@@ -24,6 +24,7 @@ lazy val root = (project in file("."))
       "com.softwaremill.sttp.tapir" %% "tapir-core" % "1.11.20",
       "com.softwaremill.sttp.tapir" %% "tapir-apispec-docs" % "1.11.20",
       "com.softwaremill.sttp.tapir" %% "tapir-json-circe" % "1.11.20",
+      "com.softwaremill.sttp.apispec" %% "jsonschema-circe" % "0.11.7",
       
       // MCP SDK
       "io.modelcontextprotocol.sdk" % "mcp" % "0.8.1",

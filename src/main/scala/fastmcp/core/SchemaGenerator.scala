@@ -11,6 +11,11 @@ import java.lang.{System => JSystem} // Avoid conflict with zio.System
 import sttp.tapir.{Schema => TapirSchema}
 import sttp.tapir.SchemaType
 import sttp.tapir.generic.auto._
+import sttp.apispec.{Schema => ApiSchema}
+import sttp.tapir.docs.apispec.schema.TapirSchemaToJsonSchema
+import io.circe.{Json, Encoder, Printer}
+import io.circe.generic.auto._
+import io.circe.syntax._
 
 /**
  * Generates McpSchema.JsonSchema instances from ZIO Schemas.

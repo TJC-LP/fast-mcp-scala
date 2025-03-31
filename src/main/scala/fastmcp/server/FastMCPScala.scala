@@ -41,7 +41,7 @@ class FastMCPScala(
                   ):
   val dependencies: List[String] = settings.dependencies
   // Initialize managers
-  private val toolManager = new ToolManager()
+  val toolManager = new ToolManager() // Changed to public for direct access
   private val resourceManager = new ResourceManager()
   private val promptManager = new PromptManager()
   // Placeholder for the Java MCP Server instance
@@ -63,7 +63,7 @@ class FastMCPScala(
             inputSchema: McpSchema.JsonSchema = new McpSchema.JsonSchema("object", null, null, true),
             options: ToolRegistrationOptions = ToolRegistrationOptions()
           ): ZIO[Any, Throwable, FastMCPScala] =
-    val definition = ToolDefinition(name, description, inputSchema)
+    val definition = ToolDefinition(name, description, Left(inputSchema))
     toolManager.addTool(name, handler, definition, options).as(this)
     
   /**
@@ -82,7 +82,7 @@ class FastMCPScala(
             inputSchema: McpSchema.JsonSchema = new McpSchema.JsonSchema("object", null, null, true),
             options: ToolRegistrationOptions = ToolRegistrationOptions()
           ): ZIO[Any, Throwable, FastMCPScala] =
-    val definition = ToolDefinition(name, description, inputSchema)
+    val definition = ToolDefinition(name, description, Left(inputSchema))
     toolManager.addContextualTool(name, handler, definition, options).as(this)
     
   /**
@@ -101,7 +101,7 @@ class FastMCPScala(
             inputSchema: McpSchema.JsonSchema = new McpSchema.JsonSchema("object", null, null, true),
             options: ToolRegistrationOptions = ToolRegistrationOptions()
           ): ZIO[Any, Throwable, FastMCPScala] =
-    val definition = ToolDefinition(name, description, inputSchema)
+    val definition = ToolDefinition(name, description, Left(inputSchema))
     toolManager.addTypedTool(name, handler, definition, options).as(this)
     
   /**
@@ -128,7 +128,7 @@ class FastMCPScala(
     val inputSchema = new McpSchema.JsonSchema("object", null, null, true)
     
     // Create the tool definition
-    val definition = ToolDefinition(name, description, inputSchema)
+    val definition = ToolDefinition(name, description, Left(inputSchema))
     
     // Register the tool
     toolManager.addTypedTool(name, typedHandler, definition, options).as(this)
@@ -158,7 +158,7 @@ class FastMCPScala(
       val inputSchema = SchemaGenerator.schemaFor[Input]
       
       // Create the tool definition
-      val definition = ToolDefinition(name, description, inputSchema)
+      val definition = ToolDefinition(name, description, Left(inputSchema))
       
       // Register the tool
       toolManager.addTypedTool(name, typedHandler, definition, options).as(this)
@@ -188,8 +188,41 @@ class FastMCPScala(
       // Generate schema using Tapir Schema
       val inputSchema = SchemaGenerator.schemaForTapir[Input]
       
-      // Create the tool definition
-      val definition = ToolDefinition(name, description, inputSchema)
+      // Create the tool definition with schema object
+      val definition = ToolDefinition(name, description, Left(inputSchema))
+      
+      // Register the tool
+      toolManager.addTypedTool(name, typedHandler, definition, options).as(this)
+    }.flatten
+
+  /**
+   * Register a case class backed tool with a directly provided JSON Schema string
+   * This avoids potential compile-time issues with schema generation
+   * 
+   * @param name        Tool name
+   * @param handler     Function that takes a case class as input and returns output
+   * @param schemaString JSON Schema string to use directly
+   * @param description Optional tool description
+   * @return ZIO effect that completes with this FastMCPScala instance or fails with ToolRegistrationError
+   */
+  def caseClassToolWithDirectSchema[Input: {JsonEncoder, JsonDecoder}, Output: {JsonEncoder, JsonDecoder}](
+            name: String,
+            handler: (Input, Option[McpContext]) => ZIO[Any, Throwable, Output],
+            schemaString: String,
+            description: Option[String] = None,
+            options: ToolRegistrationOptions = ToolRegistrationOptions()
+          ): ZIO[Any, Throwable, FastMCPScala] =
+    ZIO.attempt {
+      // Create a typed handler
+      val typedHandler = new TypedToolHandler[Input, Output] {
+        override def handle(input: Input, context: Option[McpContext]): ZIO[Any, Throwable, Output] =
+          handler(input, context)
+      }
+      
+      JSystem.err.println(s"[FastMCPScala] Using provided JSON Schema for $name: $schemaString")
+      
+      // Create the tool definition with the provided string schema
+      val definition = ToolDefinition(name, description, Right(schemaString))
       
       // Register the tool
       toolManager.addTypedTool(name, typedHandler, definition, options).as(this)

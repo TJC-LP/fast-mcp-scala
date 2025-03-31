@@ -22,7 +22,7 @@ object ToolExample:
 case class ToolDefinition(
     name: String,
     description: Option[String],
-    inputSchema: McpSchema.JsonSchema, // Use the Java SDK's JsonSchema type
+    inputSchema: Either[McpSchema.JsonSchema, String], // Can be either MCP's JsonSchema or a string schema
     version: Option[String] = None,
     examples: List[ToolExample] = List.empty,
     deprecated: Boolean = false,
@@ -35,11 +35,22 @@ object ToolDefinition:
   
   // Helper to convert to Java SDK Tool
   def toJava(td: ToolDefinition): McpSchema.Tool =
-    val tool = new McpSchema.Tool(
-      td.name, 
-      td.description.orNull, 
-      td.inputSchema
-    )
+    val tool = td.inputSchema match {
+      case Left(mcpSchema) => 
+        // Directly use McpSchema.JsonSchema
+        new McpSchema.Tool(
+          td.name, 
+          td.description.orNull, 
+          mcpSchema
+        )
+      case Right(stringSchema) => 
+        // Use string schema - MCP SDK will parse it
+        new McpSchema.Tool(
+          td.name, 
+          td.description.orNull, 
+          stringSchema
+        )
+    }
     
     // Add any additional properties via setters if needed
     // (will depend on future Java SDK enhancements)
