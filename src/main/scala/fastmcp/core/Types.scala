@@ -8,17 +8,43 @@ import scala.jdk.CollectionConverters.* // For Java/Scala collection conversions
 // Define basic types mirroring MCP Schema
 
 // --- Tool Related Types ---
-// Now using McpSchema.JsonSchema directly for inputSchema
+// For now we'll use a simpler ToolExample representation
+case class ToolExample(
+  name: Option[String],
+  description: Option[String]
+)
+
+object ToolExample:
+  given JsonEncoder[ToolExample] = DeriveJsonEncoder.gen[ToolExample]
+  given JsonDecoder[ToolExample] = DeriveJsonDecoder.gen[ToolExample]
+
+// Enhanced tool definition with more metadata
 case class ToolDefinition(
     name: String,
     description: Option[String],
-    inputSchema: McpSchema.JsonSchema // Use the Java SDK's JsonSchema type
+    inputSchema: McpSchema.JsonSchema, // Use the Java SDK's JsonSchema type
+    version: Option[String] = None,
+    examples: List[ToolExample] = List.empty,
+    deprecated: Boolean = false,
+    deprecationMessage: Option[String] = None,
+    tags: List[String] = List.empty,
+    timeoutMillis: Option[Long] = None
 )
 
 object ToolDefinition:
+  
   // Helper to convert to Java SDK Tool
   def toJava(td: ToolDefinition): McpSchema.Tool =
-    new McpSchema.Tool(td.name, td.description.orNull, td.inputSchema)
+    val tool = new McpSchema.Tool(
+      td.name, 
+      td.description.orNull, 
+      td.inputSchema
+    )
+    
+    // Add any additional properties via setters if needed
+    // (will depend on future Java SDK enhancements)
+    
+    tool
 
 
 // --- Resource Related Types ---

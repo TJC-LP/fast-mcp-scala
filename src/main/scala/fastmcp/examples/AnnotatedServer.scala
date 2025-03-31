@@ -1,111 +1,132 @@
 package fastmcp.examples
 
 import fastmcp.core.*
-import fastmcp.macros.*
 import fastmcp.server.*
+import fastmcp.server.manager.*
+import fastmcp.macros.*
 import zio.*
+import zio.json.*
+import java.lang.{System => JSystem}
 
 /**
- * Example server using annotations with macro processing
- *
- * This example uses Scala 3 macros to process annotations at compile time
+ * Example server using annotation-based tool definitions
+ * 
+ * This example demonstrates how to use annotations to define MCP tools, resources,
+ * and prompts with automatic schema generation.
  */
 object AnnotatedServer extends ZIOAppDefault:
-  override def run =
-    // Create a new FastMCPScala server
-    val server = FastMCPScala("AnnotatedCalculator", "0.1.0")
-
-    // Process annotations on CalculatorService using macros
-    for
-      // Process all annotations in the CalculatorService
-      _ <- server.processAnnotations[CalculatorService.type]
-
-      // Run the server
-      _ <- server.runStdio()
-    yield ()
-
-end AnnotatedServer
-
-/**
- * Service with annotated methods that will be exposed as MCP endpoints
- */
-object CalculatorService:
   /**
-   * A simple addition tool
+   * Tool with primitive parameters
+   * 
+   * This tool adds two numbers together.
    */
-  @Tool(name = Some("add"), description = Some("Adds two numbers"))
-  def addition(a: Double = 0.0, b: Double = 0.0): Double = a + b
-
+  @Tool(
+    name = Some("addNumbers"),
+    description = Some("Simple calculator that adds two numbers"),
+    examples = List("addNumbers(1, 2) = 3", "addNumbers(-5, 10) = 5"),
+    version = Some("1.0")
+  )
+  def add(
+    @Param(description = "First number to add") a: Int,
+    @Param(description = "Second number to add") b: Int
+  ): Int = a + b
+  
   /**
-   * A simple multiplication tool
+   * Tool with complex parameter types
+   * 
+   * This tool performs calculations on a list of numbers.
    */
-  @Tool(name = Some("multiply"), description = Some("Multiplies two numbers"))
-  def multiplication(a: Double = 1.0, b: Double = 1.0): Double = a * b
-
+  @Tool(
+    name = Some("calculator"),
+    description = Some("Perform a calculation on a list of numbers")
+  )
+  def calculator(
+    @Param(description = "The operation to perform (add, multiply, min, max, avg)") 
+    operation: String,
+    
+    @Param(description = "List of numbers to operate on") 
+    numbers: List[Double]
+  ): CalculatorResult =
+    val result = operation match
+      case "add" => numbers.sum
+      case "multiply" => numbers.product
+      case "min" => numbers.min
+      case "max" => numbers.max
+      case "avg" => if numbers.isEmpty then 0 else numbers.sum / numbers.size
+      case _ => throw new IllegalArgumentException(s"Unknown operation: $operation")
+    
+    CalculatorResult(operation, numbers, result)
+  
   /**
-   * A static resource that returns the calculator's help text
+   * Resource example - return current system status
    */
   @Resource(
-    uri = "/calculator/help",
-    name = Some("Calculator Help"),
-    description = Some("Help documentation for the calculator"),
+    uri = "status://system",
+    name = Some("System Status"),
+    description = Some("Current system status information"),
     mimeType = Some("text/plain")
   )
-  def getHelp(): String =
-    """
-      |Calculator API
-      |-------------
-      |
-      |Tools:
-      |  - add: Add two numbers
-      |  - multiply: Multiply two numbers
-      |
-      |Resources:
-      |  - /calculator/help: This help text
-      |  - /calculator/version: Version information
-      |
-      |Prompts:
-      |  - math_problem: Generate a math problem
-    """.stripMargin
-
+  def getSystemStatus(): String =
+    val runtime = java.lang.Runtime.getRuntime
+    val freeMemory = runtime.freeMemory() / (1024 * 1024)
+    val totalMemory = runtime.totalMemory() / (1024 * 1024)
+    val maxMemory = runtime.maxMemory() / (1024 * 1024)
+    
+    s"""System Status:
+       |Runtime: Java ${java.lang.System.getProperty("java.version")}
+       |Available processors: ${runtime.availableProcessors}
+       |Free memory: $freeMemory MB
+       |Total memory: $totalMemory MB
+       |Max memory: $maxMemory MB
+       |""".stripMargin
+  
   /**
-   * A templated resource that operates on a specific calculator operation
-   */
-  @Resource(
-    uri = "/calculator/operations/{op}/description",
-    name = Some("Operation Description"),
-    description = Some("Description of a specific calculator operation"),
-    mimeType = Some("text/plain")
-  )
-  def getOperationInfo(op: String): String =
-    op match
-      case "add" => "Addition: Adds two or more numbers together."
-      case "subtract" => "Subtraction: Subtracts the second number from the first."
-      case "multiply" => "Multiplication: Multiplies two or more numbers together."
-      case "divide" => "Division: Divides the first number by the second."
-      case _ => s"Unknown operation: $op"
-
-  /**
-   * A prompt that generates a math problem
+   * Prompt example - generates a greeting prompt
    */
   @Prompt(
-    name = Some("math_problem"),
-    description = Some("Generate a math problem of specified difficulty")
+    name = Some("greeting"),
+    description = Some("Generate a friendly greeting")
   )
-  def generateMathProblem(difficulty: String = "medium"): List[Message] =
-    val problem = difficulty match
-      case "easy" => "What is 7 + 3?"
-      case "medium" => "If x + 5 = 12, what is the value of x?"
-      case "hard" => "Solve for x: 3x² - 6x + 2 = 0"
-      case _ => "What is 2 + 2?"
-
+  def generateGreeting(
+    @PromptParam(description = "Name of the person to greet") 
+    name: String,
+    
+    @PromptParam(description = "Optional style (formal, casual, or friendly)", required = false)
+    style: Option[String] = None
+  ): List[Message] =
+    val greeting = style match
+      case Some("formal") => s"Good day, $name. How may I be of assistance?"
+      case Some("casual") => s"Hey $name! What's up?"
+      case Some("friendly") => s"Hi there, $name! How are you doing today?"
+      case _ => s"Hello, $name! How can I help you today?"
+    
     List(
-      Message(
-        role = Role.User,
-        content = TextContent(s"Generate a $difficulty math problem")
-      ),
-      Message(
-        role = Role.Assistant,
-        content = TextContent(problem)
-      )
+      Message(Role.User, TextContent(greeting))
     )
+  
+  /**
+   * Output type for calculator tool
+   */
+  case class CalculatorResult(
+    operation: String,
+    numbers: List[Double],
+    result: Double
+  )
+  
+  // JSON codecs for our custom types
+  given JsonEncoder[CalculatorResult] = DeriveJsonEncoder.gen[CalculatorResult]
+  given JsonDecoder[CalculatorResult] = DeriveJsonDecoder.gen[CalculatorResult]
+  
+  /**
+   * Main entry point
+   */
+  override def run =
+    val server = FastMCPScala("AnnotatedExampleServer", "1.0.0")
+    
+    for
+      // Process all tools, resources, and prompts in this object
+      _ <- server.processAnnotations[AnnotatedServer.type]
+      
+      // Run the server with stdio transport
+      _ <- server.runStdio()
+    yield ()

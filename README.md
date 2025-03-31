@@ -12,6 +12,8 @@ Fast-MCP-Scala provides a Scala wrapper around the Model Context Protocol Java S
 - **Type Safety**: Leverages Scala 3's type system for improved safety and clarity.
 - **Functional API**: Provides a clean, functional API for defining tools, resources, and prompts.
 - **Annotation Support**: Uses Scala annotations (`@Tool`, `@Resource`, `@Prompt`) for easy registration.
+- **Auto Schema Generation**: Automatically generates JSON schemas from Scala types.
+- **Parameter Documentation**: Uses `@Param` annotations to document tool parameters.
 - **Java SDK Integration**: Integrates seamlessly with the underlying Java MCP SDK.
 
 ## Getting Started
@@ -55,35 +57,104 @@ object SimpleCalculator extends ZIOAppDefault:
     } yield ()
 ```
 
+### Typed Tool Example
+
+For better type safety, you can use the typed tool API:
+
+```scala
+// Define input and output types
+case class CalculatorInput(
+  operation: String = "add",
+  numbers: List[Double] = List(0.0, 0.0)
+)
+  
+case class CalculatorOutput(
+  result: Double,
+  operation: String,
+  inputs: List[Double]
+)
+
+// Define JSON codecs
+given JsonEncoder[CalculatorInput] = DeriveJsonEncoder.gen[CalculatorInput]
+given JsonDecoder[CalculatorInput] = DeriveJsonDecoder.gen[CalculatorInput]
+given JsonEncoder[CalculatorOutput] = DeriveJsonEncoder.gen[CalculatorOutput]
+given JsonDecoder[CalculatorOutput] = DeriveJsonDecoder.gen[CalculatorOutput]
+
+// Implement typed tool handler
+object CalculatorTool extends TypedToolHandler[CalculatorInput, CalculatorOutput]:
+  override def handle(input: CalculatorInput, context: Option[McpContext]): ZIO[Any, Throwable, CalculatorOutput] =
+    ZIO.attempt {
+      val result = input.operation match
+        case "add" => input.numbers.sum
+        case "multiply" => input.numbers.product
+        case _ => throw new IllegalArgumentException(s"Unknown operation: ${input.operation}")
+      
+      CalculatorOutput(result, input.operation, input.numbers)
+    }
+
+// Register the typed tool
+server.typedTool(
+  name = "calculator",
+  handler = CalculatorTool,
+  description = Some("Perform calculations on a list of numbers")
+)
+```
+
 ### Annotation-based Example
 
-You can also use annotations to define your tools, resources, and prompts:
+You can also use annotations to define your tools, resources, and prompts with automatic schema generation:
 
 ```scala
 import fastmcp.core.*
 import fastmcp.server.*
-import fastmcp.server.annotation.AnnotationProcessor
+import fastmcp.macros.*
 import zio.*
 
 object AnnotatedCalculator extends ZIOAppDefault:
+  /**
+   * Tool with primitive parameters and automatically generated schema
+   */
+  @Tool(
+    name = Some("addNumbers"),
+    description = Some("Simple calculator that adds two numbers"),
+    examples = List("addNumbers(1, 2) = 3", "addNumbers(-5, 10) = 5")
+  )
+  def add(
+    @Param(description = "First number to add") a: Int,
+    @Param(description = "Second number to add") b: Int
+  ): Int = a + b
+  
+  /**
+   * Tool with complex parameter types
+   */
+  @Tool(
+    name = Some("calculator"),
+    description = Some("Perform a calculation on a list of numbers")
+  )
+  def calculator(
+    @Param(description = "The operation to perform (add, multiply, min, max, avg)") 
+    operation: String,
+    
+    @Param(description = "List of numbers to operate on") 
+    numbers: List[Double]
+  ): CalculatorResult =
+    // Implementation...
+    CalculatorResult(operation, numbers, result)
+    
+  case class CalculatorResult(operation: String, numbers: List[Double], result: Double)
+  
+  // JSON codecs for our custom types
+  given JsonEncoder[CalculatorResult] = DeriveJsonEncoder.gen[CalculatorResult]
+  given JsonDecoder[CalculatorResult] = DeriveJsonDecoder.gen[CalculatorResult]
+
   override def run =
     val server = FastMCPScala("AnnotatedCalculator", "0.1.0")
     
     for {
-      _ <- AnnotationProcessor.processAnnotations(CalculatorService, server)
+      // Process all annotations in this object
+      _ <- server.processAnnotations[AnnotatedCalculator.type]
       _ <- server.runStdio()
     } yield ()
-
-object CalculatorService:
-  @Tool(name = Some("add"), description = Some("Adds two numbers"))
-  def addition(a: Double = 0.0, b: Double = 0.0): Double = a + b
-  
-  @Resource(uri = "/calculator/help")
-  def getHelp(): String = "Calculator API Help"
-  
-  @Prompt(name = Some("calculate_prompt"))
-  def calculatePrompt(): List[Message] = 
-    List(Message(Role.User, TextContent("What's 2+2?")))
 ```
 
 ## Project Status
@@ -107,6 +178,9 @@ curl -sSLf https://scala-cli.virtuslab.org/get | sh    # Other platforms
 # Run SimpleServer
 scala-cli run main.scala --main-class fastmcp.examples.SimpleServer
 
+# Run TypedToolExample
+scala-cli run main.scala --main-class fastmcp.examples.TypedToolExample
+
 # Run AnnotatedServer
 scala-cli run main.scala --main-class fastmcp.examples.AnnotatedServer
 
@@ -114,7 +188,7 @@ scala-cli run main.scala --main-class fastmcp.examples.AnnotatedServer
 scala-cli run main.scala --main-class fastmcp.FastMCPMain
 ```
 
-This approach avoids SBT filesystem permission issues entirely by using scala-cli directly with the existing ZIO applications.
+This approach avoids SBT filesystem permission issues entirely by using scala-cli directly.
 
 ### Using SBT
 
@@ -126,6 +200,7 @@ sbt -Dsbt.global.base=$HOME/.sbt/1.0 run
 
 # Run a specific example
 sbt -Dsbt.global.base=$HOME/.sbt/1.0 "runMain fastmcp.examples.SimpleServer"
+sbt -Dsbt.global.base=$HOME/.sbt/1.0 "runMain fastmcp.examples.TypedToolExample"
 sbt -Dsbt.global.base=$HOME/.sbt/1.0 "runMain fastmcp.examples.AnnotatedServer"
 ```
 

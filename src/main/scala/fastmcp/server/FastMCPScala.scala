@@ -5,8 +5,13 @@ import fastmcp.server.manager.*
 import io.modelcontextprotocol.server.{McpServer, McpServerFeatures, McpSyncServer, McpSyncServerExchange}
 import io.modelcontextprotocol.spec.{McpSchema, McpServerTransportProvider}
 import zio.*
+import zio.json.*
 // Explicitly import Java's System to avoid conflicts with zio.System
 import java.lang.{System => JSystem}
+// Tapir imports for schema generation
+import sttp.tapir.{Schema => TapirSchema}
+import sttp.tapir.SchemaType
+import sttp.tapir.generic.auto._
 
 import scala.jdk.CollectionConverters.*
 
@@ -55,10 +60,140 @@ class FastMCPScala(
             name: String,
             handler: ToolHandler,
             description: Option[String] = None,
-            inputSchema: McpSchema.JsonSchema = new McpSchema.JsonSchema("object", null, null, true)
+            inputSchema: McpSchema.JsonSchema = new McpSchema.JsonSchema("object", null, null, true),
+            options: ToolRegistrationOptions = ToolRegistrationOptions()
           ): ZIO[Any, Throwable, FastMCPScala] =
     val definition = ToolDefinition(name, description, inputSchema)
-    toolManager.addTool(name, handler, definition).as(this)
+    toolManager.addTool(name, handler, definition, options).as(this)
+    
+  /**
+   * Register a context-aware tool with the server
+   * 
+   * @param name        Tool name
+   * @param handler     Function to execute when the tool is called (with context)
+   * @param description Optional tool description
+   * @param inputSchema JSON schema for the tool's input parameters
+   * @return ZIO effect that completes with this FastMCPScala instance or fails with ToolRegistrationError
+   */
+  def contextualTool(
+            name: String,
+            handler: ContextualToolHandler,
+            description: Option[String] = None,
+            inputSchema: McpSchema.JsonSchema = new McpSchema.JsonSchema("object", null, null, true),
+            options: ToolRegistrationOptions = ToolRegistrationOptions()
+          ): ZIO[Any, Throwable, FastMCPScala] =
+    val definition = ToolDefinition(name, description, inputSchema)
+    toolManager.addContextualTool(name, handler, definition, options).as(this)
+    
+  /**
+   * Register a fully type-safe tool with the server
+   * 
+   * @param name        Tool name
+   * @param handler     TypedToolHandler implementation
+   * @param description Optional tool description
+   * @param inputSchema JSON schema for the tool's input parameters
+   * @return ZIO effect that completes with this FastMCPScala instance or fails with ToolRegistrationError
+   */
+  def typedTool[Input: {JsonEncoder, JsonDecoder}, Output: {JsonEncoder, JsonDecoder}](
+            name: String,
+            handler: TypedToolHandler[Input, Output],
+            description: Option[String] = None,
+            inputSchema: McpSchema.JsonSchema = new McpSchema.JsonSchema("object", null, null, true),
+            options: ToolRegistrationOptions = ToolRegistrationOptions()
+          ): ZIO[Any, Throwable, FastMCPScala] =
+    val definition = ToolDefinition(name, description, inputSchema)
+    toolManager.addTypedTool(name, handler, definition, options).as(this)
+    
+  /**
+   * Register a case class backed tool with simplified schema
+   * 
+   * @param name        Tool name
+   * @param handler     Function that takes a case class as input and returns output
+   * @param description Optional tool description
+   * @return ZIO effect that completes with this FastMCPScala instance or fails with ToolRegistrationError
+   */
+  def caseClassTool[Input: {JsonEncoder, JsonDecoder}, Output: {JsonEncoder, JsonDecoder}](
+            name: String,
+            handler: (Input, Option[McpContext]) => ZIO[Any, Throwable, Output],
+            description: Option[String] = None,
+            options: ToolRegistrationOptions = ToolRegistrationOptions()
+          ): ZIO[Any, Throwable, FastMCPScala] =
+    // Create a typed handler
+    val typedHandler = new TypedToolHandler[Input, Output] {
+      override def handle(input: Input, context: Option[McpContext]): ZIO[Any, Throwable, Output] =
+        handler(input, context)
+    }
+    
+    // Create a basic schema for now
+    val inputSchema = new McpSchema.JsonSchema("object", null, null, true)
+    
+    // Create the tool definition
+    val definition = ToolDefinition(name, description, inputSchema)
+    
+    // Register the tool
+    toolManager.addTypedTool(name, typedHandler, definition, options).as(this)
+    
+  /**
+   * Register a case class backed tool with schema generated from ZIO Schema
+   * 
+   * @param name        Tool name
+   * @param handler     Function that takes a case class as input and returns output
+   * @param description Optional tool description
+   * @return ZIO effect that completes with this FastMCPScala instance or fails with ToolRegistrationError
+   */
+  def caseClassToolWithSchema[Input: {JsonEncoder, JsonDecoder, zio.schema.Schema}, Output: {JsonEncoder, JsonDecoder}](
+            name: String,
+            handler: (Input, Option[McpContext]) => ZIO[Any, Throwable, Output],
+            description: Option[String] = None,
+            options: ToolRegistrationOptions = ToolRegistrationOptions()
+          ): ZIO[Any, Throwable, FastMCPScala] =
+    ZIO.attempt {
+      // Create a typed handler
+      val typedHandler = new TypedToolHandler[Input, Output] {
+        override def handle(input: Input, context: Option[McpContext]): ZIO[Any, Throwable, Output] =
+          handler(input, context)
+      }
+      
+      // Generate schema using ZIO Schema
+      val inputSchema = SchemaGenerator.schemaFor[Input]
+      
+      // Create the tool definition
+      val definition = ToolDefinition(name, description, inputSchema)
+      
+      // Register the tool
+      toolManager.addTypedTool(name, typedHandler, definition, options).as(this)
+    }.flatten
+    
+  /**
+   * Register a case class backed tool with schema generated from Tapir Schema
+   * 
+   * @param name        Tool name
+   * @param handler     Function that takes a case class as input and returns output
+   * @param description Optional tool description
+   * @return ZIO effect that completes with this FastMCPScala instance or fails with ToolRegistrationError
+   */
+  def caseClassToolWithTapirSchema[Input: {JsonEncoder, JsonDecoder, TapirSchema}, Output: {JsonEncoder, JsonDecoder}](
+            name: String,
+            handler: (Input, Option[McpContext]) => ZIO[Any, Throwable, Output],
+            description: Option[String] = None,
+            options: ToolRegistrationOptions = ToolRegistrationOptions()
+          ): ZIO[Any, Throwable, FastMCPScala] =
+    ZIO.attempt {
+      // Create a typed handler
+      val typedHandler = new TypedToolHandler[Input, Output] {
+        override def handle(input: Input, context: Option[McpContext]): ZIO[Any, Throwable, Output] =
+          handler(input, context)
+      }
+      
+      // Generate schema using Tapir Schema
+      val inputSchema = SchemaGenerator.schemaForTapir[Input]
+      
+      // Create the tool definition
+      val definition = ToolDefinition(name, description, inputSchema)
+      
+      // Register the tool
+      toolManager.addTypedTool(name, typedHandler, definition, options).as(this)
+    }.flatten
 
   /**
    * Register a static resource with the server
@@ -184,15 +319,15 @@ class FastMCPScala(
 
     // Create capabilities
     val toolCapabilities = if (toolManager.listDefinitions().nonEmpty)
-      new McpSchema.ServerCapabilities.ToolCapabilities(false)
+      new McpSchema.ServerCapabilities.ToolCapabilities(true)
     else null
 
     val resourceCapabilities = if (resourceManager.listDefinitions().nonEmpty)
-      new McpSchema.ServerCapabilities.ResourceCapabilities(false, false)
+      new McpSchema.ServerCapabilities.ResourceCapabilities(true, false)
     else null
 
     val promptCapabilities = if (promptManager.listDefinitions().nonEmpty)
-      new McpSchema.ServerCapabilities.PromptCapabilities(false)
+      new McpSchema.ServerCapabilities.PromptCapabilities(true)
     else null
 
     val loggingCapabilities = new McpSchema.ServerCapabilities.LoggingCapabilities()

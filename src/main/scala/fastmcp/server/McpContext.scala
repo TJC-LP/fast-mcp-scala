@@ -8,9 +8,9 @@ import io.modelcontextprotocol.spec.McpSchema
  * Acts as a wrapper around the Java McpSyncServerExchange
  */
 case class McpContext(
-  // Underlying Java exchange object for advanced use or accessing client capabilities
-  javaExchange: Option[McpSyncServerExchange] = None
-)
+                       // Underlying Java exchange object for advanced use or accessing client capabilities
+                       javaExchange: Option[McpSyncServerExchange] = None
+                     )
 
 /**
  * Extension methods for McpContext to provide a richer API
@@ -28,7 +28,7 @@ extension (context: McpContext)
   def getClientInfo: Option[McpSchema.Implementation] =
     context.javaExchange.map(_.getClientInfo)
 
-  // Future implementations:
-  // def log(level: String, message: String): Task[Unit] = ???
-  // def reportProgress(current: Double, total: Option[Double]): Task[Unit] = ???
-  // def readResource(uri: String): Task[String | Array[Byte]] = ???
+// Future implementations:
+// def log(level: String, message: String): Task[Unit] = ???
+// def reportProgress(current: Double, total: Option[Double]): Task[Unit] = ???
+// def readResource(uri: String): Task[String | Array[Byte]] = ???
