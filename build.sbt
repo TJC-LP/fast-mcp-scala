@@ -8,8 +8,8 @@ val zioSchemaVersion = "1.6.6" // ZIO Schema version
 lazy val root = (project in file("."))
   .settings(
     name := "fast-mcp-scala",
-    // Enable Scala 3 macros
-    scalacOptions ++= Seq("-Xcheck-macros"),
+    // Enable Scala 3 macros with verbose output for debugging
+    scalacOptions ++= Seq("-Xcheck-macros", "-Xmacro:verbose"),
     libraryDependencies ++= Seq(
       // ZIO Core
       "dev.zio" %% "zio" % zioVersion,

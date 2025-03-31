@@ -493,6 +493,44 @@ class FastMCPScala(
    */
   // def runSse(): ZIO[Any, Throwable, Unit] = ???
 
+  /**
+   * Register a tool generated from a macro-annotated method (simplified implementation)
+   * This method is called by the ToolMacros.processAnnotations macro
+   *
+   * @param toolName     Name of the tool
+   * @param description  Description of the tool
+   * @param methodName   Name of the method to be called
+   * @param schemaJson   JSON Schema for the tool's input
+   * @param paramNames   Names of the parameters
+   * @param paramTypes   Types of the parameters as strings
+   * @param required     Boolean flags indicating if each parameter is required
+   * @tparam T           The type containing the annotated method
+   * @return Unit        No explicit return value
+   */
+  def registerMacroTool[T](
+    toolName: String,
+    description: Option[String],
+    methodName: String,
+    schemaJson: String,
+    paramNames: List[String],
+    paramTypes: List[String],
+    required: List[Boolean]
+  )(using classTag: scala.reflect.ClassTag[T]): Unit =
+    JSystem.err.println(s"[FastMCPScala] Registering macro-generated tool '$toolName' from method '$methodName'")
+    JSystem.err.println(s"[FastMCPScala] Schema: $schemaJson")
+    
+    // For a simplified version, we just register a basic handler
+    Unsafe.unsafe { implicit unsafe =>
+      Runtime.default.unsafe.run(
+        tool(
+          name = toolName,
+          handler = args => ZIO.succeed(s"Macro tool $toolName called with args: $args"),
+          description = description,
+          options = ToolRegistrationOptions()
+        )
+      ).getOrThrowFiberFailure()
+    }
+
 end FastMCPScala
 
 /**
