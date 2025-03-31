@@ -1,25 +1,17 @@
 package fastmcp.core
 
 import io.modelcontextprotocol.spec.McpSchema
-import zio.schema._
-import zio.schema.annotation._ // Import annotations like @description if needed later
-import java.util.{Map => JMap, List => JList, HashMap => JHashMap, ArrayList => JArrayList}
-import scala.jdk.CollectionConverters._
-import java.lang.{System => JSystem} // Avoid conflict with zio.System
 
-// Tapir imports
-import sttp.tapir.{Schema => TapirSchema}
-import sttp.tapir.SchemaType
-import sttp.tapir.generic.auto._
-import sttp.apispec.{Schema => ApiSchema}
-import sttp.tapir.docs.apispec.schema.TapirSchemaToJsonSchema
-import io.circe.{Json, Encoder, Printer}
-import io.circe.generic.auto._
-import io.circe.syntax._
+import java.lang.System as JSystem
+import java.util.{ArrayList as JArrayList, HashMap as JHashMap, List as JList, Map as JMap}
+
+// Original imports kept for compatibility with existing code
+import sttp.tapir.Schema as TapirSchema
+import zio.schema.*
 
 /**
  * Generates McpSchema.JsonSchema instances from ZIO Schemas.
- * 
+ *
  * Maps ZIO Schema types to the basic structure supported by McpSchema.JsonSchema
  * (type, properties, items, required). More advanced JSON Schema features like
  * description, examples, enums, defaults, etc., are not directly supported by
@@ -36,7 +28,7 @@ object SchemaGenerator {
   /**
    * Entry point to generate an McpSchema.JsonSchema for a type A,
    * requiring an implicit ZIO Schema[A].
-   * 
+   *
    * @tparam A The type to generate the schema for.
    * @param schema Implicit ZIO Schema for type A.
    * @return An McpSchema.JsonSchema representing type A.
@@ -47,7 +39,7 @@ object SchemaGenerator {
 
   /**
    * Recursively converts a ZIO Schema into an McpSchema.JsonSchema.
-   * 
+   *
    * @param schema The ZIO Schema to convert.
    * @tparam A The underlying type of the schema.
    * @return The corresponding McpSchema.JsonSchema.
@@ -90,13 +82,13 @@ object SchemaGenerator {
             val actualSchema = if (isOptional) fieldSchema.asInstanceOf[Schema.Optional[?]].schema else fieldSchema
 
             val propertySchema = fromZioSchema(actualSchema)
-            
+
             // TODO: Extract annotations like @description if McpSchema.JsonSchema supports them
             // val description = field.annotations.collectFirst { case d: description => d.description }.orNull
             // propertySchema.description(description) // If setter existed
 
             properties.put(field.name, propertySchema)
-            
+
             // Only non-optional fields are required in JSON Schema terms
             if (!isOptional) {
               requiredFields.add(field.name)
@@ -142,38 +134,63 @@ object SchemaGenerator {
 
   // --- Helper methods for creating McpSchema.JsonSchema instances ---
 
-  /** Maps ZIO StandardTypes to basic MCP JSON Schema types. */
-  private def primitiveSchema(standardType: StandardType[?]): McpSchema.JsonSchema = standardType match {
-    case StandardType.StringType        => createStringSchema()
-    case StandardType.BoolType          => createBooleanSchema()
-    case StandardType.IntType | StandardType.LongType |
-         StandardType.ShortType | StandardType.ByteType |
-         StandardType.BigIntegerType    => createIntSchema() // Using "integer" for all integral types
-    case StandardType.DoubleType | StandardType.FloatType |
-         StandardType.BigDecimalType    => createNumberSchema() // Using "number" for all decimal types
-    
-    // Represent temporal and UUID types as strings according to common JSON schema practice
-    case StandardType.InstantType | StandardType.LocalDateType | StandardType.LocalTimeType |
-         StandardType.LocalDateTimeType | StandardType.ZonedDateTimeType | StandardType.UUIDType |
-         StandardType.DurationType      => createStringSchema()
+  /** Default fallback schema (empty object). */
+  def defaultSchema(): McpSchema.JsonSchema =
+    createObjectSchema(new JHashMap[String, McpSchema.JsonSchema](), new JArrayList[String]())
 
-    case StandardType.UnitType          => createNullSchema() // Represent Unit as null type
-    
-    // Fallback for other primitive types (e.g., CharType) - represent as string
-    case _                              => createStringSchema()
+  /**
+   * Generate McpSchema.JsonSchema from a Tapir Schema
+   *
+   * @tparam A The type for which to generate a schema
+   * @return McpSchema.JsonSchema for the given type
+   */
+  def schemaForTapir[A: TapirSchema]: McpSchema.JsonSchema = {
+    // Get implicit Tapir schema
+    val tapirSchema = implicitly[TapirSchema[A]]
+    fromTapirSchema(tapirSchema)
+  }
+
+  /**
+   * Convert a Tapir Schema to McpSchema.JsonSchema directly
+   * This is a simplified implementation that infers basic schema types
+   */
+  def fromTapirSchema[A](schema: TapirSchema[A]): McpSchema.JsonSchema = {
+    JSystem.err.println(s"[SchemaGenerator] Converting Tapir schema: $schema")
+
+    // Very basic type inference - not comprehensive but works for common types
+    val schemaType = schema.toString
+
+    if (schemaType.contains("string") || schemaType.contains("String")) {
+      return createStringSchema()
+    } else if (schemaType.contains("integer") || schemaType.contains("Int") || schemaType.contains("Long")) {
+      return createIntSchema()
+    } else if (schemaType.contains("number") || schemaType.contains("Double") || schemaType.contains("Float")) {
+      return createNumberSchema()
+    } else if (schemaType.contains("boolean") || schemaType.contains("Boolean")) {
+      return createBooleanSchema()
+    } else if (schemaType.contains("array") || schemaType.contains("List") || schemaType.contains("Seq")) {
+      return createArraySchema(createStringSchema()) // Simplified - using string items
+    }
+
+    // Create a default object schema for all complex types
+    val properties = new JHashMap[String, McpSchema.JsonSchema]()
+    val requiredFields = new JArrayList[String]()
+
+    // For any non-primitive type, return a basic object schema
+    createObjectSchema(properties, requiredFields)
   }
 
   private def createObjectSchema(properties: JMap[String, McpSchema.JsonSchema], required: JList[String]): McpSchema.JsonSchema = {
     // Review of constructor usage in FastMCPScala shows:
     // new McpSchema.JsonSchema("object", null, null, true)
-    val schema = new McpSchema.JsonSchema("object", null, null, true) 
-    
+    val schema = new McpSchema.JsonSchema("object", null, null, true)
+
     // Now set properties and required fields
     // Converting to reflection-based approach to make it work
     try {
       val setPropertiesMethod = schema.getClass.getMethod("setProperties", classOf[JMap[?, ?]])
       setPropertiesMethod.invoke(schema, properties)
-      
+
       if (required != null && !required.isEmpty) {
         val setRequiredMethod = schema.getClass.getMethod("setRequired", classOf[JList[?]])
         setRequiredMethod.invoke(schema, required)
@@ -182,7 +199,7 @@ object SchemaGenerator {
       case e: Exception =>
         JSystem.err.println(s"[SchemaGenerator ERROR] Error setting properties: ${e.getMessage}")
     }
-    
+
     schema
   }
 
@@ -198,15 +215,6 @@ object SchemaGenerator {
     }
     schema
   }
-  
-  private def createNullSchema(): McpSchema.JsonSchema = {
-    new McpSchema.JsonSchema("null", null, null, true)
-  }
-
-
-  /** Default fallback schema (empty object). */
-  def defaultSchema(): McpSchema.JsonSchema =
-    createObjectSchema(new JHashMap[String, McpSchema.JsonSchema](), new JArrayList[String]())
 
   /** Creates a basic 'integer' type schema. */
   def createIntSchema(): McpSchema.JsonSchema =
@@ -223,48 +231,31 @@ object SchemaGenerator {
   /** Creates a basic 'boolean' type schema. */
   def createBooleanSchema(): McpSchema.JsonSchema =
     new McpSchema.JsonSchema("boolean", null, null, true)
-    
+
   // ---------- Tapir Schema Support ----------
 
-  /**
-   * Generate McpSchema.JsonSchema from a Tapir Schema
-   * 
-   * @tparam A The type for which to generate a schema
-   * @return McpSchema.JsonSchema for the given type
-   */
-  def schemaForTapir[A: TapirSchema]: McpSchema.JsonSchema = {
-    // Get implicit Tapir schema
-    val tapirSchema = implicitly[TapirSchema[A]]
-    fromTapirSchema(tapirSchema)
+  /** Maps ZIO StandardTypes to basic MCP JSON Schema types. */
+  private def primitiveSchema(standardType: StandardType[?]): McpSchema.JsonSchema = standardType match {
+    case StandardType.StringType => createStringSchema()
+    case StandardType.BoolType => createBooleanSchema()
+    case StandardType.IntType | StandardType.LongType |
+         StandardType.ShortType | StandardType.ByteType |
+         StandardType.BigIntegerType => createIntSchema() // Using "integer" for all integral types
+    case StandardType.DoubleType | StandardType.FloatType |
+         StandardType.BigDecimalType => createNumberSchema() // Using "number" for all decimal types
+
+    // Represent temporal and UUID types as strings according to common JSON schema practice
+    case StandardType.InstantType | StandardType.LocalDateType | StandardType.LocalTimeType |
+         StandardType.LocalDateTimeType | StandardType.ZonedDateTimeType | StandardType.UUIDType |
+         StandardType.DurationType => createStringSchema()
+
+    case StandardType.UnitType => createNullSchema() // Represent Unit as null type
+
+    // Fallback for other primitive types (e.g., CharType) - represent as string
+    case _ => createStringSchema()
   }
 
-  /**
-   * Convert a Tapir Schema to McpSchema.JsonSchema directly
-   * This is a simplified implementation that infers basic schema types
-   */
-  def fromTapirSchema[A](schema: TapirSchema[A]): McpSchema.JsonSchema = {
-    JSystem.err.println(s"[SchemaGenerator] Converting Tapir schema: $schema")
-    
-    // Very basic type inference - not comprehensive but works for common types
-    val schemaType = schema.toString
-    
-    if (schemaType.contains("string") || schemaType.contains("String")) {
-      return createStringSchema()
-    } else if (schemaType.contains("integer") || schemaType.contains("Int") || schemaType.contains("Long")) {
-      return createIntSchema()
-    } else if (schemaType.contains("number") || schemaType.contains("Double") || schemaType.contains("Float")) {
-      return createNumberSchema()
-    } else if (schemaType.contains("boolean") || schemaType.contains("Boolean")) {
-      return createBooleanSchema()
-    } else if (schemaType.contains("array") || schemaType.contains("List") || schemaType.contains("Seq")) {
-      return createArraySchema(createStringSchema()) // Simplified - using string items
-    }
-    
-    // Create a default object schema for all complex types
-    val properties = new JHashMap[String, McpSchema.JsonSchema]()
-    val requiredFields = new JArrayList[String]()
-    
-    // For any non-primitive type, return a basic object schema
-    createObjectSchema(properties, requiredFields)
+  private def createNullSchema(): McpSchema.JsonSchema = {
+    new McpSchema.JsonSchema("null", null, null, true)
   }
 }
