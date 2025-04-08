@@ -22,7 +22,7 @@ object MapToFunctionMacro:
   transparent inline def callByMap[F](inline f: F): Any =
     ${ callByMapImpl('f) }
 
-  private def callByMapImpl[F: Type](f: Expr[F])(using q: Quotes): Expr[Any] =
+  def callByMapImpl[F: Type](f: Expr[F])(using q: Quotes): Expr[Any] =
     import q.reflect.*
 
     // Helper class to store parameter information

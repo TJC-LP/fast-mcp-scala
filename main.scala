@@ -8,10 +8,10 @@
 //> using dep "com.softwaremill.sttp.tapir::tapir-core:1.11.23"
 //> using dep "com.softwaremill.sttp.tapir::tapir-apispec-docs:1.11.23"
 //> using dep "com.softwaremill.sttp.tapir::tapir-json-circe:1.11.23"
-//> using dep "com.softwaremill.sttp.apispec::jsonschema-circe:0.11.7"
+//> using dep "com.softwaremill.sttp.apispec::jsonschema-circe:0.11.8"
 //> using repository "https://repo1.maven.org/maven2"
 //> using file "src/main/scala"
-//> using options "-Xcheck-macros" // Enable verbose macro processing
+//> using options "-Xcheck-macros" "-experimental" // Enable verbose macro processing
 
 // This is a launcher file for scala-cli
 // You can run any of the MCP server classes with:

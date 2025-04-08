@@ -144,6 +144,16 @@ class ToolManager extends Manager[ToolDefinition]:
                          options: ToolRegistrationOptions = ToolRegistrationOptions()
                        ): ZIO[Any, Throwable, Unit] =
     ZIO.attempt {
+      // Add more verbose logging
+      JSystem.err.println(s"[ToolManager] Adding contextual tool: '$name'")
+      JSystem.err.println(s"[ToolManager] - Description: ${definition.description.getOrElse("None")}")
+      definition.inputSchema match {
+        case Left(schema) => 
+          JSystem.err.println(s"[ToolManager] - Schema type: Java Schema object")
+        case Right(schemaStr) => 
+          JSystem.err.println(s"[ToolManager] - Schema type: JSON string (${schemaStr.take(40)}...)")
+      }
+
       // Check if tool already exists
       if tools.containsKey(name) && !options.allowOverrides then
         if options.warnOnDuplicates then
@@ -152,6 +162,7 @@ class ToolManager extends Manager[ToolDefinition]:
           throw new ToolRegistrationError(s"Tool '$name' already exists")
 
       tools.put(name, (definition, handler))
+      JSystem.err.println(s"[ToolManager] Successfully registered tool: '$name'")
       ()
     }.mapError(e => new ToolRegistrationError(s"Failed to register tool '$name'", e))
 

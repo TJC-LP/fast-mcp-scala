@@ -11,7 +11,9 @@ import scala.reflect.ClassTag
 import java.lang.System as JSystem
 
 /**
- * Example demonstrating the automatic schema generation for MCP tools.
+ * Example demonstrating the registration of tools, potentially with custom schemas.
+ * Note: Automatic schema generation via `registerTool` is now basic.
+ * Use annotations (@Tool) for detailed, automatic schema generation.
  */
 object AutoSchemaExample extends ZIOAppDefault:
   // JSON codec derivation for our types
@@ -19,41 +21,50 @@ object AutoSchemaExample extends ZIOAppDefault:
   given JsonDecoder[CalculatorParams] = DeriveJsonDecoder.gen[CalculatorParams]
   given JsonEncoder[CalculatorResult] = DeriveJsonEncoder.gen[CalculatorResult]
   given JsonDecoder[CalculatorResult] = DeriveJsonDecoder.gen[CalculatorResult]
-  
+
   given JsonEncoder[WeatherParams] = DeriveJsonEncoder.gen[WeatherParams]
   given JsonDecoder[WeatherParams] = DeriveJsonDecoder.gen[WeatherParams]
   given JsonEncoder[WeatherResult] = DeriveJsonEncoder.gen[WeatherResult]
   given JsonDecoder[WeatherResult] = DeriveJsonDecoder.gen[WeatherResult]
-  
+
   /**
    * Main entry point
    */
   override def run =
     val server = FastMCPScala("AutoSchemaExample", "1.0.0")
 
+    // Define a custom schema string for the weather tool
+    val weatherSchemaString = """{
+      "type": "object",
+      "properties": {
+        "location": { "type": "string", "description": "Location to get weather for (city or coordinates)" },
+        "units": { "type": "string", "description": "Temperature units", "enum": ["celsius", "fahrenheit"], "default": "celsius" },
+        "includeForecast": { "type": "boolean", "description": "Whether to include extended forecast", "default": false }
+      },
+      "required": ["location"]
+    }"""
+
     for
-      // Register the calculator tool with automatic schema generation
+      // Register the calculator tool - schema will be basic. Use @Tool for better schemas.
       _ <- server.registerTool[CalculatorParams, CalculatorResult](
         tool = CalculatorTool,
         description = Some("Perform arithmetic operations with two numbers")
       )
-      
-      // Register the weather tool with custom schema
+
+      // Register the weather tool with a custom schema string
       _ <- server.registerToolWithCustomSchema[WeatherParams, WeatherResult](
         tool = WeatherTool,
-        schemaBuilder = builder => builder
-          .addString("location", "Location to get weather for (city or coordinates)", required = true)
-          .addEnum("units", "Temperature units", List("celsius", "fahrenheit"), required = false, defaultValue = Some("celsius"))
-          .addBoolean("includeForecast", "Whether to include extended forecast", required = false),
+        schemaString = weatherSchemaString, // Pass the schema string directly
         description = Some("Get weather information for a location")
       )
 
       // Log startup information
       _ <- ZIO.attempt {
-        JSystem.err.println("Auto Schema Example initialized with automatically derived schemas")
+        JSystem.err.println("Auto Schema Example initialized.")
+        JSystem.err.println("NOTE: Use @Tool annotations for detailed automatic schema generation.")
         JSystem.err.println("Available tools:")
-        JSystem.err.println("- calculator: Perform arithmetic operations")
-        JSystem.err.println("- weather: Get weather information")
+        JSystem.err.println("- calculator: Perform arithmetic operations (basic schema)")
+        JSystem.err.println("- weather: Get weather information (custom schema)")
       }
 
       // Run the server with stdio transport
@@ -75,7 +86,7 @@ object AutoSchemaExample extends ZIOAppDefault:
             params.operand1 / params.operand2
           case unknown => throw new IllegalArgumentException(s"Unknown operation: $unknown")
         }
-        
+
         CalculatorResult(
           params.operand1,
           params.operand2,
@@ -83,12 +94,12 @@ object AutoSchemaExample extends ZIOAppDefault:
           result
         )
       }
-      
+
     // Custom implementation of the conversion from Map to CalculatorParams
     override def convertInput(args: Map[String, Any]): ZIO[Any, Throwable, CalculatorParams] =
       ZIO.attempt {
         JSystem.err.println(s"[CalculatorTool] Converting map to CalculatorParams: $args")
-        
+
         // Extract and convert operands
         val op1 = args.getOrElse("operand1", 0.0) match {
           case n: Number => n.doubleValue()
@@ -97,7 +108,7 @@ object AutoSchemaExample extends ZIOAppDefault:
             JSystem.err.println(s"[CalculatorTool] Unexpected operand1 type: ${other.getClass.getName}")
             0.0
         }
-        
+
         val op2 = args.getOrElse("operand2", 0.0) match {
           case n: Number => n.doubleValue()
           case s: String => s.toDouble
@@ -105,14 +116,14 @@ object AutoSchemaExample extends ZIOAppDefault:
             JSystem.err.println(s"[CalculatorTool] Unexpected operand2 type: ${other.getClass.getName}")
             0.0
         }
-        
+
         // Extract operation
         val op = args.getOrElse("operation", "add").toString
-        
+
         JSystem.err.println(s"[CalculatorTool] Converted to: op1=$op1, op2=$op2, op=$op")
         CalculatorParams(op1, op2, op)
       }
-  
+
   /**
    * Calculator parameters
    */
@@ -121,7 +132,7 @@ object AutoSchemaExample extends ZIOAppDefault:
     operand2: Double,
     operation: String = "add"
   )
-  
+
   /**
    * Calculator result
    */
@@ -131,7 +142,7 @@ object AutoSchemaExample extends ZIOAppDefault:
     operation: String,
     result: Double
   )
-  
+
   /**
    * Weather tool implementation
    */
@@ -143,7 +154,7 @@ object AutoSchemaExample extends ZIOAppDefault:
         val temperature = 72.5
         val conditions = "Sunny"
         val humidity = 45.0
-        
+
         WeatherResult(
           location = params.location,
           temperature = temperature,
@@ -153,18 +164,18 @@ object AutoSchemaExample extends ZIOAppDefault:
           timestamp = java.lang.System.currentTimeMillis()
         )
       }
-      
+
     // Custom implementation of the conversion from Map to WeatherParams
     override def convertInput(args: Map[String, Any]): ZIO[Any, Throwable, WeatherParams] =
       ZIO.attempt {
         JSystem.err.println(s"[WeatherTool] Converting map to WeatherParams: $args")
-        
+
         // Extract location
         val location = args.getOrElse("location", "").toString
-        
+
         // Extract units
         val units = args.getOrElse("units", "celsius").toString
-        
+
         // Extract includeForecast
         val includeForecast = args.getOrElse("includeForecast", false) match {
           case b: Boolean => b
@@ -172,11 +183,11 @@ object AutoSchemaExample extends ZIOAppDefault:
           case n: Number => n.intValue() != 0
           case _ => false
         }
-        
+
         JSystem.err.println(s"[WeatherTool] Converted to: location=$location, units=$units, includeForecast=$includeForecast")
         WeatherParams(location, units, includeForecast)
       }
-  
+
   /**
    * Weather parameters
    */
@@ -185,7 +196,7 @@ object AutoSchemaExample extends ZIOAppDefault:
     units: String = "celsius",
     includeForecast: Boolean = false
   )
-  
+
   /**
    * Weather result
    */
@@ -197,3 +208,4 @@ object AutoSchemaExample extends ZIOAppDefault:
     units: String,
     timestamp: Long
   )
+end AutoSchemaExample // Ensure object definition is closed

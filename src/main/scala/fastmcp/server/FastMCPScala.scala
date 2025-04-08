@@ -2,6 +2,7 @@ package fastmcp.server
 
 import fastmcp.core.*
 import fastmcp.server.manager.*
+import fastmcp.macros.{JsonSchemaMacro, MapToFunctionMacro}
 import io.modelcontextprotocol.server.{McpServer, McpServerFeatures, McpSyncServer, McpSyncServerExchange}
 import io.modelcontextprotocol.spec.{McpSchema, McpServerTransportProvider}
 import zio.*
@@ -63,151 +64,12 @@ class FastMCPScala(
       name: String,
       handler: ToolHandler,
       description: Option[String] = None,
-      inputSchema: McpSchema.JsonSchema = new McpSchema.JsonSchema("object", null, null, true),
+      inputSchema: Either[McpSchema.JsonSchema, String] = Left(new McpSchema.JsonSchema("object", null, null, true)),
       options: ToolRegistrationOptions = ToolRegistrationOptions()
   ): ZIO[Any, Throwable, FastMCPScala] =
-    val definition = ToolDefinition(name, description, Left(inputSchema))
+    val definition = ToolDefinition(name, description, inputSchema)
     toolManager.addTool(name, handler, definition, options).as(this)
-
-  /**
-   * Register a context-aware tool with the server
-   * 
-   * @param name        Tool name
-   * @param handler     Function to execute when the tool is called (with context)
-   * @param description Optional tool description
-   * @param inputSchema JSON schema for the tool's input parameters
-   * @return ZIO effect that completes with this FastMCPScala instance or fails with ToolRegistrationError
-   */
-  def contextualTool(
-      name: String,
-      handler: ContextualToolHandler,
-      description: Option[String] = None,
-      inputSchema: McpSchema.JsonSchema = new McpSchema.JsonSchema("object", null, null, true),
-      options: ToolRegistrationOptions = ToolRegistrationOptions()
-  ): ZIO[Any, Throwable, FastMCPScala] =
-    val definition = ToolDefinition(name, description, Left(inputSchema))
-    toolManager.addContextualTool(name, handler, definition, options).as(this)
-
-  /**
-   * Register a fully type-safe tool with the server
-   * 
-   * @param name        Tool name
-   * @param handler     TypedToolHandler implementation
-   * @param description Optional tool description
-   * @param inputSchema JSON schema for the tool's input parameters
-   * @return ZIO effect that completes with this FastMCPScala instance or fails with ToolRegistrationError
-   */
-  def typedTool[Input: {JsonEncoder, JsonDecoder}, Output: {JsonEncoder, JsonDecoder}](
-      name: String,
-      handler: TypedToolHandler[Input, Output],
-      description: Option[String] = None,
-      inputSchema: McpSchema.JsonSchema = new McpSchema.JsonSchema("object", null, null, true),
-      options: ToolRegistrationOptions = ToolRegistrationOptions()
-  ): ZIO[Any, Throwable, FastMCPScala] =
-    val definition = ToolDefinition(name, description, Left(inputSchema))
-    toolManager.addTypedTool(name, handler, definition, options).as(this)
-
-  /**
-   * Register a case class backed tool with simplified schema
-   * 
-   * @param name        Tool name
-   * @param handler     Function that takes a case class as input and returns output
-   * @param description Optional tool description
-   * @return ZIO effect that completes with this FastMCPScala instance or fails with ToolRegistrationError
-   */
-  def caseClassTool[Input: {JsonEncoder, JsonDecoder}, Output: {JsonEncoder, JsonDecoder}](
-      name: String,
-      handler: (Input, Option[McpContext]) => ZIO[Any, Throwable, Output],
-      description: Option[String] = None,
-      options: ToolRegistrationOptions = ToolRegistrationOptions()
-  ): ZIO[Any, Throwable, FastMCPScala] =
-    // Create a typed handler
-    val typedHandler = new TypedToolHandler[Input, Output] {
-      override def handle(input: Input, context: Option[McpContext]): ZIO[Any, Throwable, Output] =
-        handler(input, context)
-    }
-    // Create a basic schema for now
-    val inputSchema = new McpSchema.JsonSchema("object", null, null, true)
-    // Create the tool definition
-    val definition = ToolDefinition(name, description, Left(inputSchema))
-    // Register the tool
-    toolManager.addTypedTool(name, typedHandler, definition, options).as(this)
-
-  /**
-   * Register a case class backed tool with schema generated from ZIO Schema
-   * 
-   * @param name        Tool name
-   * @param handler     Function that takes a case class as input and returns output
-   * @param description Optional tool description
-   * @return ZIO effect that completes with this FastMCPScala instance or fails with ToolRegistrationError
-   */
-  def caseClassToolWithSchema[Input: {JsonEncoder, JsonDecoder, zio.schema.Schema}, Output: {JsonEncoder, JsonDecoder}](
-      name: String,
-      handler: (Input, Option[McpContext]) => ZIO[Any, Throwable, Output],
-      description: Option[String] = None,
-      options: ToolRegistrationOptions = ToolRegistrationOptions()
-  ): ZIO[Any, Throwable, FastMCPScala] =
-    ZIO.attempt {
-      val typedHandler = new TypedToolHandler[Input, Output] {
-        override def handle(input: Input, context: Option[McpContext]): ZIO[Any, Throwable, Output] =
-          handler(input, context)
-      }
-      val inputSchema = SchemaGenerator.schemaFor[Input]
-      val definition = ToolDefinition(name, description, Left(inputSchema))
-      toolManager.addTypedTool(name, typedHandler, definition, options).as(this)
-    }.flatten
-
-  /**
-   * Register a case class backed tool with schema generated from Tapir Schema
-   * 
-   * @param name        Tool name
-   * @param handler     Function that takes a case class as input and returns output
-   * @param description Optional tool description
-   * @return ZIO effect that completes with this FastMCPScala instance or fails with ToolRegistrationError
-   */
-  def caseClassToolWithTapirSchema[Input: {JsonEncoder, JsonDecoder, TapirSchema}, Output: {JsonEncoder, JsonDecoder}](
-      name: String,
-      handler: (Input, Option[McpContext]) => ZIO[Any, Throwable, Output],
-      description: Option[String] = None,
-      options: ToolRegistrationOptions = ToolRegistrationOptions()
-  ): ZIO[Any, Throwable, FastMCPScala] =
-    ZIO.attempt {
-      val typedHandler = new TypedToolHandler[Input, Output] {
-        override def handle(input: Input, context: Option[McpContext]): ZIO[Any, Throwable, Output] =
-          handler(input, context)
-      }
-      val inputSchema = SchemaGenerator.schemaForTapir[Input]
-      val definition = ToolDefinition(name, description, Left(inputSchema))
-      toolManager.addTypedTool(name, typedHandler, definition, options).as(this)
-    }.flatten
-
-  /**
-   * Register a case class backed tool with a directly provided JSON Schema string
-   * 
-   * @param name        Tool name
-   * @param handler     Function that takes a case class as input and returns output
-   * @param schemaString JSON Schema string to use directly
-   * @param description Optional tool description
-   * @return ZIO effect that completes with this FastMCPScala instance or fails with ToolRegistrationError
-   */
-  def caseClassToolWithDirectSchema[Input: {JsonEncoder, JsonDecoder}, Output: {JsonEncoder, JsonDecoder}](
-      name: String,
-      handler: (Input, Option[McpContext]) => ZIO[Any, Throwable, Output],
-      schemaString: String,
-      description: Option[String] = None,
-      options: ToolRegistrationOptions = ToolRegistrationOptions()
-  ): ZIO[Any, Throwable, FastMCPScala] =
-    ZIO.attempt {
-      val typedHandler = new TypedToolHandler[Input, Output] {
-        override def handle(input: Input, context: Option[McpContext]): ZIO[Any, Throwable, Output] =
-          handler(input, context)
-      }
-      JSystem.err.println(s"[FastMCPScala] Using provided JSON Schema for $name: $schemaString")
-      // We'll store the schema as a string to let the Java SDK parse it
-      val definition = ToolDefinition(name, description, Right(schemaString))
-      toolManager.addTypedTool(name, typedHandler, definition, options).as(this)
-    }.flatten
-
+    
   /**
    * Register a static resource with the server
    *
@@ -354,7 +216,10 @@ class FastMCPScala(
     serverBuilder.capabilities(capabilities)
 
     // Register tool handlers
-    toolManager.listDefinitions().foreach { toolDef =>
+    val tools = toolManager.listDefinitions()
+    JSystem.err.println(s"[FastMCPScala] Registering ${tools.size} tools with the MCP server:")
+    tools.foreach { toolDef =>
+      JSystem.err.println(s"[FastMCPScala] - Tool: ${toolDef.name} (${toolDef.description.getOrElse("No description")})")
       serverBuilder.tool(
         ToolDefinition.toJava(toolDef),
         javaToolHandler(toolDef.name)
@@ -455,175 +320,7 @@ class FastMCPScala(
       new McpSchema.GetPromptResult(description, javaMessages)
     }
 
-  /**
-   * Fully implement registerMacroTool by reflecting on methodName, creating a handler that:
-   * 1) Locates method in T
-   * 2) Checks for required parameters
-   * 3) Converts args to the correct param types
-   * 4) Invokes method
-   * 5) Registers the resulting tool with the provided JSON schema
-   */
-  def registerMacroTool[T](
-    toolName: String,
-    description: Option[String],
-    methodName: String,
-    schemaJson: String,
-    paramNames: List[String],
-    paramTypes: List[String],
-    required: List[Boolean]
-  )(using classTag: ClassTag[T]): Unit =
-    JSystem.err.println(s"[FastMCPScala] Registering macro-generated tool '$toolName' from method '$methodName'")
-    JSystem.err.println(s"[FastMCPScala] Schema: $schemaJson")
-
-    // Attempt to load the runtime class
-    val runtimeClass = classTag.runtimeClass
-
-    // Attempt to get an instance of T (assume it's either a Scala object or has a no-arg constructor)
-    val instance: Any =
-      if runtimeClass.getName.endsWith("$") then
-        // Scala object
-        runtimeClass.getField("MODULE$").get(null)
-      else
-        // Attempt new instance via no-arg constructor
-        runtimeClass.getDeclaredConstructor().newInstance()
-
-    // Let's fix the method lookup by trying different combinations
-    JSystem.err.println(s"[FastMCPScala] Looking up method $methodName with param types: ${paramTypes.mkString(", ")}")
-    
-    // Try different combinations to find the method
-    val method = try {
-      // First try: primitive types
-      val primitiveClasses = paramTypes.map {
-        case t if t.contains("Int") => classOf[Int]
-        case t if t.contains("Long") => classOf[Long]
-        case t if t.contains("Double") => classOf[Double]
-        case t if t.contains("Float") => classOf[Float]
-        case t if t.contains("Boolean") => classOf[Boolean]
-        case t if t.contains("String") => classOf[String]
-        // Fallback: treat it as an Object param
-        case _ => classOf[Object]
-      }.toArray
-      
-      JSystem.err.println(s"[FastMCPScala] Trying primitive classes: ${primitiveClasses.map(_.getName).mkString(", ")}")
-      runtimeClass.getMethod(methodName, primitiveClasses*)
-    } catch {
-      case e1: NoSuchMethodException => try {
-        // Second try: boxed Java types
-        val boxedClasses = paramTypes.map {
-          case t if t.contains("Int") => classOf[java.lang.Integer]
-          case t if t.contains("Long") => classOf[java.lang.Long]
-          case t if t.contains("Double") => classOf[java.lang.Double]
-          case t if t.contains("Float") => classOf[java.lang.Float]
-          case t if t.contains("Boolean") => classOf[java.lang.Boolean]
-          case t if t.contains("String") => classOf[java.lang.String]
-          // Fallback
-          case _ => classOf[Object]
-        }.toArray
-        
-        JSystem.err.println(s"[FastMCPScala] Trying boxed classes: ${boxedClasses.map(_.getName).mkString(", ")}")
-        runtimeClass.getMethod(methodName, boxedClasses*)
-      } catch {
-        case e2: NoSuchMethodException =>
-          // Last resort: all strings
-          JSystem.err.println(s"[FastMCPScala] Trying with all String parameters")
-          val stringClasses = Array.fill(paramTypes.length)(classOf[String])
-          try {
-            runtimeClass.getMethod(methodName, stringClasses*)
-          } catch {
-            case e3: NoSuchMethodException =>
-              // Final attempt: use getDeclaredMethod which also returns non-public methods
-              JSystem.err.println(s"[FastMCPScala] Trying with getDeclaredMethod")
-              runtimeClass.getDeclaredMethod(methodName, stringClasses*)
-          }
-      }
-    }
-
-    // Helper to convert argument from Any to the needed param type
-    def convertParam(value: Any, tpe: String): Any =
-      // Use pattern matching for full Scala type names
-      if tpe.contains("Int") then
-        value match
-          case n: Number => n.intValue()
-          case s: String => s.toInt
-          case other     => other.toString.toInt
-      else if tpe.contains("Long") then
-        value match
-          case n: Number => n.longValue()
-          case s: String => s.toLong
-          case other     => other.toString.toLong
-      else if tpe.contains("Double") then
-        value match
-          case n: Number => n.doubleValue()
-          case s: String => s.toDouble
-          case other     => other.toString.toDouble
-      else if tpe.contains("Float") then
-        value match
-          case n: Number => n.floatValue()
-          case s: String => s.toFloat
-          case other     => other.toString.toFloat
-      else if tpe.contains("Boolean") then
-        value match
-          case b: Boolean => b
-          case s: String  => s.toBoolean
-          case n: Number  => n.intValue() != 0
-          case other      => other.toString.toBoolean
-      else if tpe.contains("String") then
-        value.toString
-      else
-        // fallback
-        value
-
-    // We don't need to parse the schema string, we can use it directly in a ToolDefinition
-
-    // Build the tool handler with reflection
-    val reflectiveHandler: ToolHandler = args =>
-      // Validate required arguments using boundary for early return
-      boundary {
-        val missingParams = paramNames.zip(required).collect {
-          case (pName, true) if !args.contains(pName) => pName
-        }
-        if missingParams.nonEmpty then
-          break(ZIO.fail(new ToolArgumentError(
-            s"Missing required parameters for tool '$toolName': ${missingParams.mkString(", ")}"
-          )))
-      }
-
-      // Convert arguments
-      val paramValues = paramNames.zip(paramTypes).zipWithIndex.map {
-        case ((pName, pType), idx) =>
-          val rawVal = args.getOrElse(pName, null)
-          if rawVal == null && required(idx) then
-            throw new ToolArgumentError(s"Parameter '$pName' is required but was not provided.")
-          if rawVal == null then null
-          else convertParam(rawVal, pType)
-      }
-
-      ZIO.attempt {
-        method.invoke(instance, paramValues*)
-      }.mapError { e =>
-        new ToolExecutionError(s"Error invoking method '$methodName' on '${runtimeClass.getName}': ${e.getMessage}", e)
-      }
-
-    // Create a tool definition with the raw schema string
-    val toolDefinition = ToolDefinition(
-      name = toolName, 
-      description = description,
-      inputSchema = Right(schemaJson) // Using the raw schema string
-    )
-
-    // Register the tool directly with the toolManager
-    Unsafe.unsafe { implicit u =>
-      Runtime.default.unsafe.run(
-        ZIO.attempt {
-          toolManager.addTool(
-            name = toolName,
-            handler = reflectiveHandler,
-            definition = toolDefinition,
-            options = ToolRegistrationOptions()
-          )
-        }.as(())
-      ).getOrThrowFiberFailure()
-    }
+end FastMCPScala // Ensure class definition is closed
 
 /**
  * Companion object for FastMCPScala

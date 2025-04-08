@@ -11,9 +11,10 @@ FastMCP-Scala provides a Scala wrapper around the Model Context Protocol Java SD
 - **ZIO Integration**: Uses ZIO for effect handling, error management, and asynchronous operations.
 - **Type Safety**: Leverages Scala 3's type system for improved safety and clarity.
 - **Functional API**: Provides a clean, functional API for defining tools, resources, and prompts.
-- **Macro-Driven Annotations**: Uses Scala 3 macros and annotations (`@Tool`, `@Resource`, `@Prompt`) for automatic registration with zero boilerplate.
-- **Auto Schema Generation**: Automatically generates JSON schemas from Scala types and method signatures at compile time.
-- **Parameter Documentation**: Uses `@Param` annotations to document tool parameters and generate schemas.
+- **Macro-Driven Annotations**: Uses Scala 3 macros and annotations (`@Tool`, `@Param`, `@Resource`, `@Prompt`) for automatic registration with zero boilerplate.
+- **Auto Schema Generation**: Automatically generates JSON schemas from method signatures and annotations at compile time using `JsonSchemaMacro` (integrating Tapir).
+- **Auto Handler Generation**: Automatically generates `Map[String, Any]` handlers from annotated methods using `MapToFunctionMacro`.
+- **Parameter Documentation**: Uses `@Param` annotations to document tool parameters, enhancing generated schemas.
 - **Java SDK Integration**: Integrates seamlessly with the underlying Java MCP SDK.
 
 ## Getting Started
@@ -107,7 +108,7 @@ You can use annotations with Scala 3 macros to define your tools with automatic 
 ```scala
 import fastmcp.core.{Tool, Param}
 import fastmcp.server.FastMCPScala
-import fastmcp.macros.MacroAnnotationProcessor.{given, *}
+import fastmcp.server.McpToolRegistration.* // Import scanAnnotations extension method
 import zio.*
 import zio.json.*
 
@@ -187,34 +188,36 @@ object MacroAnnotatedServer extends ZIOAppDefault:
     for
       // Create the server
       server <- ZIO.succeed(FastMCPScala("MacroAnnotatedServer", "0.1.0"))
-      
-      // Process tools using new macro processor
+
+      // Process tools using the scanAnnotations macro extension method
       _ <- ZIO.attempt {
+        java.lang.System.err.println("[Server] Scanning CalculatorTools...")
         // Scan tools in the CalculatorTools object
         server.scanAnnotations[CalculatorTools.type]
-        
+
+        java.lang.System.err.println("[Server] Scanning StringTools...")
         // Scan tools in the StringTools object
         server.scanAnnotations[StringTools.type]
       }
-      
+
       // Run the server
       _ <- server.runStdio()
     yield ()
 ```
 
-The macro system will:
-1. Analyze your annotated methods at compile time
-2. Generate JSON schemas from parameter types and annotations
-3. Create handlers that properly decode parameters and invoke your methods
-4. Register everything with your MCP server automatically
+The macro system (`ToolMacros`) will:
+1. Analyze your annotated methods at compile time.
+2. Use `JsonSchemaMacro` to generate JSON schemas from parameter types and annotations.
+3. Use `MapToFunctionMacro` to create handlers that properly decode parameters and invoke your methods.
+4. Register everything with your MCP server's `ToolManager` automatically.
 
 ## Schema Generation Approaches
 
-FastMCP-Scala offers multiple approaches to generating JSON schemas for your tools:
+FastMCP-Scala primarily uses a macro-driven approach for generating JSON schemas:
 
-### 1. Macro-Driven Annotation Processing
+### 1. Macro-Driven Annotation Processing (Recommended)
 
-The core approach uses Scala 3's powerful compile-time metaprogramming capabilities to automatically process `@Tool` annotations:
+The core approach uses Scala 3's powerful compile-time metaprogramming capabilities to automatically process `@Tool` and `@Param` annotations:
 
 ```scala
 @Tool(
@@ -222,67 +225,52 @@ The core approach uses Scala 3's powerful compile-time metaprogramming capabilit
   description = Some("Register a new user with complex profile information")
 )
 def registerUser(
-  @Param("User profile information") userInfo: UserInfo,
+  @Param("User profile information") userInfo: UserInfo, // Complex type
   @Param("Whether the user should be active immediately") isActive: Boolean = true,
   @Param(
     "User access level (admin, user, guest)",
-    required = false
+    required = false // Optional parameter
   ) accessLevel: String = "user"
 ): String = s"User ${userInfo.name} registered successfully"
 ```
 
-This approach:
-- Automatically generates JSON schemas from method signatures and annotations
-- Creates tool handlers from annotated methods with zero boilerplate
-- Supports both primitive types and complex return values
-- Handles parameter validation and type conversion automatically
-- Extracts documentation from `@Param` annotations for better schema descriptions
+This approach, implemented in `ToolMacros`, leverages `JsonSchemaMacro` and `MapToFunctionMacro`:
+- Automatically generates JSON schemas from method signatures and annotations.
+- Creates tool handlers from annotated methods with zero boilerplate.
+- Supports primitive types, complex case classes (generating `$defs` via Tapir), `Option`, and `List`.
+- Handles parameter validation (required vs. optional) and type conversion automatically via the generated handler.
+- Extracts documentation from `@Param` annotations for better schema descriptions.
 
-### 2. Direct Schema Generation with Function References
+### 2. Direct Schema Generation with `JsonSchemaMacro`
 
-For more control, you can directly generate schemas from function references using the `SchemaMacros` utilities:
+For specific use cases or testing, you can directly generate schemas from function references using `JsonSchemaMacro`:
 
 ```scala
-import fastmcp.core.SchemaMacros
+import fastmcp.macros.JsonSchemaMacro
 import io.circe.Json
 
-// Define your function
-def createUser(info: UserInfo, active: Boolean): Unit = ()
+// Define your function or method
+def createUser(name: String, age: Int, profile: UserProfile): Unit = ()
 
 // Use the inline macro to generate a schema at compile time
-val schema: Json = SchemaMacros.schemaForFunctionArgs(createUser)
+val schemaJson: Json = JsonSchemaMacro.schemaForFunctionArgs(createUser)
+
+println(schemaJson.spaces2) // Print the generated JSON schema
 ```
 
 This approach:
-- Generates schemas directly from function types without annotations
-- Works with any function or method reference
-- Can leverage Tapir schemas for custom types when available
-- Supports complex nested case classes
-- Returns a circe `Json` object that can be further manipulated or serialized
+- Generates schemas directly from function/method types without needing `@Tool` annotations.
+- Works with any function or method reference.
+- Leverages Tapir schemas internally for robust schema generation, including handling nested types and `$defs`.
+- Returns a circe `Json` object.
 
-### 3. Manual Schema Building
+### 3. Manual Schema String
 
-For complete control, you can manually build schemas using the `JsonSchemaBuilder` utilities:
+You can always provide a raw JSON schema string when registering tools manually (e.g., using `registerToolWithCustomSchema`), but the macro-driven approaches are preferred for automation and type safety.
 
 ```scala
-import fastmcp.core.JsonSchemaBuilder
-
-// Build a schema manually
-val schema = JsonSchemaBuilder.createSchema(
-  typeName = "object",
-  properties = Map(
-    "username" -> JsonSchemaBuilder.Examples.stringProperty(
-      description = "The user's username",
-      required = true
-    ),
-    "age" -> JsonSchemaBuilder.Examples.integerProperty(
-      description = "The user's age",
-      required = false,
-      minimum = Some(13)
-    )
-  ),
-  required = List("username")
-)
+val manualSchema = """{ "type": "object", ... }"""
+server.registerToolWithCustomSchema(myTool, schemaString = manualSchema)
 ```
 
 Check out the detailed documentation in [Macro-Driven Approach](docs/macro-driven-approach.md) to learn more about these powerful features.
@@ -311,14 +299,23 @@ scala-cli run main.scala --main-class fastmcp.examples.SimpleServer
 # Run TypedToolExample
 scala-cli run main.scala --main-class fastmcp.examples.TypedToolExample
 
-# Run AnnotatedServer
+# Run AnnotatedServer (demonstrates new macro processing)
 scala-cli run main.scala --main-class fastmcp.examples.AnnotatedServer
 
-# Run the main application (with command-line args support)
-scala-cli run main.scala --main-class fastmcp.FastMCPMain
+# Run ZioSchemaToolExample (demonstrates annotations with ZIO Schema types)
+scala-cli run main.scala --main-class fastmcp.examples.ZioSchemaToolExample
 
-# Run the new macro schema example
-scala-cli run main.scala --main-class fastmcp.examples.MacroSchemaExample
+# Run DirectSchemaExample (demonstrates manual string schema)
+scala-cli run main.scala --main-class fastmcp.examples.DirectSchemaExample
+
+# Run AutoSchemaExample (demonstrates basic registration and custom string schema)
+scala-cli run main.scala --main-class fastmcp.examples.AutoSchemaExample
+
+# Run the main application (with command-line args support)
+# scala-cli run main.scala --main-class fastmcp.FastMCPMain # If FastMCPMain exists
+
+# Run the new macro schema example (if MacroSchemaExample exists)
+# scala-cli run main.scala --main-class fastmcp.examples.MacroSchemaExample
 ```
 
 This approach avoids SBT filesystem permission issues entirely by using scala-cli directly.

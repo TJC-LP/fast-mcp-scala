@@ -1,7 +1,7 @@
 package fastmcp.server
 
 import fastmcp.core.*
-import fastmcp.macros.*
+import fastmcp.macros.ToolMacros
 import fastmcp.server.manager.*
 import zio.*
 import zio.json.*
@@ -22,13 +22,7 @@ object McpToolRegistration:
      */
     inline def scanAnnotations[T]: Unit = ToolMacros.processAnnotations[T](server)
     
-    /**
-     * Enhanced version that uses JsonSchemaMacro and MapToFunctionMacro 
-     * for automatic schema generation and handler creation.
-     *
-     * @tparam T The type to scan for annotations
-     */
-    inline def scanToolsWithMacros[T]: Unit = EnhancedToolMacros.processAnnotations[T](server)
+
     /**
      * Register an McpTool implementation with a provided JSON Schema string.
      * This is the most direct way to register a tool with a custom schema.
