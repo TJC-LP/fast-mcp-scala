@@ -233,7 +233,7 @@ object DirectSchemaExample extends ZIOAppDefault:
           case Operation.Divide =>
             if (params.operand2 == 0) throw new ArithmeticException("Division by zero")
             params.operand1 / params.operand2
-          case unknown => throw new IllegalArgumentException(s"Unknown operation: $unknown")
+          case null => throw new IllegalArgumentException("Operation cannot be null")
         }
 
         CalculatorResult(

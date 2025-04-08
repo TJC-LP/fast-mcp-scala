@@ -208,17 +208,84 @@ The macro system will:
 3. Create handlers that properly decode parameters and invoke your methods
 4. Register everything with your MCP server automatically
 
-## New Macro-Driven Approach
+## Schema Generation Approaches
 
-The latest addition to FastMCP-Scala is a fully automated macro-driven approach for tool registration. This feature:
+FastMCP-Scala offers multiple approaches to generating JSON schemas for your tools:
 
-- Uses Scala 3's powerful compile-time metaprogramming capabilities
-- Automatically generates JSON schemas from method signatures
+### 1. Macro-Driven Annotation Processing
+
+The core approach uses Scala 3's powerful compile-time metaprogramming capabilities to automatically process `@Tool` annotations:
+
+```scala
+@Tool(
+  name = Some("registerUser"),
+  description = Some("Register a new user with complex profile information")
+)
+def registerUser(
+  @Param("User profile information") userInfo: UserInfo,
+  @Param("Whether the user should be active immediately") isActive: Boolean = true,
+  @Param(
+    "User access level (admin, user, guest)",
+    required = false
+  ) accessLevel: String = "user"
+): String = s"User ${userInfo.name} registered successfully"
+```
+
+This approach:
+- Automatically generates JSON schemas from method signatures and annotations
 - Creates tool handlers from annotated methods with zero boilerplate
 - Supports both primitive types and complex return values
 - Handles parameter validation and type conversion automatically
+- Extracts documentation from `@Param` annotations for better schema descriptions
 
-Check out the detailed documentation in [Macro-Driven Approach](docs/macro-driven-approach.md) to learn more about this powerful feature.
+### 2. Direct Schema Generation with Function References
+
+For more control, you can directly generate schemas from function references using the `SchemaMacros` utilities:
+
+```scala
+import fastmcp.core.SchemaMacros
+import io.circe.Json
+
+// Define your function
+def createUser(info: UserInfo, active: Boolean): Unit = ()
+
+// Use the inline macro to generate a schema at compile time
+val schema: Json = SchemaMacros.schemaForFunctionArgs(createUser)
+```
+
+This approach:
+- Generates schemas directly from function types without annotations
+- Works with any function or method reference
+- Can leverage Tapir schemas for custom types when available
+- Supports complex nested case classes
+- Returns a circe `Json` object that can be further manipulated or serialized
+
+### 3. Manual Schema Building
+
+For complete control, you can manually build schemas using the `JsonSchemaBuilder` utilities:
+
+```scala
+import fastmcp.core.JsonSchemaBuilder
+
+// Build a schema manually
+val schema = JsonSchemaBuilder.createSchema(
+  typeName = "object",
+  properties = Map(
+    "username" -> JsonSchemaBuilder.Examples.stringProperty(
+      description = "The user's username",
+      required = true
+    ),
+    "age" -> JsonSchemaBuilder.Examples.integerProperty(
+      description = "The user's age",
+      required = false,
+      minimum = Some(13)
+    )
+  ),
+  required = List("username")
+)
+```
+
+Check out the detailed documentation in [Macro-Driven Approach](docs/macro-driven-approach.md) to learn more about these powerful features.
 
 ## Project Status
 
@@ -249,6 +316,9 @@ scala-cli run main.scala --main-class fastmcp.examples.AnnotatedServer
 
 # Run the main application (with command-line args support)
 scala-cli run main.scala --main-class fastmcp.FastMCPMain
+
+# Run the new macro schema example
+scala-cli run main.scala --main-class fastmcp.examples.MacroSchemaExample
 ```
 
 This approach avoids SBT filesystem permission issues entirely by using scala-cli directly.
@@ -265,6 +335,7 @@ sbt -Dsbt.global.base=$HOME/.sbt/1.0 run
 sbt -Dsbt.global.base=$HOME/.sbt/1.0 "runMain fastmcp.examples.SimpleServer"
 sbt -Dsbt.global.base=$HOME/.sbt/1.0 "runMain fastmcp.examples.TypedToolExample"
 sbt -Dsbt.global.base=$HOME/.sbt/1.0 "runMain fastmcp.examples.AnnotatedServer"
+sbt -Dsbt.global.base=$HOME/.sbt/1.0 "runMain fastmcp.examples.MacroSchemaExample"
 ```
 
 ## License

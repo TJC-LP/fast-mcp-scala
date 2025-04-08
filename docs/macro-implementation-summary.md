@@ -97,14 +97,57 @@ server.scanAnnotations[CalculatorTools.type]
 4. **Method Invocation**: Used Java reflection to invoke methods dynamically at runtime.
 5. **Schema Generation**: Created a simple but effective JSON schema generator based on Scala type information.
 
+## Recent Enhancements
+
+### Schema Generation Improvements
+
+The latest updates enhance our schema generation capabilities with:
+
+1. **Tapir Integration**: 
+   - Leverage Tapir's schema derivation for complex case classes
+   - Use `Schema.derived` to automatically generate schemas for custom types
+   - Seamless integration with circe JSON for schema serialization
+
+2. **Direct Schema Generation**:
+   - New `SchemaMacros.schemaForFunctionArgs` utility for direct schema inference
+   - Works with any function reference without requiring annotations
+   - Returns circe Json objects for easy manipulation
+
+3. **Improved Type Inference**:
+   - Better handling of container types (Option, List, etc.)
+   - Support for nullability in Option types
+   - More accurate type mapping for all Scala primitives
+
+Example of direct schema generation:
+
+```scala
+import fastmcp.core.SchemaMacros
+import io.circe.Json
+
+// Define complex domain models
+case class Address(street: String, city: String, zipCode: Int)
+case class UserInfo(name: String, age: Option[Int], addresses: List[Address])
+
+// Provide Tapir schemas for custom types
+given Schema[Address] = Schema.derived
+given Schema[UserInfo] = Schema.derived
+
+// Function with complex parameter types
+def createUser(info: UserInfo, active: Boolean): Unit = ()
+
+// Generate schema directly with inline macro
+val schema: Json = SchemaMacros.schemaForFunctionArgs(createUser)
+```
+
 ## Future Enhancements
 
-1. **Case Class Support**: Improve schema generation for nested case classes
+1. **Full Case Class Support**: Complete the support for deeply nested case classes
 2. **ZIO Schema Integration**: Use ZIO Schema for more accurate type information
 3. **Resource Annotations**: Add support for `@Resource` annotation processing
 4. **Prompt Annotations**: Add support for `@Prompt` annotation processing
 5. **Validation Annotations**: Add validation annotations (min, max, pattern, etc.)
 6. **Documentation Generation**: Auto-generate documentation from annotations
+7. **True Annotation Macros**: Implement `@InferSchema` annotation using scalameta or similar tooling
 
 ## Technical Design Decisions
 

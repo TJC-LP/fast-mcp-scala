@@ -3,8 +3,9 @@ package fastmcp.examples
 import fastmcp.core.*
 import fastmcp.server.*
 import fastmcp.server.manager.*
-import fastmcp.macros.*
+import fastmcp.macros.{MacroAnnotationProcessor, InferSchema}
 import fastmcp.macros.MacroAnnotationProcessor.{given, *}
+import fastmcp.server.McpToolRegistration.* // Import scanAnnotations extension method
 import zio.*
 import zio.json.*
 import java.lang.{System => JSystem}
@@ -34,6 +35,18 @@ object AnnotatedServer extends ZIOAppDefault:
     ): Int = a + b
     
     /**
+     * Alternative addition tool that takes strings and converts them to ints
+     */
+    @Tool(
+      name = Some("addString"),
+      description = Some("Adds two numbers provided as strings")
+    )
+    def addString(
+      @Param("First number to add (as string)") a: String,
+      @Param("Second number to add (as string)") b: String
+    ): Int = a.toInt + b.toInt
+    
+    /**
      * Multiplication tool
      */
     @Tool(
@@ -46,7 +59,7 @@ object AnnotatedServer extends ZIOAppDefault:
     ): Int = a * b
     
     /**
-     * Advanced calculator with operation selection
+     * Advanced calculator with operation selection - uses standard schema building
      */
     @Tool(
       name = Some("calculator"),
@@ -59,6 +72,31 @@ object AnnotatedServer extends ZIOAppDefault:
         "Operation to perform (add, subtract, multiply, divide)",
         required = false
       ) operation: String = "add"
+    ): CalculatorResult =
+      val result = operation.toLowerCase match
+        case "add" | "+" => a + b
+        case "subtract" | "-" => a - b
+        case "multiply" | "*" => a * b
+        case "divide" | "/" => 
+          if (b == 0) throw new IllegalArgumentException("Cannot divide by zero")
+          else a / b
+        case _ => throw new IllegalArgumentException(s"Unknown operation: $operation")
+      
+      CalculatorResult(operation, List(a, b), result)
+      
+    /**
+     * Advanced calculator that uses advanced schema generation with @InferSchema
+     * This allows for proper handling of complex types like CalculatorResult
+     */
+    @Tool(
+      name = Some("advancedCalculator"),
+      description = Some("Perform a calculation with automatic schema generation")
+    )
+    @InferSchema
+    def advancedCalculate(
+      a: Double,
+      b: Double,
+      operation: String = "add"
     ): CalculatorResult =
       val result = operation.toLowerCase match
         case "add" | "+" => a + b

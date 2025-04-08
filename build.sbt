@@ -9,7 +9,7 @@ lazy val root = (project in file("."))
   .settings(
     name := "fast-mcp-scala",
     // Enable Scala 3 macros with verbose output for debugging
-    scalacOptions ++= Seq("-Xcheck-macros", "-Xmacro:verbose"),
+    scalacOptions ++= Seq("-Xcheck-macros"),
     libraryDependencies ++= Seq(
       // ZIO Core
       "dev.zio" %% "zio" % zioVersion,
