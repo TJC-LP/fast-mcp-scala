@@ -15,8 +15,12 @@ import io.modelcontextprotocol.spec.McpSchema
  * This annotation is processed at compile time by the FastMCPScala.scanAnnotations macro,
  * which automatically registers the method as an MCP tool.
  *
+ * The tool's description will be taken from the `description` parameter if provided.
+ * If `description` is `None` or omitted, the macro will attempt to use the method's
+ * Scaladoc comment as the description.
+ *
  * @param name Optional name for the tool (defaults to method name)
- * @param description Optional description for the tool
+ * @param description Optional description for the tool. If None, Scaladoc will be used.
  * @param examples Optional examples of how to use the tool
  * @param version Optional version of the tool
  * @param deprecated If true, the tool is marked as deprecated
@@ -26,7 +30,7 @@ import io.modelcontextprotocol.spec.McpSchema
  */
 class Tool(
     val name: Option[String] = None,
-    val description: Option[String] = None,
+    val description: Option[String] = None, // Description can come from here or Scaladoc
     val examples: List[String] = List.empty,
     val version: Option[String] = None,
     val deprecated: Boolean = false,

@@ -219,10 +219,11 @@ class FastMCPScala(
     val tools = toolManager.listDefinitions()
     JSystem.err.println(s"[FastMCPScala] Registering ${tools.size} tools with the MCP server:")
     tools.foreach { toolDef =>
-      JSystem.err.println(s"[FastMCPScala] - Tool: ${toolDef.name} (${toolDef.description.getOrElse("No description")})")
+      // Log the tool name and description being passed to the Java SDK
+      JSystem.err.println(s"[FastMCPScala] - Registering Tool: ${toolDef.name}, Description: ${toolDef.description.getOrElse("None")}")
       serverBuilder.tool(
-        ToolDefinition.toJava(toolDef),
-        javaToolHandler(toolDef.name)
+        ToolDefinition.toJava(toolDef), // Converts Scala ToolDefinition to Java McpSchema.Tool
+        javaToolHandler(toolDef.name)   // Provides the execution handler
       )
     }
 

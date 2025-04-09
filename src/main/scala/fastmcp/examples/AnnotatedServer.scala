@@ -38,7 +38,7 @@ object AnnotatedServer extends ZIOAppDefault:
    */
   @Tool(
     name = Some("add"),
-    description = Some("Add two numbers together")
+    // description = Some("Add two numbers together")
   )
   def add(
     @Param("First number") a: Int,
