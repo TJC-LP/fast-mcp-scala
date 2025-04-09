@@ -1,10 +1,20 @@
 package fastmcp.core
 
-import scala.annotation.StaticAnnotation
+import scala.annotation.{StaticAnnotation, experimental}
+import scala.quoted.*
+
+import fastmcp.server.FastMCPScala
+import fastmcp.server.manager.ToolRegistrationOptions
+import fastmcp.macros.MapToFunctionMacro
+import fastmcp.macros.JsonSchemaMacro
+import io.modelcontextprotocol.spec.McpSchema
 
 /**
  * Marker annotation for methods representing MCP Tools
  * 
+ * This annotation is processed at compile time by the FastMCPScala.scanAnnotations macro,
+ * which automatically registers the method as an MCP tool.
+ *
  * @param name Optional name for the tool (defaults to method name)
  * @param description Optional description for the tool
  * @param examples Optional examples of how to use the tool
@@ -15,14 +25,14 @@ import scala.annotation.StaticAnnotation
  * @param timeoutMillis Optional timeout for tool execution in milliseconds
  */
 class Tool(
-    name: Option[String] = None, 
-    description: Option[String] = None,
-    examples: List[String] = List.empty,
-    version: Option[String] = None,
-    deprecated: Boolean = false,
-    deprecationMessage: Option[String] = None,
-    tags: List[String] = List.empty,
-    timeoutMillis: Option[Long] = None
+    val name: Option[String] = None,
+    val description: Option[String] = None,
+    val examples: List[String] = List.empty,
+    val version: Option[String] = None,
+    val deprecated: Boolean = false,
+    val deprecationMessage: Option[String] = None,
+    val tags: List[String] = List.empty,
+    val timeoutMillis: Option[Long] = None
 ) extends StaticAnnotation
 
 /**

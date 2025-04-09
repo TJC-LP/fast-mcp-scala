@@ -11,48 +11,6 @@ import java.lang.System as JSystem
 import java.util.concurrent.ConcurrentHashMap
 import scala.jdk.CollectionConverters.*
 
-/**
- * Extension methods for JSON conversion
- */
-// Extension to convert Map[String, Any] to JSON string
-extension (map: Map[String, Any]) 
-  def toJson: String = {
-    // Convert Map[String, Any] to a format that can be serialized
-    val jsonMap = map.map { case (k, v) => 
-      k -> (v match {
-        case null => Json.Null
-        case b: Boolean => Json.fromBoolean(b)
-        case n: Int => Json.fromInt(n)
-        case n: Long => Json.fromLong(n)
-        case n: Double => Json.fromDoubleOrString(n)
-        case s: String => Json.fromString(s)
-        case a: Seq[?] => Json.fromValues(a.map(anyToJson))
-        case m: Map[?, ?] => 
-          val stringMap = m.asInstanceOf[Map[String, Any]]
-          Json.fromFields(stringMap.map { case (sk, sv) => sk -> anyToJson(sv) })
-        case other => Json.fromString(other.toString)
-      })
-    }
-    
-    Json.fromFields(jsonMap).noSpaces
-  }
-
-// Helper function to convert Any to Json
-private def anyToJson(value: Any): Json = {
-  value match {
-    case null => Json.Null
-    case b: Boolean => Json.fromBoolean(b)
-    case n: Int => Json.fromInt(n)
-    case n: Long => Json.fromLong(n)
-    case n: Double => Json.fromDoubleOrString(n)
-    case s: String => Json.fromString(s)
-    case a: Seq[?] => Json.fromValues(a.map(anyToJson))
-    case m: Map[?, ?] => 
-      val stringMap = m.asInstanceOf[Map[String, Any]]
-      Json.fromFields(stringMap.map { case (k, v) => k -> anyToJson(v) })
-    case other => Json.fromString(other.toString)
-  }
-}
 
 /**
  * Tool handler function types
@@ -62,29 +20,6 @@ type ToolHandler = Map[String, Any] => ZIO[Any, Throwable, Any]
 
 // Context-aware handler type
 type ContextualToolHandler = (Map[String, Any], Option[McpContext]) => ZIO[Any, Throwable, Any]
-
-/**
- * Type-safe tool handler trait
- */
-trait TypedToolHandler[Input, Output]:
-  def handle(input: Input, context: Option[McpContext]): ZIO[Any, Throwable, Output]
-  
-  /**
-   * Optional method to convert from Map[String, Any] to Input.
-   * If not overridden, the default implementation will try basic conversion methods.
-   */
-  def convertInput(args: Map[String, Any]): ZIO[Any, Throwable, Input] = 
-    ZIO.attemptBlocking {
-      JSystem.err.println(s"[TypedToolHandler] Default convertInput called with args: $args")
-      // Simple approach: try casting first
-      try {
-        args.asInstanceOf[Input]
-      } catch {
-        case e: ClassCastException =>
-          // If you get this error, consider overriding convertInput in your TypedToolHandler implementation
-          throw new ToolArgumentError(s"Cannot convert Map to Input type: ${e.getMessage}. Consider overriding convertInput method.")
-      }
-    }
 
 /**
  * Options for tool registration
@@ -133,76 +68,6 @@ class ToolManager extends Manager[ToolDefinition]:
       tools.put(name, (definition, contextualHandler))
       ()
     }.mapError(e => new ToolRegistrationError(s"Failed to register tool '$name'", e))
-
-  /**
-   * Register a contextual tool handler
-   */
-  def addContextualTool(
-                         name: String,
-                         handler: ContextualToolHandler,
-                         definition: ToolDefinition,
-                         options: ToolRegistrationOptions = ToolRegistrationOptions()
-                       ): ZIO[Any, Throwable, Unit] =
-    ZIO.attempt {
-      // Add more verbose logging
-      JSystem.err.println(s"[ToolManager] Adding contextual tool: '$name'")
-      JSystem.err.println(s"[ToolManager] - Description: ${definition.description.getOrElse("None")}")
-      definition.inputSchema match {
-        case Left(schema) => 
-          JSystem.err.println(s"[ToolManager] - Schema type: Java Schema object")
-        case Right(schemaStr) => 
-          JSystem.err.println(s"[ToolManager] - Schema type: JSON string (${schemaStr.take(40)}...)")
-      }
-
-      // Check if tool already exists
-      if tools.containsKey(name) && !options.allowOverrides then
-        if options.warnOnDuplicates then
-          JSystem.err.println(s"[ToolManager] Warning: Tool '$name' already exists and will be overwritten")
-        else
-          throw new ToolRegistrationError(s"Tool '$name' already exists")
-
-      tools.put(name, (definition, handler))
-      JSystem.err.println(s"[ToolManager] Successfully registered tool: '$name'")
-      ()
-    }.mapError(e => new ToolRegistrationError(s"Failed to register tool '$name'", e))
-
-  /**
-   * Register a typed tool handler with JSON schema generation
-   */
-  def addTypedTool[Input: {JsonEncoder, JsonDecoder}, Output: {JsonEncoder, JsonDecoder}](
-                                                                                           name: String,
-                                                                                           typedHandler: TypedToolHandler[Input, Output],
-                                                                                           definition: ToolDefinition,
-                                                                                           options: ToolRegistrationOptions = ToolRegistrationOptions()
-                                                                                         ): ZIO[Any, Throwable, Unit] =
-    ZIO.attempt {
-      // Check if tool already exists
-      if tools.containsKey(name) && !options.allowOverrides then
-        if options.warnOnDuplicates then
-          JSystem.err.println(s"[ToolManager] Warning: Tool '$name' already exists and will be overwritten")
-        else
-          throw new ToolRegistrationError(s"Tool '$name' already exists")
-
-      // Create a contextual handler that:
-      // 1. Attempts to cast args to Input type (simple approach for now)
-      // 2. Calls the typed handler
-      // 3. Returns the output (will be serialized by FastMCPScala)
-      val contextualHandler: ContextualToolHandler = (args, ctx) =>
-        // Use the TypedToolHandler's convertInput method to transform the Map to Input
-        for {
-          // Convert Map to Input type using handler's conversion method
-          _ <- ZIO.succeed(JSystem.err.println(s"[ToolManager] Converting arguments for tool '$name': $args"))
-          input <- typedHandler.convertInput(args)
-            .tapError(e => ZIO.succeed(JSystem.err.println(s"[ToolManager] Error converting input: ${e.getMessage}")))
-            .mapError(e => new ToolArgumentError(s"Cannot convert arguments to expected type: ${e.getMessage}"))
-            
-          // Call the typed handler with the converted input
-          result <- typedHandler.handle(input, ctx)
-        } yield result
-
-      tools.put(name, (definition, contextualHandler))
-      ()
-    }.mapError(e => new ToolRegistrationError(s"Failed to register typed tool '$name'", e))
 
   /**
    * List all registered tool definitions
