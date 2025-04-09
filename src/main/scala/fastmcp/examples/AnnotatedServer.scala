@@ -93,7 +93,67 @@ object AnnotatedServer extends ZIOAppDefault:
       case "capitalize" => text.split(" ").map(_.capitalize).mkString(" ")
       case "reverse" => text.reverse
       case _ => throw new IllegalArgumentException(s"Unknown transformation: $transformation")
-
+    
+  // --- Resource Examples ---
+  
+  /**
+   * A static resource returning plain text.
+   * Annotated with @Resource.
+   */
+  @Resource(
+    uri = "static://welcome",
+    name = Some("WelcomeMessage"),
+    description = Some("A static welcome message."),
+  )
+  def welcomeResource(): String =
+    "Welcome to the FastMCP-Scala Annotated Server!"
+  
+  /**
+   * A template resource that takes a user ID from the URI.
+   * Annotated with @Resource. The URI pattern {userId} matches the parameter name.
+   */
+  @Resource(
+    uri = "users://{userId}/profile",
+    name = Some("UserProfile"),
+    description = Some("Dynamically generated user profile."),
+    mimeType = Some("application/json")
+  )
+  def userProfileResource(userId: String): Map[String, String] =
+    // In a real app, fetch user data based on userId
+    Map("userId" -> userId, "name" -> s"User $userId", "email" -> s"user$userId@example.com")
+  
+  // --- Prompt Examples ---
+  
+  /**
+   * A simple prompt with no arguments.
+   * Annotated with @Prompt.
+   */
+  @Prompt(
+    name = Some("hello_prompt"),
+    description = Some("A simple hello world prompt.")
+  )
+  def helloPrompt(): List[Message] =
+    List(
+      Message(role = Role.User, content = TextContent("Say hello to the world."))
+    )
+  
+  /**
+   * A prompt with required and optional arguments.
+   * Uses @PromptParam for documentation. Annotated with @Prompt.
+   */
+  @Prompt(
+    name = Some("greeting_prompt"),
+    description = Some("Generates a personalized greeting.")
+  )
+  def greetingPrompt(
+    @PromptParam("The name of the person to greet.") name: String,
+    @PromptParam("Optional title (e.g., Dr., Ms.).", required = false) title: String = ""
+  ): List[Message] =
+    val fullGreeting = if title.nonEmpty then s"$title $name" else name
+    List(
+      Message(role = Role.User, content = TextContent(s"Generate a warm greeting for $fullGreeting."))
+    )
+  
   override def run: ZIO[Any, Throwable, Unit] =
     for
       // Create server instance

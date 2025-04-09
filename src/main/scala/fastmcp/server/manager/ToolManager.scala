@@ -4,8 +4,7 @@ import fastmcp.core.*
 import fastmcp.server.McpContext
 import zio.*
 import zio.json.*
-import io.circe.{Json, Encoder}
-import io.circe.syntax.*
+
 
 import java.lang.System as JSystem
 import java.util.concurrent.ConcurrentHashMap
@@ -25,11 +24,11 @@ type ContextualToolHandler = (Map[String, Any], Option[McpContext]) => ZIO[Any, 
  * Options for tool registration
  */
 case class ToolRegistrationOptions(
-                                    validateInputSchema: Boolean = true,
-                                    validateOutputSchema: Boolean = false,
-                                    allowOverrides: Boolean = false,
-                                    warnOnDuplicates: Boolean = true
-                                  )
+  validateInputSchema: Boolean = true,
+  validateOutputSchema: Boolean = false,
+  allowOverrides: Boolean = false,
+  warnOnDuplicates: Boolean = true
+)
 
 /**
  * Manager for MCP tools

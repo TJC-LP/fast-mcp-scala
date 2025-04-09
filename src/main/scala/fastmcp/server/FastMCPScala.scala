@@ -67,7 +67,12 @@ class FastMCPScala(
       inputSchema: Either[McpSchema.JsonSchema, String] = Left(new McpSchema.JsonSchema("object", null, null, true)),
       options: ToolRegistrationOptions = ToolRegistrationOptions()
   ): ZIO[Any, Throwable, FastMCPScala] =
-    val definition = ToolDefinition(name, description, inputSchema)
+    val definition = ToolDefinition(
+        name = name,
+        description = description,
+        inputSchema = inputSchema
+        // TODO: Add other fields like tags, examples etc. from options or definition if needed
+    )
     toolManager.addTool(name, handler, definition, options).as(this)
     
   /**
@@ -195,7 +200,8 @@ class FastMCPScala(
 
     val resourceCapabilities =
       if resourceManager.listDefinitions().nonEmpty then
-        new McpSchema.ServerCapabilities.ResourceCapabilities(true, false)
+        // TODO: Differentiate between static and template support if needed by spec
+        new McpSchema.ServerCapabilities.ResourceCapabilities(true, true) // Assuming both static and template support
       else null
 
     val promptCapabilities =
@@ -227,26 +233,46 @@ class FastMCPScala(
       )
     }
 
-    // Register resources
+    // Register resources (Static and Templates)
+    JSystem.err.println(s"[FastMCPScala] Registering ${resourceManager.listDefinitions().size} resources/templates...")
+    // Iterate through ALL resource definitions and register each one
     resourceManager.listDefinitions().foreach { resDef =>
+      JSystem.err.println(s"[FastMCPScala] - Registering Resource/Template: ${resDef.uri}")
+
+      // Create the specification for the current resource definition
       val resourceSpec = new McpServerFeatures.SyncResourceSpecification(
-        ResourceDefinition.toJava(resDef),
-        (exchange, request) => {
+        ResourceDefinition.toJava(resDef), // Convert Scala def to Java def
+        (exchange, request) => { // Define the handler for this specific resource
           val uri = request.uri()
-          val result = Unsafe.unsafe { implicit unsafe =>
-            Runtime.default.unsafe.run(readResource(uri)).getOrThrowFiberFailure()
+          // Synchronously run the ZIO effect from readResource(uri)
+          // readResource internally calls the correct handler from ResourceManager
+          // This block executes the ZIO effect and returns the result or throws
+          try {
+            val result: McpSchema.ReadResourceResult = Unsafe.unsafe { implicit unsafe =>
+              Runtime.default.unsafe.run(readResource(uri)).getOrThrowFiberFailure()
+            }
+            result // Return the successful result
+          } catch {
+            case e: Throwable =>
+              // Log the error and rethrow or convert to an MCP error if possible
+              JSystem.err.println(s"[FastMCPScala] Error reading resource '$uri': ${e.getMessage}")
+              // Rethrowing will likely cause the Java SDK to return a generic internal error
+              // Ideally, we'd map this to McpSchema.ErrorObject, but the BiFunction signature doesn't allow it directly.
+              throw new RuntimeException(s"Error accessing resource '$uri'", e)
           }
-          result
         }
       )
+      // Register this specific resource specification with the Java server builder
       serverBuilder.resources(resourceSpec)
     }
 
     // Register prompts
+    JSystem.err.println(s"[FastMCPScala] Registering ${promptManager.listDefinitions().size} prompts...")
     promptManager.listDefinitions().foreach { promptDef =>
+      JSystem.err.println(s"[FastMCPScala] - Registering Prompt: ${promptDef.name}")
       val promptSpec = new McpServerFeatures.SyncPromptSpecification(
         PromptDefinition.toJava(promptDef),
-        javaPromptHandler(promptDef.name)
+        javaPromptHandler(promptDef.name) // Use existing handler logic
       )
       serverBuilder.prompts(promptSpec)
     }
@@ -256,7 +282,7 @@ class FastMCPScala(
     JSystem.err.println(s"MCP Server '$name' configured.")
 
   /**
-   * Convert Scala ZIO handler to Java BiFunction for SyncServer
+   * Convert Scala ZIO handler to Java BiFunction for SyncServer Tool handling
    */
   private def javaToolHandler(toolName: String)
     : java.util.function.BiFunction[McpSyncServerExchange, java.util.Map[String, Object], McpSchema.CallToolResult] =
@@ -268,35 +294,62 @@ class FastMCPScala(
       val result = Unsafe.unsafe { implicit unsafe =>
         Runtime.default.unsafe.run(resultEffect).getOrThrowFiberFailure()
       }
-
+      // Convert result to McpSchema.Content list
       val contentList = result match
         case s: String =>
-          val textContent = new McpSchema.TextContent(null, null, s)
-          List(textContent).asJava
+          List(new McpSchema.TextContent(null, null, s)).asJava
+        case bytes: Array[Byte] => // Handle byte array results if needed
+           val base64Data = java.util.Base64.getEncoder.encodeToString(bytes)
+           // Assuming default image or binary content type
+           List(new McpSchema.ImageContent(null, null, base64Data, "application/octet-stream")).asJava
         case c: Content =>
           List(c.toJava).asJava
         case lst: List[?] if lst.nonEmpty && lst.head.isInstanceOf[Content] =>
           lst.asInstanceOf[List[Content]].map(_.toJava).asJava
-        case other =>
-          val textContent = new McpSchema.TextContent(null, null, other.toString)
-          List(textContent).asJava
+        case other => // Default to string representation
+          List(new McpSchema.TextContent(null, null, other.toString)).asJava
 
       new McpSchema.CallToolResult(contentList, false)
     }
 
   /**
    * Read a resource by URI
+   *
+   * @param uri Resource URI
+   * @return ZIO effect that completes with the resource content as ReadResourceResult or fails with ResourceError
    */
   def readResource(uri: String): ZIO[Any, Throwable, McpSchema.ReadResourceResult] =
-    for
+    for {
+      // Attempt to find the resource definition for accurate mime type
+      definitionOpt <- ZIO.succeed {
+        resourceManager.getResourceDefinition(uri)                         // First try static resources
+          .orElse(resourceManager.findMatchingTemplate(uri).map(_._2))     // Then try templates
+      }
+      
+      // Get the content from the resource handler
       content <- resourceManager.readResource(uri, None)
-      javaContent = content match
+      
+      // Determine the correct mime type
+      finalMimeType = definitionOpt.flatMap(_.mimeType).getOrElse {
+        content match {
+          case _: String => "text/plain"                  // Default for strings
+          case _: Array[Byte] => "application/octet-stream" // Default for binary
+          case _ => "application/json"                    // Default for other types (assume JSON)
+        }
+      }
+      
+      // Create the appropriate resource contents with the correct mime type
+      javaContent = content match {
         case s: String =>
-          new McpSchema.TextResourceContents(uri, "text/plain", s)
+          new McpSchema.TextResourceContents(uri, finalMimeType, s)
         case bytes: Array[Byte] =>
           val base64Data = java.util.Base64.getEncoder.encodeToString(bytes)
-          new McpSchema.BlobResourceContents(uri, "application/octet-stream", base64Data)
-    yield new McpSchema.ReadResourceResult(List(javaContent).asJava)
+          new McpSchema.BlobResourceContents(uri, finalMimeType, base64Data)
+        case other =>
+          // For non-String, non-byte[] types, use toString and treat as text
+          new McpSchema.TextResourceContents(uri, finalMimeType, other.toString)
+      }
+    } yield new McpSchema.ReadResourceResult(List(javaContent).asJava)
 
   /**
    * Convert Scala ZIO handler to Java BiFunction for prompt handling
@@ -304,7 +357,7 @@ class FastMCPScala(
   def javaPromptHandler(promptName: String)
     : java.util.function.BiFunction[McpSyncServerExchange, McpSchema.GetPromptRequest, McpSchema.GetPromptResult] =
     (exchange, request) => {
-      val scalaArgs = request.arguments().asScala.toMap.asInstanceOf[Map[String, Any]]
+      val scalaArgs = Option(request.arguments()).map(_.asScala.toMap.asInstanceOf[Map[String, Any]]).getOrElse(Map.empty)
       val context = McpContext(Some(exchange))
 
       val messagesEffect = promptManager.getPrompt(promptName, scalaArgs, Some(context))

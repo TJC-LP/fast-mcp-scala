@@ -84,29 +84,31 @@ class SchemaField(
 
 /**
  * Marker annotation for methods representing MCP Resources
- * If uri contains {placeholders}, it's treated as a template
+ * If uri contains {placeholders}, it's treated as a template resource.
+ * Placeholders in the URI must match the method parameter names.
+ * Static resources (no placeholders) should have methods with no parameters.
  * 
- * @param uri The URI for the resource
- * @param name Optional name for the resource
- * @param description Optional description for the resource
- * @param mimeType Optional MIME type for the resource
+ * @param uri The URI or URI template for the resource (e.g., "file:///data.txt" or "users://{userId}/profile")
+ * @param name Optional name for the resource (defaults to method name)
+ * @param description Optional description for the resource (defaults to Scaladoc)
+ * @param mimeType Optional MIME type for the resource (defaults to "text/plain")
  */
 class Resource(
-    uri: String,
-    name: Option[String] = None,
-    description: Option[String] = None,
-    mimeType: Option[String] = None
+    val uri: String, // Changed to val for macro access
+    val name: Option[String] = None,
+    val description: Option[String] = None,
+    val mimeType: Option[String] = None
 ) extends StaticAnnotation
 
 /**
  * Marker annotation for methods representing MCP Prompts
  * 
  * @param name Optional name for the prompt (defaults to method name)
- * @param description Optional description for the prompt
+ * @param description Optional description for the prompt (defaults to Scaladoc)
  */
 class Prompt(
-    name: Option[String] = None, 
-    description: Option[String] = None
+    val name: Option[String] = None,
+    val description: Option[String] = None
 ) extends StaticAnnotation
 
 /**
@@ -116,6 +118,6 @@ class Prompt(
  * @param required Whether the parameter is required (defaults to true)
  */
 class PromptParam(
-    description: String,
-    required: Boolean = true
+    val description: String, // Changed to val for macro access
+    val required: Boolean = true
 ) extends StaticAnnotation
