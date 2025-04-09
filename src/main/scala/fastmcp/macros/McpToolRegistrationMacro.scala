@@ -1,190 +1,155 @@
 package fastmcp.macros
 
 import fastmcp.core.*
+import fastmcp.macros.{JsonSchemaMacro, MapToFunctionMacro}
 import fastmcp.server.FastMCPScala
 import fastmcp.server.manager.*
-import zio.*
-import zio.json.*
 import io.circe.Json
-import io.modelcontextprotocol.spec.McpSchema
+import zio.*
+
 import java.lang.System as JSystem
-import java.lang.reflect.Method
-import scala.annotation.{experimental, tailrec}
+import scala.compiletime.summonFrom
 import scala.quoted.*
-import scala.reflect.ClassTag
-import scala.util.Try
 
 /**
- * Macro implementation and runtime methods for MCP tool registration
+ * Contains helper methods for registering annotated tools
  */
-object McpToolRegistrationMacro {
+object McpToolRegistrationMacro:
   /**
-   * Extension methods for FastMCPScala
+   * Extension method for FastMCPScala that scans an object for @Tool annotations
+   * and registers them with the server
    */
-  extension (server: FastMCPScala) {
+  extension (server: FastMCPScala)
     /**
-     * Register a tool directly from a function with @Tool annotation using a macro
+     * Scan an object for methods with @Tool annotations and register them
      *
-     * This is a streamlined approach that:
-     * 1. Extracts metadata from @Tool annotation if present at compile time
-     * 2. Generates JSON schema from function signature at compile time
-     * 3. Creates a type-safe handler that converts Map[String, Any] to function arguments
-     * 4. Wraps non-ZIO results in ZIO.succeed
-     * 5. Registers the tool with the server
-     *
-     * @param function The function to register as a tool
-     * @param optToolName Optional name override for the tool
-     * @param optToolDesc Optional description override for the tool
-     * @param options Optional registration options
-     * @return ZIO effect that completes with the FastMCPScala instance
+     * @tparam T Type of the object containing annotated methods
+     * @return The same FastMCPScala instance, for chaining
      */
-    @experimental
-    transparent inline def annotatedTool[F](
-        inline function: F,
-        optToolName: Option[String] = None,
-        optToolDesc: Option[String] = None,
-        options: ToolRegistrationOptions = ToolRegistrationOptions()
-    ): ZIO[Any, Throwable, FastMCPScala] =
-      ${ annotatedToolImpl('function, 'optToolName, 'optToolDesc, 'options, 'server) }
-  }
+    inline def scanAnnotations[T]: FastMCPScala =
+      ${ scanAnnotationsImpl[T]('server) }
 
   /**
-   * Macro implementation for annotatedTool
+   * Macro implementation for scanAnnotations
    */
-  @experimental
-  private def annotatedToolImpl[F: Type](
-      functionExpr: Expr[F],
-      optToolNameExpr: Expr[Option[String]],
-      optToolDescExpr: Expr[Option[String]],
-      optionsExpr: Expr[ToolRegistrationOptions],
-      serverExpr: Expr[FastMCPScala]
-  )(using quotes: Quotes): Expr[ZIO[Any, Throwable, FastMCPScala]] = {
+  private def scanAnnotationsImpl[T: Type](
+      server: Expr[FastMCPScala]
+  )(using quotes: Quotes): Expr[FastMCPScala] =
     import quotes.reflect.*
 
-    /**
-     * Find method information through Scala 3 AST analysis
-     */
-    def findMethodInfo(term: Term): (String, Option[String], Option[String]) = {
-      // Default values
-      var methodName = "anonTool"
+    val tpe = TypeRepr.of[T]
+    val sym = tpe.typeSymbol
+
+    // Find all methods with @Tool annotation
+    val annotatedMethods = sym.declaredMethods.filter { method =>
+      method.annotations.exists(_.tpe <:< TypeRepr.of[Tool])
+    }
+
+    if annotatedMethods.isEmpty then
+      report.warning(s"No @Tool annotations found in ${Type.show[T]}")
+      return server
+
+    // Helper to parse annotation arguments reflectively
+    def parseToolParams(term: Term): (Option[String], Option[String], List[String]) =
       var toolName: Option[String] = None
       var toolDesc: Option[String] = None
-      
-      def extractOptString(term: Term): Option[String] = term match {
+      var toolTags: List[String] = Nil
+
+      def parseOptionString(argTerm: Term): Option[String] = argTerm match {
         case Apply(Select(Ident("Some"), "apply"), List(Literal(StringConstant(s)))) =>
           Some(s)
         case Select(Ident("None"), "MODULE$") =>
           None
-        case _ => 
-          report.warning(s"Unknown term pattern in option extraction: ${term.show}")
-          None
+        case _ => None
       }
 
-      // Helper to extract annotation parameters
-      def extractToolAnnotation(annot: Term): Unit = annot match {
-        case Apply(_, args) =>
-          args.foreach {
-            case NamedArg("name", value) =>
-              extractOptString(value).foreach(n => toolName = Some(n))
-            
-            case NamedArg("description", value) =>
-              extractOptString(value).foreach(d => toolDesc = Some(d))
-            
-            case _ => // Ignore other fields
+      def parseListString(argTerm: Term): List[String] = argTerm match {
+        case Apply(TypeApply(Select(Ident("List"), "apply"), _), elems) =>
+          elems.collect {
+            case Literal(StringConstant(item)) => item
           }
-        case _ => // Not an Apply node
+        case _ => Nil
       }
 
-      // Process the term to find method symbol and annotations
+      // e.g. new Tool(name = Some("xyz"), description = Some("desc"), tags = List("..."))
       term match {
-        // Handle different method reference patterns
-        case Inlined(_, _, t) => 
-          return findMethodInfo(t)
-          
-        case Block(_, expr) =>
-          return findMethodInfo(expr)
-          
-        case Select(_, _) if term.symbol.isDefDef =>
-          methodName = term.symbol.name
-          // Look for Tool annotation
-          term.symbol.annotations.find(_.tpe <:< TypeRepr.of[Tool]).foreach(extractToolAnnotation)
-          
-        case Ident(_) if term.symbol.isDefDef =>
-          methodName = term.symbol.name
-          // Look for Tool annotation
-          term.symbol.annotations.find(_.tpe <:< TypeRepr.of[Tool]).foreach(extractToolAnnotation)
-          
-        case Closure(methRef, _) if methRef.symbol.isDefDef =>
-          methodName = methRef.symbol.name
-          // Look for Tool annotation
-          methRef.symbol.annotations.find(_.tpe <:< TypeRepr.of[Tool]).foreach(extractToolAnnotation)
-          
-        case _ =>
-          // For other cases, try to extract a reasonable name from the function expression
-          methodName = term.show.replaceAll("[^a-zA-Z0-9]", "")
-                        .takeWhile(_ != '(').trim match {
-                          case "" => "anonTool"
-                          case s => s
-                        }
+        case Apply(Select(New(_), _), argTerms) =>
+          argTerms.foreach {
+            case NamedArg("name", valueTerm) =>
+              toolName = parseOptionString(valueTerm)
+            case NamedArg("description", valueTerm) =>
+              toolDesc = parseOptionString(valueTerm)
+            case NamedArg("tags", valueTerm) =>
+              toolTags = parseListString(valueTerm)
+            case _ => ()
+          }
+        case _ => ()
       }
-      
-      (methodName, toolName, toolDesc)
-    }
-    
-    // Extract method information
-    val (methodName, annotToolName, annotToolDesc) = findMethodInfo(functionExpr.asTerm)
-    
-    // Extract and prioritize tool name - with proper String type
-    val nameExpr: Expr[String] = optToolNameExpr match {
-      case '{ Some($name: String) } => name
-      case '{ None } => 
-        annotToolName match {
-          case Some(name) => Expr(name)
-          case None => Expr(methodName)
-        }
-      case _ => Expr(methodName)
-    }
-    
-    // Extract and prioritize tool description - with proper Option[String] type
-    val descExpr: Expr[Option[String]] = optToolDescExpr match {
-      case '{ Some($desc: String) } => '{Some($desc)}
-      case '{ None } => 
-        annotToolDesc match {
-          case Some(desc) => Expr(Some(desc))
-          case None => '{None}
-        }
-      case _ => '{None}
-    }
+      (toolName, toolDesc, toolTags)
 
-    // Generate schema from function signature
-    val schemaJsonExpr = '{ 
-      JsonSchemaMacro.schemaForFunctionArgs($functionExpr) 
-    }
-    val schemaStringExpr = '{
-      $schemaJsonExpr.spaces2
-    }
+    // For each annotated method, generate code to register it with the server
+    val registrations: List[Expr[FastMCPScala]] = annotatedMethods.map { method =>
+      val methodName = method.name
 
-    // Build the handler: Map[String, Any] => ZIO[Any, Throwable, Any]
-    val handlerExpr = '{
-      (args: Map[String, Any]) => 
-        ZIO.attempt {
-          val mappedFn = MapToFunctionMacro.callByMap($functionExpr)
-          mappedFn.asInstanceOf[Map[String, Any] => Any](args)
-        }
-    }
+      // Find the @Tool annotation
+      val toolAnnot = method.annotations.find(_.tpe <:< TypeRepr.of[Tool]).get
 
-    // Return code that registers the tool on the server
-    '{
-      // Log registration
-      ZIO.succeed(JSystem.err.println(s"[McpToolRegistrationMacro] Registering tool: " + $nameExpr)).flatMap { _ =>
-        $serverExpr.tool(
-          name = $nameExpr,
-          description = $descExpr,
-          handler = $handlerExpr,
-          inputSchema = Right($schemaStringExpr),
-          options = $optionsExpr
+      // Reflectively parse name, description, tags from the annotation
+      val (toolName, toolDesc, toolTags) = parseToolParams(toolAnnot.asExpr.asTerm)
+      val finalName = toolName.getOrElse(methodName)
+
+      // Find the method symbol by name in the companion module
+      val companionSym = sym.companionModule
+      val methodSymOpt = companionSym.declaredMethod(methodName).headOption.getOrElse {
+        report.errorAndAbort(
+          s"Could not find method symbol for '$methodName' in ${companionSym.fullName}"
         )
       }
+
+      // Create a Term representing the method reference, then specify the owner
+      val expandedTerm: Term =
+        Select(Ref(companionSym), methodSymOpt).etaExpand(Symbol.spliceOwner)
+
+      // Convert to an expression
+      val methodRefExpr = expandedTerm.asExprOf[Any]
+
+      '{
+        // Log registration
+        JSystem.err.println(s"[McpToolRegistration] Registering tool: ${${Expr(finalName)}}")
+
+        // Generate the JSON schema from method signature
+        val schema = JsonSchemaMacro.schemaForFunctionArgs($methodRefExpr)
+
+        // Create the tool handler
+        val handler: ToolHandler = (args: Map[String, Any]) => ZIO.attempt {
+          val mappedFn = MapToFunctionMacro.callByMap($methodRefExpr)
+          mappedFn.asInstanceOf[Map[String, Any] => Any](args)
+        }
+
+        // Register the tool by calling .tool(...) which returns a ZIO
+        // We'll run the ZIO for side effects and then return server
+        val regEffect = $server.tool(
+          name = ${Expr(finalName)},
+          description = ${Expr(toolDesc)},
+          handler = handler,
+          inputSchema = Right(schema.spaces2),
+          options = ToolRegistrationOptions(allowOverrides = true)
+        )
+
+        // Synchronously run that effect so we can return the server
+        zio.Unsafe.unsafe { implicit unsafe =>
+          zio.Runtime.default.unsafe.run(regEffect).getOrThrowFiberFailure()
+        }
+
+        // Return the server
+        $server
+      }
     }
-  }
-}
+
+    // If no registrations, just return the server
+    if registrations.isEmpty then server
+    else
+      // Combine all registrations into one final block
+      val registrationTerms = registrations.map(_.asTerm)
+      val block = Block(registrationTerms.init.toList, registrationTerms.last)
+      block.asExprOf[FastMCPScala]

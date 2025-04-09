@@ -108,101 +108,115 @@ You can use annotations with Scala 3 macros to define your tools with automatic 
 ```scala
 import fastmcp.core.{Tool, Param}
 import fastmcp.server.FastMCPScala
-import fastmcp.server.McpToolRegistration.* // Import scanAnnotations extension method
+import fastmcp.macros.McpToolRegistrationMacro.* // Import scanAnnotations extension method
 import zio.*
 import zio.json.*
 
-object CalculatorTools:
-  /**
-   * Simple addition tool with primitive parameters
-   */
-  @Tool(
-    name = Some("add"),
-    description = Some("Simple calculator that adds two numbers")
-  )
-  def add(
-    @Param("First number to add") a: Int,
-    @Param("Second number to add") b: Int
-  ): Int = a + b
-  
-  /**
-   * Advanced calculator with operation selection
-   */
-  @Tool(
-    name = Some("calculator"),
-    description = Some("Perform a calculation with two numbers")
-  )
-  def calculate(
-    @Param("First number") a: Double,
-    @Param("Second number") b: Double,
-    @Param(
-      "Operation to perform (add, subtract, multiply, divide)",
-      required = false
-    ) operation: String = "add"
-  ): CalculatorResult =
-    val result = operation.toLowerCase match
-      case "add" | "+" => a + b
-      case "subtract" | "-" => a - b
-      case "multiply" | "*" => a * b
-      case "divide" | "/" => 
-        if (b == 0) throw new IllegalArgumentException("Cannot divide by zero")
-        else a / b
-      case _ => throw new IllegalArgumentException(s"Unknown operation: $operation")
-    
-    CalculatorResult(operation, List(a, b), result)
-    
-object StringTools:
-  /**
-   * Text transformation tool
-   */
-  @Tool(
-    name = Some("transform"),
-    description = Some("Transforms text using various operations")
-  )
-  def transformText(
-    @Param("Text to transform") text: String,
-    @Param(
-      "Transformation to apply (uppercase, lowercase, capitalize, reverse)",
-      required = false
-    ) transformation: String = "uppercase"
-  ): String =
-    transformation.toLowerCase match
-      case "uppercase" => text.toUpperCase
-      case "lowercase" => text.toLowerCase
-      case "capitalize" => text.split(" ").map(_.capitalize).mkString(" ")
-      case "reverse" => text.reverse
-      case _ => throw new IllegalArgumentException(s"Unknown transformation: $transformation")
+object CalculatorTools
+
+:
+/**
+ * Simple addition tool with primitive parameters
+ */
+@Tool(
+  name = Some("add"),
+  description = Some("Simple calculator that adds two numbers")
+)
+def add(
+         @Param("First number to add") a: Int,
+         @Param("Second number to add") b: Int
+       ): Int = a + b
+
+/**
+ * Advanced calculator with operation selection
+ */
+@Tool(
+  name = Some("calculator"),
+  description = Some("Perform a calculation with two numbers")
+)
+def calculate(
+               @Param("First number") a: Double,
+               @Param("Second number") b: Double,
+               @Param(
+                 "Operation to perform (add, subtract, multiply, divide)",
+                 required = false
+               ) operation: String = "add"
+             ): CalculatorResult =
+val result = operation.toLowerCase match
+case "add" | "+"
+=> a + b
+case "subtract" | "-"
+=> a - b
+case "multiply" | "*"
+=> a * b
+case "divide" | "/"
+=>
+if (b == 0) throw new IllegalArgumentException("Cannot divide by zero")
+else a / b
+case _ => throw new IllegalArgumentException(s"Unknown operation: $operation")
+
+CalculatorResult(operation, List(a, b), result)
+
+object StringTools
+
+:
+/**
+ * Text transformation tool
+ */
+@Tool(
+  name = Some("transform"),
+  description = Some("Transforms text using various operations")
+)
+def transformText(
+                   @Param("Text to transform") text: String,
+                   @Param(
+                     "Transformation to apply (uppercase, lowercase, capitalize, reverse)",
+                     required = false
+                   ) transformation: String = "uppercase"
+                 ): String =
+  transformation.toLowerCase match
+case "uppercase"
+=> text.toUpperCase
+case "lowercase"
+=> text.toLowerCase
+case "capitalize"
+=> text.split(" ").map(_.capitalize).mkString(" ")
+case "reverse"
+=> text.reverse
+case _ => throw new IllegalArgumentException(s"Unknown transformation: $transformation")
 
 case class CalculatorResult(
-  operation: String,
-  numbers: List[Double],
-  result: Double
-)
+                             operation: String,
+                             numbers: List[Double],
+                             result: Double
+                           )
 
 // JSON codecs
 given JsonEncoder[CalculatorResult] = DeriveJsonEncoder.gen[CalculatorResult]
 given JsonDecoder[CalculatorResult] = DeriveJsonDecoder.gen[CalculatorResult]
 
-object MacroAnnotatedServer extends ZIOAppDefault:
-  override def run: ZIO[Any, Throwable, Unit] =
-    for
-      // Create the server
-      server <- ZIO.succeed(FastMCPScala("MacroAnnotatedServer", "0.1.0"))
+object MacroAnnotatedServer extends ZIOAppDefault
 
-      // Process tools using the scanAnnotations macro extension method
-      _ <- ZIO.attempt {
-        java.lang.System.err.println("[Server] Scanning CalculatorTools...")
-        // Scan tools in the CalculatorTools object
-        server.scanAnnotations[CalculatorTools.type]
+:
+override def run: ZIO[Any, Throwable, Unit] =
+  for
+    // Create the server
+    server <- ZIO.succeed(FastMCPScala("MacroAnnotatedServer", "0.1.0"))
 
-        java.lang.System.err.println("[Server] Scanning StringTools...")
-        // Scan tools in the StringTools object
-        server.scanAnnotations[StringTools.type]
-      }
+    // Process tools using the scanAnnotations macro extension method
+    _ <- ZIO.attempt {
+      java.lang.System.err.println("[Server] Scanning CalculatorTools...")
+      // Scan tools in the CalculatorTools object
+      server.scanAnnotations[CalculatorTools.type]
 
-      // Run the server
-      _ <- server.runStdio()
-    yield ()
+      java.lang.System.err.println("[Server] Scanning StringTools...")
+      // Scan tools in the StringTools object
+      server.scanAnnotations[StringTools.type]
+    }
+
+    // Run the server
+    _ <- server.runStdio()
+  yield ()
 ```
 
 The macro system (`ToolMacros`) will:

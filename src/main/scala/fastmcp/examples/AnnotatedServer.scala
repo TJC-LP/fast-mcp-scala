@@ -2,7 +2,7 @@ package fastmcp.examples
 
 import fastmcp.core.*
 import fastmcp.server.*
-import fastmcp.server.McpToolRegistration.* // Import scanAnnotations extension method
+import fastmcp.macros.McpToolRegistrationMacro.* // Import scanAnnotations extension method
 import zio.*
 import zio.json.*
 import java.lang.System as JSystem
