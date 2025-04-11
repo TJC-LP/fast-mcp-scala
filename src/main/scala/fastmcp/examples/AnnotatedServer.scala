@@ -2,9 +2,11 @@ package fastmcp.examples
 
 import fastmcp.core.*
 import fastmcp.server.*
-import fastmcp.macros.McpToolRegistrationMacro.* // Import scanAnnotations extension method
+import fastmcp.macros.McpToolRegistrationMacro.*
 import zio.*
 import zio.json.*
+import sttp.tapir.*
+
 import java.lang.System as JSystem
 
 /**
@@ -28,7 +30,13 @@ object AnnotatedServer extends ZIOAppDefault:
   // JSON codec for the result
   given JsonEncoder[CalculatorResult] = DeriveJsonEncoder.gen[CalculatorResult]
   given JsonDecoder[CalculatorResult] = DeriveJsonDecoder.gen[CalculatorResult]
-  
+
+  enum TransformationType:
+    case uppercase, lowercase, reverse, capitalize
+
+  object TransformationType:
+    given Schema[TransformationType] = Schema.derivedEnumeration.defaultStringBased
+
   /**
    * Simple tool that adds two numbers.
    * The @Tool annotation will:
@@ -77,25 +85,18 @@ object AnnotatedServer extends ZIOAppDefault:
    */
   @Tool(
     name = Some("transform"),
-    description = Some("Transform text using various operations"),
-    tags = List("string", "text")
+    description = Some("Transform text using various operations")
   )
   def transformText(
-    @Param("Text to transform") text: String,
-    @Param(
-      "Transformation to apply (uppercase, lowercase, capitalize, reverse)",
-      required = false
-    ) transformation: String = "uppercase"
+    text: String,
+    transformation: TransformationType
   ): String =
-    transformation.toLowerCase match
-      case "uppercase" => text.toUpperCase
-      case "lowercase" => text.toLowerCase
-      case "capitalize" => text.split(" ").map(_.capitalize).mkString(" ")
-      case "reverse" => text.reverse
-      case _ => throw new IllegalArgumentException(s"Unknown transformation: $transformation")
-    
-  // --- Resource Examples ---
-  
+    transformation match
+      case TransformationType.uppercase => text.toUpperCase
+      case TransformationType.lowercase => text.toLowerCase
+      case TransformationType.capitalize => text.split(" ").map(_.capitalize).mkString(" ")
+      case TransformationType.reverse => text.reverse
+
   /**
    * A static resource returning plain text.
    * Annotated with @Resource.

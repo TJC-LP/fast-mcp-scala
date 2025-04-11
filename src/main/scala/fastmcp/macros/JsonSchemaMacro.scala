@@ -73,7 +73,7 @@ object JsonSchemaMacro:
           // e.g. def createUser[A](...) => unwrap
           extractParams(resType, maybeParamNames)
 
-        case AppliedType(fnType, argTypes) if fnType.typeSymbol.fullName.matches("scala.Function\\d+") =>
+        case AppliedType(fnType, argTypes) if fnType.typeSymbol.fullName.startsWith("scala.Function") =>
           // it's a FunctionN => paramTpes are all but the last (return type)
           val paramTpes = argTypes.dropRight(1)
           val names = maybeParamNames match {
@@ -155,7 +155,7 @@ object JsonSchemaMacro:
             SProductField[Unit, t](
               FieldName(${ Expr(paramName) }),
               $namedSchemaExpr,
-              (_: Unit) => Some(???.asInstanceOf[t])
+              (_: Unit) => None  // We don't need a real getter here, since this is just for schema generation
             )
           }
       }

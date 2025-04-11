@@ -197,7 +197,7 @@ class FastMCPScala(
             name: String,
             handler: ToolHandler,
             description: Option[String] = None,
-            inputSchema: Either[McpSchema.JsonSchema, String] = Left(new McpSchema.JsonSchema("object", null, null, true)),
+            inputSchema: Either[McpSchema.JsonSchema, String] = Left(new McpSchema.JsonSchema("object", null, null, true, null, null)),
             options: ToolRegistrationOptions = ToolRegistrationOptions()
           ): ZIO[Any, Throwable, FastMCPScala] =
     val definition = ToolDefinition(

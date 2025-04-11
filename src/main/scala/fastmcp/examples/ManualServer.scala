@@ -7,6 +7,7 @@ import fastmcp.server.manager.*
 import io.modelcontextprotocol.spec.McpSchema
 import zio.*
 import zio.json.*
+import sttp.tapir.*
 
 import java.lang.System as JSystem
 
@@ -20,8 +21,49 @@ object ManualServer extends ZIOAppDefault:
 
   // JSON codecs for our custom types
   given JsonEncoder[CalculatorResult] = DeriveJsonEncoder.gen[CalculatorResult]
-
   given JsonDecoder[CalculatorResult] = DeriveJsonDecoder.gen[CalculatorResult]
+  
+  // Define TransformationType enum
+  enum TransformationType:
+    case uppercase, lowercase, reverse, capitalize
+  
+  object TransformationType:
+    given Schema[TransformationType] = Schema.derivedEnumeration.defaultStringBased
+    
+    // JSON codec for the enum
+    given JsonEncoder[TransformationType] = JsonEncoder[String].contramap[TransformationType](_.toString)
+    given JsonDecoder[TransformationType] = JsonDecoder[String].mapOrFail { str =>
+      try Right(TransformationType.valueOf(str))
+      catch case _: IllegalArgumentException => Left(s"Invalid transformation type: $str")
+    }
+    
+  // Define TextStyle enum for more complex formatting
+  enum TextStyle:
+    case plain, bold, italic, code, heading
+  
+  object TextStyle:
+    given Schema[TextStyle] = Schema.derivedEnumeration.defaultStringBased
+    
+    // JSON codec for the enum
+    given JsonEncoder[TextStyle] = JsonEncoder[String].contramap[TextStyle](_.toString)
+    given JsonDecoder[TextStyle] = JsonDecoder[String].mapOrFail { str =>
+      try Right(TextStyle.valueOf(str))
+      catch case _: IllegalArgumentException => Left(s"Invalid text style: $str")
+    }
+    
+  // Define OutputFormat enum
+  enum OutputFormat:
+    case text, html, markdown, json
+  
+  object OutputFormat:
+    given Schema[OutputFormat] = Schema.derivedEnumeration.defaultStringBased
+    
+    // JSON codec for the enum
+    given JsonEncoder[OutputFormat] = JsonEncoder[String].contramap[OutputFormat](_.toString)
+    given JsonDecoder[OutputFormat] = JsonDecoder[String].mapOrFail { str =>
+      try Right(OutputFormat.valueOf(str))
+      catch case _: IllegalArgumentException => Left(s"Invalid output format: $str")
+    }
 
   def add(
            a: Int,
@@ -90,13 +132,23 @@ object ManualServer extends ZIOAppDefault:
         inputSchema = greetSchema
       )
       
-      // Register StringTools.transformText
+      // Register StringTools.transformText with enum parameter
       transformSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(StringTools.transformText).spaces2)
       _ <- server.tool(
         name = "transform",
-        description = Some("Transforms text using various operations"),
+        description = Some("Transforms text using enum-based transformation operations"),
         handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(StringTools.transformText)(args)),
         inputSchema = transformSchema
+      )
+      
+      // Register the complex formatting tool with multiple enum parameters
+      formatTextSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(TextFormatTools.formatText).spaces2)
+      _ <- server.tool(
+        name = "format-text",
+        description = Some("Complex text formatting with transformation, style, and output format options"),
+        // No special handling needed - everything is handled at the macro level
+        handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(TextFormatTools.formatText)(args)),
+        inputSchema = formatTextSchema
       )
       
       // For demonstration purposes, also register a tool manually 
@@ -209,15 +261,68 @@ object ManualServer extends ZIOAppDefault:
       s"$greeting, $name!"
 
     /**
-     * Text transformation tool
+     * Text transformation tool using enum type
      */
     def transformText(
                        text: String,
-                       transformation: String = "uppercase"
+                       transformation: TransformationType = TransformationType.uppercase
                      ): String =
-      transformation.toLowerCase match
-        case "uppercase" => text.toUpperCase
-        case "lowercase" => text.toLowerCase
-        case "capitalize" => text.split(" ").map(_.capitalize).mkString(" ")
-        case "reverse" => text.reverse
-        case _ => throw new IllegalArgumentException(s"Unknown transformation: $transformation")
+      transformation match
+        case TransformationType.uppercase => text.toUpperCase
+        case TransformationType.lowercase => text.toLowerCase
+        case TransformationType.capitalize => text.split(" ").map(_.capitalize).mkString(" ")
+        case TransformationType.reverse => text.reverse
+        
+  /**
+   * Advanced text formatting tools using multiple enums
+   */
+  object TextFormatTools:
+    case class FormattedOutput(
+      originalText: String,
+      formattedText: String,
+      transformation: TransformationType,
+      style: TextStyle,
+      format: OutputFormat
+    )
+    
+    given JsonEncoder[FormattedOutput] = DeriveJsonEncoder.gen[FormattedOutput]
+    given JsonDecoder[FormattedOutput] = DeriveJsonDecoder.gen[FormattedOutput]
+    
+    /**
+     * Complex formatting tool that uses multiple enum parameters
+     */
+    def formatText(
+      text: String,
+      transformation: TransformationType = TransformationType.uppercase,
+      style: TextStyle = TextStyle.plain,
+      outputFormat: OutputFormat = OutputFormat.text
+    ): FormattedOutput =
+      // First apply the transformation
+      val transformedText = transformation match
+        case TransformationType.uppercase => text.toUpperCase
+        case TransformationType.lowercase => text.toLowerCase
+        case TransformationType.capitalize => text.split(" ").map(_.capitalize).mkString(" ")
+        case TransformationType.reverse => text.reverse
+      
+      // Then apply the style based on output format
+      val styledText = (style, outputFormat) match
+        case (TextStyle.plain, _) => transformedText
+        case (TextStyle.bold, OutputFormat.html) => s"<strong>$transformedText</strong>"
+        case (TextStyle.bold, OutputFormat.markdown) => s"**$transformedText**"
+        case (TextStyle.italic, OutputFormat.html) => s"<em>$transformedText</em>"
+        case (TextStyle.italic, OutputFormat.markdown) => s"*$transformedText*"
+        case (TextStyle.code, OutputFormat.html) => s"<code>$transformedText</code>"
+        case (TextStyle.code, OutputFormat.markdown) => s"`$transformedText`"
+        case (TextStyle.heading, OutputFormat.html) => s"<h1>$transformedText</h1>"
+        case (TextStyle.heading, OutputFormat.markdown) => s"# $transformedText"
+        case (TextStyle.heading, OutputFormat.json) => transformedText.toUpperCase
+        case (style, OutputFormat.json) => transformedText // In JSON mode, we ignore styling
+        case (style, _) => transformedText // Default for other combinations
+      
+      FormattedOutput(
+        originalText = text,
+        formattedText = styledText,
+        transformation = transformation,
+        style = style,
+        format = outputFormat
+      )

@@ -2,18 +2,19 @@ ThisBuild / version := "0.1.0-SNAPSHOT"
 
 ThisBuild / scalaVersion := "3.6.4" // Using Scala 3
 
-val zioVersion = "2.1.16" // Specify ZIO version
+val zioVersion = "2.1.17" // Specify ZIO version
 val zioSchemaVersion = "1.6.6" // ZIO Schema version
 
 lazy val root = (project in file("."))
   .settings(
     name := "fast-mcp-scala",
-    // Enable Scala 3 macros with verbose output for debugging
-    scalacOptions ++= Seq("-Xcheck-macros", "-experimental", "-Xprint:postInlining", "-Xmax-inlines:100000"),
+    // Enable Scala 3 macros
+    resolvers += Resolver.mavenLocal,
+    scalacOptions ++= Seq("-Xcheck-macros", "-experimental", "-Xmax-inlines:100000"),
     libraryDependencies ++= Seq(
       // ZIO Core
       "dev.zio" %% "zio" % zioVersion,
-      "dev.zio" %% "zio-json" % "0.7.39",
+      "dev.zio" %% "zio-json" % "0.7.42",
       
       // ZIO Schema for schema generation
       "dev.zio" %% "zio-schema" % zioSchemaVersion,
@@ -21,14 +22,19 @@ lazy val root = (project in file("."))
       "dev.zio" %% "zio-schema-derivation" % zioSchemaVersion,
 
       // Tapir
-      "com.softwaremill.sttp.tapir" %% "tapir-core" % "1.11.20",
-      "com.softwaremill.sttp.tapir" %% "tapir-apispec-docs" % "1.11.20",
-      "com.softwaremill.sttp.tapir" %% "tapir-json-circe" % "1.11.20",
-      "com.softwaremill.sttp.apispec" %% "jsonschema-circe" % "0.11.7",
+      "com.softwaremill.sttp.tapir" %% "tapir-core" % "1.11.24",
+      "com.softwaremill.sttp.tapir" %% "tapir-apispec-docs" % "1.11.24",
+      "com.softwaremill.sttp.tapir" %% "tapir-json-circe" % "1.11.24",
+      "com.softwaremill.sttp.apispec" %% "jsonschema-circe" % "0.11.8",
       
       // MCP SDK
-      "io.modelcontextprotocol.sdk" % "mcp" % "0.8.1",
-
+      "io.modelcontextprotocol.sdk" % "mcp" % "0.10.0-SNAPSHOT",
+      
+      // Test dependencies
+      "org.scalatest" %% "scalatest" % "3.2.19" % Test,
+      "dev.zio" %% "zio-test" % zioVersion % Test,
+      "dev.zio" %% "zio-test-sbt" % zioVersion % Test,
+      "dev.zio" %% "zio-test-magnolia" % zioVersion % Test,
     ),
     // Set the main class for 'sbt run'
     Compile / run / mainClass := Some("fastmcp.FastMCPMain")
