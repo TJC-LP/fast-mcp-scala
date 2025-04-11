@@ -1,132 +1,158 @@
 package fastmcp.macros
 
-import fastmcp.core.*
-import fastmcp.macros.MapToFunctionMacro
+import fastmcp.core.ResourceParam
 import fastmcp.server.FastMCPScala
-import fastmcp.server.manager.*
+import fastmcp.server.manager.* // Imports ResourceDefinition, ResourceHandler, ResourceTemplateHandler, ResourceArgument
 import zio.*
+import zio.json.*
+import zio.json.EncoderOps
 
 import java.lang.System as JSystem
 import scala.quoted.*
-import scala.util.matching.Regex
 
 /**
  * Responsible for processing @Resource annotations and generating
- * resource registration code.
+ * resource registration code for FastMCPScala.
  */
 private[macros] object ResourceProcessor:
+
   /**
-   * Process a @Resource annotation and generate registration code
+   * Processes a method annotated with @Resource.
+   * Determines if it's a static or templated resource based on the URI pattern.
+   * Generates code to call the appropriate `server.resource` or `server.resourceTemplate`
+   * method in FastMCPScala, passing the correct handler type and collected metadata.
    */
   def processResourceAnnotation(
-      server: Expr[FastMCPScala],
-      ownerSymAny: Any,
-      methodAny: Any,
-      resourceAnnotAny: Any
-  )(using quotes: Quotes): Expr[FastMCPScala] =
+                                 server: Expr[FastMCPScala],
+                                 ownerSymAny: Any, // Symbol of the class/object containing the method
+                                 methodAny: Any,   // Symbol of the annotated method
+                                 resourceAnnotAny: Any // Term representing the @Resource annotation instance
+                               )(using quotes: Quotes): Expr[FastMCPScala] =
     import quotes.reflect.*
-    val ownerSym  = ownerSymAny.asInstanceOf[Symbol]
+
+    // --- 1. Symbol and Annotation Parsing ---
+    val ownerSym = ownerSymAny.asInstanceOf[Symbol]
     val methodSym = methodAny.asInstanceOf[Symbol]
     val resourceAnnot = resourceAnnotAny.asInstanceOf[Term]
-
     val methodName = methodSym.name
 
-    // Parse @Resource annotation parameters
     val (uri, annotName, annotDesc, mimeType) = MacroUtils.parseResourceParams(resourceAnnot)
-    val finalName = annotName.orElse(Some(methodName)) // Default name to method name if not in annotation
+    val finalName = annotName.orElse(Some(methodName))
+    val finalDesc = annotDesc.orElse(methodSym.docstring)
 
-    // Fetch Scaladoc if description is missing
-    val scaladocDesc: Option[String] = methodSym.docstring
-    val finalDesc: Option[String] = annotDesc.orElse(scaladocDesc)
-
-    // Get method reference
-    val methodRefExpr = MacroUtils.getMethodRefExpr(ownerSym, methodSym)
-
-    // Check if URI is a template
+    // --- 2. Determine Resource Type (Static vs. Template) ---
     val uriTemplatePattern = """\{([^{}]+)\}""".r
     val uriParams = uriTemplatePattern.findAllMatchIn(uri).map(_.group(1)).toList
+    val isTemplate = uriParams.nonEmpty
 
-    if uriParams.nonEmpty then
-      // --- Template Resource ---
-      val funcParams = methodSym.paramSymss.headOption.getOrElse(Nil).map(_.name)
-      if uriParams.toSet != funcParams.toSet then
-        report.errorAndAbort(
-          s"Resource template URI parameters {${uriParams.mkString(", ")}} " +
-          s"in '$uri' do not match function parameters (${funcParams.mkString(", ")}) " +
-          s"for method '${methodSym.name}'."
-        )
+    // --- 3. Parameter Validation and Argument Gathering ---
+    val methodParamSyms = methodSym.paramSymss.headOption.getOrElse(Nil)
+    val methodParamNames = methodParamSyms.map(_.name).toSet
 
-      '{
-        JSystem.err.println(s"[McpAnnotationProcessor] Registering @Resource template: ${${Expr(uri)}}")
-        // Generate handler that calls the function and converts the result
-        val handler: ResourceTemplateHandler = (params: Map[String, String]) =>
-          ZIO.attempt {
-            // FIXED: Correctly invoke MapToFunctionMacro.callByMap with params
-            val fn = MapToFunctionMacro.callByMap($methodRefExpr)
-            val result = fn.asInstanceOf[Map[String, Any] => Any](params)
-            
-            // Convert result to String or Array[Byte] with simpler approach
-            result match {
-              case s: String => s
-              case b: Array[Byte] => b
-              case map: Map[?, ?] =>
-                // Use simple string representation for maps
-                map.toString
-              case other =>
-                // Use simple string representation for other types
-                other.toString
+    val resourceArgumentsExpr: Expr[Option[List[ResourceArgument]]] =
+      if (isTemplate) {
+        val placeholderNames = uriParams.toSet
+        if (placeholderNames != methodParamNames) {
+          report.errorAndAbort(
+            s"Resource template URI parameters {${uriParams.mkString(", ")}} in '$uri' " +
+              s"do not match function parameters (${methodParamNames.mkString(", ")}) " +
+              s"for method '${methodName}'. Ensure parameter names match URI placeholders exactly."
+          )
+        }
+        val argsList: List[Expr[ResourceArgument]] = methodParamSyms.map { psym =>
+          val paramName = psym.name
+          val paramDoc = psym.docstring
+          val resourceParamAnnotOpt = psym.annotations.find(_.tpe <:< TypeRepr.of[ResourceParam])
+          var paramAnnotDesc: Option[String] = None
+          var paramAnnotRequired: Boolean = true
+          resourceParamAnnotOpt.map(_.asExpr.asTerm).foreach { annotTerm =>
+            annotTerm match {
+              case Apply(_, argVals) =>
+                argVals.foreach {
+                  case Literal(StringConstant(s)) => paramAnnotDesc = Some(s)
+                  case NamedArg("description", Literal(StringConstant(s))) => paramAnnotDesc = Some(s)
+                  case NamedArg("required", Literal(BooleanConstant(b))) => paramAnnotRequired = b
+                  case Literal(BooleanConstant(b)) if argVals.size > 1 && argVals.head.isInstanceOf[Literal] => paramAnnotRequired = b
+                  case _ => ()
+                }
+              case _ => ()
             }
           }
-
-        val regEffect = $server.resourceTemplate(
-          uriPattern = ${Expr(uri)},
-          name = ${Expr(finalName)},
-          description = ${Expr(finalDesc)},
-          mimeType = ${Expr(mimeType.orElse(Some("application/json")))}, // Default JSON for Maps
-          handler = handler
-        )
-        zio.Unsafe.unsafe { implicit unsafe =>
-          zio.Runtime.default.unsafe.run(regEffect).getOrThrowFiberFailure()
+          val finalParamDesc = paramAnnotDesc.orElse(paramDoc)
+          '{ ResourceArgument(${Expr(paramName)}, ${Expr(finalParamDesc)}, ${Expr(paramAnnotRequired)}) }
         }
-        $server
+        '{ Some(${Expr.ofList(argsList)}) }
+      } else {
+        if (methodParamSyms.nonEmpty) {
+          report.errorAndAbort(
+            s"Static resource method '${methodName}' (URI: '$uri') must not have parameters. Found: ${methodParamNames.mkString(", ")}"
+          )
+        }
+        '{ None }
       }
-    else
-      // --- Static Resource ---
-      if methodSym.paramSymss.headOption.exists(_.nonEmpty) then
-         report.errorAndAbort(s"Static resource method '${methodSym.name}' must not have parameters.")
 
-      '{
-        JSystem.err.println(s"[McpAnnotationProcessor] Registering static @Resource: ${${Expr(uri)}}")
-        // Generate handler that calls the function and converts the result
-        val handler: ResourceHandler = () =>
-          ZIO.attempt {
-            // FIXED: Correctly invoke MapToFunctionMacro.callByMap with empty map for no-arg functions
-            val fn = MapToFunctionMacro.callByMap($methodRefExpr)
-            val result = fn.asInstanceOf[() => Any]()
-            
-            // Convert result to String or Array[Byte] with simpler approach
-            result match {
-              case s: String => s
-              case b: Array[Byte] => b
-              case map: Map[?, ?] =>
-                // Use simple string representation for maps
-                map.toString
-              case other =>
-                // Use simple string representation for other types
-                other.toString
+    // --- 4. Generate Handler and Registration Code ---
+    val methodRefExpr = MacroUtils.getMethodRefExpr(ownerSym, methodSym)
+
+    val registrationCode: Expr[FastMCPScala] =
+      if (isTemplate) {
+        // --- Generate Template Handler and Call server.resourceTemplate ---
+        '{
+          JSystem.err.println(s"[ResourceProcessor] Registering TEMPLATE resource: ${${Expr(uri)}} -> ${${Expr(methodName)}}")
+          val handler: ResourceTemplateHandler = (params: Map[String, String]) =>
+            ZIO.attempt {
+              val fn = MapToFunctionMacro.callByMap($methodRefExpr)
+              val anyParams: Map[String, Any] = params.asInstanceOf[Map[String, Any]]
+              val result: Any = fn.asInstanceOf[Map[String, Any] => Any](anyParams)
+              result match {
+                case s: String => s
+                case b: Array[Byte] => b
+                case other => other.toString
+              }
             }
-          }
 
-        val regEffect = $server.resource(
-          uri = ${Expr(uri)},
-          name = ${Expr(finalName)},
-          description = ${Expr(finalDesc)},
-          mimeType = ${Expr(mimeType.orElse(Some("text/plain")))}, // Default text/plain for static resources
-          handler = handler
-        )
-        zio.Unsafe.unsafe { implicit unsafe =>
-          zio.Runtime.default.unsafe.run(regEffect).getOrThrowFiberFailure()
+          // Call server.resourceTemplate
+          val registrationEffect = $server.resourceTemplate(
+            uriPattern = ${Expr(uri)},
+            handler = handler,
+            name = ${Expr(finalName)},
+            description = ${Expr(finalDesc)},
+            mimeType = ${Expr(mimeType)},
+            arguments = $resourceArgumentsExpr // Pass the generated arguments Expr
+          )
+          Unsafe.unsafe { implicit unsafe => Runtime.default.unsafe.run(registrationEffect).getOrThrowFiberFailure() }
+          $server
         }
-        $server
+      } else {
+        // --- Generate Static Handler and Call server.resource ---
+        '{
+          JSystem.err.println(s"[ResourceProcessor] Registering STATIC resource: ${${Expr(uri)}} -> ${${Expr(methodName)}}")
+          val handler: ResourceHandler = () =>
+            ZIO.attempt {
+              val fn = MapToFunctionMacro.callByMap($methodRefExpr)
+              val result: Any = fn.asInstanceOf[Map[String, Any] => Any](Map.empty)
+              result match {
+                case s: String => s
+                case b: Array[Byte] => b
+                case other => other.toString
+              }
+            }
+
+          // Call server.resource
+          val registrationEffect = $server.resource(
+            uri = ${Expr(uri)},
+            handler = handler,
+            name = ${Expr(finalName)},
+            description = ${Expr(finalDesc)},
+            mimeType = ${Expr(mimeType)}
+            // No 'arguments' parameter for the static method
+          )
+          Unsafe.unsafe { implicit unsafe => Runtime.default.unsafe.run(registrationEffect).getOrThrowFiberFailure() }
+          $server
+        }
       }
+
+    // --- 5. Return Generated Code ---
+    registrationCode
+
 end ResourceProcessor

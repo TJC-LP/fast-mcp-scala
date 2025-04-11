@@ -50,7 +50,7 @@ object SimpleServer extends ZIOAppDefault:
 
       // Register a templated resource for user profiles
       _ <- server.resourceTemplate(
-        uriPattern = "/users/{id}/profile",
+        uriPattern = "users://{id}/profile",
         name = Some("User Profile"),
         description = Some("Returns information about a user"),
         handler = params => {

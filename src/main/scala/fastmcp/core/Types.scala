@@ -59,24 +59,8 @@ object ToolDefinition:
 
 
 // --- Resource Related Types ---
-case class ResourceDefinition(
-    uri: String,
-    name: Option[String],
-    description: Option[String],
-    mimeType: Option[String] = Some("text/plain")
-    // annotations: Option[McpSchema.Annotations] = None // Add later if needed
-)
-
-object ResourceDefinition:
- // Helper to convert to Java SDK Resource
-  def toJava(rd: ResourceDefinition): McpSchema.Resource =
-    new McpSchema.Resource(
-      rd.uri,
-      rd.name.orNull,
-      rd.description.orNull,
-      rd.mimeType.orNull,
-      null // annotations placeholder
-    )
+// REMOVED ResourceDefinition case class and companion object from here.
+// It now resides in server.manager.ResourceManager.scala
 
 
 // --- Prompt Related Types ---

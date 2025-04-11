@@ -2,7 +2,6 @@ package fastmcp.core
 
 import scala.annotation.{StaticAnnotation, experimental}
 import scala.quoted.*
-
 import fastmcp.server.FastMCPScala
 import fastmcp.server.manager.ToolRegistrationOptions
 import fastmcp.macros.MapToFunctionMacro
@@ -30,7 +29,7 @@ import io.modelcontextprotocol.spec.McpSchema
  */
 class Tool(
     val name: Option[String] = None,
-    val description: Option[String] = None, // Description can come from here or Scaladoc
+    val description: Option[String] = None,
     val examples: List[String] = List.empty,
     val version: Option[String] = None,
     val deprecated: Boolean = false,
@@ -85,7 +84,7 @@ class SchemaField(
 /**
  * Marker annotation for methods representing MCP Resources
  * If uri contains {placeholders}, it's treated as a template resource.
- * Placeholders in the URI must match the method parameter names.
+ * Placeholders in the URI must match the method parameter names unless @ResourceParam is used.
  * Static resources (no placeholders) should have methods with no parameters.
  * 
  * @param uri The URI or URI template for the resource (e.g., "file:///data.txt" or "users://{userId}/profile")
@@ -94,10 +93,21 @@ class SchemaField(
  * @param mimeType Optional MIME type for the resource (defaults to "text/plain")
  */
 class Resource(
-    val uri: String, // Changed to val for macro access
+    val uri: String,
     val name: Option[String] = None,
     val description: Option[String] = None,
     val mimeType: Option[String] = None
+) extends StaticAnnotation
+
+/**
+ * Marker annotation for resource method parameters, used to describe template arguments.
+ *
+ * @param description  A human-readable description for the parameter
+ * @param required     Whether the parameter is required (defaults to true)
+ */
+class ResourceParam(
+    val description: String,
+    val required: Boolean = true
 ) extends StaticAnnotation
 
 /**
@@ -118,6 +128,6 @@ class Prompt(
  * @param required Whether the parameter is required (defaults to true)
  */
 class PromptParam(
-    val description: String, // Changed to val for macro access
+    val description: String,
     val required: Boolean = true
 ) extends StaticAnnotation
