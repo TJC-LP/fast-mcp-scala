@@ -72,7 +72,16 @@ private[macros] object ResourceProcessor:
                   case Literal(StringConstant(s)) => paramAnnotDesc = Some(s)
                   case NamedArg("description", Literal(StringConstant(s))) => paramAnnotDesc = Some(s)
                   case NamedArg("required", Literal(BooleanConstant(b))) => paramAnnotRequired = b
-                  case Literal(BooleanConstant(b)) if argVals.size > 1 && argVals.head.isInstanceOf[Literal] => paramAnnotRequired = b
+                  case lit @ Literal(_) if argVals.size > 1 && {
+                    argVals.head match { 
+                      case _: Literal => true
+                      case _ => false 
+                    }
+                  } => 
+                    lit match {
+                      case Literal(BooleanConstant(b)) => paramAnnotRequired = b
+                      case _ => ()
+                    }
                   case _ => ()
                 }
               case _ => ()

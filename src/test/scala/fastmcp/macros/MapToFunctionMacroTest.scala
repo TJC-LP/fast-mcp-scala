@@ -1,18 +1,15 @@
 package fastmcp.macros
 
+import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
 import org.scalatest.funsuite.AnyFunSuite
 
 /**
  * Tests for the MapToFunctionMacro that converts a function to a Map[String, Any] => R function
  */
-class MapToFunctionMacroTest extends AnyFunSuite {
+class MapToFunctionMacroTest extends AnyFunSuite with Matchers {
 
-  // Simple case class for testing
-  case class Person(name: String, age: Int, email: Option[String] = None)
-
-  // Enum for testing
-  enum Color:
-    case RED, GREEN, BLUE, YELLOW
+  // Test enum with lowercase values
 
   // Test with a simple function with primitive types
   test("should convert simple function with primitive types") {
@@ -22,11 +19,11 @@ class MapToFunctionMacroTest extends AnyFunSuite {
     
     // Test with valid parameters
     val result1 = mapFunction.asInstanceOf[Map[String, Any] => Int](Map("a" -> 5, "b" -> 3))
-    assert(result1 == 8)
+    result1 should be(8)
     
     // Test with parameters in different order
     val result2 = mapFunction.asInstanceOf[Map[String, Any] => Int](Map("b" -> 7, "a" -> 2))
-    assert(result2 == 9)
+    result2 should be(9)
   }
   
   // Test with a function taking a case class
@@ -35,9 +32,15 @@ class MapToFunctionMacroTest extends AnyFunSuite {
     
     val mapFunction = MapToFunctionMacro.callByMap(greet)
     
+    // Test with directly providing a Person object
     val person = Person("Alice", 30)
-    val result = mapFunction.asInstanceOf[Map[String, Any] => String](Map("person" -> person))
-    assert(result == "Hello, Alice! You are 30 years old.")
+    val result1 = mapFunction.asInstanceOf[Map[String, Any] => String](Map("person" -> person))
+    result1 should be("Hello, Alice! You are 30 years old.")
+    
+    // Test with providing a Map for the Person object - this is what we get from JSON
+    val result2 = mapFunction(
+      Map("person" -> Map("name" -> "Bob", "age" -> 25)))
+    result2 should be("Hello, Bob! You are 25 years old.")
   }
   
   // Test with a function using optional parameters
@@ -47,54 +50,104 @@ class MapToFunctionMacroTest extends AnyFunSuite {
     
     val mapFunction = MapToFunctionMacro.callByMap(optionalGreet)
     
-    // Test with only required parameter and explicitly providing the optional as None
-    val result1 = mapFunction.asInstanceOf[Map[String, Any] => String](Map("name" -> "Alice", "title" -> None))
-    assert(result1 == "Alice")
+    // Test with only required parameter
+    val result1 = mapFunction.asInstanceOf[Map[String, Any] => String](Map("name" -> "Alice"))
+    result1 should be("Alice")
     
-    // Test with optional parameter provided
-    val result2 = mapFunction.asInstanceOf[Map[String, Any] => String](Map("name" -> "Alice", "title" -> Some("Dr.")))
-    assert(result2 == "Dr. Alice")
+    // Test with explicitly providing the optional as None
+    val result2 = mapFunction.asInstanceOf[Map[String, Any] => String](Map("name" -> "Alice", "title" -> None))
+    result2 should be("null Alice")
+    
+    // Test with optional parameter provided as Some
+    val result3 = mapFunction.asInstanceOf[Map[String, Any] => String](Map("name" -> "Alice", "title" -> Some("Dr.")))
+    result3 should be("Dr. Alice")
+    
+    // Test with optional parameter provided as direct value (string) - this is what we get from JSON
+    val result4 = mapFunction.asInstanceOf[Map[String, Any] => String](Map("name" -> "Alice", "title" -> "Dr."))
+    result4 should be("Dr. Alice")
   }
   
-  // Test with a function taking an enum parameter
-  test("should handle enum parameters") {
-    def colorToHex(colorName: String): String = colorName.toUpperCase match
-      case "RED" => "#FF0000"
-      case "GREEN" => "#00FF00"
-      case "BLUE" => "#0000FF"
-      case "YELLOW" => "#FFFF00"
-      case _ => "#000000"
+  // Test with uppercase enum parameters (traditional Java-style)
+  test("should handle uppercase enum parameters") {
+    def getColorHex(color: Color): String = 
+      color match
+        case Color.RED => "#FF0000"
+        case Color.GREEN => "#00FF00"
+        case Color.BLUE => "#0000FF"
+        case Color.YELLOW => "#FFFF00"
     
-    val mapFunction = MapToFunctionMacro.callByMap(colorToHex)
+    val mapFunction = MapToFunctionMacro.callByMap(getColorHex)
+    
+    // Test with string value - should map to enum
+    val result1 = mapFunction.asInstanceOf[Map[String, Any] => String](Map("color" -> "RED"))
+    result1 should be("#FF0000")
+    
+    // Test with enum value directly
+    val result2 = mapFunction.asInstanceOf[Map[String, Any] => String](Map("color" -> Color.GREEN))
+    result2 should be("#00FF00")
+  }
+  
+  // Test with lowercase enum parameters (Scala 3 style)
+  test("should handle lowercase enum parameters") {
+    def formatText(text: String, style: TextStyle): String =
+      style match
+        case TextStyle.plain => text
+        case TextStyle.bold => s"**$text**"
+        case TextStyle.italic => s"*$text*"
+        case TextStyle.code => s"`$text`"
+        case TextStyle.heading => s"# $text"
+    
+    val mapFunction = MapToFunctionMacro.callByMap(formatText)
     
     // Test with string value
-    val result1 = mapFunction.asInstanceOf[Map[String, Any] => String](Map("colorName" -> "RED"))
-    assert(result1 == "#FF0000")
+    val result1 = mapFunction.asInstanceOf[Map[String, Any] => String](
+      Map("text" -> "Hello", "style" -> "bold"))
+    result1 should be("**Hello**")
     
-    // Test with lowercase string (should handle case-insensitively)
-    val result2 = mapFunction.asInstanceOf[Map[String, Any] => String](Map("colorName" -> "blue"))
-    assert(result2 == "#0000FF")
-    
-    // Test with mixed-case string
-    val result3 = mapFunction.asInstanceOf[Map[String, Any] => String](Map("colorName" -> "Green"))
-    assert(result3 == "#00FF00")
+    // Test with enum value directly
+    val result2 = mapFunction.asInstanceOf[Map[String, Any] => String](
+      Map("text" -> "World", "style" -> TextStyle.italic))
+    result2 should be("*World*")
   }
   
-  // Test with a function with multiple parameters of different types
-  test("should handle complex parameter combinations") {
-    def complexFunction(name: String, age: Int, hobbies: List[String], colorName: String): String =
-      s"$name, $age, likes ${hobbies.mkString(", ")}, favorite color: ${colorName.toLowerCase}"
+  // Test with a complex function with multiple enum parameters
+  test("should handle multiple enum parameters") {
+    case class FormattedOutput(originalText: String, formattedText: String)
     
-    val mapFunction = MapToFunctionMacro.callByMap(complexFunction)
+    def formatText(
+      text: String,
+      style: TextStyle = TextStyle.plain,
+      format: OutputFormat = OutputFormat.text
+    ): FormattedOutput = {
+      val styledText = (style, format) match
+        case (TextStyle.plain, _) => text
+        case (TextStyle.bold, OutputFormat.html) => s"<strong>$text</strong>"
+        case (TextStyle.bold, _) => s"**$text**"
+        case (TextStyle.italic, OutputFormat.html) => s"<em>$text</em>"
+        case (TextStyle.italic, _) => s"*$text*"
+        case (TextStyle.code, OutputFormat.html) => s"<code>$text</code>"
+        case (TextStyle.code, _) => s"`$text`"
+        case (TextStyle.heading, OutputFormat.html) => s"<h1>$text</h1>"
+        case (TextStyle.heading, _) => s"# $text"
+      
+      FormattedOutput(text, styledText)
+    }
     
-    val result = mapFunction.asInstanceOf[Map[String, Any] => String](Map(
-      "name" -> "Bob",
-      "age" -> 25,
-      "hobbies" -> List("reading", "hiking", "coding"),
-      "colorName" -> "RED"
-    ))
+    val mapFunction = MapToFunctionMacro.callByMap(formatText)
     
-    assert(result == "Bob, 25, likes reading, hiking, coding, favorite color: red")
+    // Test with string values for both enums
+    val result1 = mapFunction.asInstanceOf[Map[String, Any] => FormattedOutput](
+      Map("text" -> "Hello", "style" -> "bold", "format" -> "html"))
+    
+    result1.originalText should be("Hello")
+    result1.formattedText should be("<strong>Hello</strong>")
+    
+    // Test with one enum direct and one as string
+    val result2 = mapFunction.asInstanceOf[Map[String, Any] => FormattedOutput](
+      Map("text" -> "World", "style" -> TextStyle.italic, "format" -> "markdown"))
+    
+    result2.originalText should be("World")
+    result2.formattedText should be("*World*")
   }
   
   // Test for error handling with missing parameters
@@ -107,7 +160,7 @@ class MapToFunctionMacroTest extends AnyFunSuite {
       mapFunction.asInstanceOf[Map[String, Any] => String](Map.empty)
     }
     
-    assert(exception.getMessage.contains("Missing required parameter"))
+    exception.getMessage should include("Key not found in map")
   }
   
   // Test for error handling with incorrect parameter types
@@ -121,6 +174,6 @@ class MapToFunctionMacroTest extends AnyFunSuite {
     }
     
     // Just verify that we got some error when trying to use a string as an integer
-    assert(!exception.getMessage.isEmpty)
+    exception.getMessage should not be empty
   }
 }

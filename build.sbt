@@ -4,6 +4,7 @@ ThisBuild / scalaVersion := "3.6.4" // Using Scala 3
 
 val zioVersion = "2.1.17" // Specify ZIO version
 val zioSchemaVersion = "1.6.6" // ZIO Schema version
+val jacksonVersion = "2.18.3"
 
 lazy val root = (project in file("."))
   .settings(
@@ -20,6 +21,12 @@ lazy val root = (project in file("."))
       "dev.zio" %% "zio-schema" % zioSchemaVersion,
       "dev.zio" %% "zio-schema-json" % zioSchemaVersion,
       "dev.zio" %% "zio-schema-derivation" % zioSchemaVersion,
+      
+      // Jackson for JSON serialization/deserialization
+      "com.fasterxml.jackson.core" % "jackson-databind" % jacksonVersion,
+      "com.fasterxml.jackson.module" %% "jackson-module-scala" % jacksonVersion,
+      "com.fasterxml.jackson.datatype" % "jackson-datatype-jdk8" % jacksonVersion,
+      "com.fasterxml.jackson.datatype" % "jackson-datatype-jsr310" % jacksonVersion,
 
       // Tapir
       "com.softwaremill.sttp.tapir" %% "tapir-core" % "1.11.24",
@@ -37,5 +44,8 @@ lazy val root = (project in file("."))
       "dev.zio" %% "zio-test-magnolia" % zioVersion % Test,
     ),
     // Set the main class for 'sbt run'
-    Compile / run / mainClass := Some("fastmcp.FastMCPMain")
+    Compile / run / mainClass := Some("fastmcp.FastMCPMain"),
+    
+    // Configure test class loading to fix enum reflection issues
+    Test / classLoaderLayeringStrategy := ClassLoaderLayeringStrategy.Flat
   )

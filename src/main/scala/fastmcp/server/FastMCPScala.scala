@@ -273,8 +273,8 @@ class FastMCPScala(
               template.uriTemplate(), template.name(), template.description(),
               template.mimeType(), template.annotations()
             )
-          case other =>
-            JSystem.err.println(s"[FastMCPScala] Warning: Unexpected type during resource list conversion: ${other.getClass.getName}")
+          case _ =>
+            JSystem.err.println(s"[FastMCPScala] Warning: Unexpected type during resource list conversion for ${resourceDef.uri}")
             new McpSchema.Resource(resourceDef.uri, resourceDef.name.orNull, resourceDef.description.orNull, resourceDef.mimeType.orNull, null)
         }
       }.asJava

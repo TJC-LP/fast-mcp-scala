@@ -92,7 +92,7 @@ object ManualServer extends ZIOAppDefault:
         handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.add)(args)),
         inputSchema = addSchema
       )
-      
+
       // Register CalculatorTools.addString
       addStringSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.addString).spaces2)
       _ <- server.tool(
