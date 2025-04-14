@@ -1,18 +1,17 @@
 package fastmcp.macros
 
 import scala.quoted.*
-import sttp.apispec.Schema as ASchema
 import sttp.apispec.circe.*
 import sttp.tapir.*
 import sttp.tapir.docs.apispec.schema.*
-import sttp.tapir.generic.auto.*
+
 import io.circe.{Json, JsonObject}
 import io.circe.syntax.*
 import sttp.tapir.Schema.SName
 import sttp.tapir.SchemaType.*
-import sttp.tapir.SchemaType.SProductField
 
 import scala.annotation.tailrec
+import scala.deriving.Mirror // Required for derivedEnumeration check
 
 object JsonSchemaMacro:
 
@@ -33,66 +32,16 @@ object JsonSchemaMacro:
   inline def schemaForFunctionArgs[F](inline fn: F): Json =
     ${ schemaForFunctionArgsImpl('fn) }
 
-  /**
-   * Takes a JSON schema potentially containing `$defs` and `$ref` and returns
-   * a new JSON schema where all references are resolved and inlined.
-   */
-  def resolveJsonRefs(inputJson: Json): Json = {
-    val cursor = inputJson.hcursor
-    val definitions: Map[String, Json] = cursor
-      .downField("$defs")
-      .as[Map[String, Json]]
-      .getOrElse(Map.empty)
-
-    def resolve(currentJson: Json, defs: Map[String, Json]): Json = {
-      currentJson.fold(
-        jsonNull = Json.Null,
-        jsonBoolean = Json.fromBoolean,
-        jsonNumber = Json.fromJsonNumber,
-        jsonString = Json.fromString,
-        jsonArray = arr => Json.fromValues(arr.map(elem => resolve(elem, defs))),
-        jsonObject = obj => {
-          obj("$ref") match {
-            case Some(refJson) if refJson.isString =>
-              val refPath = refJson.asString.get
-              // Assuming format like "#/$defs/DefinitionName"
-              val defName = refPath.split('/').last
-              defs.get(defName) match {
-                case Some(definition) =>
-                  // Recursively resolve within the definition itself
-                  resolve(definition, defs)
-                case None =>
-                  // Reference not found, return the original ref object
-                  // Consider logging a warning here
-                  currentJson
-              }
-            case _ =>
-              // Not a $ref object or $ref is not a string,
-              // resolve recursively within values.
-              // Filter out the $defs key if encountered nested (shouldn't happen with root removal).
-              Json.fromJsonObject(
-                obj.filterKeys(_ != "$defs").mapValues(value => resolve(value, defs))
-              )
-          }
-        }
-      )
-    }
-
-    // Remove top-level $defs before starting resolution
-    val rootJsonWithoutDefs = inputJson.mapObject(_.remove("$defs"))
-    resolve(rootJsonWithoutDefs, definitions)
-  }
-
-
   private def schemaForFunctionArgsImpl[F: Type](fn: Expr[F])(using Quotes): Expr[Json] = {
     import quotes.reflect.*
 
-    // =========== HELPER METHODS (maybeAssignNameToSchema, extractParams, maybeRealParamNames) - unchanged ===========
+    // =========== HELPER METHODS (maybeAssignNameToSchema, extractParams, maybeRealParamNames) ===========
 
     /**
-     * Optionally give a name to a Tapir Schema[T]. If T is a product/sum type, Tapir
+     * Optionally give a name to a Tapir Schema[T]. If T is a product type, Tapir
      * can then track it in `$defs`, referencing it by that name instead of the raw FQN.
      * For instance: .name(SName("Test")) => references #/$defs/Test
+     * Only applied to non-enum product types now.
      */
     def maybeAssignNameToSchema[T: Type](originalSchema: Expr[Schema[T]]): Expr[Schema[T]] = {
       val tpeRepr = TypeRepr.of[T]
@@ -151,12 +100,12 @@ object JsonSchemaMacro:
       case Inlined(_, _, inner) =>
         maybeRealParamNames(inner)
 
-      case ident @ Ident(_) =>
+      case ident@Ident(_) =>
         if (ident.symbol.isDefDef)
           ident.symbol.paramSymss.headOption.map(_.map(_.name))
         else None
 
-      case sel @ Select(_, _) =>
+      case sel@Select(_, _) =>
         if (sel.symbol.isDefDef)
           sel.symbol.paramSymss.headOption.map(_.map(_.name))
         else None
@@ -173,7 +122,7 @@ object JsonSchemaMacro:
         None
     }
 
-    // =========== MAIN MACRO LOGIC (mostly unchanged) ===========
+    // =========== MAIN MACRO LOGIC ===========
 
     val fnTerm = fn.asTerm
     val fnType = fnTerm.tpe
@@ -184,16 +133,38 @@ object JsonSchemaMacro:
     val productFieldsExpr: List[Expr[SProductField[Unit]]] = params.map { case (paramName, paramType) =>
       paramType.asType match {
         case '[t] =>
-          val rawSchemaExpr = Expr.summon[Schema[t]].getOrElse {
-            report.errorAndAbort(
-              s"No Tapir Schema found for parameter '$paramName' of type: ${Type.show[t]}"
-            )
-          }
-          val namedSchemaExpr = maybeAssignNameToSchema[t](rawSchemaExpr)
+          // --- Check if 't' is an Enum ---
+          val tpeRepr = TypeRepr.of[t]
+          val tSymbol = tpeRepr.typeSymbol
+          val isEnum = tSymbol.flags.is(Flags.Enum)
+
+          // --- Get Schema Expression ---
+          val schemaExpr: Expr[Schema[t]] =
+            if (isEnum) {
+              // Explicitly use string-based derivation for enums
+              // Check if Mirror.SumOf[t] exists, needed for derivedEnumeration
+              Expr.summon[Mirror.SumOf[t]].getOrElse {
+                report.errorAndAbort(s"Cannot derive enum schema for ${Type.show[t]}: Missing Mirror.SumOf[t]. Ensure it's a standard Scala 3 enum.")
+              }
+              report.info(s"Detected enum type ${Type.show[t]}, using derivedEnumeration.") // Optional debug info
+              '{ Schema.derivedEnumeration[t].defaultStringBased }
+            } else {
+              // For non-enums, use the regular implicit summon and naming logic
+              // NOTE: Requires `import sttp.tapir.generic.auto.*` at the *call site* (e.g., ManualServer.scala)
+              val rawSchemaExpr = Expr.summon[Schema[t]].getOrElse {
+                report.errorAndAbort(
+                  s"No Tapir Schema found for parameter '$paramName' of type: ${Type.show[t]}. Did you import sttp.tapir.generic.auto.* at the call site?"
+                )
+              }
+              // Apply naming only to non-enum product types
+              maybeAssignNameToSchema[t](rawSchemaExpr)
+            }
+
+          // --- Create SProductField ---
           '{
             SProductField[Unit, t](
               FieldName(${ Expr(paramName) }),
-              $namedSchemaExpr,
+              $schemaExpr, // Use the determined schema expression
               (_: Unit) => None
             )
           }
@@ -217,3 +188,54 @@ object JsonSchemaMacro:
       JsonSchemaMacro.resolveJsonRefs(initialJson)
     }
   }
+
+  /**
+   * Takes a JSON schema potentially containing `$defs` and `$ref` and returns
+   * a new JSON schema where all references are resolved and inlined.
+   */
+  def resolveJsonRefs(inputJson: Json): Json = {
+    val cursor = inputJson.hcursor
+    val definitions: Map[String, Json] = cursor
+      .downField("$defs")
+      .as[Map[String, Json]]
+      .getOrElse(Map.empty)
+
+    def resolve(currentJson: Json, defs: Map[String, Json]): Json = {
+      currentJson.fold(
+        jsonNull = Json.Null,
+        jsonBoolean = Json.fromBoolean,
+        jsonNumber = Json.fromJsonNumber,
+        jsonString = Json.fromString,
+        jsonArray = arr => Json.fromValues(arr.map(elem => resolve(elem, defs))),
+        jsonObject = obj => {
+          obj("$ref") match {
+            case Some(refJson) if refJson.isString =>
+              val refPath = refJson.asString.get
+              // Assuming format like "#/$defs/DefinitionName"
+              val defName = refPath.split('/').last
+              defs.get(defName) match {
+                case Some(definition) =>
+                  // Recursively resolve within the definition itself
+                  resolve(definition, defs)
+                case None =>
+                  // Reference not found, return the original ref object
+                  // Consider logging a warning here
+                  currentJson
+              }
+            case _ =>
+              // Not a $ref object or $ref is not a string,
+              // resolve recursively within values.
+              // Filter out the $defs key if encountered nested (shouldn't happen with root removal).
+              Json.fromJsonObject(
+                obj.filterKeys(_ != "$defs").mapValues(value => resolve(value, defs))
+              )
+          }
+        }
+      )
+    }
+
+    // Remove top-level $defs before starting resolution
+    val rootJsonWithoutDefs = inputJson.mapObject(_.remove("$defs"))
+    resolve(rootJsonWithoutDefs, definitions)
+  }
+end JsonSchemaMacro
