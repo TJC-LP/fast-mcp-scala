@@ -34,9 +34,6 @@ object AnnotatedServer extends ZIOAppDefault:
   enum TransformationType:
     case uppercase, lowercase, reverse, capitalize
 
-  object TransformationType:
-    given Schema[TransformationType] = Schema.derivedEnumeration.defaultStringBased
-
   /**
    * Simple tool that adds two numbers.
    * The @Tool annotation will:
@@ -68,7 +65,7 @@ object AnnotatedServer extends ZIOAppDefault:
       "Operation to perform (add, subtract, multiply, divide)",
       required = false
     ) operation: String = "add"
-  ): CalculatorResult =
+  ): String =
     val result = operation.toLowerCase match
       case "add" | "+" => a + b
       case "subtract" | "-" => a - b
@@ -78,7 +75,7 @@ object AnnotatedServer extends ZIOAppDefault:
         else a / b
       case _ => throw new IllegalArgumentException(s"Unknown operation: $operation")
     
-    CalculatorResult(operation, List(a, b), result)
+    CalculatorResult(operation, List(a, b), result).toJsonPretty
   
   /**
    * String transformation tool.
@@ -108,20 +105,21 @@ object AnnotatedServer extends ZIOAppDefault:
   )
   def welcomeResource(): String =
     "Welcome to the FastMCP-Scala Annotated Server!"
-  
+
   /**
    * A template resource that takes a user ID from the URI.
    * Annotated with @Resource. The URI pattern {userId} matches the parameter name.
    */
   @Resource(
-    uri = "users://{userId}/profile",
+    uri = "users://profile",
     name = Some("UserProfile"),
     description = Some("Dynamically generated user profile."),
     mimeType = Some("application/json")
   )
-  def userProfileResource(userId: String): Map[String, String] =
+  def userProfileResource(): String =
     // In a real app, fetch user data based on userId
-    Map("userId" -> userId, "name" -> s"User $userId", "email" -> s"user$userId@example.com")
+    val userId = "123"
+    Map("userId" -> userId, "name" -> s"User $userId", "email" -> s"user$userId@example.com").toJsonPretty
   
   // --- Prompt Examples ---
   

@@ -13,28 +13,11 @@ class JsonSchemaMacroTest extends AnyFunSuite {
 
   // Simple case class for testing
   case class Person(name: String, age: Int, email: Option[String])
-  object Person {
-    // Make sure Schema[Person] is available
-    given Schema[Person] = Schema.derived
-  }
 
   // Nested case class for testing schema references
   case class Address(street: String, city: String, zipCode: String)
-  object Address {
-    given Schema[Address] = Schema.derived
-  }
 
   case class User(person: Person, address: Address, tags: List[String])
-  object User {
-    given Schema[User] = Schema.derived
-  }
-  
-  // Enum for testing
-  enum Color:
-    case RED, GREEN, BLUE, YELLOW
-  
-  object Color:
-    given Schema[Color] = Schema.derivedEnumeration.defaultStringBased
 
   // Test with a simple function with primitive types
   test("should generate schema for simple function with primitive types") {
