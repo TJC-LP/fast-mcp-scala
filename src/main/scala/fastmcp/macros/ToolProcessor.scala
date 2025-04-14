@@ -6,6 +6,7 @@ import zio.*
 
 import java.lang.System as JSystem
 import scala.quoted.*
+import io.circe.Json
 
 /**
  * Responsible for processing @Tool annotations and generating
@@ -40,16 +41,39 @@ private[macros] object ToolProcessor:
     // Get method reference
     val methodRefExpr = MacroUtils.getMethodRefExpr(ownerSym, methodSym)
 
+    // --- Extract @Param descriptions for each parameter ---
+    val paramSymbols = methodSym.paramSymss.headOption.getOrElse(Nil)
+    val paramDescriptions: Map[String, String] = paramSymbols.flatMap { pSym =>
+      pSym.annotations.find(_.tpe <:< TypeRepr.of[fastmcp.core.Param])
+        .flatMap { annot =>
+          annot match
+            case Apply(_, argTerms) =>
+              // Try named "description" first, then positional
+              argTerms.collectFirst {
+                case NamedArg("description", Literal(StringConstant(desc))) => desc
+              }.orElse {
+                argTerms.collectFirst {
+                  case Literal(StringConstant(desc)) => desc
+                }
+              }
+            case _ => None
+        }
+        .map(desc => pSym.name -> desc)
+    }.toMap
+
     '{
       JSystem.err.println(s"[McpAnnotationProcessor] Registering @Tool: ${${ Expr(finalName) }}")
-      val schema = JsonSchemaMacro.schemaForFunctionArgs($methodRefExpr)
+      val rawSchema: io.circe.Json = JsonSchemaMacro.schemaForFunctionArgs($methodRefExpr)
+      val schemaWithDescriptions: io.circe.Json =
+        if (${Expr(paramDescriptions.nonEmpty)}) MacroUtils.injectParamDescriptions(rawSchema, ${Expr(paramDescriptions)})
+        else rawSchema
       val regEffect = $server.tool(
         name = ${ Expr(finalName) },
         description = ${ Expr(finalDesc) },
         handler = (args: Map[String, Any]) => ZIO.attempt {
           MapToFunctionMacro.callByMap($methodRefExpr).asInstanceOf[Map[String, Any] => Any](args)
         },
-        inputSchema = Right(schema.spaces2),
+        inputSchema = Right(schemaWithDescriptions.spaces2),
         options = ToolRegistrationOptions(allowOverrides = true)
       )
       zio.Unsafe.unsafe { implicit unsafe =>

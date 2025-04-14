@@ -18,6 +18,7 @@ object JsonSchemaMacro:
   /**
    * Produces a JSON schema describing the parameters of the given function.
    * Definitions (`$defs`) are resolved and inlined into the `properties`.
+   * Also injects @Param annotation parameter descriptions as JSON "description" fields in properties.
    *
    * Example usage:
    * {{{
@@ -25,7 +26,8 @@ object JsonSchemaMacro:
    *   case class User(name: String, address: Address)
    *   def processUser(user: User, count: Int): Unit = ()
    *   val schemaJson = JsonSchemaMacro.schemaForFunctionArgs(processUser)
-   *   // schemaJson will have Address definition inlined within User property.
+   *   // schemaJson will have Address definition inlined within User property,
+   *   // and any @Param descriptions injected.
    *   println(schemaJson.spaces2)
    * }}}
    */
@@ -35,7 +37,7 @@ object JsonSchemaMacro:
   private def schemaForFunctionArgsImpl[F: Type](fn: Expr[F])(using Quotes): Expr[Json] = {
     import quotes.reflect.*
 
-    // =========== HELPER METHODS (maybeAssignNameToSchema, extractParams, maybeRealParamNames) ===========
+    // =========== HELPER METHODS ===========
 
     /**
      * Optionally give a name to a Tapir Schema[T]. If T is a product type, Tapir
@@ -142,7 +144,6 @@ object JsonSchemaMacro:
           val schemaExpr: Expr[Schema[t]] =
             if (isEnum) {
               // Explicitly use string-based derivation for enums
-              // Check if Mirror.SumOf[t] exists, needed for derivedEnumeration
               Expr.summon[Mirror.SumOf[t]].getOrElse {
                 report.errorAndAbort(s"Cannot derive enum schema for ${Type.show[t]}: Missing Mirror.SumOf[t]. Ensure it's a standard Scala 3 enum.")
               }
@@ -185,57 +186,8 @@ object JsonSchemaMacro:
       // Convert apispec schema -> initial circe JSON (potentially with $defs/$ref)
       val initialJson = apispecSchema.asJson
       // Post-process the JSON to resolve and inline references
-      JsonSchemaMacro.resolveJsonRefs(initialJson)
+      MacroUtils.resolveJsonRefs(initialJson)
     }
   }
 
-  /**
-   * Takes a JSON schema potentially containing `$defs` and `$ref` and returns
-   * a new JSON schema where all references are resolved and inlined.
-   */
-  def resolveJsonRefs(inputJson: Json): Json = {
-    val cursor = inputJson.hcursor
-    val definitions: Map[String, Json] = cursor
-      .downField("$defs")
-      .as[Map[String, Json]]
-      .getOrElse(Map.empty)
-
-    def resolve(currentJson: Json, defs: Map[String, Json]): Json = {
-      currentJson.fold(
-        jsonNull = Json.Null,
-        jsonBoolean = Json.fromBoolean,
-        jsonNumber = Json.fromJsonNumber,
-        jsonString = Json.fromString,
-        jsonArray = arr => Json.fromValues(arr.map(elem => resolve(elem, defs))),
-        jsonObject = obj => {
-          obj("$ref") match {
-            case Some(refJson) if refJson.isString =>
-              val refPath = refJson.asString.get
-              // Assuming format like "#/$defs/DefinitionName"
-              val defName = refPath.split('/').last
-              defs.get(defName) match {
-                case Some(definition) =>
-                  // Recursively resolve within the definition itself
-                  resolve(definition, defs)
-                case None =>
-                  // Reference not found, return the original ref object
-                  // Consider logging a warning here
-                  currentJson
-              }
-            case _ =>
-              // Not a $ref object or $ref is not a string,
-              // resolve recursively within values.
-              // Filter out the $defs key if encountered nested (shouldn't happen with root removal).
-              Json.fromJsonObject(
-                obj.filterKeys(_ != "$defs").mapValues(value => resolve(value, defs))
-              )
-          }
-        }
-      )
-    }
-
-    // Remove top-level $defs before starting resolution
-    val rootJsonWithoutDefs = inputJson.mapObject(_.remove("$defs"))
-    resolve(rootJsonWithoutDefs, definitions)
-  }
 end JsonSchemaMacro

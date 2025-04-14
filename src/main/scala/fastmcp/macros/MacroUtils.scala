@@ -2,6 +2,7 @@ package fastmcp.macros
 
 import scala.quoted.*
 import scala.util.Try
+import io.circe.{Json, JsonObject}
 
 /**
  * Utility methods shared between the processor objects (Compressed)
@@ -123,7 +124,70 @@ private[macros] object MacroUtils:
         (paramDesc, paramRequired)
       case None => (None, true) // Defaults if no @PromptParam
     }
-
+  
+  // Helper to parse @Param annotation arguments for @Tool methods
+  // Returns: (description: Option[String], example: Option[String], required: Boolean, schema: Option[String])
+  def parseToolParam(paramAnnotOptAny: Option[Any])(using quotes: Quotes): (Option[String], Option[String], Boolean, Option[String]) =
+    import quotes.reflect.*
+    val paramAnnotOpt = paramAnnotOptAny.map(_.asInstanceOf[Term])
+  
+    paramAnnotOpt match {
+      case Some(annotTerm) =>
+        var paramDesc: Option[String] = None
+        var paramExample: Option[String] = None
+        var paramRequired: Boolean = true // Default required for @Param
+        var paramSchema: Option[String] = None
+        var descriptionSetPositionally = false
+        var exampleSetByName = false
+        var requiredSetByName = false
+        var schemaSetByName = false
+  
+        annotTerm match {
+          case Apply(_, args) =>
+            args.foreach {
+              // Positional description: Only take the first one encountered
+              case Literal(StringConstant(s)) if paramDesc.isEmpty =>
+                paramDesc = Some(s)
+                descriptionSetPositionally = true
+              // Named description
+              case NamedArg("description", Literal(StringConstant(s))) =>
+                paramDesc = Some(s)
+              // Named example
+              case NamedArg("example", valueTerm) =>
+                valueTerm match {
+                  case Apply(TypeApply(Select(Ident("Some"), "apply"), _), List(Literal(StringConstant(ex)))) =>
+                    paramExample = Some(ex)
+                    exampleSetByName = true
+                  case Select(Ident("None"), _) | Ident("None") =>
+                    paramExample = None
+                  case _ => ()
+                }
+              // Named required
+              case NamedArg("required", Literal(BooleanConstant(b))) =>
+                paramRequired = b
+                requiredSetByName = true
+              // Named schema
+              case NamedArg("schema", valueTerm) =>
+                valueTerm match {
+                  case Apply(TypeApply(Select(Ident("Some"), "apply"), _), List(Literal(StringConstant(sch)))) =>
+                    paramSchema = Some(sch)
+                    schemaSetByName = true
+                  case Select(Ident("None"), _) | Ident("None") =>
+                    paramSchema = None
+                  case _ => ()
+                }
+              // Positional boolean: Only if description was set positionally and required wasn't set by name.
+              case Literal(BooleanConstant(b)) if descriptionSetPositionally && !requiredSetByName =>
+                paramRequired = b
+              // Ignore other argument types or structures
+              case _ => ()
+            }
+          case _ => () // Ignore if annotation term is not an Apply
+        }
+        (paramDesc, paramExample, paramRequired, paramSchema)
+      case None => (None, None, true, None) // Defaults if no @Param
+    }
+  
   // Helper to parse @Resource annotation arguments
   def parseResourceParams(termAny: Any)(using quotes: Quotes): (String, Option[String], Option[String], Option[String]) =
     import quotes.reflect.*
@@ -196,6 +260,102 @@ private[macros] object MacroUtils:
             System.err.println(s"Reflection invocation failed for ${function.getClass.getName} with $argCount args: ${e.getMessage}")
             throw new RuntimeException(s"Failed to invoke function via reflection: ${e.getMessage}", e)
         }.get // Re-throw exception if recovery failed
+    }
+  }
+
+  /**
+   * Takes a JSON schema potentially containing `$defs` and `$ref` and returns
+   * a new JSON schema where all references are resolved and inlined.
+   */
+  def resolveJsonRefs(inputJson: Json): Json = {
+    val cursor = inputJson.hcursor
+    val definitions: Map[String, Json] = cursor
+      .downField("$defs")
+      .as[Map[String, Json]]
+      .getOrElse(Map.empty)
+
+    def resolve(currentJson: Json, defs: Map[String, Json]): Json = {
+      currentJson.fold(
+        jsonNull = Json.Null,
+        jsonBoolean = Json.fromBoolean,
+        jsonNumber = Json.fromJsonNumber,
+        jsonString = Json.fromString,
+        jsonArray = arr => Json.fromValues(arr.map(elem => resolve(elem, defs))),
+        jsonObject = obj => {
+          obj("$ref") match {
+            case Some(refJson) if refJson.isString =>
+              val refPath = refJson.asString.get
+              // Assuming format like "#/$defs/DefinitionName"
+              val defName = refPath.split('/').last
+              defs.get(defName) match {
+                case Some(definition) =>
+                  // Recursively resolve within the definition itself
+                  resolve(definition, defs)
+                case None =>
+                  // Reference not found, return the original ref object
+                  currentJson
+              }
+            case _ =>
+              // Not a $ref object or $ref is not a string,
+              // resolve recursively within values.
+              // Filter out the $defs key if encountered nested (shouldn't happen with root removal).
+              Json.fromJsonObject(
+                JsonObject.fromIterable(
+                  obj.toIterable.filter(_._1 != "$defs").map { case (k, v) => (k, resolve(v, defs)) }
+                )
+              )
+          }
+        }
+      )
+    }
+
+    // Remove top-level $defs before starting resolution
+    val rootJsonWithoutDefs = inputJson.mapObject(_.remove("$defs"))
+    resolve(rootJsonWithoutDefs, definitions)
+  }
+
+  /**
+   * Injects param descriptions (from @Param annotations) into the top-level "properties" fields of the JSON schema.
+   * Returns a new Json with descriptions added.
+   */
+  def injectParamDescriptions(schemaJson: Json, descriptionMap: Map[String, String]): Json = {
+    val cursor = schemaJson.hcursor
+
+    // Navigate to properties object
+    val maybeProps = cursor.downField("properties").focus
+
+    maybeProps match {
+      case Some(propsJson) if propsJson.isObject =>
+        // Build new properties object with description injected
+        val newPropsObj = propsJson.asObject.map { propsObj =>
+          val updatedFields = propsObj.toMap.map {
+            case (fieldName, fieldJson) =>
+              descriptionMap.get(fieldName) match {
+                case Some(desc) =>
+                  // Inject or replace description
+                  val newFieldObj = fieldJson.asObject match {
+                    case Some(obj) => Json.fromJsonObject(obj.add("description", Json.fromString(desc)))
+                    case None => fieldJson
+                  }
+                  fieldName -> newFieldObj
+                case None =>
+                  fieldName -> fieldJson
+              }
+          }
+          JsonObject.fromMap(updatedFields)
+        }
+
+        // Replace properties with updated object
+        newPropsObj match {
+          case Some(obj) =>
+            cursor.withFocus(_.mapObject(_.add("properties", Json.fromJsonObject(obj)))).top.getOrElse(schemaJson)
+          case None =>
+            schemaJson
+        }
+
+      case _ =>
+        // No properties object to inject into
+        schemaJson
     }
   }
 end MacroUtils
