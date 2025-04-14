@@ -10,7 +10,7 @@ lazy val root = (project in file("."))
   .settings(
     name := "fast-mcp-scala",
     // Enable Scala 3 macros
-    resolvers += Resolver.mavenLocal,
+    // resolvers += Resolver.mavenLocal,
     scalacOptions ++= Seq("-Xcheck-macros", "-experimental", "-Xmax-inlines:100000"),
     libraryDependencies ++= Seq(
       // ZIO Core
@@ -35,7 +35,7 @@ lazy val root = (project in file("."))
       "com.softwaremill.sttp.apispec" %% "jsonschema-circe" % "0.11.8",
       
       // MCP SDK
-      "io.modelcontextprotocol.sdk" % "mcp" % "0.10.0-SNAPSHOT",
+      "io.modelcontextprotocol.sdk" % "mcp" % "0.9.0",
       
       // Test dependencies
       "org.scalatest" %% "scalatest" % "3.2.19" % Test,

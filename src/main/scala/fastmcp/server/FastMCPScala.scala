@@ -197,7 +197,7 @@ class FastMCPScala(
             name: String,
             handler: ToolHandler,
             description: Option[String] = None,
-            inputSchema: Either[McpSchema.JsonSchema, String] = Left(new McpSchema.JsonSchema("object", null, null, true, null, null)),
+            inputSchema: Either[McpSchema.JsonSchema, String] = Left(new McpSchema.JsonSchema("object", null, null, true)),
             options: ToolRegistrationOptions = ToolRegistrationOptions()
           ): ZIO[Any, Throwable, FastMCPScala] =
     val definition = ToolDefinition(
@@ -273,9 +273,6 @@ class FastMCPScala(
               template.uriTemplate(), template.name(), template.description(),
               template.mimeType(), template.annotations()
             )
-          case _ =>
-            JSystem.err.println(s"[FastMCPScala] Warning: Unexpected type during resource list conversion for ${resourceDef.uri}")
-            new McpSchema.Resource(resourceDef.uri, resourceDef.name.orNull, resourceDef.description.orNull, resourceDef.mimeType.orNull, null)
         }
       }.asJava
       new McpSchema.ListResourcesResult(javaResources, null)

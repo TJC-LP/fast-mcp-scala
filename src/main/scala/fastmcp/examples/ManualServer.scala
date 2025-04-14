@@ -4,7 +4,7 @@ import fastmcp.core.*
 import fastmcp.macros.{JsonSchemaMacro, MapToFunctionMacro}
 import fastmcp.server.*
 import fastmcp.server.manager.*
-import io.modelcontextprotocol.spec.McpSchema
+import sttp.tapir.generic.auto.*
 import zio.*
 import zio.json.*
 import sttp.tapir.*
@@ -26,17 +26,17 @@ object ManualServer extends ZIOAppDefault:
   // Define TransformationType enum
   enum TransformationType:
     case uppercase, lowercase, reverse, capitalize
-  
+
   object TransformationType:
     given Schema[TransformationType] = Schema.derivedEnumeration.defaultStringBased
-    
+
     // JSON codec for the enum
     given JsonEncoder[TransformationType] = JsonEncoder[String].contramap[TransformationType](_.toString)
     given JsonDecoder[TransformationType] = JsonDecoder[String].mapOrFail { str =>
       try Right(TransformationType.valueOf(str))
       catch case _: IllegalArgumentException => Left(s"Invalid transformation type: $str")
     }
-    
+
   // Define TextStyle enum for more complex formatting
   enum TextStyle:
     case plain, bold, italic, code, heading
@@ -284,19 +284,26 @@ object ManualServer extends ZIOAppDefault:
       style: TextStyle,
       format: OutputFormat
     )
-    
+
     given JsonEncoder[FormattedOutput] = DeriveJsonEncoder.gen[FormattedOutput]
     given JsonDecoder[FormattedOutput] = DeriveJsonDecoder.gen[FormattedOutput]
-    
+
+    case class FormatText(
+                      text: String,
+                      transformation: TransformationType = TransformationType.uppercase,
+                      style: TextStyle = TextStyle.plain,
+                      outputFormat: OutputFormat = OutputFormat.text
+                    )
+
     /**
      * Complex formatting tool that uses multiple enum parameters
      */
     def formatText(
-      text: String,
-      transformation: TransformationType = TransformationType.uppercase,
-      style: TextStyle = TextStyle.plain,
-      outputFormat: OutputFormat = OutputFormat.text
-    ): FormattedOutput =
+                    text: String,
+                    transformation: TransformationType = TransformationType.uppercase,
+                    style: TextStyle = TextStyle.plain,
+                    outputFormat: OutputFormat = OutputFormat.text
+    ): String =
       // First apply the transformation
       val transformedText = transformation match
         case TransformationType.uppercase => text.toUpperCase
@@ -325,4 +332,4 @@ object ManualServer extends ZIOAppDefault:
         transformation = transformation,
         style = style,
         format = outputFormat
-      )
+      ).toJsonPretty

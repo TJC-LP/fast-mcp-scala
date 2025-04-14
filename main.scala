@@ -11,13 +11,13 @@
 //> using dep "com.fasterxml.jackson.datatype:jackson-datatype-jdk8:2.18.3"
 //> using dep "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.18.3"
 
-//> using dep "io.modelcontextprotocol.sdk:mcp:0.10.0-SNAPSHOT" // Updated MCP version to SNAPSHOT
+//> using dep "io.modelcontextprotocol.sdk:mcp:0.9.0" // Updated MCP version to SNAPSHOT
 //> using dep "com.softwaremill.sttp.tapir::tapir-core:1.11.24" // Updated version
 //> using dep "com.softwaremill.sttp.tapir::tapir-apispec-docs:1.11.24" // Updated version
 //> using dep "com.softwaremill.sttp.tapir::tapir-json-circe:1.11.24" // Updated version
 //> using dep "com.softwaremill.sttp.apispec::jsonschema-circe:0.11.8"
 //> using repository "https://repo1.maven.org/maven2"
-//> using repository "m2Local" // Add local Maven repository (~/.m2/repository)
+// //> using repository "m2Local" // Add local Maven repository (~/.m2/repository)
 //> using file "src/main/scala"
 //> using options "-Xcheck-macros" "-experimental" // Enable verbose macro processing
 

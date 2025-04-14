@@ -6,7 +6,7 @@ import sttp.apispec.circe.*
 import sttp.tapir.*
 import sttp.tapir.docs.apispec.schema.*
 import sttp.tapir.generic.auto.*
-import io.circe.Json
+import io.circe.{Json, JsonObject}
 import io.circe.syntax.*
 import sttp.tapir.Schema.SName
 import sttp.tapir.SchemaType.*
@@ -18,22 +18,76 @@ object JsonSchemaMacro:
 
   /**
    * Produces a JSON schema describing the parameters of the given function.
-   * Nested case classes will appear in `$defs`.
+   * Definitions (`$defs`) are resolved and inlined into the `properties`.
    *
    * Example usage:
    * {{{
-   *   def createUser(name: String, age: Int, email: Option[String], tags: List[String], test: Test): Unit = ()
-   *   val schemaJson = JsonSchemaMacro.schemaForFunctionArgs(createUser)
+   *   case class Address(street: String, city: String)
+   *   case class User(name: String, address: Address)
+   *   def processUser(user: User, count: Int): Unit = ()
+   *   val schemaJson = JsonSchemaMacro.schemaForFunctionArgs(processUser)
+   *   // schemaJson will have Address definition inlined within User property.
    *   println(schemaJson.spaces2)
    * }}}
    */
   inline def schemaForFunctionArgs[F](inline fn: F): Json =
     ${ schemaForFunctionArgsImpl('fn) }
 
+  /**
+   * Takes a JSON schema potentially containing `$defs` and `$ref` and returns
+   * a new JSON schema where all references are resolved and inlined.
+   */
+  def resolveJsonRefs(inputJson: Json): Json = {
+    val cursor = inputJson.hcursor
+    val definitions: Map[String, Json] = cursor
+      .downField("$defs")
+      .as[Map[String, Json]]
+      .getOrElse(Map.empty)
+
+    def resolve(currentJson: Json, defs: Map[String, Json]): Json = {
+      currentJson.fold(
+        jsonNull = Json.Null,
+        jsonBoolean = Json.fromBoolean,
+        jsonNumber = Json.fromJsonNumber,
+        jsonString = Json.fromString,
+        jsonArray = arr => Json.fromValues(arr.map(elem => resolve(elem, defs))),
+        jsonObject = obj => {
+          obj("$ref") match {
+            case Some(refJson) if refJson.isString =>
+              val refPath = refJson.asString.get
+              // Assuming format like "#/$defs/DefinitionName"
+              val defName = refPath.split('/').last
+              defs.get(defName) match {
+                case Some(definition) =>
+                  // Recursively resolve within the definition itself
+                  resolve(definition, defs)
+                case None =>
+                  // Reference not found, return the original ref object
+                  // Consider logging a warning here
+                  currentJson
+              }
+            case _ =>
+              // Not a $ref object or $ref is not a string,
+              // resolve recursively within values.
+              // Filter out the $defs key if encountered nested (shouldn't happen with root removal).
+              Json.fromJsonObject(
+                obj.filterKeys(_ != "$defs").mapValues(value => resolve(value, defs))
+              )
+          }
+        }
+      )
+    }
+
+    // Remove top-level $defs before starting resolution
+    val rootJsonWithoutDefs = inputJson.mapObject(_.remove("$defs"))
+    resolve(rootJsonWithoutDefs, definitions)
+  }
+
+
   private def schemaForFunctionArgsImpl[F: Type](fn: Expr[F])(using Quotes): Expr[Json] = {
     import quotes.reflect.*
-    
-    // =========== HELPER METHOD ===========
+
+    // =========== HELPER METHODS (maybeAssignNameToSchema, extractParams, maybeRealParamNames) - unchanged ===========
 
     /**
      * Optionally give a name to a Tapir Schema[T]. If T is a product/sum type, Tapir
@@ -44,16 +98,12 @@ object JsonSchemaMacro:
       val tpeRepr = TypeRepr.of[T]
       val tpeSym = tpeRepr.typeSymbol
 
-      // If T is a case class or a Scala 3 "product",
-      // we can name it using e.g. the short name of the type (the symbol name).
-      // Otherwise we just return the schema unmodified.
       val isProduct = tpeSym.isClassDef && tpeSym.caseFields.nonEmpty
 
       if (isProduct) {
         val shortName = tpeSym.name // e.g. "Test"
         '{ $originalSchema.name(SName(${ Expr(shortName) })) }
       } else {
-        // not a product type, or no fields => no special naming
         originalSchema
       }
     }
@@ -66,15 +116,12 @@ object JsonSchemaMacro:
     def extractParams(tpe: TypeRepr, maybeParamNames: Option[List[String]]): List[(String, TypeRepr)] = {
       tpe.widen match {
         case MethodType(paramNames, paramTypes, _) =>
-          // e.g. def createUser(name: String, age: Int): ...
           paramNames.zip(paramTypes)
 
         case PolyType(_, _, resType) =>
-          // e.g. def createUser[A](...) => unwrap
           extractParams(resType, maybeParamNames)
 
         case AppliedType(fnType, argTypes) if fnType.typeSymbol.fullName.startsWith("scala.Function") =>
-          // it's a FunctionN => paramTpes are all but the last (return type)
           val paramTpes = argTypes.dropRight(1)
           val names = maybeParamNames match {
             case Some(realNames) if realNames.length == paramTpes.length =>
@@ -123,58 +170,50 @@ object JsonSchemaMacro:
         maybeRealParamNames(expr)
 
       case _ =>
-        // can't find param names -> fallback
         None
     }
 
-    // =========== MAIN MACRO LOGIC ===========
+    // =========== MAIN MACRO LOGIC (mostly unchanged) ===========
 
     val fnTerm = fn.asTerm
     val fnType = fnTerm.tpe
 
-    // gather param names & types
     val paramNamesOpt = maybeRealParamNames(fnTerm)
     val params: List[(String, TypeRepr)] = extractParams(fnType, paramNamesOpt)
 
-    // For each param, we summon the Tapir Schema[t], optionally name it if t is a product type.
     val productFieldsExpr: List[Expr[SProductField[Unit]]] = params.map { case (paramName, paramType) =>
       paramType.asType match {
         case '[t] =>
-          // Summon the schema at call site
           val rawSchemaExpr = Expr.summon[Schema[t]].getOrElse {
             report.errorAndAbort(
               s"No Tapir Schema found for parameter '$paramName' of type: ${Type.show[t]}"
             )
           }
-
-          // Possibly name the schema (for case classes). E.g. => .name(SName("Test"))
           val namedSchemaExpr = maybeAssignNameToSchema[t](rawSchemaExpr)
-
-          // Return an SProductField referencing that named schema
           '{
             SProductField[Unit, t](
               FieldName(${ Expr(paramName) }),
               $namedSchemaExpr,
-              (_: Unit) => None  // We don't need a real getter here, since this is just for schema generation
+              (_: Unit) => None
             )
           }
       }
     }
 
-    // Combine fields => Single SProduct => top-level schema
     val fieldsListExpr: Expr[List[SProductField[Unit]]] = Expr.ofList(productFieldsExpr)
     val productSchemaExpr: Expr[Schema[Unit]] = '{
-      // Optionally name the top-level schema so that it also can appear in $defs if nested in a bigger schema
       Schema(
         SProduct[Unit](fields = $fieldsListExpr)
-      ).name(SName("FunctionArgs"))
+      ).name(SName("FunctionArgs")) // Still useful if this schema is nested elsewhere
     }
 
-    // Convert to Apispec + Circe JSON
+    // Convert to Apispec + Circe JSON, then resolve references
     '{
       // Convert Tapir schema -> apispec schema
       val apispecSchema = TapirSchemaToJsonSchema($productSchemaExpr, markOptionsAsNullable = true)
-      apispecSchema.asJson
+      // Convert apispec schema -> initial circe JSON (potentially with $defs/$ref)
+      val initialJson = apispecSchema.asJson
+      // Post-process the JSON to resolve and inline references
+      JsonSchemaMacro.resolveJsonRefs(initialJson)
     }
   }
-
