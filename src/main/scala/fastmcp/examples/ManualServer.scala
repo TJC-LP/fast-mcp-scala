@@ -4,7 +4,6 @@ import fastmcp.core.*
 import fastmcp.macros.{JsonSchemaMacro, MapToFunctionMacro}
 import fastmcp.server.*
 import fastmcp.server.manager.*
-import sttp.tapir.generic.auto.*
 import zio.*
 import zio.json.*
 import sttp.tapir.*
@@ -21,54 +20,8 @@ object ManualServer extends ZIOAppDefault:
 
   // JSON codecs for our custom types
   given JsonEncoder[CalculatorResult] = DeriveJsonEncoder.gen[CalculatorResult]
+
   given JsonDecoder[CalculatorResult] = DeriveJsonDecoder.gen[CalculatorResult]
-  
-  // Define TransformationType enum
-  enum TransformationType:
-    case uppercase, lowercase, reverse, capitalize
-
-  object TransformationType:
-    given Schema[TransformationType] = Schema.derivedEnumeration.defaultStringBased
-
-    // JSON codec for the enum
-    given JsonEncoder[TransformationType] = JsonEncoder[String].contramap[TransformationType](_.toString)
-    given JsonDecoder[TransformationType] = JsonDecoder[String].mapOrFail { str =>
-      try Right(TransformationType.valueOf(str))
-      catch case _: IllegalArgumentException => Left(s"Invalid transformation type: $str")
-    }
-
-  // Define TextStyle enum for more complex formatting
-  enum TextStyle:
-    case plain, bold, italic, code, heading
-  
-  object TextStyle:
-    given Schema[TextStyle] = Schema.derivedEnumeration.defaultStringBased
-    
-    // JSON codec for the enum
-    given JsonEncoder[TextStyle] = JsonEncoder[String].contramap[TextStyle](_.toString)
-    given JsonDecoder[TextStyle] = JsonDecoder[String].mapOrFail { str =>
-      try Right(TextStyle.valueOf(str))
-      catch case _: IllegalArgumentException => Left(s"Invalid text style: $str")
-    }
-    
-  // Define OutputFormat enum
-  enum OutputFormat:
-    case text, html, markdown, json
-  
-  object OutputFormat:
-    given Schema[OutputFormat] = Schema.derivedEnumeration.defaultStringBased
-    
-    // JSON codec for the enum
-    given JsonEncoder[OutputFormat] = JsonEncoder[String].contramap[OutputFormat](_.toString)
-    given JsonDecoder[OutputFormat] = JsonDecoder[String].mapOrFail { str =>
-      try Right(OutputFormat.valueOf(str))
-      catch case _: IllegalArgumentException => Left(s"Invalid output format: $str")
-    }
-
-  def add(
-           a: Int,
-           b: Int
-         ): Int = a + b
 
   /**
    * Main entry point
@@ -80,10 +33,10 @@ object ManualServer extends ZIOAppDefault:
         name = "MacroAnnotatedServer",
         version = "0.1.0"
       ))
-      
+
       // Start registering tools from CalculatorTools directly in the for-comprehension
       _ <- ZIO.succeed(JSystem.err.println("[AnnotatedServer] Directly registering tools from CalculatorTools..."))
-      
+
       // Register CalculatorTools.add
       addSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.add).spaces2)
       _ <- server.tool(
@@ -101,7 +54,7 @@ object ManualServer extends ZIOAppDefault:
         handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.addString)(args)),
         inputSchema = addStringSchema
       )
-      
+
       // Register CalculatorTools.multiply
       multiplySchema = Right(JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.multiply).spaces2)
       _ <- server.tool(
@@ -110,7 +63,7 @@ object ManualServer extends ZIOAppDefault:
         handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.multiply)(args)),
         inputSchema = multiplySchema
       )
-      
+
       // Register CalculatorTools.calculate
       calculateSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.calculate).spaces2)
       _ <- server.tool(
@@ -119,10 +72,10 @@ object ManualServer extends ZIOAppDefault:
         handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.calculate)(args)),
         inputSchema = calculateSchema
       )
-      
+
       // Register tools from StringTools
       _ <- ZIO.succeed(JSystem.err.println("[AnnotatedServer] Directly registering tools from StringTools..."))
-      
+
       // Register StringTools.greet
       greetSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(StringTools.greet).spaces2)
       _ <- server.tool(
@@ -131,7 +84,7 @@ object ManualServer extends ZIOAppDefault:
         handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(StringTools.greet)(args)),
         inputSchema = greetSchema
       )
-      
+
       // Register StringTools.transformText with enum parameter
       transformSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(StringTools.transformText).spaces2)
       _ <- server.tool(
@@ -140,7 +93,7 @@ object ManualServer extends ZIOAppDefault:
         handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(StringTools.transformText)(args)),
         inputSchema = transformSchema
       )
-      
+
       // Register the complex formatting tool with multiple enum parameters
       formatTextSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(TextFormatTools.formatText).spaces2)
       _ <- server.tool(
@@ -150,8 +103,8 @@ object ManualServer extends ZIOAppDefault:
         handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(TextFormatTools.formatText)(args)),
         inputSchema = formatTextSchema
       )
-      
-      // For demonstration purposes, also register a tool manually 
+
+      // For demonstration purposes, also register a tool manually
       addManualSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(add).spaces2)
       _ <- server.tool(
         name = "add-manual",
@@ -164,6 +117,23 @@ object ManualServer extends ZIOAppDefault:
       _ <- server.runStdio()
     yield ()
 
+  def add(
+           a: Int,
+           b: Int
+         ): Int = a + b
+
+  // Define TransformationType enum
+  enum TransformationType:
+    case uppercase, lowercase, reverse, capitalize
+
+  // Define TextStyle enum for more complex formatting
+  enum TextStyle:
+    case plain, bold, italic, code, heading
+
+  // Define OutputFormat enum
+  enum OutputFormat:
+    case text, html, markdown, json
+
   /**
    * Output type for calculator tool
    */
@@ -172,6 +142,33 @@ object ManualServer extends ZIOAppDefault:
                                numbers: List[Double],
                                result: Double
                              )
+
+  object TransformationType:
+    // JSON codec for the enum
+    given JsonEncoder[TransformationType] = JsonEncoder[String].contramap[TransformationType](_.toString)
+
+    given JsonDecoder[TransformationType] = JsonDecoder[String].mapOrFail { str =>
+      try Right(TransformationType.valueOf(str))
+      catch case _: IllegalArgumentException => Left(s"Invalid transformation type: $str")
+    }
+
+  object TextStyle:
+    // JSON codec for the enum
+    given JsonEncoder[TextStyle] = JsonEncoder.derived[TextStyle]
+
+    given JsonDecoder[TextStyle] = JsonDecoder[String].mapOrFail { str =>
+      try Right(TextStyle.valueOf(str))
+      catch case _: IllegalArgumentException => Left(s"Invalid text style: $str")
+    }
+
+  object OutputFormat:
+    // JSON codec for the enum
+    given JsonEncoder[OutputFormat] = JsonEncoder[String].contramap[OutputFormat](_.toString)
+
+    given JsonDecoder[OutputFormat] = JsonDecoder[String].mapOrFail { str =>
+      try Right(OutputFormat.valueOf(str))
+      catch case _: IllegalArgumentException => Left(s"Invalid output format: $str")
+    }
 
   /**
    * Calculator tools with various arithmetic operations
@@ -272,28 +269,14 @@ object ManualServer extends ZIOAppDefault:
         case TransformationType.lowercase => text.toLowerCase
         case TransformationType.capitalize => text.split(" ").map(_.capitalize).mkString(" ")
         case TransformationType.reverse => text.reverse
-        
+
   /**
    * Advanced text formatting tools using multiple enums
    */
   object TextFormatTools:
-    case class FormattedOutput(
-      originalText: String,
-      formattedText: String,
-      transformation: TransformationType,
-      style: TextStyle,
-      format: OutputFormat
-    )
-
     given JsonEncoder[FormattedOutput] = DeriveJsonEncoder.gen[FormattedOutput]
-    given JsonDecoder[FormattedOutput] = DeriveJsonDecoder.gen[FormattedOutput]
 
-    case class FormatText(
-                      text: String,
-                      transformation: TransformationType = TransformationType.uppercase,
-                      style: TextStyle = TextStyle.plain,
-                      outputFormat: OutputFormat = OutputFormat.text
-                    )
+    given JsonDecoder[FormattedOutput] = DeriveJsonDecoder.gen[FormattedOutput]
 
     /**
      * Complex formatting tool that uses multiple enum parameters
@@ -303,14 +286,14 @@ object ManualServer extends ZIOAppDefault:
                     transformation: TransformationType = TransformationType.uppercase,
                     style: TextStyle = TextStyle.plain,
                     outputFormat: OutputFormat = OutputFormat.text
-    ): String =
+                  ): String =
       // First apply the transformation
       val transformedText = transformation match
         case TransformationType.uppercase => text.toUpperCase
         case TransformationType.lowercase => text.toLowerCase
         case TransformationType.capitalize => text.split(" ").map(_.capitalize).mkString(" ")
         case TransformationType.reverse => text.reverse
-      
+
       // Then apply the style based on output format
       val styledText = (style, outputFormat) match
         case (TextStyle.plain, _) => transformedText
@@ -325,7 +308,7 @@ object ManualServer extends ZIOAppDefault:
         case (TextStyle.heading, OutputFormat.json) => transformedText.toUpperCase
         case (style, OutputFormat.json) => transformedText // In JSON mode, we ignore styling
         case (style, _) => transformedText // Default for other combinations
-      
+
       FormattedOutput(
         originalText = text,
         formattedText = styledText,
@@ -333,3 +316,18 @@ object ManualServer extends ZIOAppDefault:
         style = style,
         format = outputFormat
       ).toJsonPretty
+
+    case class FormattedOutput(
+                                originalText: String,
+                                formattedText: String,
+                                transformation: TransformationType,
+                                style: TextStyle,
+                                format: OutputFormat
+                              )
+
+    case class FormatText(
+                           text: String,
+                           transformation: TransformationType = TransformationType.uppercase,
+                           style: TextStyle = TextStyle.plain,
+                           outputFormat: OutputFormat = OutputFormat.text
+                         )
