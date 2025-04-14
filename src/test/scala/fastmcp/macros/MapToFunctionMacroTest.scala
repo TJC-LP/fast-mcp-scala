@@ -56,7 +56,7 @@ class MapToFunctionMacroTest extends AnyFunSuite with Matchers {
     
     // Test with explicitly providing the optional as None
     val result2 = mapFunction.asInstanceOf[Map[String, Any] => String](Map("name" -> "Alice", "title" -> None))
-    result2 should be("null Alice")
+    result2 should be("Alice")
     
     // Test with optional parameter provided as Some
     val result3 = mapFunction.asInstanceOf[Map[String, Any] => String](Map("name" -> "Alice", "title" -> Some("Dr.")))

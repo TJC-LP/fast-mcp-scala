@@ -69,15 +69,19 @@ class JsonSchemaMacroTest extends AnyFunSuite {
     
     val schema = JsonSchemaMacro.schemaForFunctionArgs(complexFunction)
 
-    // Check that we have a $defs section for the Person schema
-    val defs = schema.hcursor.downField("$defs").focus.getOrElse(Json.Null)
-    assert(defs.isObject)
-    assert(defs.hcursor.downField("Person").focus.isDefined)
-    
-    // Verify person property references the Person schema
+    // With our new implementation we no longer use $defs, but instead inline schemas in properties
     val properties = schema.hcursor.downField("properties").focus.getOrElse(Json.Null)
-    val personRef = properties.hcursor.downField("person").downField("$ref").as[String].getOrElse("")
-    assert(personRef == "#/$defs/Person")
+    
+    // Verify person property contains an inlined schema 
+    val personProperty = properties.hcursor.downField("person").focus.getOrElse(Json.Null)
+    assert(personProperty.isObject)
+    assert(personProperty.hcursor.downField("type").as[String].getOrElse("") == "object")
+    
+    // Check that person has its own properties section
+    val personProps = personProperty.hcursor.downField("properties").focus.getOrElse(Json.Null)
+    assert(personProps.isObject)
+    assert(personProps.hcursor.downField("name").focus.isDefined)
+    assert(personProps.hcursor.downField("age").focus.isDefined)
     
     // Verify tags property is an array
     val tagsProperty = properties.hcursor.downField("tags").focus.getOrElse(Json.Null)
@@ -90,28 +94,27 @@ class JsonSchemaMacroTest extends AnyFunSuite {
     
     val schema = JsonSchemaMacro.schemaForFunctionArgs(userFunction)
     
-    // Verify we have definitions for User, Person, and Address
-    val defs = schema.hcursor.downField("$defs").focus.getOrElse(Json.Null)
-    assert(defs.hcursor.downField("User").focus.isDefined)
-    assert(defs.hcursor.downField("Person").focus.isDefined)
-    assert(defs.hcursor.downField("Address").focus.isDefined)
-    
-    // Verify the user property references the User schema
+    // With our new implementation we no longer use $defs, but instead inline all schemas in properties
     val properties = schema.hcursor.downField("properties").focus.getOrElse(Json.Null)
-    val userRef = properties.hcursor.downField("user").downField("$ref").as[String].getOrElse("")
-    assert(userRef == "#/$defs/User")
     
-    // Navigate into the User schema and verify it references Person and Address schemas
-    val userSchema = defs.hcursor.downField("User").focus.getOrElse(Json.Null)
-    val userProperties = userSchema.hcursor.downField("properties").focus.getOrElse(Json.Null)
+    // Verify the user property contains a nested schema
+    val userProperty = properties.hcursor.downField("user").focus.getOrElse(Json.Null)
+    assert(userProperty.isObject)
+    assert(userProperty.hcursor.downField("type").as[String].getOrElse("") == "object")
     
-    // Check Person reference
-    val personRef = userProperties.hcursor.downField("person").downField("$ref").as[String].getOrElse("")
-    assert(personRef == "#/$defs/Person")
+    // Navigate into the User schema and verify it has nested Person and Address schemas
+    val userProperties = userProperty.hcursor.downField("properties").focus.getOrElse(Json.Null)
+    assert(userProperties.isObject)
     
-    // Check Address reference
-    val addressRef = userProperties.hcursor.downField("address").downField("$ref").as[String].getOrElse("")
-    assert(addressRef == "#/$defs/Address")
+    // Check Person is inlined 
+    val personProperty = userProperties.hcursor.downField("person").focus.getOrElse(Json.Null)
+    assert(personProperty.isObject)
+    assert(personProperty.hcursor.downField("type").as[String].getOrElse("") == "object")
+    
+    // Check Address is inlined
+    val addressProperty = userProperties.hcursor.downField("address").focus.getOrElse(Json.Null)
+    assert(addressProperty.isObject)
+    assert(addressProperty.hcursor.downField("type").as[String].getOrElse("") == "object")
   }
   
   // Test with optional parameters
@@ -143,21 +146,13 @@ class JsonSchemaMacroTest extends AnyFunSuite {
     val properties = schema.hcursor.downField("properties").focus.getOrElse(Json.Null)
     assert(properties.isObject)
     
-    // Check that we have a $defs section for the Color enum schema
-    val defs = schema.hcursor.downField("$defs").focus.getOrElse(Json.Null)
-    assert(defs.isObject)
-    assert(defs.hcursor.downField("Color").focus.isDefined)
+    // With our new implementation, enum values are inlined in the property
+    val colorProperty = properties.hcursor.downField("color").focus.getOrElse(Json.Null)
+    assert(colorProperty.isObject)
+    assert(colorProperty.hcursor.downField("type").as[String].getOrElse("") == "string")
     
-    // Verify color property references the Color schema
-    val colorRef = properties.hcursor.downField("color").downField("$ref").as[String].getOrElse("")
-    assert(colorRef == "#/$defs/Color")
-    
-    // Verify the Color enum definition has the correct structure
-    val colorSchema = defs.hcursor.downField("Color").focus.getOrElse(Json.Null)
-    assert(colorSchema.hcursor.downField("type").as[String].getOrElse("") == "string")
-    
-    // Verify the enum values are present
-    val enumValues = colorSchema.hcursor.downField("enum").as[List[String]].getOrElse(List())
+    // Verify the enum values are present directly in the property
+    val enumValues = colorProperty.hcursor.downField("enum").as[List[String]].getOrElse(List())
     assert(enumValues.nonEmpty)
     assert(enumValues.contains("RED"))
     assert(enumValues.contains("GREEN"))

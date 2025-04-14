@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.DeserializationFeature
 
 import scala.annotation.tailrec
 import scala.quoted.*
-// Changed import to JsonMapper
 import com.fasterxml.jackson.databind.json.JsonMapper
 import com.fasterxml.jackson.module.scala.{ClassTagExtensions, DefaultScalaModule}
 
@@ -209,10 +208,13 @@ object MapToFunctionMacro:
               val nameStr = $nameExpr
               if ($mapExpr.contains(nameStr)) {
                 val rawValue = $mapExpr(nameStr)
-                if (rawValue == null) None
+                if (rawValue == null || rawValue == None) None
                 else {
                   implicit val ct: ClassTag[t] = ${ innerClassTagExpr.asInstanceOf[Expr[ClassTag[t]]] }
-                  Some(MapToFunctionMacro.mapper.convertValue[t](rawValue))
+                  rawValue match {
+                    case Some(v) => Some(MapToFunctionMacro.mapper.convertValue[t](v))
+                    case v => Some(MapToFunctionMacro.mapper.convertValue[t](v))
+                  }
                 }
               } else None
             }
