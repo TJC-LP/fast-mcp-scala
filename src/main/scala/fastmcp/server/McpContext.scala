@@ -1,6 +1,6 @@
 package fastmcp.server
 
-import io.modelcontextprotocol.server.McpSyncServerExchange
+import io.modelcontextprotocol.server.{McpAsyncServerExchange, McpSyncServerExchange}
 import io.modelcontextprotocol.spec.McpSchema
 
 /**
@@ -9,7 +9,7 @@ import io.modelcontextprotocol.spec.McpSchema
  */
 case class McpContext(
                        // Underlying Java exchange object for advanced use or accessing client capabilities
-                       javaExchange: Option[McpSyncServerExchange] = None
+                       javaExchange: Option[McpAsyncServerExchange] = None
                      )
 
 /**
