@@ -1,7 +1,6 @@
 package fastmcp.macros
 
 import fastmcp.core.*
-import fastmcp.macros.MapToFunctionMacro
 import fastmcp.server.FastMCPScala
 import fastmcp.server.manager.*
 import zio.*
@@ -18,13 +17,13 @@ private[macros] object PromptProcessor:
    * Process a @Prompt annotation and generate registration code
    */
   def processPromptAnnotation(
-      server: Expr[FastMCPScala],
-      ownerSymAny: Any,
-      methodAny: Any,
-      promptAnnotAny: Any
-  )(using quotes: Quotes): Expr[FastMCPScala] =
+                               server: Expr[FastMCPScala],
+                               ownerSymAny: Any,
+                               methodAny: Any,
+                               promptAnnotAny: Any
+                             )(using quotes: Quotes): Expr[FastMCPScala] =
     import quotes.reflect.*
-    val ownerSym  = ownerSymAny.asInstanceOf[Symbol]
+    val ownerSym = ownerSymAny.asInstanceOf[Symbol]
     val methodSym = methodAny.asInstanceOf[Symbol]
     val promptAnnot = promptAnnotAny.asInstanceOf[Term]
 
@@ -44,10 +43,10 @@ private[macros] object PromptProcessor:
       val paramAnnotTerm = param.annotations.find(_.tpe <:< TypeRepr.of[PromptParam]).map(_.asExpr.asTerm)
       val (paramDesc, paramRequired) = MacroUtils.parsePromptParamArgs(paramAnnotTerm)
       '{ PromptArgument(
-          name = ${Expr(paramName)},
-          description = ${Expr(paramDesc)},
-          required = ${Expr(paramRequired)}
-        )}
+        name = ${ Expr(paramName) },
+        description = ${ Expr(paramDesc) },
+        required = ${ Expr(paramRequired) }
+      ) }
     }
     val promptArgsExpr = Expr.ofList(promptArgs)
 
@@ -55,15 +54,14 @@ private[macros] object PromptProcessor:
     val methodRefExpr = MacroUtils.getMethodRefExpr(ownerSym, methodSym)
 
     '{
-      JSystem.err.println(s"[McpAnnotationProcessor] Registering @Prompt: ${${Expr(finalName)}}")
-      val handler: PromptHandler = (args: Map[String, Any]) => ZIO.attempt {
-        MapToFunctionMacro.callByMap($methodRefExpr).asInstanceOf[Map[String, Any] => List[Message]](args)
-      }
+      JSystem.err.println(s"[McpAnnotationProcessor] Registering @Prompt: ${${ Expr(finalName) }}")
       val regEffect = $server.prompt(
-        name = ${Expr(finalName)},
-        description = ${Expr(finalDesc)},
+        name = ${ Expr(finalName) },
+        description = ${ Expr(finalDesc) },
         arguments = Some($promptArgsExpr),
-        handler = handler
+        handler = (args: Map[String, Any]) => ZIO.attempt {
+          MapToFunctionMacro.callByMap($methodRefExpr).asInstanceOf[Map[String, Any] => List[Message]](args)
+        }
       )
       zio.Unsafe.unsafe { implicit unsafe =>
         zio.Runtime.default.unsafe.run(regEffect).getOrThrowFiberFailure()

@@ -2,10 +2,8 @@ package fastmcp.macros
 
 import fastmcp.core.ResourceParam
 import fastmcp.server.FastMCPScala
-import fastmcp.server.manager.* // Imports ResourceDefinition, ResourceHandler, ResourceTemplateHandler, ResourceArgument
+import fastmcp.server.manager.*
 import zio.*
-import zio.json.*
-import zio.json.EncoderOps
 
 import java.lang.System as JSystem
 import scala.quoted.*
@@ -25,7 +23,7 @@ private[macros] object ResourceProcessor:
   def processResourceAnnotation(
                                  server: Expr[FastMCPScala],
                                  ownerSymAny: Any, // Symbol of the class/object containing the method
-                                 methodAny: Any,   // Symbol of the annotated method
+                                 methodAny: Any, // Symbol of the annotated method
                                  resourceAnnotAny: Any // Term representing the @Resource annotation instance
                                )(using quotes: Quotes): Expr[FastMCPScala] =
     import quotes.reflect.*
@@ -36,13 +34,13 @@ private[macros] object ResourceProcessor:
     val resourceAnnot = resourceAnnotAny.asInstanceOf[Term]
     val methodName = methodSym.name
 
-    val (uri, annotName, annotDesc, mimeType) = MacroUtils.parseResourceParams(resourceAnnot)
+    val (uri_, annotName, annotDesc, mimeType_) = MacroUtils.parseResourceParams(resourceAnnot)
     val finalName = annotName.orElse(Some(methodName))
     val finalDesc = annotDesc.orElse(methodSym.docstring)
 
     // --- 2. Determine Resource Type (Static vs. Template) ---
-    val uriTemplatePattern = """\{([^{}]+)\}""".r
-    val uriParams = uriTemplatePattern.findAllMatchIn(uri).map(_.group(1)).toList
+    val uriTemplatePattern = """\{([^{}]+)}""".r
+    val uriParams = uriTemplatePattern.findAllMatchIn(uri_).map(_.group(1)).toList
     val isTemplate = uriParams.nonEmpty
 
     // --- 3. Parameter Validation and Argument Gathering ---
@@ -54,9 +52,9 @@ private[macros] object ResourceProcessor:
         val placeholderNames = uriParams.toSet
         if (placeholderNames != methodParamNames) {
           report.errorAndAbort(
-            s"Resource template URI parameters {${uriParams.mkString(", ")}} in '$uri' " +
+            s"Resource template URI parameters {${uriParams.mkString(", ")}} in '$uri_' " +
               s"do not match function parameters (${methodParamNames.mkString(", ")}) " +
-              s"for method '${methodName}'. Ensure parameter names match URI placeholders exactly."
+              s"for method '$methodName'. Ensure parameter names match URI placeholders exactly."
           )
         }
         val argsList: List[Expr[ResourceArgument]] = methodParamSyms.map { psym =>
@@ -65,36 +63,34 @@ private[macros] object ResourceProcessor:
           val resourceParamAnnotOpt = psym.annotations.find(_.tpe <:< TypeRepr.of[ResourceParam])
           var paramAnnotDesc: Option[String] = None
           var paramAnnotRequired: Boolean = true
-          resourceParamAnnotOpt.map(_.asExpr.asTerm).foreach { annotTerm =>
-            annotTerm match {
-              case Apply(_, argVals) =>
-                argVals.foreach {
-                  case Literal(StringConstant(s)) => paramAnnotDesc = Some(s)
-                  case NamedArg("description", Literal(StringConstant(s))) => paramAnnotDesc = Some(s)
-                  case NamedArg("required", Literal(BooleanConstant(b))) => paramAnnotRequired = b
-                  case lit @ Literal(_) if argVals.size > 1 && {
-                    argVals.head match { 
-                      case _: Literal => true
-                      case _ => false 
-                    }
-                  } => 
-                    lit match {
-                      case Literal(BooleanConstant(b)) => paramAnnotRequired = b
-                      case _ => ()
-                    }
-                  case _ => ()
-                }
-              case _ => ()
-            }
+          resourceParamAnnotOpt.map(_.asExpr.asTerm).foreach {
+            case Apply(_, argVals) =>
+              argVals.foreach {
+                case Literal(StringConstant(s)) => paramAnnotDesc = Some(s)
+                case NamedArg("description", Literal(StringConstant(s))) => paramAnnotDesc = Some(s)
+                case NamedArg("required", Literal(BooleanConstant(b))) => paramAnnotRequired = b
+                case lit@Literal(_) if argVals.size > 1 && {
+                  argVals.head match {
+                    case _: Literal => true
+                    case _ => false
+                  }
+                } =>
+                  lit match {
+                    case Literal(BooleanConstant(b)) => paramAnnotRequired = b
+                    case _ => ()
+                  }
+                case _ => ()
+              }
+            case _ => ()
           }
           val finalParamDesc = paramAnnotDesc.orElse(paramDoc)
-          '{ ResourceArgument(${Expr(paramName)}, ${Expr(finalParamDesc)}, ${Expr(paramAnnotRequired)}) }
+          '{ ResourceArgument(${ Expr(paramName) }, ${ Expr(finalParamDesc) }, ${ Expr(paramAnnotRequired) }) }
         }
-        '{ Some(${Expr.ofList(argsList)}) }
+        '{ Some(${ Expr.ofList(argsList) }) }
       } else {
         if (methodParamSyms.nonEmpty) {
           report.errorAndAbort(
-            s"Static resource method '${methodName}' (URI: '$uri') must not have parameters. Found: ${methodParamNames.mkString(", ")}"
+            s"Static resource method '$methodName' (URI: '$uri_') must not have parameters. Found: ${methodParamNames.mkString(", ")}"
           )
         }
         '{ None }
@@ -107,26 +103,24 @@ private[macros] object ResourceProcessor:
       if (isTemplate) {
         // --- Generate Template Handler and Call server.resourceTemplate ---
         '{
-          JSystem.err.println(s"[ResourceProcessor] Registering TEMPLATE resource: ${${Expr(uri)}} -> ${${Expr(methodName)}}")
-          val handler: ResourceTemplateHandler = (params: Map[String, String]) =>
-            ZIO.attempt {
-              val fn = MapToFunctionMacro.callByMap($methodRefExpr)
-              val anyParams: Map[String, Any] = params.asInstanceOf[Map[String, Any]]
-              val result: Any = fn.asInstanceOf[Map[String, Any] => Any](anyParams)
-              result match {
-                case s: String => s
-                case b: Array[Byte] => b
-                case other => other.toString
-              }
-            }
-
+          JSystem.err.println(s"[ResourceProcessor] Registering TEMPLATE resource: ${${ Expr(uri_) }} -> ${${ Expr(methodName) }}")
           // Call server.resourceTemplate
           val registrationEffect = $server.resourceTemplate(
-            uriPattern = ${Expr(uri)},
-            handler = handler,
-            name = ${Expr(finalName)},
-            description = ${Expr(finalDesc)},
-            mimeType = ${Expr(mimeType)},
+            uriPattern = ${ Expr(uri_) },
+            handler = (params: Map[String, String]) =>
+              ZIO.attempt {
+                val fn = MapToFunctionMacro.callByMap($methodRefExpr)
+                val anyParams: Map[String, Any] = params.asInstanceOf[Map[String, Any]]
+                val result: Any = fn.asInstanceOf[Map[String, Any] => Any](anyParams)
+                result match {
+                  case s: String => s
+                  case b: Array[Byte] => b
+                  case other => other.toString
+                }
+              },
+            name = ${ Expr(finalName) },
+            description = ${ Expr(finalDesc) },
+            mimeType = ${ Expr(mimeType_) },
             arguments = $resourceArgumentsExpr // Pass the generated arguments Expr
           )
           Unsafe.unsafe { implicit unsafe => Runtime.default.unsafe.run(registrationEffect).getOrThrowFiberFailure() }
@@ -135,25 +129,23 @@ private[macros] object ResourceProcessor:
       } else {
         // --- Generate Static Handler and Call server.resource ---
         '{
-          JSystem.err.println(s"[ResourceProcessor] Registering STATIC resource: ${${Expr(uri)}} -> ${${Expr(methodName)}}")
-          val handler: ResourceHandler = () =>
-            ZIO.attempt {
-              val fn = MapToFunctionMacro.callByMap($methodRefExpr)
-              val result: Any = fn.asInstanceOf[Map[String, Any] => Any](Map.empty)
-              result match {
-                case s: String => s
-                case b: Array[Byte] => b
-                case other => other.toString
-              }
-            }
-
+          JSystem.err.println(s"[ResourceProcessor] Registering STATIC resource: ${${ Expr(uri_) }} -> ${${ Expr(methodName) }}")
           // Call server.resource
           val registrationEffect = $server.resource(
-            uri = ${Expr(uri)},
-            handler = handler,
-            name = ${Expr(finalName)},
-            description = ${Expr(finalDesc)},
-            mimeType = ${Expr(mimeType)}
+            uri = ${ Expr(uri_) },
+            handler = () =>
+              ZIO.attempt {
+                val fn = MapToFunctionMacro.callByMap($methodRefExpr)
+                val result: Any = fn.asInstanceOf[Map[String, Any] => Any](Map.empty)
+                result match {
+                  case s: String => s
+                  case b: Array[Byte] => b
+                  case other => other.toString
+                }
+              },
+            name = ${ Expr(finalName) },
+            description = ${ Expr(finalDesc) },
+            mimeType = ${ Expr(mimeType_) }
             // No 'arguments' parameter for the static method
           )
           Unsafe.unsafe { implicit unsafe => Runtime.default.unsafe.run(registrationEffect).getOrThrowFiberFailure() }

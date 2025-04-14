@@ -1,12 +1,8 @@
 package fastmcp.macros
 
 import fastmcp.core.*
-import fastmcp.macros.{JsonSchemaMacro, MapToFunctionMacro}
 import fastmcp.server.FastMCPScala
-import fastmcp.server.manager.*
-import zio.*
 
-import java.lang.System as JSystem
 import scala.quoted.*
 
 /**
@@ -32,8 +28,8 @@ object McpToolRegistrationMacro:
    * Macro implementation for scanAnnotations
    */
   private def scanAnnotationsImpl[T: Type](
-      server: Expr[FastMCPScala]
-  )(using quotes: Quotes): Expr[FastMCPScala] =
+                                            server: Expr[FastMCPScala]
+                                          )(using quotes: Quotes): Expr[FastMCPScala] =
     import quotes.reflect.*
 
     val tpe = TypeRepr.of[T]
@@ -43,8 +39,8 @@ object McpToolRegistrationMacro:
     val annotatedMethods = sym.declaredMethods.filter { method =>
       method.annotations.exists(annot =>
         annot.tpe <:< TypeRepr.of[Tool] ||
-        annot.tpe <:< TypeRepr.of[Prompt] ||
-        annot.tpe <:< TypeRepr.of[Resource]
+          annot.tpe <:< TypeRepr.of[Prompt] ||
+          annot.tpe <:< TypeRepr.of[Resource]
       )
     }
 
@@ -72,7 +68,7 @@ object McpToolRegistrationMacro:
     else
       // Combine all registrations into one final block
       val registrationTerms = registrationExprs.map(_.asTerm)
-      val block = Block(registrationTerms.init.toList, registrationTerms.last)
+      val block = Block(registrationTerms.init, registrationTerms.last)
       block.asExprOf[FastMCPScala]
 
 end McpToolRegistrationMacro // End main object

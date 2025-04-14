@@ -1,12 +1,11 @@
 package fastmcp.macros
 
 import com.fasterxml.jackson.databind.DeserializationFeature
-
-import scala.annotation.tailrec
-import scala.quoted.*
 import com.fasterxml.jackson.databind.json.JsonMapper
 import com.fasterxml.jackson.module.scala.{ClassTagExtensions, DefaultScalaModule}
 
+import scala.annotation.tailrec
+import scala.quoted.*
 import scala.reflect.ClassTag
 
 object MapToFunctionMacro:
@@ -103,7 +102,7 @@ object MapToFunctionMacro:
         val ctExpr: Expr[ClassTag[?]] = summonClassTagExprFor(p.tpe) // Gets Expr[ClassTag[?]]
         val nameExpr = Expr(p.name)
         val typeStr = Expr(p.tpe.show)
-        
+
         p.tpe.asType match {
           // List[t] handling
           case '[List[t]] =>

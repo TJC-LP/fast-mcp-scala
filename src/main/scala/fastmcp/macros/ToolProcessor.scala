@@ -1,7 +1,5 @@
 package fastmcp.macros
 
-import fastmcp.core.*
-import fastmcp.macros.{JsonSchemaMacro, MapToFunctionMacro}
 import fastmcp.server.FastMCPScala
 import fastmcp.server.manager.*
 import zio.*
@@ -18,14 +16,14 @@ private[macros] object ToolProcessor:
    * Process a @Tool annotation and generate registration code
    */
   def processToolAnnotation(
-      server: Expr[FastMCPScala],
-      ownerSymAny: Any,
-      methodAny: Any,
-      toolAnnotAny: Any
-  )(using quotes: Quotes): Expr[FastMCPScala] =
+                             server: Expr[FastMCPScala],
+                             ownerSymAny: Any,
+                             methodAny: Any,
+                             toolAnnotAny: Any
+                           )(using quotes: Quotes): Expr[FastMCPScala] =
     import quotes.reflect.*
     // Cast back to reflect types
-    val ownerSym  = ownerSymAny.asInstanceOf[Symbol]
+    val ownerSym = ownerSymAny.asInstanceOf[Symbol]
     val methodSym = methodAny.asInstanceOf[Symbol]
     val toolAnnot = toolAnnotAny.asInstanceOf[Term]
 
@@ -43,15 +41,14 @@ private[macros] object ToolProcessor:
     val methodRefExpr = MacroUtils.getMethodRefExpr(ownerSym, methodSym)
 
     '{
-      JSystem.err.println(s"[McpAnnotationProcessor] Registering @Tool: ${${Expr(finalName)}}")
+      JSystem.err.println(s"[McpAnnotationProcessor] Registering @Tool: ${${ Expr(finalName) }}")
       val schema = JsonSchemaMacro.schemaForFunctionArgs($methodRefExpr)
-      val handler: ToolHandler = (args: Map[String, Any]) => ZIO.attempt {
-        MapToFunctionMacro.callByMap($methodRefExpr).asInstanceOf[Map[String, Any] => Any](args)
-      }
       val regEffect = $server.tool(
-        name = ${Expr(finalName)},
-        description = ${Expr(finalDesc)},
-        handler = handler,
+        name = ${ Expr(finalName) },
+        description = ${ Expr(finalDesc) },
+        handler = (args: Map[String, Any]) => ZIO.attempt {
+          MapToFunctionMacro.callByMap($methodRefExpr).asInstanceOf[Map[String, Any] => Any](args)
+        },
         inputSchema = Right(schema.spaces2),
         options = ToolRegistrationOptions(allowOverrides = true)
       )
