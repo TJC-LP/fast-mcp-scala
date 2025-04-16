@@ -108,13 +108,14 @@ You can use annotations with Scala 3 macros to define your tools with automatic 
 ```scala
 import fastmcp.core.{Tool, Param}
 import fastmcp.server.FastMCPScala
-import fastmcp.macros.McpToolRegistrationMacro.* // Import scanAnnotations extension method
+import fastmcp.macros.MCPRegistrationMacro.* // Import scanAnnotations extension method
 import zio.*
 import zio.json.*
 
 object CalculatorTools
 
 :
+
 /**
  * Simple addition tool with primitive parameters
  */
@@ -160,6 +161,7 @@ CalculatorResult(operation, List(a, b), result)
 object StringTools
 
 :
+
 /**
  * Text transformation tool
  */
@@ -198,6 +200,7 @@ given JsonDecoder[CalculatorResult] = DeriveJsonDecoder.gen[CalculatorResult]
 object MacroAnnotatedServer extends ZIOAppDefault
 
 :
+
 override def run: ZIO[Any, Throwable, Unit] =
   for
     // Create the server

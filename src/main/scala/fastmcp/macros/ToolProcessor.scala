@@ -1,5 +1,6 @@
 package fastmcp.macros
 
+import fastmcp.core.Tool // Import the Tool annotation
 import fastmcp.server.FastMCPScala
 import fastmcp.server.manager.*
 import zio.*
@@ -19,19 +20,24 @@ private[macros] object ToolProcessor:
   def processToolAnnotation(
                              server: Expr[FastMCPScala],
                              ownerSymAny: Any,
-                             methodAny: Any,
-                             toolAnnotAny: Any
+                             methodAny: Any
+                             // toolAnnotAny removed
                            )(using quotes: Quotes): Expr[FastMCPScala] =
     import quotes.reflect.*
     // Cast back to reflect types
     val ownerSym = ownerSymAny.asInstanceOf[Symbol]
     val methodSym = methodAny.asInstanceOf[Symbol]
-    val toolAnnot = toolAnnotAny.asInstanceOf[Term]
+
+    // Use generic annotation extraction for @Tool
+    val toolAnnotTermOpt = MacroUtils.extractAnnotation[fastmcp.core.Tool](methodSym)
+    val toolAnnotTerm = toolAnnotTermOpt.getOrElse {
+      report.errorAndAbort(s"No @Tool annotation found on method ${methodSym.name}")
+    }
 
     val methodName = methodSym.name
 
-    // Parse @Tool annotation parameters
-    val (annotName, annotDesc, toolTags) = MacroUtils.parseToolParams(toolAnnot)
+    // Parse @Tool annotation parameters from the extracted term
+    val (annotName, annotDesc, toolTags) = MacroUtils.parseToolParams(toolAnnotTerm)
     val finalName = annotName.getOrElse(methodName)
 
     // Fetch Scaladoc if description is missing
@@ -44,9 +50,10 @@ private[macros] object ToolProcessor:
     // --- Extract @Param descriptions for each parameter ---
     val paramSymbols = methodSym.paramSymss.headOption.getOrElse(Nil)
     val paramDescriptions: Map[String, String] = paramSymbols.flatMap { pSym =>
-      pSym.annotations.find(_.tpe <:< TypeRepr.of[fastmcp.core.Param])
-        .flatMap { annot =>
-          annot match
+      // Use generic annotation extraction for @Param
+      MacroUtils.extractAnnotation[fastmcp.core.Param](pSym)
+        .flatMap { annotTerm =>
+          annotTerm match
             case Apply(_, argTerms) =>
               // Try named "description" first, then positional
               argTerms.collectFirst {

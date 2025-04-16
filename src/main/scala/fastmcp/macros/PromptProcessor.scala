@@ -19,18 +19,22 @@ private[macros] object PromptProcessor:
   def processPromptAnnotation(
                                server: Expr[FastMCPScala],
                                ownerSymAny: Any,
-                               methodAny: Any,
-                               promptAnnotAny: Any
+                               methodAny: Any
                              )(using quotes: Quotes): Expr[FastMCPScala] =
     import quotes.reflect.*
     val ownerSym = ownerSymAny.asInstanceOf[Symbol]
     val methodSym = methodAny.asInstanceOf[Symbol]
-    val promptAnnot = promptAnnotAny.asInstanceOf[Term]
+
+    // Use generic annotation extraction for @Prompt
+    val promptAnnotTermOpt = MacroUtils.extractAnnotation[Prompt](methodSym)
+    val promptAnnotTerm = promptAnnotTermOpt.getOrElse {
+      report.errorAndAbort(s"No @Prompt annotation found on method ${methodSym.name}")
+    }
 
     val methodName = methodSym.name
 
     // Parse @Prompt annotation parameters
-    val (annotName, annotDesc) = MacroUtils.parsePromptParams(promptAnnot)
+    val (annotName, annotDesc) = MacroUtils.parsePromptParams(promptAnnotTerm)
     val finalName = annotName.getOrElse(methodName)
 
     // Fetch Scaladoc if description is missing
@@ -40,8 +44,9 @@ private[macros] object PromptProcessor:
     // Analyze parameters for @PromptParam
     val promptArgs: List[Expr[PromptArgument]] = methodSym.paramSymss.headOption.getOrElse(Nil).map { param =>
       val paramName = param.name
-      val paramAnnotTerm = param.annotations.find(_.tpe <:< TypeRepr.of[PromptParam]).map(_.asExpr.asTerm)
-      val (paramDesc, paramRequired) = MacroUtils.parsePromptParamArgs(paramAnnotTerm)
+      // Use generic annotation extraction for @PromptParam
+      val paramAnnotTermOpt = MacroUtils.extractAnnotation[PromptParam](param)
+      val (paramDesc, paramRequired) = MacroUtils.parsePromptParamArgs(paramAnnotTermOpt)
       '{ PromptArgument(
         name = ${ Expr(paramName) },
         description = ${ Expr(paramDesc) },

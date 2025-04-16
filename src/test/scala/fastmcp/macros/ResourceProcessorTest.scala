@@ -4,7 +4,7 @@ import fastmcp.core.*
 import fastmcp.server.FastMCPScala
 import fastmcp.server.manager.ResourceArgument
 import org.scalatest.funsuite.AnyFunSuite
-import fastmcp.macros.McpToolRegistrationMacro.scanAnnotations
+import fastmcp.macros.MCPRegistrationMacro.scanAnnotations
 import zio.*
 
 /**

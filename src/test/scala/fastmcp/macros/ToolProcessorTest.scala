@@ -3,7 +3,7 @@ package fastmcp.macros
 import fastmcp.core.*
 import fastmcp.server.FastMCPScala
 import fastmcp.server.manager.ToolRegistrationOptions
-import fastmcp.macros.McpToolRegistrationMacro.scanAnnotations
+import fastmcp.macros.MCPRegistrationMacro.scanAnnotations
 import org.scalatest.funsuite.AnyFunSuite
 import zio.*
 import zio.json.*

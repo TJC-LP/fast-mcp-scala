@@ -2,7 +2,7 @@ package fastmcp.examples
 
 import fastmcp.core.*
 import fastmcp.server.*
-import fastmcp.macros.McpToolRegistrationMacro.*
+import fastmcp.macros.MCPRegistrationMacro.*
 import zio.*
 import zio.json.*
 import sttp.tapir.*

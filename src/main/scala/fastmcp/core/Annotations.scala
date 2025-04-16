@@ -1,12 +1,6 @@
 package fastmcp.core
 
 import scala.annotation.{StaticAnnotation, experimental}
-import scala.quoted.*
-import fastmcp.server.FastMCPScala
-import fastmcp.server.manager.ToolRegistrationOptions
-import fastmcp.macros.MapToFunctionMacro
-import fastmcp.macros.JsonSchemaMacro
-import io.modelcontextprotocol.spec.McpSchema
 
 /**
  * Marker annotation for methods representing MCP Tools

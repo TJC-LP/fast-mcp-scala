@@ -9,7 +9,7 @@ import scala.quoted.*
  * Main object containing extension method for registering annotated tools, prompts, and resources.
  * Delegates actual processing to specialized objects.
  */
-object McpToolRegistrationMacro:
+object MCPRegistrationMacro:
   /**
    * Extension method for FastMCPScala that scans an object for MCP annotations
    * (@Tool, @Prompt, @Resource) and registers them with the server.
@@ -53,10 +53,10 @@ object McpToolRegistrationMacro:
       method.annotations.collectFirst {
         case toolAnnot if toolAnnot.tpe <:< TypeRepr.of[Tool] =>
           val annotTerm = toolAnnot.asExpr.asTerm
-          ToolProcessor.processToolAnnotation(server, sym, method, annotTerm)
+          ToolProcessor.processToolAnnotation(server, sym, method)
         case promptAnnot if promptAnnot.tpe <:< TypeRepr.of[Prompt] =>
           val annotTerm = promptAnnot.asExpr.asTerm
-          PromptProcessor.processPromptAnnotation(server, sym, method, annotTerm)
+          PromptProcessor.processPromptAnnotation(server, sym, method)
         case resourceAnnot if resourceAnnot.tpe <:< TypeRepr.of[Resource] =>
           val annotTerm = resourceAnnot.asExpr.asTerm
           ResourceProcessor.processResourceAnnotation(server, sym, method, annotTerm)
@@ -71,4 +71,4 @@ object McpToolRegistrationMacro:
       val block = Block(registrationTerms.init, registrationTerms.last)
       block.asExprOf[FastMCPScala]
 
-end McpToolRegistrationMacro // End main object
+end MCPRegistrationMacro // End main object

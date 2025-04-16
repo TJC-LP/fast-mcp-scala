@@ -9,10 +9,27 @@ import io.circe.{Json, JsonObject}
  */
 private[macros] object MacroUtils:
 
-  // Helper to parse Option[String] literals from annotation arguments
-  private def parseOptionStringLiteral(argTermAny: Any)(using quotes: Quotes): Option[String] =
+  /**
+   * Generic utility to extract an annotation of type `A` from a symbol.
+   * Returns the annotation term if present, otherwise None.
+   */
+  def extractAnnotation[A: Type](using quotes: Quotes)(sym: quotes.reflect.Symbol): Option[quotes.reflect.Term] =
     import quotes.reflect.*
-    val argTerm = argTermAny.asInstanceOf[Term]
+    val annotTpe = TypeRepr.of[A]
+    sym.annotations.find(_.tpe <:< annotTpe)
+
+  /**
+   * Generic utility to extract all annotations of type `A` from a symbol.
+   * Returns a list of annotation terms.
+   */
+  def extractAnnotations[A: Type](using quotes: Quotes)(sym: quotes.reflect.Symbol): List[quotes.reflect.Term] =
+    import quotes.reflect.*
+    val annotTpe = TypeRepr.of[A]
+    sym.annotations.filter(_.tpe <:< annotTpe)
+
+  // Helper to parse Option[String] literals from annotation arguments
+  private def parseOptionStringLiteral(using quotes: Quotes)(argTerm: quotes.reflect.Term): Option[String] =
+    import quotes.reflect.*
     argTerm match {
       // Matches Some("literal") created via Some.apply[String]("literal")
       case Apply(TypeApply(Select(Ident("Some"), "apply"), _), List(Literal(StringConstant(s)))) => Some(s)
@@ -26,11 +43,8 @@ private[macros] object MacroUtils:
     }
 
   // Gets a reference to the method within its owner object
-  def getMethodRefExpr(ownerSymAny: Any, methodSymAny: Any)(using quotes: Quotes): Expr[Any] =
+  def getMethodRefExpr(using quotes: Quotes)(ownerSym: quotes.reflect.Symbol, methodSym: quotes.reflect.Symbol): Expr[Any] =
     import quotes.reflect.*
-    val ownerSym = ownerSymAny.asInstanceOf[Symbol]
-    val methodSym = methodSymAny.asInstanceOf[Symbol]
-
     val companionSym = ownerSym.companionModule
     val methodSymOpt = companionSym.declaredMethod(methodSym.name).headOption.getOrElse {
       report.errorAndAbort(
@@ -40,9 +54,8 @@ private[macros] object MacroUtils:
     Select(Ref(companionSym), methodSymOpt).etaExpand(Symbol.spliceOwner).asExprOf[Any]
 
   // Helper to parse @Tool annotation arguments
-  def parseToolParams(termAny: Any)(using quotes: Quotes): (Option[String], Option[String], List[String]) =
+  def parseToolParams(using quotes: Quotes)(term: quotes.reflect.Term): (Option[String], Option[String], List[String]) =
     import quotes.reflect.*
-    val term = termAny.asInstanceOf[Term]
 
     var toolName: Option[String] = None
     var toolDesc: Option[String] = None
@@ -69,9 +82,8 @@ private[macros] object MacroUtils:
     (toolName, toolDesc, toolTags)
 
   // Helper to parse @Prompt annotation arguments
-  def parsePromptParams(termAny: Any)(using quotes: Quotes): (Option[String], Option[String]) =
+  def parsePromptParams(using quotes: Quotes)(term: quotes.reflect.Term): (Option[String], Option[String]) =
     import quotes.reflect.*
-    val term = termAny.asInstanceOf[Term]
 
     var promptName: Option[String] = None
     var promptDesc: Option[String] = None
@@ -88,9 +100,8 @@ private[macros] object MacroUtils:
     (promptName, promptDesc)
 
   // Helper to parse @PromptParam annotation arguments
-  def parsePromptParamArgs(paramAnnotOptAny: Option[Any])(using quotes: Quotes): (Option[String], Boolean) =
+  def parsePromptParamArgs(using quotes: Quotes)(paramAnnotOpt: Option[quotes.reflect.Term]): (Option[String], Boolean) =
     import quotes.reflect.*
-    val paramAnnotOpt = paramAnnotOptAny.map(_.asInstanceOf[Term])
 
     paramAnnotOpt match {
       case Some(annotTerm) =>
@@ -127,9 +138,8 @@ private[macros] object MacroUtils:
   
   // Helper to parse @Param annotation arguments for @Tool methods
   // Returns: (description: Option[String], example: Option[String], required: Boolean, schema: Option[String])
-  def parseToolParam(paramAnnotOptAny: Option[Any])(using quotes: Quotes): (Option[String], Option[String], Boolean, Option[String]) =
+  def parseToolParam(using quotes: Quotes)(paramAnnotOpt: Option[quotes.reflect.Term]): (Option[String], Option[String], Boolean, Option[String]) =
     import quotes.reflect.*
-    val paramAnnotOpt = paramAnnotOptAny.map(_.asInstanceOf[Term])
   
     paramAnnotOpt match {
       case Some(annotTerm) =>
@@ -189,9 +199,8 @@ private[macros] object MacroUtils:
     }
   
   // Helper to parse @Resource annotation arguments
-  def parseResourceParams(termAny: Any)(using quotes: Quotes): (String, Option[String], Option[String], Option[String]) =
+  def parseResourceParams(using quotes: Quotes)(term: quotes.reflect.Term): (String, Option[String], Option[String], Option[String]) =
     import quotes.reflect.*
-    val term = termAny.asInstanceOf[Term]
 
     var uri: String = ""
     var resourceName: Option[String] = None

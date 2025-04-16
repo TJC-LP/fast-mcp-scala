@@ -1,6 +1,6 @@
 package fastmcp.macros
 
-import fastmcp.core.ResourceParam
+import fastmcp.core.{Resource, ResourceParam} // Added Resource import
 import fastmcp.server.FastMCPScala
 import fastmcp.server.manager.*
 import zio.*
@@ -24,17 +24,22 @@ private[macros] object ResourceProcessor:
                                  server: Expr[FastMCPScala],
                                  ownerSymAny: Any, // Symbol of the class/object containing the method
                                  methodAny: Any, // Symbol of the annotated method
-                                 resourceAnnotAny: Any // Term representing the @Resource annotation instance
+                                 resourceAnnotAny: Any // Term representing the @Resource annotation instance - NO LONGER USED DIRECTLY
                                )(using quotes: Quotes): Expr[FastMCPScala] =
     import quotes.reflect.*
 
     // --- 1. Symbol and Annotation Parsing ---
     val ownerSym = ownerSymAny.asInstanceOf[Symbol]
     val methodSym = methodAny.asInstanceOf[Symbol]
-    val resourceAnnot = resourceAnnotAny.asInstanceOf[Term]
+
+    // Use generic annotation extraction for @Resource
+    val resourceAnnotTermOpt = MacroUtils.extractAnnotation[Resource](methodSym)
+    val resourceAnnotTerm = resourceAnnotTermOpt.getOrElse {
+      report.errorAndAbort(s"No @Resource annotation found on method ${methodSym.name}")
+    }
     val methodName = methodSym.name
 
-    val (uri_, annotName, annotDesc, mimeType_) = MacroUtils.parseResourceParams(resourceAnnot)
+    val (uri_, annotName, annotDesc, mimeType_) = MacroUtils.parseResourceParams(resourceAnnotTerm)
     val finalName = annotName.orElse(Some(methodName))
     val finalDesc = annotDesc.orElse(methodSym.docstring)
 
@@ -60,28 +65,31 @@ private[macros] object ResourceProcessor:
         val argsList: List[Expr[ResourceArgument]] = methodParamSyms.map { psym =>
           val paramName = psym.name
           val paramDoc = psym.docstring
-          val resourceParamAnnotOpt = psym.annotations.find(_.tpe <:< TypeRepr.of[ResourceParam])
+          // Use generic annotation extraction for @ResourceParam
+          val resourceParamAnnotTermOpt = MacroUtils.extractAnnotation[ResourceParam](psym)
           var paramAnnotDesc: Option[String] = None
           var paramAnnotRequired: Boolean = true
-          resourceParamAnnotOpt.map(_.asExpr.asTerm).foreach {
-            case Apply(_, argVals) =>
-              argVals.foreach {
-                case Literal(StringConstant(s)) => paramAnnotDesc = Some(s)
-                case NamedArg("description", Literal(StringConstant(s))) => paramAnnotDesc = Some(s)
-                case NamedArg("required", Literal(BooleanConstant(b))) => paramAnnotRequired = b
-                case lit@Literal(_) if argVals.size > 1 && {
-                  argVals.head match {
-                    case _: Literal => true
-                    case _ => false
-                  }
-                } =>
-                  lit match {
-                    case Literal(BooleanConstant(b)) => paramAnnotRequired = b
-                    case _ => ()
-                  }
-                case _ => ()
-              }
-            case _ => ()
+          resourceParamAnnotTermOpt.foreach { term => // Use the extracted term
+            term match {
+              case Apply(_, argVals) =>
+                argVals.foreach {
+                  case Literal(StringConstant(s)) => paramAnnotDesc = Some(s)
+                  case NamedArg("description", Literal(StringConstant(s))) => paramAnnotDesc = Some(s)
+                  case NamedArg("required", Literal(BooleanConstant(b))) => paramAnnotRequired = b
+                  case lit@Literal(_) if argVals.size > 1 && {
+                    argVals.head match {
+                      case _: Literal => true
+                      case _ => false
+                    }
+                  } =>
+                    lit match {
+                      case Literal(BooleanConstant(b)) => paramAnnotRequired = b
+                      case _ => ()
+                    }
+                  case _ => ()
+                }
+              case _ => ()
+            }
           }
           val finalParamDesc = paramAnnotDesc.orElse(paramDoc)
           '{ ResourceArgument(${ Expr(paramName) }, ${ Expr(finalParamDesc) }, ${ Expr(paramAnnotRequired) }) }
