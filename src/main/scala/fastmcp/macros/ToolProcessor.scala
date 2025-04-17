@@ -44,9 +44,15 @@ private[macros] object ToolProcessor:
     // Get method reference
     val methodRefExpr = MacroUtils.getMethodRefExpr(ownerSym, methodSym)
 
-    // --- Extract @Param descriptions for each parameter ---
+    // --- Check for context parameter: McpContext named 'ctx' ---
     val paramSymbols = methodSym.paramSymss.headOption.getOrElse(Nil)
-    val paramDescriptions: Map[String, String] = paramSymbols.flatMap { pSym =>
+    val ctxParamOpt = paramSymbols.find { p =>
+      p.name == "ctx" && p.info <:< TypeRepr.of[fastmcp.server.McpContext]
+    }
+    val userParams = paramSymbols.filterNot(ctxParamOpt.contains)
+
+    // --- Extract @Param descriptions for each parameter (excluding ctx) ---
+    val paramDescriptions: Map[String, String] = userParams.flatMap { pSym =>
       // Use generic annotation extraction for @Param
       MacroUtils
         .extractAnnotation[fastmcp.core.Param](pSym)
@@ -70,18 +76,31 @@ private[macros] object ToolProcessor:
 
     '{
       JSystem.err.println(s"[McpAnnotationProcessor] Registering @Tool: ${${ Expr(finalName) }}")
-      val rawSchema: io.circe.Json = JsonSchemaMacro.schemaForFunctionArgs($methodRefExpr)
+      val rawSchema: io.circe.Json = JsonSchemaMacro.schemaForFunctionArgs(
+        $methodRefExpr,
+        ${ Expr(ctxParamOpt.map(_.name).toList) }
+      )
       val schemaWithDescriptions: io.circe.Json =
         if (${ Expr(paramDescriptions.nonEmpty) })
           MacroUtils.injectParamDescriptions(rawSchema, ${ Expr(paramDescriptions) })
         else rawSchema
-      val regEffect = $server.tool(
+      // Create a contextual handler based on whether the function has a ctx parameter
+      val contextualHandler: ContextualToolHandler =
+        (args: Map[String, Any], ctxOpt: Option[fastmcp.server.McpContext]) =>
+          ZIO.attempt {
+            val merged = ${ Expr(ctxParamOpt.isDefined) } match {
+              case true => args + ("ctx" -> ctxOpt.getOrElse(fastmcp.server.McpContext()))
+              case false => args
+            }
+            MapToFunctionMacro
+              .callByMap($methodRefExpr)
+              .asInstanceOf[Map[String, Any] => Any](merged)
+          }
+
+      val regEffect = $server.contextualTool(
         name = ${ Expr(finalName) },
         description = ${ Expr(finalDesc) },
-        handler = (args: Map[String, Any]) =>
-          ZIO.attempt {
-            MapToFunctionMacro.callByMap($methodRefExpr).asInstanceOf[Map[String, Any] => Any](args)
-          },
+        handler = contextualHandler,
         inputSchema = Right(schemaWithDescriptions.spaces2),
         options = ToolRegistrationOptions(allowOverrides = true)
       )

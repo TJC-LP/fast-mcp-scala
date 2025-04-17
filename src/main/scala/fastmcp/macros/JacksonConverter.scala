@@ -99,6 +99,16 @@ object JacksonConverter:
         case Some(v) => Some(summon[JacksonConverter[A]].convert(name, v, mapper))
         case v => Some(summon[JacksonConverter[A]].convert(name, v, mapper))
 
+  // Identity converter for McpContext as per Context Propagation Upgrade
+  given JacksonConverter[fastmcp.server.McpContext] with
+
+    def convert(
+        key: String,
+        raw: Any,
+        mapper: JsonMapper & ClassTagExtensions
+    ): fastmcp.server.McpContext =
+      raw.asInstanceOf[fastmcp.server.McpContext]
+
   // Fallback for any other type T with a ClassTag: let Jackson handle it directly
   given [T: ClassTag]: JacksonConverter[T] with
 

@@ -32,20 +32,31 @@ object JsonSchemaMacro:
     * }}}
     */
   inline def schemaForFunctionArgs[F](inline fn: F): Json =
-    ${ schemaForFunctionArgsImpl('fn) }
+    ${ schemaForFunctionArgsImpl('fn, '{ Nil }) }
 
-  private def schemaForFunctionArgsImpl[F: Type](fn: Expr[F])(using Quotes): Expr[Json] =
+  /** Produces a JSON schema describing the parameters of the given function, excluding specified
+    * parameters. This overload is used primarily for excluding context parameters from the schema.
+    */
+  inline def schemaForFunctionArgs[F](inline fn: F, inline exclude: List[String]): Json =
+    ${ schemaForFunctionArgsImpl('fn, 'exclude) }
+
+  private def schemaForFunctionArgsImpl[F: Type](fn: Expr[F], exclude: Expr[List[String]])(using
+      Quotes
+  ): Expr[Json] =
     import quotes.reflect.*
 
     // Check if we're running in a CI/test environment; use noTrace to avoid excessive macro trace
-    val useNoTrace = Properties.propOrFalse("scala.util.noTrace")
+    Properties.propOrFalse("scala.util.noTrace")
 
     // Analyze function to extract parameters
     val fnTerm = fn.asTerm
     val fnType = fnTerm.tpe
 
     val paramNamesOpt = FunctionAnalyzer.maybeRealParamNames(fnTerm)
-    val params: List[(String, TypeRepr)] = FunctionAnalyzer.extractParams(fnType, paramNamesOpt)
+    val excludeList = exclude.valueOrError.toList
+    val params: List[(String, TypeRepr)] = FunctionAnalyzer
+      .extractParams(fnType, paramNamesOpt)
+      .filterNot(p => excludeList.contains(p._1))
 
     // Generate schema for each parameter
     val productFieldsExpr = params.map { case (paramName, paramType) =>

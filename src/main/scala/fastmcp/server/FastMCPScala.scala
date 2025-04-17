@@ -58,6 +58,11 @@ class FastMCPScala(
 
   /** Register a tool with the server
     */
+  /** Register a tool with the server using a basic handler (without context)
+    *
+    * @deprecated
+    *   Consider using the contextual version for better context awareness
+    */
   def tool(
       name: String,
       handler: ToolHandler,
@@ -73,6 +78,47 @@ class FastMCPScala(
       inputSchema = inputSchema
     )
     toolManager.addTool(name, handler, definition, options).as(this)
+
+  /** Register a tool with the server using a contextual handler
+    *
+    * This method allows registering tools that have access to the McpContext, enabling them to
+    * access client information and capabilities.
+    */
+  def contextualTool(
+      name: String,
+      handler: ContextualToolHandler,
+      description: Option[String] = None,
+      inputSchema: Either[McpSchema.JsonSchema, String] = Left(
+        new McpSchema.JsonSchema("object", null, null, true)
+      ),
+      options: ToolRegistrationOptions = ToolRegistrationOptions()
+  ): ZIO[Any, Throwable, FastMCPScala] =
+    val definition = ToolDefinition(
+      name = name,
+      description = description,
+      inputSchema = inputSchema
+    )
+    // Store the handler directly as it's already a ContextualToolHandler
+    val toolDef = (definition, handler)
+    ZIO.succeed(toolManager.tools.put(name, toolDef)).as(this)
+
+  /** Convenience method for registering a context-aware tool
+    *
+    * This method makes it more explicit when a tool requires context access.
+    */
+  def contextTool(
+      name: String,
+      handler: (Map[String, Any], McpContext) => ZIO[Any, Throwable, Any],
+      description: Option[String] = None,
+      inputSchema: Either[McpSchema.JsonSchema, String] = Left(
+        new McpSchema.JsonSchema("object", null, null, true)
+      ),
+      options: ToolRegistrationOptions = ToolRegistrationOptions()
+  ): ZIO[Any, Throwable, FastMCPScala] =
+    val contextualHandler: ContextualToolHandler =
+      (args, ctxOpt) => handler(args, ctxOpt.getOrElse(McpContext()))
+
+    contextualTool(name, contextualHandler, description, inputSchema, options)
 
   /** Register a **static** resource with the server.
     */

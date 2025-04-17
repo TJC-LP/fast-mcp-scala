@@ -17,8 +17,10 @@ ThisBuild / scalacOptions ++= Seq(
   "-Wunused:all",
   "-Wvalue-discard",
   "-Wsafe-init", // detect uninitialized vals
-  "-Wnonunit-statement"
+  "-Wnonunit-statement",
 )
+// remove only the discard/statement warnings in tests
+Test / scalacOptions --= Seq("-Wvalue-discard", "-Wnonunit-statement")
 
 lazy val root = (project in file("."))
   .settings(

@@ -13,7 +13,6 @@ object SchemaGenerator:
   /** Generates a product field for a parameter of a function.
     */
   def generateProductField[T: Type](paramName: String)(using Quotes): Expr[SProductField[Unit]] =
-    import quotes.reflect.*
 
     val (_, schemaExpr) = SchemaExtractor.createSchemaFor[T](paramName)
 

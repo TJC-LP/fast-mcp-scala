@@ -1,7 +1,6 @@
 package fastmcp.macros
 
 import scala.quoted.*
-import scala.util.Try
 import io.circe.{Json, JsonObject}
 
 /** Utility methods shared between the processor objects (Compressed)

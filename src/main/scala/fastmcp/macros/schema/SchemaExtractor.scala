@@ -1,11 +1,9 @@
 package fastmcp.macros.schema
 
 import scala.quoted.*
-import scala.annotation.tailrec
 import scala.deriving.Mirror
 import sttp.tapir.Schema
 import sttp.tapir.Schema.SName
-import sttp.tapir.SchemaType.*
 
 /** Helper for extracting schema information from types at compile time. This is part of the
   * JsonSchemaMacro refactoring to reduce compilation time.
