@@ -306,21 +306,6 @@ class FastMCPScala(
   // --- Server Lifecycle Methods ---
 
   /**
-   * Converts a ZIO effect to a Reactor Mono.
-   * Executes the ZIO effect asynchronously and bridges the result/error to the MonoSink.
-   */
-  private def zioToMono[A](effect: ZIO[Any, Throwable, A]): Mono[A] = {
-    Mono.create { sink =>
-      Unsafe.unsafe { implicit unsafe =>
-        Runtime.default.unsafe.runToFuture(effect).onComplete {
-          case Success(value) => sink.success(value)
-          case Failure(error) => sink.error(error)
-        }
-      }
-    }
-  }
-
-  /**
    * Helper to convert Scala result types into McpSchema.ReadResourceResult.
    */
   private def createReadResourceResult(uri: String, content: String | Array[Byte], mimeTypeOpt: Option[String]): ZIO[Any, Throwable, McpSchema.ReadResourceResult] = ZIO.attempt {
@@ -337,6 +322,21 @@ class FastMCPScala(
         new McpSchema.BlobResourceContents(uri, finalMimeType, base64Data)
     }
     new McpSchema.ReadResourceResult(List(javaContent).asJava)
+  }
+
+  /**
+   * Converts a ZIO effect to a Reactor Mono.
+   * Executes the ZIO effect asynchronously and bridges the result/error to the MonoSink.
+   */
+  private def zioToMono[A](effect: ZIO[Any, Throwable, A]): Mono[A] = {
+    Mono.create { sink =>
+      Unsafe.unsafe { implicit unsafe =>
+        Runtime.default.unsafe.runToFuture(effect).onComplete {
+          case Success(value) => sink.success(value)
+          case Failure(error) => sink.error(error)
+        }
+      }
+    }
   }
 
   /**

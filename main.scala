@@ -28,19 +28,11 @@
 // scala-cli run main.scala --main-class fastmcp.examples.AnnotatedServer    (Annotation-based server with macros)
 // scala-cli run main.scala --main-class fastmcp.examples.ManualServer       (Manual tool registration example)
 // scala-cli run main.scala --main-class fastmcp.examples.JacksonEnumDemo    (Simple Jackson enum demonstration)
-// scala-cli run main.scala --main-class fastmcp.examples.EnumDemoMain       (Enum handling demonstration)
-// scala-cli run main.scala --main-class fastmcp.examples.EnumExperiment     (Low-level enum experiment)
-// scala-cli run main.scala --main-class fastmcp.examples.TypedToolExample   (Enhanced typed tools example)
-// scala-cli run main.scala --main-class fastmcp.examples.ZioSchemaToolExample (ZIO Schema integration example)
-// scala-cli run main.scala --main-class fastmcp.examples.MacroSchemaExample  (Schema generation macro example)
-// scala-cli run main.scala --main-class fastmcp.FastMCPMain                 (Main application)
 //
 // MACRO ENHANCEMENTS:
 // - The AnnotatedServer example demonstrates the enhanced macro-driven approach for
 //   automatic schema generation and tool registration with @Tool annotations
 // - The ManualServer example shows manual tool registration with enum conversion through Jackson
-// - The MacroSchemaExample shows the new direct schema generation capabilities using
-//   SchemaMacros.schemaForFunctionArgs with Tapir integration
 //
 // These examples showcase how to use Scala 3's metaprogramming capabilities to create
 // a zero-boilerplate MCP tool registration experience with advanced schema generation.
