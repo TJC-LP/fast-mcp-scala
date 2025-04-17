@@ -19,34 +19,38 @@ libraryDependencies += "io.fast-mcp-scala" %% "fast-mcp-scala" % "0.1.0-SNAPSHOT
 ## Quickstart (Annotation-based)
 
 ```scala
-import fastmcp.core.{Tool, Param, Prompt, PromptParam, Resource}
-import fastmcp.server.FastMCPScala
+import fastmcp.core.{Tool, ToolParam, Prompt, PromptParam, Resource}
+import fastmcp.server.FastMcpServer
 import zio._
 
 // Define annotated tools, prompts, and resources
-object Example:
-  @Tool(name = Some("add"), description = Some("Add two numbers"))
-  def add(
-    @Param("First operand") a: Double,
-    @Param("Second operand") b: Double
-  ): Double = a + b
+object Example
 
-  @Prompt(name = Some("greet"), description = Some("Generate a greeting message"))
-  def greet(@PromptParam("Name to greet") name: String): String =
-    s"Hello, $name!"
+:
+@Tool(name = Some("add"), description = Some("Add two numbers"))
+def add(
+         @ToolParam("First operand") a: Double,
+         @ToolParam("Second operand") b: Double
+       ): Double = a + b
 
-  // Note: resource templates (templated URIs) are not yet supported;
-  // coming soon when the MCP java-sdk adds template support.
-  @Resource(uri = "file://test", description = Some("Test resource"))
-  def test(): String = "This is a test"
+@Prompt(name = Some("greet"), description = Some("Generate a greeting message"))
+def greet(@PromptParam("Name to greet") name: String): String =
+  s"Hello, $name!"
 
-object ExampleServer extends ZIOAppDefault:
-  override def run =
-    for
-      server <- ZIO.succeed(FastMCPScala("AllInOneServer", "0.1.0"))
-      _      <- ZIO.attempt(server.scanAnnotations[Example.type])
-      _      <- server.runStdio()
-    yield ()
+// Note: resource templates (templated URIs) are not yet supported;
+// coming soon when the MCP java-sdk adds template support.
+@Resource(uri = "file://test", description = Some("Test resource"))
+def test(): String = "This is a test"
+
+object ExampleServer extends ZIOAppDefault
+
+:
+override def run =
+  for
+    server <- ZIO.succeed(FastMcpServer("AllInOneServer", "0.1.0"))
+    _ <- ZIO.attempt(server.scanAnnotations[Example.type])
+    _ <- server.runStdio()
+  yield ()
 ```
 
 For more examples and detailed docs, see the `docs/guide.md`.

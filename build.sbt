@@ -7,8 +7,8 @@ lazy val Versions = new {
   val zio = "2.1.17"
   val zioSchema = "1.6.6"
   val jackson = "2.18.3"
-  val tapir = "1.11.24"
-  val jsonSchemaCirce = "0.11.8"
+  val tapir = "1.11.25"
+  val jsonSchemaCirce = "0.11.9"
   val mcpSdk = "0.9.0"
   val scalaTest = "3.2.19"
 }
@@ -17,7 +17,7 @@ ThisBuild / scalacOptions ++= Seq(
   "-Wunused:all",
   "-Wvalue-discard",
   "-Wsafe-init", // detect uninitialized vals
-  "-Wnonunit-statement",
+  "-Wnonunit-statement"
 )
 // remove only the discard/statement warnings in tests
 Test / scalacOptions --= Seq("-Wvalue-discard", "-Wnonunit-statement")
@@ -32,6 +32,7 @@ lazy val root = (project in file("."))
     Compile / scalafix / scalafixOnCompile := true,
     ThisBuild / scalafmtOnCompile := true,
     semanticdbEnabled := true,
+    Test / semanticdbEnabled := true,
     libraryDependencies ++= Seq(
       // ZIO Core
       "dev.zio" %% "zio" % Versions.zio,
@@ -69,3 +70,90 @@ lazy val root = (project in file("."))
     // Configure test class loading to fix enum reflection issues
     Test / classLoaderLayeringStrategy := ClassLoaderLayeringStrategy.Flat
   )
+
+// -----------------------------------------------------------------------------
+// CI / CD configuration driven by sbt‑github‑actions and sbt‑ci‑release
+// -----------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// General build matrix settings
+// ---------------------------------------------------------------------------
+
+ThisBuild / githubWorkflowJavaVersions := Seq(
+  JavaSpec.temurin("8"),
+  JavaSpec.temurin("11"),
+  JavaSpec.temurin("17"),
+  JavaSpec.temurin("21")
+)
+
+ThisBuild / githubWorkflowScalaVersions := Seq("3.6.4")
+
+// Only run on main branch and version tags (vX.Y.Z)
+ThisBuild / githubWorkflowTargetBranches := Seq(
+  "main"
+)
+
+ThisBuild / githubWorkflowTargetTags := Seq("v*")
+
+// Workflow drift check disabled for now to avoid false positives during initial migration
+// ThisBuild / githubWorkflowCheck := true
+
+// ---------------------------------------------------------------------------
+// Quality gates: formatting, linting, coverage, etc.
+// ---------------------------------------------------------------------------
+
+ThisBuild / githubWorkflowBuildPreamble ++= Seq(
+  WorkflowStep.Sbt(List("scalafmtCheckAll", "scalafixAll"), name = Some("Scalafmt & Scalafix")),
+  WorkflowStep.Sbt(List("coverage", "test", "coverageAggregate"), name = Some("Tests & Coverage")),
+  WorkflowStep.Run(
+    List("bash", "-lc", "bash <(curl -s https://codecov.io/bash)"),
+    name = Some("Upload coverage to Codecov"),
+    cond = Some("success()")
+  )
+)
+
+// Fail build if coverage below 90%
+coverageMinimumStmtTotal := 90
+coverageFailOnMinimum := true
+
+coverageEnabled := true
+
+// ---------------------------------------------------------------------------
+// Snapshot & release publishing (sbt-ci-release)
+// ---------------------------------------------------------------------------
+
+inThisBuild(
+  Seq(
+    organization := "com.tjclp",
+    homepage := Some(url("https://tjclp.com")),
+    licenses := List("MIT" -> url("https://opensource.org/licenses/MIT")),
+    developers := List(
+      Developer(
+        "arcaputo3",
+        "Richie Caputo",
+        "rcaputo3@tjclp.com",
+        url("https://tjclp.com")
+      )
+    ),
+    sonatypeCredentialHost := "s01.oss.sonatype.org"
+  )
+)
+
+ThisBuild / githubWorkflowPublishTargetBranches :=
+  Seq(RefPredicate.StartsWith(Ref.Tag("v")))
+ThisBuild / githubWorkflowPublish := Seq(
+  WorkflowStep.Sbt(
+    commands = List("ci-release"),
+    name = Some("Publish project"),
+    env = Map(
+      "PGP_PASSPHRASE" -> "${{ secrets.PGP_PASSPHRASE }}",
+      "PGP_SECRET" -> "${{ secrets.PGP_SECRET }}",
+      "SONATYPE_PASSWORD" -> "${{ secrets.SONATYPE_PASSWORD }}",
+      "SONATYPE_USERNAME" -> "${{ secrets.SONATYPE_USERNAME }}"
+    )
+  )
+)
+
+// ---------------------------------------------------------------------------
+// Scaladoc / site generation (gh-pages) — executed only on release tags
+// ---------------------------------------------------------------------------

@@ -63,12 +63,17 @@ sealed trait Content(`type`: String):
   def toJava: McpSchema.Content
 
 object Content:
-  given JsonCodec[TextContent] = DeriveJsonCodec.gen[TextContent]
-  // ... codecs for other content types ...
-  given JsonCodec[Content] = DeriveJsonCodec.gen[Content] // For the sealed trait
+  given JsonCodec[core.TextContent] = DeriveJsonCodec.gen[TextContent]
 
-case class TextContent(...) extends Content("text"):
-  override def toJava: McpSchema.TextContent = ... // conversion logic
+  // ... codecs for other content types ...
+  given JsonCodec[core.Content] = DeriveJsonCodec.gen[core.Content] // For the sealed trait
+
+case class TextContent(
+
+...) extends Content("text"):
+
+  override def toJava: McpSchema.TextContent =
+... // conversion logic
 
 // ... (Message, Role with codecs and toJava)
 ```
