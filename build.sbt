@@ -23,9 +23,9 @@ ThisBuild / scalacOptions ++= Seq(
 lazy val root = (project in file("."))
   .settings(
     name := "fast-mcp-scala",
-    // Enable Scala 3 macros
+    // Enable Scala 3 macros with reasonable inline limits for better compilation performance
     // resolvers += Resolver.mavenLocal,
-    scalacOptions ++= Seq("-Xcheck-macros", "-experimental", "-Xmax-inlines:100000"),
+    scalacOptions ++= Seq("-Xcheck-macros", "-experimental", "-Xmax-inlines:128"),
     Compile / scalafix / semanticdbEnabled := true,
     Compile / scalafix / scalafixOnCompile := true,
     ThisBuild / scalafmtOnCompile := true,

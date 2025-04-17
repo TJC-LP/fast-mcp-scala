@@ -88,6 +88,14 @@ These annotations will be processed by the metaprogramming layer.
 This is the core of the "FastMCP" developer experience. The goal is to automatically convert annotated Scala methods into MCP definitions and register them.
 
 *   **Approach:** Use Scala 3 compile-time macros (`inline def` with macro implementations). This provides type safety and avoids runtime reflection overhead. Runtime reflection is a less desirable fallback.
+
+*   **Macro Performance Tuning:**
+    * Keep compile times fast by setting `-Xmax-inlines:128` in `scalacOptions`
+    * Split large macros into smaller, focused helper modules
+    * Use `java.lang.invoke.MethodHandle` instead of reflection for runtime function invocation
+    * Use the `scala.util.Properties.noTrace` check to conditionally optimize macro expansion
+    * Consider setting `-Xmacro-settings:verbose` during development for debugging
+
 *   **Macro Tasks:**
     1.  **Identify Annotations:** Find methods annotated with `@Tool`, `@Resource`, or `@Prompt` within the `FastMCPScala` class or companion object (or potentially anywhere, depending on design).
     2.  **Extract Metadata:** For each annotated method:
