@@ -80,10 +80,9 @@ lazy val root = (project in file("."))
 // ---------------------------------------------------------------------------
 
 ThisBuild / githubWorkflowJavaVersions := Seq(
-  JavaSpec.temurin("8"),
-  JavaSpec.temurin("11"),
   JavaSpec.temurin("17"),
-  JavaSpec.temurin("21")
+  JavaSpec.temurin("21"),
+  JavaSpec.temurin("23"),
 )
 
 ThisBuild / githubWorkflowScalaVersions := Seq("3.6.4")
