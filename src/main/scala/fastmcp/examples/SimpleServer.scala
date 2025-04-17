@@ -7,9 +7,8 @@ import zio.json.*
 
 import scala.util.Random
 
-/**
- * A simple example showing how to use FastMCPScala
- */
+/** A simple example showing how to use FastMCPScala
+  */
 object SimpleServer extends ZIOAppDefault:
   // Define a JSON codec for the result
   given JsonCodec[CalculatorResult] = DeriveJsonCodec.gen[CalculatorResult]
@@ -63,10 +62,12 @@ object SimpleServer extends ZIOAppDefault:
       _ <- server.prompt(
         name = "introduction",
         description = Some("Creates an introduction based on a person's name and interests"),
-        arguments = Some(List(
-          PromptArgument("name", Some("Person's name"), true),
-          PromptArgument("interests", Some("Person's interests"), false)
-        )),
+        arguments = Some(
+          List(
+            PromptArgument("name", Some("Person's name"), true),
+            PromptArgument("interests", Some("Person's interests"), false)
+          )
+        ),
         handler = args => {
           val name = args.getOrElse("name", "").toString
           val interests = args.getOrElse("interests", "").toString
@@ -97,7 +98,7 @@ object SimpleServer extends ZIOAppDefault:
 
   // Define a simple data class for calculator results
   case class CalculatorResult(
-                               result: Double,
-                               operation: String,
-                               inputs: List[Double]
-                             )
+      result: Double,
+      operation: String,
+      inputs: List[Double]
+  )

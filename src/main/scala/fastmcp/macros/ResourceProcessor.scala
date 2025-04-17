@@ -8,24 +8,22 @@ import zio.*
 import java.lang.System as JSystem
 import scala.quoted.*
 
-/**
- * Responsible for processing @Resource annotations and generating
- * resource registration code for FastMCPScala.
- */
+/** Responsible for processing @Resource annotations and generating resource registration code for
+  * FastMCPScala.
+  */
 private[macros] object ResourceProcessor:
 
-  /**
-   * Processes a method annotated with @Resource.
-   * Determines if it's a static or templated resource based on the URI pattern.
-   * Generates code to call the appropriate `server.resource` or `server.resourceTemplate`
-   * method in FastMCPScala, passing the correct handler type and collected metadata.
-   */
+  /** Processes a method annotated with @Resource. Determines if it's a static or templated resource
+    * based on the URI pattern. Generates code to call the appropriate `server.resource` or
+    * `server.resourceTemplate` method in FastMCPScala, passing the correct handler type and
+    * collected metadata.
+    */
   def processResourceAnnotation(
-                                 server: Expr[FastMCPScala],
-                                 ownerSymAny: Any, // Symbol of the class/object containing the method
-                                 methodAny: Any, // Symbol of the annotated method
-                                 resourceAnnotAny: Any // Term representing the @Resource annotation instance - NO LONGER USED DIRECTLY
-                               )(using quotes: Quotes): Expr[FastMCPScala] =
+      server: Expr[FastMCPScala],
+      ownerSymAny: Any, // Symbol of the class/object containing the method
+      methodAny: Any, // Symbol of the annotated method
+      resourceAnnotAny: Any // Term representing the @Resource annotation instance - NO LONGER USED DIRECTLY
+  )(using quotes: Quotes): Expr[FastMCPScala] =
     import quotes.reflect.*
 
     // --- 1. Symbol and Annotation Parsing ---
@@ -74,14 +72,15 @@ private[macros] object ResourceProcessor:
               case Apply(_, argVals) =>
                 argVals.foreach {
                   case Literal(StringConstant(s)) => paramAnnotDesc = Some(s)
-                  case NamedArg("description", Literal(StringConstant(s))) => paramAnnotDesc = Some(s)
+                  case NamedArg("description", Literal(StringConstant(s))) =>
+                    paramAnnotDesc = Some(s)
                   case NamedArg("required", Literal(BooleanConstant(b))) => paramAnnotRequired = b
-                  case lit@Literal(_) if argVals.size > 1 && {
-                    argVals.head match {
-                      case _: Literal => true
-                      case _ => false
-                    }
-                  } =>
+                  case lit @ Literal(_) if argVals.size > 1 && {
+                        argVals.head match {
+                          case _: Literal => true
+                          case _ => false
+                        }
+                      } =>
                     lit match {
                       case Literal(BooleanConstant(b)) => paramAnnotRequired = b
                       case _ => ()
@@ -92,13 +91,20 @@ private[macros] object ResourceProcessor:
             }
           }
           val finalParamDesc = paramAnnotDesc.orElse(paramDoc)
-          '{ ResourceArgument(${ Expr(paramName) }, ${ Expr(finalParamDesc) }, ${ Expr(paramAnnotRequired) }) }
+          '{
+            ResourceArgument(
+              ${ Expr(paramName) },
+              ${ Expr(finalParamDesc) },
+              ${ Expr(paramAnnotRequired) }
+            )
+          }
         }
         '{ Some(${ Expr.ofList(argsList) }) }
       } else {
         if (methodParamSyms.nonEmpty) {
           report.errorAndAbort(
-            s"Static resource method '$methodName' (URI: '$uri_') must not have parameters. Found: ${methodParamNames.mkString(", ")}"
+            s"Static resource method '$methodName' (URI: '$uri_') must not have parameters. Found: ${methodParamNames
+                .mkString(", ")}"
           )
         }
         '{ None }
@@ -131,7 +137,9 @@ private[macros] object ResourceProcessor:
             mimeType = ${ Expr(mimeType_) },
             arguments = $resourceArgumentsExpr // Pass the generated arguments Expr
           )
-          Unsafe.unsafe { implicit unsafe => Runtime.default.unsafe.run(registrationEffect).getOrThrowFiberFailure() }
+          Unsafe.unsafe { implicit unsafe =>
+            Runtime.default.unsafe.run(registrationEffect).getOrThrowFiberFailure()
+          }
           $server
         }
       } else {
@@ -156,7 +164,9 @@ private[macros] object ResourceProcessor:
             mimeType = ${ Expr(mimeType_) }
             // No 'arguments' parameter for the static method
           )
-          Unsafe.unsafe { implicit unsafe => Runtime.default.unsafe.run(registrationEffect).getOrThrowFiberFailure() }
+          Unsafe.unsafe { implicit unsafe =>
+            Runtime.default.unsafe.run(registrationEffect).getOrThrowFiberFailure()
+          }
           $server
         }
       }

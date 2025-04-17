@@ -7,10 +7,9 @@ import io.circe.Json
 import sttp.tapir.Schema
 import sttp.tapir.generic.auto.* // Needed for Schema derivation
 
-/**
- * Tests that the description provided in the @Param annotation
- * is correctly included in the generated JSON schema by JsonSchemaMacro.
- */
+/** Tests that the description provided in the @Param annotation is correctly included in the
+  * generated JSON schema by JsonSchemaMacro.
+  */
 class ParamAnnotationSchemaTest extends AnyFunSuite with Matchers {
 
   // Define a simple case class for testing
@@ -18,9 +17,9 @@ class ParamAnnotationSchemaTest extends AnyFunSuite with Matchers {
 
   // Define the test function with @Param annotations including descriptions
   def testFunctionWithParamDesc(
-    @Param("The unique identifier for the data") dataId: Int,
-    @Param("The actual test data object") testData: TestData,
-    @Param("Flag indicating if processing is active") isActive: Boolean
+      @Param("The unique identifier for the data") dataId: Int,
+      @Param("The actual test data object") testData: TestData,
+      @Param("Flag indicating if processing is active") isActive: Boolean
   ): Unit = ()
 
   test("@Param description should be included in the generated JSON schema") {

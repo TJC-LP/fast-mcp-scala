@@ -10,8 +10,8 @@ import scala.jdk.CollectionConverters.* // For Java/Scala collection conversions
 // --- Tool Related Types ---
 // For now we'll use a simpler ToolExample representation
 case class ToolExample(
-  name: Option[String],
-  description: Option[String]
+    name: Option[String],
+    description: Option[String]
 )
 
 object ToolExample:
@@ -22,7 +22,10 @@ object ToolExample:
 case class ToolDefinition(
     name: String,
     description: Option[String],
-    inputSchema: Either[McpSchema.JsonSchema, String], // Can be either MCP's JsonSchema or a string schema
+    inputSchema: Either[
+      McpSchema.JsonSchema,
+      String
+    ], // Can be either MCP's JsonSchema or a string schema
     version: Option[String] = None,
     examples: List[ToolExample] = List.empty,
     deprecated: Boolean = false,
@@ -32,36 +35,34 @@ case class ToolDefinition(
 )
 
 object ToolDefinition:
-  
+
   // Helper to convert to Java SDK Tool
   def toJava(td: ToolDefinition): McpSchema.Tool =
     val tool = td.inputSchema match {
-      case Left(mcpSchema) => 
+      case Left(mcpSchema) =>
         // Directly use McpSchema.JsonSchema
         new McpSchema.Tool(
-          td.name, 
-          td.description.orNull, 
+          td.name,
+          td.description.orNull,
           mcpSchema
         )
-      case Right(stringSchema) => 
+      case Right(stringSchema) =>
         // Use string schema - MCP SDK will parse it
         new McpSchema.Tool(
-          td.name, 
-          td.description.orNull, 
+          td.name,
+          td.description.orNull,
           stringSchema
         )
     }
-    
+
     // Add any additional properties via setters if needed
     // (will depend on future Java SDK enhancements)
-    
-    tool
 
+    tool
 
 // --- Resource Related Types ---
 // REMOVED ResourceDefinition case class and companion object from here.
 // It now resides in server.manager.ResourceManager.scala
-
 
 // --- Prompt Related Types ---
 case class PromptArgument(
@@ -69,8 +70,10 @@ case class PromptArgument(
     description: Option[String],
     required: Boolean = false
 )
+
 object PromptArgument:
   given JsonCodec[PromptArgument] = DeriveJsonCodec.gen[PromptArgument]
+
   // Helper to convert to Java SDK PromptArgument
   def toJava(pa: PromptArgument): McpSchema.PromptArgument =
     new McpSchema.PromptArgument(pa.name, pa.description.orNull, pa.required)
@@ -80,12 +83,13 @@ case class PromptDefinition(
     description: Option[String],
     arguments: Option[List[PromptArgument]]
 )
+
 object PromptDefinition:
+
   // Helper to convert to Java SDK Prompt
   def toJava(pd: PromptDefinition): McpSchema.Prompt =
     val javaArgs = pd.arguments.map(_.map(PromptArgument.toJava).asJava).orNull
     new McpSchema.Prompt(pd.name, pd.description.orNull, javaArgs)
-
 
 // --- Content Types ---
 // Use sealed trait for ADT pattern, enabling exhaustive matching
@@ -96,7 +100,9 @@ object Content:
   // Define codecs for subtypes first
   given JsonCodec[TextContent] = DeriveJsonCodec.gen[TextContent]
   given JsonCodec[ImageContent] = DeriveJsonCodec.gen[ImageContent]
-  given JsonCodec[EmbeddedResourceContent] = DeriveJsonCodec.gen[EmbeddedResourceContent] // Codec for the inner part
+
+  given JsonCodec[EmbeddedResourceContent] =
+    DeriveJsonCodec.gen[EmbeddedResourceContent] // Codec for the inner part
   given JsonCodec[EmbeddedResource] = DeriveJsonCodec.gen[EmbeddedResource]
 
   // Derive codec for the sealed trait
@@ -107,10 +113,11 @@ case class TextContent(
     audience: Option[List[Role]] = None,
     priority: Option[Double] = None
 ) extends Content("text"):
+
   override def toJava: McpSchema.TextContent =
     new McpSchema.TextContent(
-      audience.map(roles => roles.map(Role.toJava).asJava).orNull, 
-      priority.map(Double.box).orNull, 
+      audience.map(roles => roles.map(Role.toJava).asJava).orNull,
+      priority.map(Double.box).orNull,
       text
     )
 
@@ -120,11 +127,12 @@ case class ImageContent(
     audience: Option[List[Role]] = None,
     priority: Option[Double] = None
 ) extends Content("image"):
+
   override def toJava: McpSchema.ImageContent =
     new McpSchema.ImageContent(
-      audience.map(roles => roles.map(Role.toJava).asJava).orNull, 
-      priority.map(Double.box).orNull, 
-      data, 
+      audience.map(roles => roles.map(Role.toJava).asJava).orNull,
+      priority.map(Double.box).orNull,
+      data,
       mimeType
     )
 
@@ -133,13 +141,12 @@ case class EmbeddedResourceContent(
     uri: String,
     mimeType: String,
     text: Option[String] = None, // For text resources
-    blob: Option[String] = None  // For binary resources (Base64 encoded)
+    blob: Option[String] = None // For binary resources (Base64 encoded)
 ):
+
   def toJava: McpSchema.ResourceContents =
-    if text.isDefined then
-      new McpSchema.TextResourceContents(uri, mimeType, text.get)
-    else if blob.isDefined then
-      new McpSchema.BlobResourceContents(uri, mimeType, blob.get)
+    if text.isDefined then new McpSchema.TextResourceContents(uri, mimeType, text.get)
+    else if blob.isDefined then new McpSchema.BlobResourceContents(uri, mimeType, blob.get)
     else // Should ideally not happen if validated properly
       throw new IllegalArgumentException(s"EmbeddedResourceContent for $uri must have text or blob")
 
@@ -148,13 +155,13 @@ case class EmbeddedResource(
     audience: Option[List[Role]] = None,
     priority: Option[Double] = None
 ) extends Content("resource"):
+
   override def toJava: McpSchema.EmbeddedResource =
     new McpSchema.EmbeddedResource(
-      audience.map(roles => roles.map(Role.toJava).asJava).orNull, 
-      priority.map(Double.box).orNull, 
+      audience.map(roles => roles.map(Role.toJava).asJava).orNull,
+      priority.map(Double.box).orNull,
       resource.toJava
     )
-
 
 // --- Message Types ---
 // Represents the role in a conversation (user or assistant)
@@ -162,6 +169,7 @@ enum Role:
   case User, Assistant
 
 object Role:
+
   given JsonCodec[Role] = JsonCodec.string.transformOrFail(
     {
       case s if s.equalsIgnoreCase("user") => Right(Role.User)
@@ -170,6 +178,7 @@ object Role:
     },
     _.toString.toLowerCase
   )
+
   // Helper to convert to Java SDK Role
   def toJava(r: Role): McpSchema.Role = r match {
     case Role.User => McpSchema.Role.USER
@@ -180,8 +189,10 @@ case class Message(
     role: Role,
     content: Content
 )
+
 object Message:
   given JsonCodec[Message] = DeriveJsonCodec.gen[Message]
+
   // Helper to convert to Java SDK PromptMessage
   def toJava(m: Message): McpSchema.PromptMessage =
     new McpSchema.PromptMessage(Role.toJava(m.role), m.content.toJava)

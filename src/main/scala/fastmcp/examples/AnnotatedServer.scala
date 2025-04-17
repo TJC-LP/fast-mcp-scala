@@ -9,24 +9,23 @@ import sttp.tapir.*
 
 import java.lang.System as JSystem
 
-/**
- * Enhanced server example demonstrating the zero-boilerplate experience with @Tool annotations.
- * 
- * This example shows:
- * 1. Tools defined with @Tool annotations are automatically registered at compile-time
- * 2. Schema generation happens automatically using JsonSchemaMacro
- * 3. Handler mapping is done using MapToFunctionMacro
- * 4. We just call server.scanAnnotations[AnnotatedServer.type] to register everything
- */
+/** Enhanced server example demonstrating the zero-boilerplate experience with @Tool annotations.
+  *
+  * This example shows:
+  *   1. Tools defined with @Tool annotations are automatically registered at compile-time 2. Schema
+  *      generation happens automatically using JsonSchemaMacro 3. Handler mapping is done using
+  *      MapToFunctionMacro 4. We just call server.scanAnnotations[AnnotatedServer.type] to register
+  *      everything
+  */
 object AnnotatedServer extends ZIOAppDefault:
-  
+
   // Define a result type for our calculator
   case class CalculatorResult(
-    operation: String,
-    numbers: List[Double],
-    result: Double
+      operation: String,
+      numbers: List[Double],
+      result: Double
   )
-  
+
   // JSON codec for the result
   given JsonEncoder[CalculatorResult] = DeriveJsonEncoder.gen[CalculatorResult]
   given JsonDecoder[CalculatorResult] = DeriveJsonDecoder.gen[CalculatorResult]
@@ -34,37 +33,33 @@ object AnnotatedServer extends ZIOAppDefault:
   enum TransformationType:
     case uppercase, lowercase, reverse, capitalize
 
-  /**
-   * Simple tool that adds two numbers.
-   * The @Tool annotation will:
-   * 1. Be scanned by scanAnnotations[AnnotatedServer.type]
-   * 2. Generate a JSON schema for the parameters
-   * 3. Create a handler using MapToFunctionMacro
-   */
+  /** Simple tool that adds two numbers. The @Tool annotation will:
+    *   1. Be scanned by scanAnnotations[AnnotatedServer.type] 2. Generate a JSON schema for the
+    *      parameters 3. Create a handler using MapToFunctionMacro
+    */
   @Tool(
-    name = Some("add"),
+    name = Some("add")
     // description = Some("Add two numbers together")
   )
   def add(
-    @Param("First number") a: Int,
-    @Param("Second number") b: Int
+      @Param("First number") a: Int,
+      @Param("Second number") b: Int
   ): Int = a + b
-  
-  /**
-   * More complex calculator tool that handles different operations.
-   */
+
+  /** More complex calculator tool that handles different operations.
+    */
   @Tool(
     name = Some("calculator"),
     description = Some("Perform a calculation with two numbers"),
     tags = List("math", "calculation")
   )
   def calculate(
-    @Param("First number") a: Double,
-    @Param("Second number") b: Double,
-    @Param(
-      "Operation to perform (add, subtract, multiply, divide)",
-      required = false
-    ) operation: String = "add"
+      @Param("First number") a: Double,
+      @Param("Second number") b: Double,
+      @Param(
+        "Operation to perform (add, subtract, multiply, divide)",
+        required = false
+      ) operation: String = "add"
   ): String =
     val result = operation.toLowerCase match
       case "add" | "+" => a + b
@@ -74,19 +69,18 @@ object AnnotatedServer extends ZIOAppDefault:
         if (b == 0) throw new IllegalArgumentException("Cannot divide by zero")
         else a / b
       case _ => throw new IllegalArgumentException(s"Unknown operation: $operation")
-    
+
     CalculatorResult(operation, List(a, b), result).toJsonPretty
-  
-  /**
-   * String transformation tool.
-   */
+
+  /** String transformation tool.
+    */
   @Tool(
     name = Some("transform"),
     description = Some("Transform text using various operations")
   )
   def transformText(
-    text: String,
-    transformation: TransformationType
+      text: String,
+      transformation: TransformationType
   ): String =
     transformation match
       case TransformationType.uppercase => text.toUpperCase
@@ -94,22 +88,19 @@ object AnnotatedServer extends ZIOAppDefault:
       case TransformationType.capitalize => text.split(" ").map(_.capitalize).mkString(" ")
       case TransformationType.reverse => text.reverse
 
-  /**
-   * A static resource returning plain text.
-   * Annotated with @Resource.
-   */
+  /** A static resource returning plain text. Annotated with @Resource.
+    */
   @Resource(
     uri = "static://welcome",
     name = Some("WelcomeMessage"),
-    description = Some("A static welcome message."),
+    description = Some("A static welcome message.")
   )
   def welcomeResource(): String =
     "Welcome to the FastMCP-Scala Annotated Server!"
 
-  /**
-   * A template resource that takes a user ID from the URI.
-   * Annotated with @Resource. The URI pattern {userId} matches the parameter name.
-   */
+  /** A template resource that takes a user ID from the URI. Annotated with @Resource. The URI
+    * pattern {userId} matches the parameter name.
+    */
   @Resource(
     uri = "users://profile",
     name = Some("UserProfile"),
@@ -119,14 +110,16 @@ object AnnotatedServer extends ZIOAppDefault:
   def userProfileResource(): String =
     // In a real app, fetch user data based on userId
     val userId = "123"
-    Map("userId" -> userId, "name" -> s"User $userId", "email" -> s"user$userId@example.com").toJsonPretty
-  
+    Map(
+      "userId" -> userId,
+      "name" -> s"User $userId",
+      "email" -> s"user$userId@example.com"
+    ).toJsonPretty
+
   // --- Prompt Examples ---
-  
-  /**
-   * A simple prompt with no arguments.
-   * Annotated with @Prompt.
-   */
+
+  /** A simple prompt with no arguments. Annotated with @Prompt.
+    */
   @Prompt(
     name = Some("hello_prompt"),
     description = Some("A simple hello world prompt.")
@@ -135,32 +128,36 @@ object AnnotatedServer extends ZIOAppDefault:
     List(
       Message(role = Role.User, content = TextContent("Say hello to the world."))
     )
-  
-  /**
-   * A prompt with required and optional arguments.
-   * Uses @PromptParam for documentation. Annotated with @Prompt.
-   */
+
+  /** A prompt with required and optional arguments. Uses @PromptParam for documentation. Annotated
+    * with @Prompt.
+    */
   @Prompt(
     name = Some("greeting_prompt"),
     description = Some("Generates a personalized greeting.")
   )
   def greetingPrompt(
-    @PromptParam("The name of the person to greet.") name: String,
-    @PromptParam("Optional title (e.g., Dr., Ms.).", required = false) title: String = ""
+      @PromptParam("The name of the person to greet.") name: String,
+      @PromptParam("Optional title (e.g., Dr., Ms.).", required = false) title: String = ""
   ): List[Message] =
     val fullGreeting = if title.nonEmpty then s"$title $name" else name
     List(
-      Message(role = Role.User, content = TextContent(s"Generate a warm greeting for $fullGreeting."))
+      Message(
+        role = Role.User,
+        content = TextContent(s"Generate a warm greeting for $fullGreeting.")
+      )
     )
-  
+
   override def run: ZIO[Any, Throwable, Unit] =
     for
       // Create server instance
-      server <- ZIO.succeed(FastMCPScala(
-        name = "MacroAnnotatedServer",
-        version = "0.1.0"
-      ))
-      
+      server <- ZIO.succeed(
+        FastMCPScala(
+          name = "MacroAnnotatedServer",
+          version = "0.1.0"
+        )
+      )
+
       // Process tools using the scanAnnotations macro extension method
       _ <- ZIO.attempt {
         JSystem.err.println("[Server] Scanning for annotated tools...")

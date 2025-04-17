@@ -1,30 +1,26 @@
 package fastmcp.server
 
-import io.modelcontextprotocol.server.{McpAsyncServerExchange, McpSyncServerExchange}
+import io.modelcontextprotocol.server.McpAsyncServerExchange
 import io.modelcontextprotocol.spec.McpSchema
 
-/**
- * Represents the context of an MCP request
- * Acts as a wrapper around the Java McpSyncServerExchange
- */
+/** Represents the context of an MCP request Acts as a wrapper around the Java McpSyncServerExchange
+  */
 case class McpContext(
-                       // Underlying Java exchange object for advanced use or accessing client capabilities
-                       javaExchange: Option[McpAsyncServerExchange] = None
-                     )
+    // Underlying Java exchange object for advanced use or accessing client capabilities
+    javaExchange: Option[McpAsyncServerExchange] = None
+)
 
-/**
- * Extension methods for McpContext to provide a richer API
- */
+/** Extension methods for McpContext to provide a richer API
+  */
 extension (context: McpContext)
-  /**
-   * Returns the client capabilities if available
-   */
+
+  /** Returns the client capabilities if available
+    */
   def getClientCapabilities: Option[McpSchema.ClientCapabilities] =
     context.javaExchange.map(_.getClientCapabilities)
 
-  /**
-   * Returns the client information if available
-   */
+  /** Returns the client information if available
+    */
   def getClientInfo: Option[McpSchema.Implementation] =
     context.javaExchange.map(_.getClientInfo)
 

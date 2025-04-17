@@ -8,20 +8,19 @@ import sttp.tapir.*
 import sttp.tapir.Schema.annotations.{description, encodedExample}
 import sttp.tapir.generic.auto.*
 
-/**
- * Tests to ensure that tapir annotations are properly included in the JSON schema
- */
+/** Tests to ensure that tapir annotations are properly included in the JSON schema
+  */
 class ParamAnnotationTest extends AnyFunSuite with Matchers {
 
   def configFunction(
-                      options: ConfigOptions
-                    ): String = s"${options.name}: ${options.value}"
+      options: ConfigOptions
+  ): String = s"${options.name}: ${options.value}"
 
   // Test with a case class parameter
   case class ConfigOptions(
-                            @description("Name of the configuration") name: String,
-                            @description("Value of the configuration") value: Int
-                          )
+      @description("Name of the configuration") name: String,
+      @description("Value of the configuration") value: Int
+  )
 
   object ConfigOptions {
     // Provide a Schema instance for ConfigOptions

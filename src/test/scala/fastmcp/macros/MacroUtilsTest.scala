@@ -216,7 +216,9 @@ class MacroUtilsTest extends AnyFunSuite { // Ensure this matches the import
     assert(actualJson == expectedJson) // Use ScalaTest's assert
   }
 
-  test("injectParamDescriptions should not add description if property value is not a JSON object") {
+  test(
+    "injectParamDescriptions should not add description if property value is not a JSON object"
+  ) {
     // Note: This structure is not typical for JSON Schema properties,
     // but tests the robustness of the `.asObject` check.
     val inputJsonString = """{

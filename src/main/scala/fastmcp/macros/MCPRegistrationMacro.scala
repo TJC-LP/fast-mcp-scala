@@ -5,31 +5,31 @@ import fastmcp.server.FastMCPScala
 
 import scala.quoted.*
 
-/**
- * Main object containing extension method for registering annotated tools, prompts, and resources.
- * Delegates actual processing to specialized objects.
- */
+/** Main object containing extension method for registering annotated tools, prompts, and resources.
+  * Delegates actual processing to specialized objects.
+  */
 object MCPRegistrationMacro:
-  /**
-   * Extension method for FastMCPScala that scans an object for MCP annotations
-   * (@Tool, @Prompt, @Resource) and registers them with the server.
-   */
+
+  /** Extension method for FastMCPScala that scans an object for MCP annotations (@Tool, @Prompt,
+    * \@Resource) and registers them with the server.
+    */
   extension (server: FastMCPScala)
-    /**
-     * Scan an object for methods with @Tool, @Prompt, or @Resource annotations and register them.
-     *
-     * @tparam T Type of the object containing annotated methods
-     * @return The same FastMCPScala instance, for chaining
-     */
+
+    /** Scan an object for methods with @Tool, @Prompt, or @Resource annotations and register them.
+      *
+      * @tparam T
+      *   Type of the object containing annotated methods
+      * @return
+      *   The same FastMCPScala instance, for chaining
+      */
     inline def scanAnnotations[T]: FastMCPScala =
       ${ scanAnnotationsImpl[T]('server) }
 
-  /**
-   * Macro implementation for scanAnnotations
-   */
+  /** Macro implementation for scanAnnotations
+    */
   private def scanAnnotationsImpl[T: Type](
-                                            server: Expr[FastMCPScala]
-                                          )(using quotes: Quotes): Expr[FastMCPScala] =
+      server: Expr[FastMCPScala]
+  )(using quotes: Quotes): Expr[FastMCPScala] =
     import quotes.reflect.*
 
     val tpe = TypeRepr.of[T]
@@ -52,10 +52,10 @@ object MCPRegistrationMacro:
     val registrationExprs: List[Expr[FastMCPScala]] = annotatedMethods.flatMap { method =>
       method.annotations.collectFirst {
         case toolAnnot if toolAnnot.tpe <:< TypeRepr.of[Tool] =>
-          val annotTerm = toolAnnot.asExpr.asTerm
+          toolAnnot.asExpr.asTerm
           ToolProcessor.processToolAnnotation(server, sym, method)
         case promptAnnot if promptAnnot.tpe <:< TypeRepr.of[Prompt] =>
-          val annotTerm = promptAnnot.asExpr.asTerm
+          promptAnnot.asExpr.asTerm
           PromptProcessor.processPromptAnnotation(server, sym, method)
         case resourceAnnot if resourceAnnot.tpe <:< TypeRepr.of[Resource] =>
           val annotTerm = resourceAnnot.asExpr.asTerm

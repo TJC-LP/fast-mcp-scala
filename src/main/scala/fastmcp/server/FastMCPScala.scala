@@ -2,7 +2,12 @@ package fastmcp.server
 
 import fastmcp.core.*
 import fastmcp.server.manager.*
-import io.modelcontextprotocol.server.{McpAsyncServer, McpAsyncServerExchange, McpServer, McpServerFeatures}
+import io.modelcontextprotocol.server.{
+  McpAsyncServer,
+  McpAsyncServerExchange,
+  McpServer,
+  McpServerFeatures
+}
 import io.modelcontextprotocol.spec.{McpSchema, McpServerTransportProvider}
 import zio.*
 // Explicitly import Java's System to avoid conflicts with zio.System
@@ -16,62 +21,29 @@ import scala.jdk.CollectionConverters.*
 import scala.util.{Failure, Success} // Needed for runToFuture onComplete
 
 // Qualified import to resolve ambiguity
-import fastmcp.server.manager.ResourceDefinition as ManagerResourceDefinition
 
-/**
- * Settings for the FastMCPScala server
- */
+/** Settings for the FastMCPScala server
+  */
 case class FastMCPScalaSettings(
-                                 debug: Boolean = false,
-                                 logLevel: String = "INFO",
-                                 host: String = "0.0.0.0",
-                                 port: Int = 8000,
-                                 warnOnDuplicateResources: Boolean = true,
-                                 warnOnDuplicateTools: Boolean = true,
-                                 warnOnDuplicatePrompts: Boolean = true,
-                                 dependencies: List[String] = List.empty
-                               )
+    debug: Boolean = false,
+    logLevel: String = "INFO",
+    host: String = "0.0.0.0",
+    port: Int = 8000,
+    warnOnDuplicateResources: Boolean = true,
+    warnOnDuplicateTools: Boolean = true,
+    warnOnDuplicatePrompts: Boolean = true,
+    dependencies: List[String] = List.empty
+)
 
-/**
- * Main server class for FastMCP-Scala
- *
- * This class provides a high-level API for creating MCP servers using Scala and ZIO
- */
+/** Main server class for FastMCP-Scala
+  *
+  * This class provides a high-level API for creating MCP servers using Scala and ZIO
+  */
 class FastMCPScala(
-                    val name: String = "FastMCPScala",
-                    version: String = "0.1.0",
-                    settings: FastMCPScalaSettings = FastMCPScalaSettings()
-                  ):
-  /**
-   * Creates a generic Java BiFunction handler for templated resources.
-   * Returns a Mono that completes with the result.
-   */
-  private lazy val genericTemplateReadHandler: java.util.function.BiFunction[McpAsyncServerExchange, McpSchema.ReadResourceRequest, Mono[McpSchema.ReadResourceResult]] =
-    (exchange, request) => {
-      val actualUri = request.uri()
-      val context = McpContext(Some(exchange))
-      JSystem.err.println(s"[FastMCPScala] Generic template handler invoked for actual URI: '$actualUri'")
-
-      // Execute the ZIO effect and convert to Mono
-      val resourceEffect: ZIO[Any, Throwable, String | Array[Byte]] =
-        resourceManager.readResource(actualUri, Some(context))
-          .catchAll {
-            case e: ResourceNotFoundError =>
-              JSystem.err.println(s"[FastMCPScala] Resource not found via ResourceManager for URI '$actualUri': ${e.getMessage}")
-              ZIO.fail(new RuntimeException(s"Resource not found: '$actualUri'", e))
-            case e: Throwable =>
-              JSystem.err.println(s"[FastMCPScala] Error reading resource '$actualUri' via ResourceManager: ${e.getMessage}")
-              ZIO.fail(new RuntimeException(s"Error accessing resource '$actualUri'", e))
-          }
-
-      val finalEffect: ZIO[Any, Throwable, McpSchema.ReadResourceResult] = resourceEffect.flatMap { content =>
-        val mimeTypeOpt = resourceManager.findMatchingTemplate(actualUri).flatMap(_._2.mimeType)
-        createReadResourceResult(actualUri, content, mimeTypeOpt)
-      }
-
-      // Convert the final ZIO effect to Mono using the helper
-      zioToMono(finalEffect)
-    }
+    val name: String = "FastMCPScala",
+    version: String = "0.1.0",
+    settings: FastMCPScalaSettings = FastMCPScalaSettings()
+):
   val dependencies: List[String] = settings.dependencies
   // Initialize managers
   val toolManager = new ToolManager()
@@ -84,16 +56,17 @@ class FastMCPScala(
 
   // --- Private Java Handler Converters ---
 
-  /**
-   * Register a tool with the server
-   */
+  /** Register a tool with the server
+    */
   def tool(
-            name: String,
-            handler: ToolHandler,
-            description: Option[String] = None,
-            inputSchema: Either[McpSchema.JsonSchema, String] = Left(new McpSchema.JsonSchema("object", null, null, true)),
-            options: ToolRegistrationOptions = ToolRegistrationOptions()
-          ): ZIO[Any, Throwable, FastMCPScala] =
+      name: String,
+      handler: ToolHandler,
+      description: Option[String] = None,
+      inputSchema: Either[McpSchema.JsonSchema, String] = Left(
+        new McpSchema.JsonSchema("object", null, null, true)
+      ),
+      options: ToolRegistrationOptions = ToolRegistrationOptions()
+  ): ZIO[Any, Throwable, FastMCPScala] =
     val definition = ToolDefinition(
       name = name,
       description = description,
@@ -101,50 +74,55 @@ class FastMCPScala(
     )
     toolManager.addTool(name, handler, definition, options).as(this)
 
-  /**
-   * Register a **static** resource with the server.
-   */
+  /** Register a **static** resource with the server.
+    */
   def resource(
-                uri: String,
-                handler: ResourceHandler, // () => ZIO[Any, Throwable, String | Array[Byte]]
-                name: Option[String] = None,
-                description: Option[String] = None,
-                mimeType: Option[String] = Some("text/plain") // Default mimeType here
-              ): ZIO[Any, Throwable, FastMCPScala] = {
-    val definition = ManagerResourceDefinition(
-      uri = uri, name = name, description = description, mimeType = mimeType,
-      isTemplate = false, arguments = None
+      uri: String,
+      handler: ResourceHandler, // () => ZIO[Any, Throwable, String | Array[Byte]]
+      name: Option[String] = None,
+      description: Option[String] = None,
+      mimeType: Option[String] = Some("text/plain") // Default mimeType here
+  ): ZIO[Any, Throwable, FastMCPScala] = {
+    val definition = ResourceDefinition(
+      uri = uri,
+      name = name,
+      description = description,
+      mimeType = mimeType,
+      isTemplate = false,
+      arguments = None
     )
     resourceManager.addResource(uri, handler, definition).as(this)
   }
 
-  /**
-   * Register a **templated** resource with the server.
-   */
+  /** Register a **templated** resource with the server.
+    */
   def resourceTemplate(
-                        uriPattern: String,
-                        handler: ResourceTemplateHandler, // Map[String, String] => ZIO[Any, Throwable, String | Array[Byte]]
-                        name: Option[String] = None,
-                        description: Option[String] = None,
-                        mimeType: Option[String] = Some("text/plain"), // Default mimeType here
-                        arguments: Option[List[ResourceArgument]] = None // Arguments might be passed by macro
-                      ): ZIO[Any, Throwable, FastMCPScala] = {
-    val definition = ManagerResourceDefinition(
-      uri = uriPattern, name = name, description = description, mimeType = mimeType,
-      isTemplate = true, arguments = arguments
+      uriPattern: String,
+      handler: ResourceTemplateHandler, // Map[String, String] => ZIO[Any, Throwable, String | Array[Byte]]
+      name: Option[String] = None,
+      description: Option[String] = None,
+      mimeType: Option[String] = Some("text/plain"), // Default mimeType here
+      arguments: Option[List[ResourceArgument]] = None // Arguments might be passed by macro
+  ): ZIO[Any, Throwable, FastMCPScala] = {
+    val definition = ResourceDefinition(
+      uri = uriPattern,
+      name = name,
+      description = description,
+      mimeType = mimeType,
+      isTemplate = true,
+      arguments = arguments
     )
     resourceManager.addResourceTemplate(uriPattern, handler, definition).as(this)
   }
 
-  /**
-   * Register a prompt with the server
-   */
+  /** Register a prompt with the server
+    */
   def prompt(
-              name: String,
-              handler: PromptHandler,
-              description: Option[String] = None,
-              arguments: Option[List[PromptArgument]] = None
-            ): ZIO[Any, Throwable, FastMCPScala] =
+      name: String,
+      handler: PromptHandler,
+      description: Option[String] = None,
+      arguments: Option[List[PromptArgument]] = None
+  ): ZIO[Any, Throwable, FastMCPScala] =
     val definition = PromptDefinition(name, description, arguments)
     promptManager.addPrompt(name, handler, definition).as(this)
 
@@ -158,16 +136,22 @@ class FastMCPScala(
 
   def listResources(): ZIO[Any, Throwable, McpSchema.ListResourcesResult] =
     ZIO.succeed {
-      val javaResources = resourceManager.listDefinitions().map { resourceDef =>
-        ManagerResourceDefinition.toJava(resourceDef) match {
-          case res: McpSchema.Resource => res
-          case template: McpSchema.ResourceTemplate =>
-            new McpSchema.Resource(
-              template.uriTemplate(), template.name(), template.description(),
-              template.mimeType(), template.annotations()
-            )
+      val javaResources = resourceManager
+        .listDefinitions()
+        .map { resourceDef =>
+          ResourceDefinition.toJava(resourceDef) match {
+            case res: McpSchema.Resource => res
+            case template: McpSchema.ResourceTemplate =>
+              new McpSchema.Resource(
+                template.uriTemplate(),
+                template.name(),
+                template.description(),
+                template.mimeType(),
+                template.annotations()
+              )
+          }
         }
-      }.asJava
+        .asJava
       new McpSchema.ListResourcesResult(javaResources, null)
     }
 
@@ -177,9 +161,8 @@ class FastMCPScala(
       new McpSchema.ListPromptsResult(prompts, null)
     }
 
-  /**
-   * Run the server with the specified transport
-   */
+  /** Run the server with the specified transport
+    */
   def run(transport: String = "stdio"): ZIO[Any, Throwable, Unit] =
     transport.toLowerCase match
       case "stdio" => runStdio()
@@ -187,34 +170,47 @@ class FastMCPScala(
 
   // --- Public Listing Methods ---
 
-  /**
-   * Run the server with stdio transport
-   */
+  /** Run the server with stdio transport
+    */
   def runStdio(): ZIO[Any, Throwable, Unit] =
     ZIO.attemptBlocking {
-      val stdioTransportProvider = new io.modelcontextprotocol.server.transport.StdioServerTransportProvider()
+      val stdioTransportProvider =
+        new io.modelcontextprotocol.server.transport.StdioServerTransportProvider()
       this.setupServer(stdioTransportProvider)
       JSystem.err.println(s"FastMCPScala server '${this.name}' running with stdio transport.")
       Thread.sleep(Long.MaxValue)
     }.unit
 
-  /**
-   * Set up the Java MCP Server with the given transport provider
-   */
+  /** Set up the Java MCP Server with the given transport provider
+    */
   def setupServer(transportProvider: McpServerTransportProvider): Unit =
     // Use McpServer.async builder
-    val serverBuilder = McpServer.async(transportProvider)
+    val serverBuilder = McpServer
+      .async(transportProvider)
       .serverInfo(name, version)
 
     // --- Capabilities Setup ---
     val experimental = new java.util.HashMap[String, Object]()
-    val toolCapabilities = if (toolManager.listDefinitions().nonEmpty) new McpSchema.ServerCapabilities.ToolCapabilities(true) else null
-    val resourceCapabilities = if (resourceManager.listDefinitions().nonEmpty) new McpSchema.ServerCapabilities.ResourceCapabilities(true, true) else null
-    val promptCapabilities = if (promptManager.listDefinitions().nonEmpty) new McpSchema.ServerCapabilities.PromptCapabilities(true) else null
+    val toolCapabilities =
+      if (toolManager.listDefinitions().nonEmpty)
+        new McpSchema.ServerCapabilities.ToolCapabilities(true)
+      else null
+    val resourceCapabilities =
+      if (resourceManager.listDefinitions().nonEmpty)
+        new McpSchema.ServerCapabilities.ResourceCapabilities(true, true)
+      else null
+    val promptCapabilities =
+      if (promptManager.listDefinitions().nonEmpty)
+        new McpSchema.ServerCapabilities.PromptCapabilities(true)
+      else null
     val loggingCapabilities = new McpSchema.ServerCapabilities.LoggingCapabilities()
 
     val capabilities = new McpSchema.ServerCapabilities(
-      experimental, loggingCapabilities, promptCapabilities, resourceCapabilities, toolCapabilities
+      experimental,
+      loggingCapabilities,
+      promptCapabilities,
+      resourceCapabilities,
+      toolCapabilities
     )
     serverBuilder.capabilities(capabilities)
 
@@ -227,51 +223,81 @@ class FastMCPScala(
     }
 
     // --- Resource and Template Registration with Java Server ---
-    JSystem.err.println(s"[FastMCPScala] Processing ${resourceManager.listDefinitions().size} resource definitions for Java server registration...")
+    JSystem.err.println(
+      s"[FastMCPScala] Processing ${resourceManager.listDefinitions().size} resource definitions for Java server registration..."
+    )
     val resourceSpecs = new java.util.ArrayList[McpServerFeatures.AsyncResourceSpecification]()
     val templateDefs = new java.util.ArrayList[McpSchema.ResourceTemplate]()
 
     resourceManager.listDefinitions().foreach { resDef =>
-      JSystem.err.println(s"[FastMCPScala] - Processing definition for URI: ${resDef.uri}, isTemplate: ${resDef.isTemplate}")
+      JSystem.err.println(
+        s"[FastMCPScala] - Processing definition for URI: ${resDef.uri}, isTemplate: ${resDef.isTemplate}"
+      )
 
       if (resDef.isTemplate) {
         // 1. Add Template Definition for discovery via .resourceTemplates()
-        ManagerResourceDefinition.toJava(resDef) match {
+        ResourceDefinition.toJava(resDef) match {
           case template: McpSchema.ResourceTemplate =>
             templateDefs.add(template)
-            JSystem.err.println(s"[FastMCPScala]   - Added ResourceTemplate definition for discovery: ${resDef.uri}")
-          case _ => JSystem.err.println(s"[FastMCPScala]   - Warning: ResourceDefinition marked as template but did not convert to ResourceTemplate: ${resDef.uri}")
+            JSystem.err.println(
+              s"[FastMCPScala]   - Added ResourceTemplate definition for discovery: ${resDef.uri}"
+            )
+          case _ =>
+            JSystem.err.println(
+              s"[FastMCPScala]   - Warning: ResourceDefinition marked as template but did not convert to ResourceTemplate: ${resDef.uri}"
+            )
         }
-        JSystem.err.println(s"[FastMCPScala]   - Added Generic Handler spec keyed by template URI: ${resDef.uri}")
+        JSystem.err.println(
+          s"[FastMCPScala]   - Added Generic Handler spec keyed by template URI: ${resDef.uri}"
+        )
 
       } else {
         // --- Static Resource ---
-        ManagerResourceDefinition.toJava(resDef) match {
+        ResourceDefinition.toJava(resDef) match {
           case resource: McpSchema.Resource =>
-            val resourceSpec = new McpServerFeatures.AsyncResourceSpecification(resource, javaStaticResourceReadHandler(resDef.uri))
+            val resourceSpec = new McpServerFeatures.AsyncResourceSpecification(
+              resource,
+              javaStaticResourceReadHandler(resDef.uri)
+            )
             resourceSpecs.add(resourceSpec)
-            JSystem.err.println(s"[FastMCPScala]   - Added AsyncResourceSpecification for static resource: ${resDef.uri}")
-          case _ => JSystem.err.println(s"[FastMCPScala]   - Warning: ResourceDefinition marked as static but did not convert to Resource: ${resDef.uri}")
+            JSystem.err.println(
+              s"[FastMCPScala]   - Added AsyncResourceSpecification for static resource: ${resDef.uri}"
+            )
+          case _ =>
+            JSystem.err.println(
+              s"[FastMCPScala]   - Warning: ResourceDefinition marked as static but did not convert to Resource: ${resDef.uri}"
+            )
         }
       }
     }
 
     if (!resourceSpecs.isEmpty) {
       serverBuilder.resources(resourceSpecs)
-      JSystem.err.println(s"[FastMCPScala] Registered ${resourceSpecs.size()} resource handler specifications with Java server via .resources()")
+      JSystem.err.println(
+        s"[FastMCPScala] Registered ${resourceSpecs.size()} resource handler specifications with Java server via .resources()"
+      )
     }
     if (!templateDefs.isEmpty) {
       serverBuilder.resourceTemplates(templateDefs)
-      JSystem.err.println(s"[FastMCPScala] Registered ${templateDefs.size()} resource template definitions with Java server via .resourceTemplates()")
+      JSystem.err.println(
+        s"[FastMCPScala] Registered ${templateDefs.size()} resource template definitions with Java server via .resourceTemplates()"
+      )
     }
 
     // --- Prompt Registration ---
-    JSystem.err.println(s"[FastMCPScala] Registering ${promptManager.listDefinitions().size} prompts...")
+    JSystem.err.println(
+      s"[FastMCPScala] Registering ${promptManager.listDefinitions().size} prompts..."
+    )
     promptManager.listDefinitions().foreach { promptDef =>
       JSystem.err.println(s"[FastMCPScala] - Registering Prompt: ${promptDef.name}")
       val javaPrompt = PromptDefinition.toJava(promptDef)
-      val promptSpec = new McpServerFeatures.AsyncPromptSpecification(javaPrompt, javaPromptHandler(promptDef.name))
-      serverBuilder.prompts(promptSpec) // Note: .prompts() might take a list or varargs depending on the Java library version
+      val promptSpec = new McpServerFeatures.AsyncPromptSpecification(
+        javaPrompt,
+        javaPromptHandler(promptDef.name)
+      )
+      serverBuilder.prompts(
+        promptSpec
+      ) // Note: .prompts() might take a list or varargs depending on the Java library version
     }
 
     // --- Build Server ---
@@ -279,38 +305,58 @@ class FastMCPScala(
     underlyingJavaServer = Some(serverBuilder.build())
     JSystem.err.println(s"MCP Server '$name' configured.")
 
-  /**
-   * Creates a Java BiFunction handler for a specific static resource URI.
-   * Returns a Mono that completes with the result.
-   */
-  private def javaStaticResourceReadHandler(registeredUri: String): java.util.function.BiFunction[McpAsyncServerExchange, McpSchema.ReadResourceRequest, Mono[McpSchema.ReadResourceResult]] =
+  /** Creates a Java BiFunction handler for a specific static resource URI. Returns a Mono that
+    * completes with the result.
+    */
+  private def javaStaticResourceReadHandler(
+      registeredUri: String
+  ): java.util.function.BiFunction[McpAsyncServerExchange, McpSchema.ReadResourceRequest, Mono[
+    McpSchema.ReadResourceResult
+  ]] =
     (exchange, request) => {
       val handlerOpt: Option[ResourceHandler] = resourceManager.getResourceHandler(registeredUri)
       handlerOpt match {
         case Some(handler) =>
           // Execute the ZIO effect and convert to Mono
           val contentEffect: ZIO[Any, Throwable, String | Array[Byte]] = handler()
-          val finalEffect: ZIO[Any, Throwable, McpSchema.ReadResourceResult] = contentEffect.flatMap { content =>
-            val mimeTypeOpt = resourceManager.getResourceDefinition(registeredUri).flatMap(_.mimeType)
-            createReadResourceResult(registeredUri, content, mimeTypeOpt)
-          }.catchAll(e => ZIO.fail(new RuntimeException(s"Error executing static resource handler for $registeredUri", e)))
+          val finalEffect: ZIO[Any, Throwable, McpSchema.ReadResourceResult] = contentEffect
+            .flatMap { content =>
+              val mimeTypeOpt =
+                resourceManager.getResourceDefinition(registeredUri).flatMap(_.mimeType)
+              createReadResourceResult(registeredUri, content, mimeTypeOpt)
+            }
+            .catchAll(e =>
+              ZIO.fail(
+                new RuntimeException(
+                  s"Error executing static resource handler for $registeredUri",
+                  e
+                )
+              )
+            )
 
           // Convert the final ZIO effect to Mono using the helper
           zioToMono(finalEffect)
 
         case None =>
-          Mono.error(new RuntimeException(s"Static resource handler not found for URI: $registeredUri"))
+          Mono.error(
+            new RuntimeException(s"Static resource handler not found for URI: $registeredUri")
+          )
       }
     }
 
   // --- Server Lifecycle Methods ---
 
-  /**
-   * Helper to convert Scala result types into McpSchema.ReadResourceResult.
-   */
-  private def createReadResourceResult(uri: String, content: String | Array[Byte], mimeTypeOpt: Option[String]): ZIO[Any, Throwable, McpSchema.ReadResourceResult] = ZIO.attempt {
+  /** Helper to convert Scala result types into McpSchema.ReadResourceResult.
+    */
+  private def createReadResourceResult(
+      uri: String,
+      content: String | Array[Byte],
+      mimeTypeOpt: Option[String]
+  ): ZIO[Any, Throwable, McpSchema.ReadResourceResult] = ZIO.attempt {
     val finalMimeType = mimeTypeOpt.getOrElse(content match {
-      case s: String if (s.startsWith("{") && s.endsWith("}")) || (s.startsWith("[") && s.endsWith("]")) => "application/json"
+      case s: String
+          if (s.startsWith("{") && s.endsWith("}")) || (s.startsWith("[") && s.endsWith("]")) =>
+        "application/json"
       case _: String => "text/plain"
       case _: Array[Byte] => "application/octet-stream"
     })
@@ -324,10 +370,9 @@ class FastMCPScala(
     new McpSchema.ReadResourceResult(List(javaContent).asJava)
   }
 
-  /**
-   * Converts a ZIO effect to a Reactor Mono.
-   * Executes the ZIO effect asynchronously and bridges the result/error to the MonoSink.
-   */
+  /** Converts a ZIO effect to a Reactor Mono. Executes the ZIO effect asynchronously and bridges
+    * the result/error to the MonoSink.
+    */
   private def zioToMono[A](effect: ZIO[Any, Throwable, A]): Mono[A] = {
     Mono.create { sink =>
       Unsafe.unsafe { implicit unsafe =>
@@ -339,26 +384,64 @@ class FastMCPScala(
     }
   }
 
-  /**
-   * Convert Scala ZIO handler to Java BiFunction for prompt handling.
-   * Returns a Mono that completes with the result.
-   */
-  private def javaPromptHandler(promptName: String)
-  : java.util.function.BiFunction[McpAsyncServerExchange, McpSchema.GetPromptRequest, Mono[McpSchema.GetPromptResult]] =
+  /** Converts a ZIO effect with potential Throwable error to a Reactor Mono with MCP error
+    * handling. Errors are mapped to McpSchema.CallToolResult with isError flag set.
+    */
+  private def zioToMonoWithErrorHandling[A](
+      effect: ZIO[Any, Throwable, A],
+      resultTransform: A => McpSchema.CallToolResult
+  ): Mono[McpSchema.CallToolResult] = {
+    Mono.create { sink =>
+      Unsafe.unsafe { implicit unsafe =>
+        Runtime.default.unsafe
+          .runToFuture(
+            effect.fold(
+              // Error case - map to CallToolResult with isError=true
+              error => ErrorMapper.toCallToolResult(error),
+              // Success case - transform the result
+              success => resultTransform(success)
+            )
+          )
+          .onComplete {
+            case Success(result) => sink.success(result)
+            case Failure(error) =>
+              // This should generally not happen since we handled errors in the fold,
+              // but just in case there's an error during the error mapping itself
+              JSystem.err.println(
+                s"[FastMCPScala] Unexpected error in zioToMonoWithErrorHandling: ${error.getMessage}"
+              )
+              sink.error(error)
+          }
+      }
+    }
+  }
+
+  /** Convert Scala ZIO handler to Java BiFunction for prompt handling. Returns a Mono that
+    * completes with the result.
+    */
+  private def javaPromptHandler(
+      promptName: String
+  ): java.util.function.BiFunction[McpAsyncServerExchange, McpSchema.GetPromptRequest, Mono[
+    McpSchema.GetPromptResult
+  ]] =
     (exchange, request) => {
-      val scalaArgs = Option(request.arguments()).map(_.asScala.toMap.asInstanceOf[Map[String, Any]]).getOrElse(Map.empty)
+      val scalaArgs = Option(request.arguments())
+        .map(_.asScala.toMap.asInstanceOf[Map[String, Any]])
+        .getOrElse(Map.empty)
       val context = McpContext(Some(exchange))
 
-      val messagesEffect: ZIO[Any, Throwable, List[Message]] = promptManager.getPrompt(promptName, scalaArgs, Some(context))
+      val messagesEffect: ZIO[Any, Throwable, List[Message]] =
+        promptManager.getPrompt(promptName, scalaArgs, Some(context))
 
-      val finalEffect: ZIO[Any, Throwable, McpSchema.GetPromptResult] = messagesEffect.map { messages =>
-        val javaMessages = messages.map(Message.toJava).asJava
-        val description = promptManager
-          .getPromptDefinition(promptName)
-          .flatMap(_.description)
-          .getOrElse(s"Prompt: $promptName")
+      val finalEffect: ZIO[Any, Throwable, McpSchema.GetPromptResult] = messagesEffect.map {
+        messages =>
+          val javaMessages = messages.map(Message.toJava).asJava
+          val description = promptManager
+            .getPromptDefinition(promptName)
+            .flatMap(_.description)
+            .getOrElse(s"Prompt: $promptName")
 
-        new McpSchema.GetPromptResult(description, javaMessages)
+          new McpSchema.GetPromptResult(description, javaMessages)
       }
 
       // Convert the final ZIO effect to Mono using the helper
@@ -367,76 +450,82 @@ class FastMCPScala(
 
   // --- Private Helper Methods ---
 
-  /**
-   * Convert Scala ZIO handler to Java BiFunction for SyncServer Tool handling.
-   * IMPORTANT: This method assumes the ToolHandler returns a type that can be
-   * directly converted to McpSchema.Content (String, Array[Byte], Content, List[Content])
-   * or a String representation. It no longer attempts generic JSON serialization
-   * for arbitrary Products or Maps due to lack of implicit encoders.
-   * ToolHandlers returning complex types should serialize them to JSON String *within* the handler.
-   * Returns a Mono that completes with the result.
-   */
-  private def javaToolHandler(toolName: String)
-  : java.util.function.BiFunction[McpAsyncServerExchange, java.util.Map[String, Object], Mono[McpSchema.CallToolResult]] =
+  /** Convert Scala ZIO handler to Java BiFunction for SyncServer Tool handling. IMPORTANT: This
+    * method assumes the ToolHandler returns a type that can be directly converted to
+    * McpSchema.Content (String, Array[Byte], Content, List[Content]) or a String representation. It
+    * no longer attempts generic JSON serialization for arbitrary Products or Maps due to lack of
+    * implicit encoders. ToolHandlers returning complex types should serialize them to JSON String
+    * *within* the handler. Returns a Mono that completes with the result.
+    */
+  private def javaToolHandler(
+      toolName: String
+  ): java.util.function.BiFunction[McpAsyncServerExchange, java.util.Map[String, Object], Mono[
+    McpSchema.CallToolResult
+  ]] =
     (exchange, args) => {
       val scalaArgs = args.asScala.toMap.asInstanceOf[Map[String, Any]]
       val context = McpContext(Some(exchange))
 
       // Execute the user-provided ToolHandler
-      val resultEffect: ZIO[Any, Throwable, Any] = toolManager.callTool(toolName, scalaArgs, Some(context))
+      val resultEffect: ZIO[Any, Throwable, Any] =
+        toolManager.callTool(toolName, scalaArgs, Some(context))
 
-      // Map the ZIO effect result to McpSchema.CallToolResult
-      val finalEffect: ZIO[Any, Throwable, McpSchema.CallToolResult] = resultEffect.map { result =>
+      // Create a transform function to convert the result to McpSchema.CallToolResult
+      val transformResult: Any => McpSchema.CallToolResult = { result =>
         // Convert the result to Java McpSchema.Content list
         val contentList: java.util.List[McpSchema.Content] = result match {
           case s: String =>
             List(new McpSchema.TextContent(null, null, s)).asJava
           case bytes: Array[Byte] =>
             val base64Data = java.util.Base64.getEncoder.encodeToString(bytes)
-            List(new McpSchema.ImageContent(null, null, base64Data, "application/octet-stream")).asJava
+            List(
+              new McpSchema.ImageContent(null, null, base64Data, "application/octet-stream")
+            ).asJava
           case c: Content =>
             List(c.toJava).asJava
           case lst: List[?] if lst.nonEmpty && lst.head.isInstanceOf[Content] =>
             lst.asInstanceOf[List[Content]].map(_.toJava).asJava
           case null =>
-            JSystem.err.println(s"[FastMCPScala] Warning: Tool handler for '$toolName' returned null.")
+            JSystem.err.println(
+              s"[FastMCPScala] Warning: Tool handler for '$toolName' returned null."
+            )
             List.empty[McpSchema.Content].asJava
           case other =>
-            JSystem.err.println(s"[FastMCPScala] Warning: Tool handler for '$toolName' returned type ${other.getClass.getName}, using toString representation.")
+            JSystem.err.println(
+              s"[FastMCPScala] Warning: Tool handler for '$toolName' returned type ${other.getClass.getName}, using toString representation."
+            )
             List(new McpSchema.TextContent(null, null, other.toString)).asJava
         }
         // Construct the final result for the MCP protocol
-        new McpSchema.CallToolResult(contentList, false) // Assuming streaming is false for sync handler
+        new McpSchema.CallToolResult(contentList, false) // false for isError
       }
 
-      // Convert the final ZIO effect to Mono using the helper
-      zioToMono(finalEffect)
+      // Convert the ZIO effect to Mono using the helper that handles errors
+      zioToMonoWithErrorHandling(resultEffect, transformResult)
     }
 
 end FastMCPScala
 
-/**
- * Companion object for FastMCPScala
- */
+/** Companion object for FastMCPScala
+  */
 object FastMCPScala:
-  /**
-   * Create a new FastMCPScala instance and run it with stdio transport
-   */
+
+  /** Create a new FastMCPScala instance and run it with stdio transport
+    */
   def stdio(
-             name: String = "FastMCPScala",
-             version: String = "0.1.0",
-             settings: FastMCPScalaSettings = FastMCPScalaSettings()
-           ): ZIO[Any, Throwable, Unit] =
+      name: String = "FastMCPScala",
+      version: String = "0.1.0",
+      settings: FastMCPScalaSettings = FastMCPScalaSettings()
+  ): ZIO[Any, Throwable, Unit] =
     ZIO.succeed(apply(name, version, settings)).flatMap(_.runStdio())
 
-  /**
-   * Create a new FastMCPScala instance with the given settings
-   */
+  /** Create a new FastMCPScala instance with the given settings
+    */
   def apply(
-             name: String = "FastMCPScala",
-             version: String = "0.1.0",
-             settings: FastMCPScalaSettings = FastMCPScalaSettings()
-           ): FastMCPScala =
-    new FastMCPScala(name, version, settings) //comment
+      name: String = "FastMCPScala",
+      version: String = "0.1.0",
+      settings: FastMCPScalaSettings = FastMCPScalaSettings()
+  ): FastMCPScala =
+    new FastMCPScala(name, version, settings) // comment
 
 end FastMCPScala

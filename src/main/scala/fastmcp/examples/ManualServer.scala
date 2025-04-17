@@ -1,6 +1,5 @@
 package fastmcp.examples
 
-import fastmcp.core.*
 import fastmcp.macros.{JsonSchemaMacro, MapToFunctionMacro}
 import fastmcp.server.*
 import fastmcp.server.manager.*
@@ -10,12 +9,11 @@ import sttp.tapir.*
 
 import java.lang.System as JSystem
 
-/**
- * Example server using annotation-based tool definitions with macro processing
- *
- * This example demonstrates how to use @Tool annotations to define MCP tools
- * with automatic schema generation through Scala 3 macros.
- */
+/** Example server using annotation-based tool definitions with macro processing
+  *
+  * This example demonstrates how to use @Tool annotations to define MCP tools with automatic schema
+  * generation through Scala 3 macros.
+  */
 object ManualServer extends ZIOAppDefault:
 
   // JSON codecs for our custom types
@@ -23,19 +21,22 @@ object ManualServer extends ZIOAppDefault:
 
   given JsonDecoder[CalculatorResult] = DeriveJsonDecoder.gen[CalculatorResult]
 
-  /**
-   * Main entry point
-   */
+  /** Main entry point
+    */
   override def run: ZIO[Any, Throwable, Unit] =
     for
       // Create MCP server
-      server <- ZIO.succeed(FastMCPScala(
-        name = "MacroAnnotatedServer",
-        version = "0.1.0"
-      ))
+      server <- ZIO.succeed(
+        FastMCPScala(
+          name = "MacroAnnotatedServer",
+          version = "0.1.0"
+        )
+      )
 
       // Start registering tools from CalculatorTools directly in the for-comprehension
-      _ <- ZIO.succeed(JSystem.err.println("[AnnotatedServer] Directly registering tools from CalculatorTools..."))
+      _ <- ZIO.succeed(
+        JSystem.err.println("[AnnotatedServer] Directly registering tools from CalculatorTools...")
+      )
 
       // Register CalculatorTools.add
       addSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.add).spaces2)
@@ -47,16 +48,21 @@ object ManualServer extends ZIOAppDefault:
       )
 
       // Register CalculatorTools.addString
-      addStringSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.addString).spaces2)
+      addStringSchema = Right(
+        JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.addString).spaces2
+      )
       _ <- server.tool(
         name = "addString",
         description = Some("Adds two numbers provided as strings"),
-        handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.addString)(args)),
+        handler =
+          args => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.addString)(args)),
         inputSchema = addStringSchema
       )
 
       // Register CalculatorTools.multiply
-      multiplySchema = Right(JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.multiply).spaces2)
+      multiplySchema = Right(
+        JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.multiply).spaces2
+      )
       _ <- server.tool(
         name = "multiply",
         description = Some("Multiplies two numbers together"),
@@ -65,16 +71,21 @@ object ManualServer extends ZIOAppDefault:
       )
 
       // Register CalculatorTools.calculate
-      calculateSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.calculate).spaces2)
+      calculateSchema = Right(
+        JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.calculate).spaces2
+      )
       _ <- server.tool(
         name = "calculator",
         description = Some("Perform a calculation with two numbers and a specified operation"),
-        handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.calculate)(args)),
+        handler =
+          args => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.calculate)(args)),
         inputSchema = calculateSchema
       )
 
       // Register tools from StringTools
-      _ <- ZIO.succeed(JSystem.err.println("[AnnotatedServer] Directly registering tools from StringTools..."))
+      _ <- ZIO.succeed(
+        JSystem.err.println("[AnnotatedServer] Directly registering tools from StringTools...")
+      )
 
       // Register StringTools.greet
       greetSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(StringTools.greet).spaces2)
@@ -86,21 +97,28 @@ object ManualServer extends ZIOAppDefault:
       )
 
       // Register StringTools.transformText with enum parameter
-      transformSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(StringTools.transformText).spaces2)
+      transformSchema = Right(
+        JsonSchemaMacro.schemaForFunctionArgs(StringTools.transformText).spaces2
+      )
       _ <- server.tool(
         name = "transform",
         description = Some("Transforms text using enum-based transformation operations"),
-        handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(StringTools.transformText)(args)),
+        handler =
+          args => ZIO.succeed(MapToFunctionMacro.callByMap(StringTools.transformText)(args)),
         inputSchema = transformSchema
       )
 
       // Register the complex formatting tool with multiple enum parameters
-      formatTextSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(TextFormatTools.formatText).spaces2)
+      formatTextSchema = Right(
+        JsonSchemaMacro.schemaForFunctionArgs(TextFormatTools.formatText).spaces2
+      )
       _ <- server.tool(
         name = "format-text",
-        description = Some("Complex text formatting with transformation, style, and output format options"),
+        description =
+          Some("Complex text formatting with transformation, style, and output format options"),
         // No special handling needed - everything is handled at the macro level
-        handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(TextFormatTools.formatText)(args)),
+        handler =
+          args => ZIO.succeed(MapToFunctionMacro.callByMap(TextFormatTools.formatText)(args)),
         inputSchema = formatTextSchema
       )
 
@@ -118,9 +136,9 @@ object ManualServer extends ZIOAppDefault:
     yield ()
 
   def add(
-           a: Int,
-           b: Int
-         ): Int = a + b
+      a: Int,
+      b: Int
+  ): Int = a + b
 
   // Define TransformationType enum
   enum TransformationType:
@@ -134,18 +152,19 @@ object ManualServer extends ZIOAppDefault:
   enum OutputFormat:
     case text, html, markdown, json
 
-  /**
-   * Output type for calculator tool
-   */
+  /** Output type for calculator tool
+    */
   case class CalculatorResult(
-                               operation: String,
-                               numbers: List[Double],
-                               result: Double
-                             )
+      operation: String,
+      numbers: List[Double],
+      result: Double
+  )
 
   object TransformationType:
+
     // JSON codec for the enum
-    given JsonEncoder[TransformationType] = JsonEncoder[String].contramap[TransformationType](_.toString)
+    given JsonEncoder[TransformationType] =
+      JsonEncoder[String].contramap[TransformationType](_.toString)
 
     given JsonDecoder[TransformationType] = JsonDecoder[String].mapOrFail { str =>
       try Right(TransformationType.valueOf(str))
@@ -170,42 +189,38 @@ object ManualServer extends ZIOAppDefault:
       catch case _: IllegalArgumentException => Left(s"Invalid output format: $str")
     }
 
-  /**
-   * Calculator tools with various arithmetic operations
-   */
+  /** Calculator tools with various arithmetic operations
+    */
   object CalculatorTools:
-    /**
-     * Simple addition tool
-     */
+
+    /** Simple addition tool
+      */
     def add(
-             a: Int,
-             b: Int
-           ): Int = a + b
+        a: Int,
+        b: Int
+    ): Int = a + b
 
-    /**
-     * Alternative addition tool that takes strings and converts them to ints
-     */
+    /** Alternative addition tool that takes strings and converts them to ints
+      */
     def addString(
-                   a: String,
-                   b: String
-                 ): Int = a.toInt + b.toInt
+        a: String,
+        b: String
+    ): Int = a.toInt + b.toInt
 
-    /**
-     * Multiplication tool
-     */
+    /** Multiplication tool
+      */
     def multiply(
-                  a: Int,
-                  b: Int
-                ): Int = a * b
+        a: Int,
+        b: Int
+    ): Int = a * b
 
-    /**
-     * Advanced calculator with operation selection - uses standard schema building
-     */
+    /** Advanced calculator with operation selection - uses standard schema building
+      */
     def calculate(
-                   a: Double,
-                   b: Double,
-                   operation: String = "add"
-                 ): CalculatorResult =
+        a: Double,
+        b: Double,
+        operation: String = "add"
+    ): CalculatorResult =
       val result = operation.toLowerCase match
         case "add" | "+" => a + b
         case "subtract" | "-" => a - b
@@ -217,15 +232,14 @@ object ManualServer extends ZIOAppDefault:
 
       CalculatorResult(operation, List(a, b), result)
 
-    /**
-     * Advanced calculator that uses advanced schema generation with @InferSchema
-     * This allows for proper handling of complex types like CalculatorResult
-     */
+    /** Advanced calculator that uses advanced schema generation with @InferSchema This allows for
+      * proper handling of complex types like CalculatorResult
+      */
     def advancedCalculate(
-                           a: Double,
-                           b: Double,
-                           operation: String = "add"
-                         ): CalculatorResult =
+        a: Double,
+        b: Double,
+        operation: String = "add"
+    ): CalculatorResult =
       val result = operation.toLowerCase match
         case "add" | "+" => a + b
         case "subtract" | "-" => a - b
@@ -237,17 +251,16 @@ object ManualServer extends ZIOAppDefault:
 
       CalculatorResult(operation, List(a, b), result)
 
-  /**
-   * String manipulation tools
-   */
+  /** String manipulation tools
+    */
   object StringTools:
-    /**
-     * Greeting generator
-     */
+
+    /** Greeting generator
+      */
     def greet(
-               name: String,
-               language: String = "en"
-             ): String =
+        name: String,
+        language: String = "en"
+    ): String =
       val greeting = language.toLowerCase match
         case "en" => "Hello"
         case "es" => "Hola"
@@ -257,36 +270,33 @@ object ManualServer extends ZIOAppDefault:
 
       s"$greeting, $name!"
 
-    /**
-     * Text transformation tool using enum type
-     */
+    /** Text transformation tool using enum type
+      */
     def transformText(
-                       text: String,
-                       transformation: TransformationType = TransformationType.uppercase
-                     ): String =
+        text: String,
+        transformation: TransformationType = TransformationType.uppercase
+    ): String =
       transformation match
         case TransformationType.uppercase => text.toUpperCase
         case TransformationType.lowercase => text.toLowerCase
         case TransformationType.capitalize => text.split(" ").map(_.capitalize).mkString(" ")
         case TransformationType.reverse => text.reverse
 
-  /**
-   * Advanced text formatting tools using multiple enums
-   */
+  /** Advanced text formatting tools using multiple enums
+    */
   object TextFormatTools:
     given JsonEncoder[FormattedOutput] = DeriveJsonEncoder.gen[FormattedOutput]
 
     given JsonDecoder[FormattedOutput] = DeriveJsonDecoder.gen[FormattedOutput]
 
-    /**
-     * Complex formatting tool that uses multiple enum parameters
-     */
+    /** Complex formatting tool that uses multiple enum parameters
+      */
     def formatText(
-                    text: String,
-                    transformation: TransformationType = TransformationType.uppercase,
-                    style: TextStyle = TextStyle.plain,
-                    outputFormat: OutputFormat = OutputFormat.text
-                  ): String =
+        text: String,
+        transformation: TransformationType = TransformationType.uppercase,
+        style: TextStyle = TextStyle.plain,
+        outputFormat: OutputFormat = OutputFormat.text
+    ): String =
       // First apply the transformation
       val transformedText = transformation match
         case TransformationType.uppercase => text.toUpperCase
@@ -318,16 +328,16 @@ object ManualServer extends ZIOAppDefault:
       ).toJsonPretty
 
     case class FormattedOutput(
-                                originalText: String,
-                                formattedText: String,
-                                transformation: TransformationType,
-                                style: TextStyle,
-                                format: OutputFormat
-                              )
+        originalText: String,
+        formattedText: String,
+        transformation: TransformationType,
+        style: TextStyle,
+        format: OutputFormat
+    )
 
     case class FormatText(
-                           text: String,
-                           transformation: TransformationType = TransformationType.uppercase,
-                           style: TextStyle = TextStyle.plain,
-                           outputFormat: OutputFormat = OutputFormat.text
-                         )
+        text: String,
+        transformation: TransformationType = TransformationType.uppercase,
+        style: TextStyle = TextStyle.plain,
+        outputFormat: OutputFormat = OutputFormat.text
+    )
