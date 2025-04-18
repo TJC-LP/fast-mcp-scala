@@ -93,19 +93,12 @@ object PromptDefinition:
 
 // --- Content Types ---
 // Use sealed trait for ADT pattern, enabling exhaustive matching
+@jsonDiscriminator("type")
 sealed trait Content(`type`: String):
   def toJava: McpSchema.Content // Abstract method to convert to Java SDK type
 
 object Content:
-  // Define codecs for subtypes first
-  given JsonCodec[TextContent] = DeriveJsonCodec.gen[TextContent]
-  given JsonCodec[ImageContent] = DeriveJsonCodec.gen[ImageContent]
-
-  given JsonCodec[EmbeddedResourceContent] =
-    DeriveJsonCodec.gen[EmbeddedResourceContent] // Codec for the inner part
-  given JsonCodec[EmbeddedResource] = DeriveJsonCodec.gen[EmbeddedResource]
-
-  // Derive codec for the sealed trait
+  // Note: ZIO JSON provides built-in support for sealed traits with discriminator annotations
   given JsonCodec[Content] = DeriveJsonCodec.gen[Content]
 
 case class TextContent(
@@ -120,6 +113,9 @@ case class TextContent(
       priority.map(Double.box).orNull,
       text
     )
+
+object TextContent:
+  given JsonCodec[TextContent] = DeriveJsonCodec.gen[TextContent]
 
 case class ImageContent(
     data: String, // Base64 encoded image data
@@ -136,6 +132,9 @@ case class ImageContent(
       mimeType
     )
 
+object ImageContent:
+  given JsonCodec[ImageContent] = DeriveJsonCodec.gen[ImageContent]
+
 // Represents resource content embedded within a message or tool result
 case class EmbeddedResourceContent(
     uri: String,
@@ -150,6 +149,9 @@ case class EmbeddedResourceContent(
     else // Should ideally not happen if validated properly
       throw new IllegalArgumentException(s"EmbeddedResourceContent for $uri must have text or blob")
 
+object EmbeddedResourceContent:
+  given JsonCodec[EmbeddedResourceContent] = DeriveJsonCodec.gen[EmbeddedResourceContent]
+
 case class EmbeddedResource(
     resource: EmbeddedResourceContent,
     audience: Option[List[Role]] = None,
@@ -162,6 +164,9 @@ case class EmbeddedResource(
       priority.map(Double.box).orNull,
       resource.toJava
     )
+
+object EmbeddedResource:
+  given JsonCodec[EmbeddedResource] = DeriveJsonCodec.gen[EmbeddedResource]
 
 // --- Message Types ---
 // Represents the role in a conversation (user or assistant)

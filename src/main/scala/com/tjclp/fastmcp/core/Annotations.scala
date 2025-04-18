@@ -53,10 +53,10 @@ class Tool(
   *   Optional JSON schema override for the parameter type
   */
 class ToolParam(
-    description: String,
-    example: Option[String] = None,
-    required: Boolean = true,
-    schema: Option[String] = None
+    val description: String,
+    val example: Option[String] = None,
+    val required: Boolean = true,
+    val schema: Option[String] = None
 ) extends StaticAnnotation
 
 /** Annotation for case class fields to provide schema metadata Used with ZIO Schema to enhance the

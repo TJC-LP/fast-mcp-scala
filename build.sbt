@@ -86,7 +86,7 @@ lazy val root = (project in file("."))
 ThisBuild / githubWorkflowJavaVersions := Seq(
   JavaSpec.temurin("17"),
   JavaSpec.temurin("21"),
-  JavaSpec.temurin("24"),
+  JavaSpec.temurin("24")
 )
 
 ThisBuild / githubWorkflowScalaVersions := Seq("3.6.4")
@@ -115,14 +115,13 @@ ThisBuild / githubWorkflowBuildPreamble ++= Seq(
   )
 )
 
-    // Fail build if coverage below minimum threshold (initially 60%, will be raised gradually)
-coverageMinimumStmtTotal := 60
-coverageFailOnMinimum := true
-
+// Fail build if coverage below minimum threshold (initially 60%, will be raised gradually)
 coverageEnabled := true
-// Enable branch coverage highlighting and Cobertura output
-coverageHighlighting := true
-coverageOutputCobertura := true
+coverageFailOnMinimum := true
+coverageMinimumStmtTotal := 80
+coverageHighlighting := true // default; false is faster but less precise
+// Exclude examples from coverage metrics
+coverageExcludedPackages := "com\\.tjclp\\.fastmcp\\.examples\\..*"
 
 // ---------------------------------------------------------------------------
 // Snapshot & release publishing (sbt-ci-release)

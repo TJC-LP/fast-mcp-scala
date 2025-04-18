@@ -3,7 +3,7 @@ package macros
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.MacpRegistrationMacro.scanAnnotations
-import com.tjclp.fastmcp.server.FastMcpServer
+import com.tjclp.fastmcp.server.*
 import org.scalatest.funsuite.AnyFunSuite
 import sttp.tapir.Schema
 import zio.*

@@ -8,4 +8,4 @@ addSbtPlugin("com.github.sbt" % "sbt-github-actions" % "0.25.0")
 addSbtPlugin("com.github.sbt" % "sbt-ci-release" % "1.9.3")
 
 // Code‑coverage support
-addSbtPlugin("org.scoverage" % "sbt-scoverage" % "2.0.9")
+addSbtPlugin("org.scoverage" % "sbt-scoverage" % "2.3.1")
