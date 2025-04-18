@@ -45,7 +45,7 @@ object ManualServer extends ZIOAppDefault:
       _ <- server.tool(
         name = "add",
         description = Some("Simple calculator that adds two numbers"),
-        handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.add)(args)),
+        handler = (args, _) => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.add)(args)),
         inputSchema = addSchema
       )
 
@@ -57,7 +57,7 @@ object ManualServer extends ZIOAppDefault:
         name = "addString",
         description = Some("Adds two numbers provided as strings"),
         handler =
-          args => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.addString)(args)),
+          (args, _) => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.addString)(args)),
         inputSchema = addStringSchema
       )
 
@@ -68,7 +68,8 @@ object ManualServer extends ZIOAppDefault:
       _ <- server.tool(
         name = "multiply",
         description = Some("Multiplies two numbers together"),
-        handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.multiply)(args)),
+        handler =
+          (args, _) => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.multiply)(args)),
         inputSchema = multiplySchema
       )
 
@@ -80,7 +81,7 @@ object ManualServer extends ZIOAppDefault:
         name = "calculator",
         description = Some("Perform a calculation with two numbers and a specified operation"),
         handler =
-          args => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.calculate)(args)),
+          (args, _) => ZIO.succeed(MapToFunctionMacro.callByMap(CalculatorTools.calculate)(args)),
         inputSchema = calculateSchema
       )
 
@@ -94,7 +95,7 @@ object ManualServer extends ZIOAppDefault:
       _ <- server.tool(
         name = "greet",
         description = Some("Generates a friendly greeting message"),
-        handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(StringTools.greet)(args)),
+        handler = (args, _) => ZIO.succeed(MapToFunctionMacro.callByMap(StringTools.greet)(args)),
         inputSchema = greetSchema
       )
 
@@ -106,7 +107,7 @@ object ManualServer extends ZIOAppDefault:
         name = "transform",
         description = Some("Transforms text using enum-based transformation operations"),
         handler =
-          args => ZIO.succeed(MapToFunctionMacro.callByMap(StringTools.transformText)(args)),
+          (args, _) => ZIO.succeed(MapToFunctionMacro.callByMap(StringTools.transformText)(args)),
         inputSchema = transformSchema
       )
 
@@ -120,7 +121,7 @@ object ManualServer extends ZIOAppDefault:
           Some("Complex text formatting with transformation, style, and output format options"),
         // No special handling needed - everything is handled at the macro level
         handler =
-          args => ZIO.succeed(MapToFunctionMacro.callByMap(TextFormatTools.formatText)(args)),
+          (args, _) => ZIO.succeed(MapToFunctionMacro.callByMap(TextFormatTools.formatText)(args)),
         inputSchema = formatTextSchema
       )
 
@@ -129,7 +130,7 @@ object ManualServer extends ZIOAppDefault:
       _ <- server.tool(
         name = "add-manual",
         description = Some("Manual version of the add tool"),
-        handler = args => ZIO.succeed(MapToFunctionMacro.callByMap(add)(args)),
+        handler = (args, _) => ZIO.succeed(MapToFunctionMacro.callByMap(add)(args)),
         inputSchema = addManualSchema
       )
 

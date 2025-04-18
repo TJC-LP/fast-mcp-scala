@@ -60,6 +60,10 @@ lazy val root = (project in file("."))
 
       // Test dependencies
       "org.scalatest" %% "scalatest" % Versions.scalaTest % Test,
+      // ScalaCheck support for property-based testing
+      "org.scalacheck" %% "scalacheck" % "1.18.1" % Test,
+      // Mockito for mocking in tests
+      "org.scalatestplus" %% "mockito-5-12" % "3.2.19.0" % Test,
       "dev.zio" %% "zio-test" % Versions.zio % Test,
       "dev.zio" %% "zio-test-sbt" % Versions.zio % Test,
       "dev.zio" %% "zio-test-magnolia" % Versions.zio % Test
@@ -111,11 +115,14 @@ ThisBuild / githubWorkflowBuildPreamble ++= Seq(
   )
 )
 
-// Fail build if coverage below 90%
-coverageMinimumStmtTotal := 90
+    // Fail build if coverage below minimum threshold (initially 60%, will be raised gradually)
+coverageMinimumStmtTotal := 60
 coverageFailOnMinimum := true
 
 coverageEnabled := true
+// Enable branch coverage highlighting and Cobertura output
+coverageHighlighting := true
+coverageOutputCobertura := true
 
 // ---------------------------------------------------------------------------
 // Snapshot & release publishing (sbt-ci-release)

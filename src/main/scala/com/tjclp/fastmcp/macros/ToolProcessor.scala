@@ -101,12 +101,11 @@ private[macros] object ToolProcessor:
               .asInstanceOf[Map[String, Any] => Any](merged)
           }
 
-      val regEffect = $server.contextualTool(
+      val regEffect = $server.tool(
         name = ${ Expr(finalName) },
         description = ${ Expr(finalDesc) },
         handler = contextualHandler,
-        inputSchema = Right(schemaWithDescriptions.spaces2),
-        options = ToolRegistrationOptions(allowOverrides = true)
+        inputSchema = Right(schemaWithDescriptions.spaces2)
       )
       zio.Unsafe.unsafe { implicit unsafe =>
         zio.Runtime.default.unsafe.run(regEffect).getOrThrowFiberFailure()

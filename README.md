@@ -13,7 +13,7 @@ Features:
 Add to your `build.sbt`:
 
 ```scala
-libraryDependencies += "io.fast-mcp-scala" %% "fast-mcp-scala" % "0.1.0-SNAPSHOT"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.0"
 ```
 
 ## Quickstart (Annotation-based)

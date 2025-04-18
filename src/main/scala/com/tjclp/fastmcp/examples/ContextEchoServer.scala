@@ -18,18 +18,18 @@ object ContextEchoServer extends ZIOAppDefault:
     val server = FastMcpServer("ContextEchoServer", "1.0.0")
 
     // Register a tool that uses context to get client information
-    val registerTool = server.contextTool(
+    val registerTool = server.tool(
       name = "echo",
-      handler = (args: Map[String, Any], ctx: McpContext) => {
+      handler = (args: Map[String, Any], ctx: Option[McpContext]) => {
         // Extract client information from context
-        val clientName = ctx.getClientInfo.map(_.name()).getOrElse("Unknown Client")
-        val clientVersion = ctx.getClientInfo.map(_.version()).getOrElse("Unknown Version")
+        val clientName = ctx.get.getClientInfo.map(_.name()).getOrElse("Unknown Client")
+        val clientVersion = ctx.get.getClientInfo.map(_.version()).getOrElse("Unknown Version")
 
         // Extract client capabilities
-        val hasRootListChanges = ctx.getClientCapabilities.exists(c =>
+        val hasRootListChanges = ctx.get.getClientCapabilities.exists(c =>
           c.roots() != null && c.roots().listChanged() == true
         )
-        val hasSampling = ctx.getClientCapabilities.exists(c => c.sampling() != null)
+        val hasSampling = ctx.get.getClientCapabilities.exists(c => c.sampling() != null)
 
         // Create a summary of the client and context information
         val summary = s"""

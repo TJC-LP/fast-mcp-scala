@@ -10,11 +10,6 @@ import scala.jdk.CollectionConverters.*
 import core.*
 import server.*
 
-/** Tool handler function types
-  */
-// Basic handler type for backward compatibility
-type ToolHandler = Map[String, Any] => ZIO[Any, Throwable, Any]
-
 // Context-aware handler type
 type ContextualToolHandler = (Map[String, Any], Option[McpContext]) => ZIO[Any, Throwable, Any]
 
@@ -35,40 +30,39 @@ class ToolManager extends Manager[ToolDefinition]:
   // Thread-safe storage for registered tools - public for direct access in examples
   val tools = new ConcurrentHashMap[String, (ToolDefinition, ContextualToolHandler)]()
 
-  /** Register a tool with the manager
+  private def checkToolConflict(
+      name: String,
+      options: ToolRegistrationOptions
+  ): Unit = // Check if tool already exists
+    // Check if tool already exists
+    if tools.containsKey(name) && !options.allowOverrides then
+      if options.warnOnDuplicates then
+        JSystem.err.println(
+          s"[ToolManager] Warning: Tool '$name' already exists and will be overwritten"
+        )
+      else throw new ToolRegistrationError(s"Tool '$name' already exists")
+
+  /** Register a context-aware tool handler directly
     *
     * @param name
     *   Tool name
     * @param handler
-    *   Function to execute when the tool is called
+    *   Context-aware function to execute when the tool is called
     * @param definition
     *   Tool definition including description and schema
-    * @return
-    *   ZIO effect that completes with Unit on success or fails with ToolRegistrationError
     */
   def addTool(
       name: String,
-      handler: ToolHandler,
+      handler: ContextualToolHandler,
       definition: ToolDefinition,
       options: ToolRegistrationOptions = ToolRegistrationOptions()
   ): ZIO[Any, Throwable, Unit] =
     ZIO
       .attempt {
-        // Check if tool already exists
-        if tools.containsKey(name) && !options.allowOverrides then
-          if options.warnOnDuplicates then
-            JSystem.err.println(
-              s"[ToolManager] Warning: Tool '$name' already exists and will be overwritten"
-            )
-          else throw new ToolRegistrationError(s"Tool '$name' already exists")
-
-        // Convert basic handler to contextual handler
-        val contextualHandler: ContextualToolHandler = (args, ctx) => handler(args)
-
-        tools.put(name, (definition, contextualHandler))
+        checkToolConflict(name, options)
+        tools.put(name, (definition, handler))
         ()
       }
-      .mapError(e => new ToolRegistrationError(s"Failed to register tool '$name'", e))
 
   /** List all registered tool definitions
     */

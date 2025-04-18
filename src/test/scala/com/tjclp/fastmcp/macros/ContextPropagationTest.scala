@@ -48,7 +48,7 @@ class ContextPropagationTest extends AnyFunSuite:
     )
 
     // Register a tool that captures the context
-    val toolEffect = server.contextualTool(
+    val toolEffect = server.tool(
       name = "context-test",
       handler = (args: Map[String, Any], ctxOpt: Option[McpContext]) => {
         capturedContext.set(ctxOpt)

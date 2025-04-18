@@ -23,7 +23,7 @@ object SimpleServer extends ZIOAppDefault:
       _ <- server.tool(
         name = "calculator",
         description = Some("A simple calculator that performs basic arithmetic operations"),
-        handler = args => {
+        handler = (args, _) => {
           val operation = args.getOrElse("operation", "add").toString
           val numbers = args.getOrElse("numbers", List(0.0, 0.0)).asInstanceOf[List[Double]]
 

@@ -12,10 +12,10 @@
 //> using dep "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.18.3"
 
 //> using dep "io.modelcontextprotocol.sdk:mcp:0.9.0" // Updated MCP version to SNAPSHOT
-//> using dep "com.softwaremill.sttp.tapir::tapir-core:1.11.24" // Updated version
-//> using dep "com.softwaremill.sttp.tapir::tapir-apispec-docs:1.11.24" // Updated version
-//> using dep "com.softwaremill.sttp.tapir::tapir-json-circe:1.11.24" // Updated version
-//> using dep "com.softwaremill.sttp.apispec::jsonschema-circe:0.11.8"
+//> using dep "com.softwaremill.sttp.tapir::tapir-core:1.11.25" // Updated based on logs
+//> using dep "com.softwaremill.sttp.tapir::tapir-apispec-docs:1.11.25" // Updated based on logs
+//> using dep "com.softwaremill.sttp.tapir::tapir-json-circe:1.11.25" // Updated based on logs
+//> using dep "com.softwaremill.sttp.apispec::jsonschema-circe:0.11.9" // Updated based on logs
 //> using repository "https://repo1.maven.org/maven2"
 // //> using repository "m2Local" // Add local Maven repository (~/.m2/repository)
 //> using file "src/main/scala"
@@ -24,10 +24,9 @@
 // This is a launcher file for scala-cli
 // You can run any of the MCP server classes with:
 //
-// scala-cli run main.scala --main-class fastmcp.examples.SimpleServer       (Basic server example)
-// scala-cli run main.scala --main-class fastmcp.examples.AnnotatedServer    (Annotation-based server with macros)
-// scala-cli run main.scala --main-class fastmcp.examples.ManualServer       (Manual tool registration example)
-// scala-cli run main.scala --main-class fastmcp.examples.JacksonEnumDemo    (Simple Jackson enum demonstration)
+// scala-cli run main.scala --main-class com.tjclp.fastmcp.examples.SimpleServer       (Basic server example)
+// scala-cli run main.scala --main-class com.tjclp.fastmcp.examples.AnnotatedServer    (Annotation-based server with macros)
+// scala-cli run main.scala --main-class com.tjclp.fastmcp.examples.ManualServer       (Manual tool registration example)
 //
 // MACRO ENHANCEMENTS:
 // - The AnnotatedServer example demonstrates the enhanced macro-driven approach for
