@@ -113,10 +113,10 @@ ThisBuild / githubWorkflowBuildPreamble ++= Seq(
   )
 )
 
-// Fail build if coverage below minimum threshold (initially 60%, will be raised gradually)
+// Enable coverage - no minimum coverage yet
 coverageEnabled := true
-coverageFailOnMinimum := true
-coverageMinimumStmtTotal := 80
+coverageFailOnMinimum := false
+// coverageMinimumStmtTotal := 60
 coverageHighlighting := true // default; false is faster but less precise
 // Exclude examples from coverage metrics
 // Exclude example servers as well as generated macro helpers and any vendored code

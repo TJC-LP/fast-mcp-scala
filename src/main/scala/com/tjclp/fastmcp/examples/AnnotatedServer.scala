@@ -7,6 +7,10 @@ import com.tjclp.fastmcp.server.*
 import sttp.tapir.*
 import zio.*
 import zio.json.*
+// Use auto schema generation by importing the line below
+import sttp.tapir.generic.auto.*
+// Use schema annotations when using case class tool arguments
+import sttp.tapir.Schema.annotations.*
 
 import java.lang.System as JSystem
 
@@ -24,6 +28,18 @@ object AnnotatedServer extends ZIOAppDefault:
   given JsonEncoder[CalculatorResult] = DeriveJsonEncoder.gen[CalculatorResult]
 
   given JsonDecoder[CalculatorResult] = DeriveJsonDecoder.gen[CalculatorResult]
+
+  // Case classes are supported as tool params
+  case class Description(
+      @description("The text to describe") text: String,
+      @description("Whether to set the text to uppercase") isUpper: Boolean = false
+  )
+
+  @Tool(name = Some("description"))
+  def generateDescription(
+      @ToolParam("A description to generate") description: Description
+  ): String =
+    if description.isUpper then description.text.toUpperCase else description.text
 
   /** Simple tool that adds two numbers. The @Tool annotation will:
     *   1. Be scanned by scanAnnotations[AnnotatedServer.type] 2. Generate a JSON schema for the
