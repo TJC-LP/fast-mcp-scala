@@ -1,8 +1,8 @@
 package com.tjclp.fastmcp
 
 import com.tjclp.fastmcp.server.McpContext
-import io.modelcontextprotocol.spec.McpSchema
 import io.modelcontextprotocol.server.McpAsyncServerExchange
+import io.modelcontextprotocol.spec.McpSchema
 
 /** Test fixtures and helpers for MCP tests.
   */

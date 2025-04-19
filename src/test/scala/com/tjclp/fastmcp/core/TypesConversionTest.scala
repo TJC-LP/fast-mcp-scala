@@ -3,8 +3,8 @@ package com.tjclp.fastmcp.core
 import io.modelcontextprotocol.spec.McpSchema
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+
 import scala.jdk.CollectionConverters.*
-import com.tjclp.fastmcp.core._
 
 /** Tests for conversions from Scala core ADTs to Java MCP Schema types.
   */

@@ -3,8 +3,6 @@ package com.tjclp.fastmcp.server.manager
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import zio.*
-import zio.Unsafe
-import com.tjclp.fastmcp.TestFixtures._
 
 /** Tests for ResourceTemplatePattern matching and ResourceManager resolution behavior.
   */

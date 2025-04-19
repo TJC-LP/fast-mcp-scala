@@ -2,12 +2,14 @@ package com.tjclp.fastmcp.macros
 
 import io.circe.Json
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.matchers.should.Matchers
 import sttp.tapir.Schema
 import sttp.tapir.generic.auto.*
+import com.tjclp.fastmcp.server.McpContext
 
 /** Tests for the JsonSchemaMacro that generates JSON schema for function parameters
   */
-class JsonSchemaMacroTest extends AnyFunSuite {
+class JsonSchemaMacroTest extends AnyFunSuite with Matchers {
 
   // Simple case class for testing
   case class Person(name: String, age: Int, email: Option[String])
@@ -115,6 +117,12 @@ class JsonSchemaMacroTest extends AnyFunSuite {
 
     // Check the schema's overall structure
     assert(schema.hcursor.downField("type").as[String].getOrElse("") == "object")
+
+    // Check required field - only name should be required
+    val required = schema.hcursor.downField("required").as[List[String]].getOrElse(List.empty)
+    assert(required.contains("name"))
+    assert(!required.contains("age"))
+    assert(!required.contains("tags"))
   }
 
   // Test with an enum parameter
@@ -140,5 +148,41 @@ class JsonSchemaMacroTest extends AnyFunSuite {
     assert(enumValues.contains("GREEN"))
     assert(enumValues.contains("BLUE"))
     assert(enumValues.contains("YELLOW"))
+  }
+
+  // Test with context parameter to be excluded
+  test("should exclude context parameter from schema") {
+    def functionWithContext(ctx: McpContext, name: String, age: Int): Unit = ()
+
+    val schema = JsonSchemaMacro.schemaForFunctionArgs(functionWithContext, exclude = List("ctx"))
+
+    // Verify ctx is excluded from properties
+    val properties = schema.hcursor.downField("properties").focus.getOrElse(Json.Null)
+    assert(properties.hcursor.downField("name").focus.isDefined)
+    assert(properties.hcursor.downField("age").focus.isDefined)
+    assert(properties.hcursor.downField("ctx").focus.isEmpty)
+
+    // Verify ctx is excluded from required
+    val required = schema.hcursor.downField("required").as[List[String]].getOrElse(List.empty)
+    assert(required.contains("name"))
+    assert(required.contains("age"))
+    assert(!required.contains("ctx"))
+  }
+
+  // Test explicit exclusion of parameters
+  test("should exclude specified parameters from schema") {
+    def twoParamsFunction(name: String, age: Int): Unit = ()
+
+    val schema = JsonSchemaMacro.schemaForFunctionArgs(twoParamsFunction, List("age"))
+
+    // Verify age is excluded from properties
+    val properties = schema.hcursor.downField("properties").focus.getOrElse(Json.Null)
+    assert(properties.hcursor.downField("name").focus.isDefined)
+    assert(properties.hcursor.downField("age").focus.isEmpty)
+
+    // Verify age is excluded from required
+    val required = schema.hcursor.downField("required").as[List[String]].getOrElse(List.empty)
+    assert(required.contains("name"))
+    assert(!required.contains("age"))
   }
 }

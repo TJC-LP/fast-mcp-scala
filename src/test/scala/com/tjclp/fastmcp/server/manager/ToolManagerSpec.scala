@@ -1,12 +1,11 @@
 package com.tjclp.fastmcp.server.manager
 
-import org.scalatest.flatspec.AnyFlatSpec
-import org.scalatest.matchers.should.Matchers
-import zio.*
-import zio.Unsafe
 import com.tjclp.fastmcp.TestFixtures.*
 import com.tjclp.fastmcp.core.ToolDefinition
 import com.tjclp.fastmcp.server.McpContext
+import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
+import zio.*
 
 /** Tests for ToolManager registration, duplicate handling, and callTool behavior.
   */

@@ -54,7 +54,7 @@ object JsonSchemaMacro:
     val fnType = fnTerm.tpe
 
     val paramNamesOpt = FunctionAnalyzer.maybeRealParamNames(fnTerm)
-    val excludeList = exclude.valueOrError.toList
+    val excludeList = exclude.valueOrAbort
     val params: List[(String, TypeRepr)] = FunctionAnalyzer
       .extractParams(fnType, paramNamesOpt)
       .filterNot(p => excludeList.contains(p._1))
