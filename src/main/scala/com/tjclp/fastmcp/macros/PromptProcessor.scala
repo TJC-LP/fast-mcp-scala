@@ -1,71 +1,54 @@
 package com.tjclp.fastmcp
 package macros
 
+import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.server.*
+
+import scala.quoted.*
 import zio.*
 
-import java.lang.System as JSystem
-import scala.quoted.*
+/** Lightweight implementation thanks to [[AnnotationProcessorBase]]. */
+private[macros] object PromptProcessor extends AnnotationProcessorBase:
 
-import core.*
-import server.*
-
-/** Responsible for processing @Prompt annotations and generating prompt registration code.
-  */
-private[macros] object PromptProcessor:
-
-  /** Process a @Prompt annotation and generate registration code
-    */
-  def processPromptAnnotation(
+  def processPromptAnnotation(using Quotes)(
       server: Expr[FastMcpServer],
-      ownerSymAny: Any,
-      methodAny: Any
-  )(using quotes: Quotes): Expr[FastMcpServer] =
+      ownerSym: quotes.reflect.Symbol,
+      methodSym: quotes.reflect.Symbol
+  ): Expr[FastMcpServer] =
     import quotes.reflect.*
-    val ownerSym = ownerSymAny.asInstanceOf[Symbol]
-    val methodSym = methodAny.asInstanceOf[Symbol]
-
-    // Use generic annotation extraction for @Prompt
-    val promptAnnotTermOpt = MacroUtils.extractAnnotation[Prompt](methodSym)
-    val promptAnnotTerm = promptAnnotTermOpt.getOrElse {
-      report.errorAndAbort(s"No @Prompt annotation found on method ${methodSym.name}")
-    }
 
     val methodName = methodSym.name
 
-    // Parse @Prompt annotation parameters
-    val (annotName, annotDesc) = MacroUtils.parsePromptParams(promptAnnotTerm)
-    val finalName = annotName.getOrElse(methodName)
+    // 1️⃣  Find @Prompt annotation -------------------------------------------------------------
+    val promptAnnot = findAnnotation[Prompt](methodSym).getOrElse {
+      report.errorAndAbort(s"No @Prompt annotation found on method '$methodName'")
+    }
 
-    // Fetch Scaladoc if description is missing
-    val scaladocDesc: Option[String] = methodSym.docstring
-    val finalDesc: Option[String] = annotDesc.orElse(scaladocDesc)
+    // 2️⃣  name / description with Scaladoc fallback ------------------------------------------
+    val (finalName, finalDesc) = nameAndDescription(promptAnnot, methodSym)
 
-    // Analyze parameters for @PromptParam
-    val promptArgs: List[Expr[PromptArgument]] =
-      methodSym.paramSymss.headOption.getOrElse(Nil).map { param =>
-        val paramName = param.name
-        // Use generic annotation extraction for @PromptParam
-        val paramAnnotTermOpt = MacroUtils.extractAnnotation[PromptParam](param)
-        val (paramDesc, paramRequired) = MacroUtils.parsePromptParamArgs(paramAnnotTermOpt)
-        '{
-          PromptArgument(
-            name = ${ Expr(paramName) },
-            description = ${ Expr(paramDesc) },
-            required = ${ Expr(paramRequired) }
-          )
-        }
+    // 3️⃣  Collect @PromptParam metadata -------------------------------------------------------
+    val argExprs: List[Expr[PromptArgument]] =
+      methodSym.paramSymss.headOption.getOrElse(Nil).map { pSym =>
+        val (descOpt, required) = MacroUtils.parsePromptParamArgs(
+          MacroUtils.extractAnnotation[PromptParam](pSym)
+        )
+        '{ PromptArgument(${ Expr(pSym.name) }, ${ Expr(descOpt) }, ${ Expr(required) }) }
       }
-    val promptArgsExpr = Expr.ofList(promptArgs)
 
-    // Get method reference
-    val methodRefExpr = MacroUtils.getMethodRefExpr(ownerSym, methodSym)
+    val maybeArgs: Expr[Option[List[PromptArgument]]] =
+      if argExprs.isEmpty then '{ None }
+      else '{ Some(${ Expr.ofList(argExprs) }) }
 
-    '{
-      JSystem.err.println(s"[McpAnnotationProcessor] Registering @Prompt: ${${ Expr(finalName) }}")
-      val regEffect = $server.prompt(
+    // 4️⃣  Method reference -------------------------------------------------------------------
+    val methodRefExpr = methodRef(ownerSym, methodSym)
+
+    // 5️⃣  Compose registration effect --------------------------------------------------------
+    val registration: Expr[ZIO[Any, Throwable, FastMcpServer]] = '{
+      $server.prompt(
         name = ${ Expr(finalName) },
         description = ${ Expr(finalDesc) },
-        arguments = Some($promptArgsExpr),
+        arguments = $maybeArgs,
         handler = (args: Map[String, Any]) =>
           ZIO.attempt {
             MapToFunctionMacro
@@ -73,9 +56,7 @@ private[macros] object PromptProcessor:
               .asInstanceOf[Map[String, Any] => List[Message]](args)
           }
       )
-      zio.Unsafe.unsafe { implicit unsafe =>
-        zio.Runtime.default.unsafe.run(regEffect).getOrThrowFiberFailure()
-      }
-      $server
     }
-end PromptProcessor
+
+    // 6️⃣  Execute & return server ------------------------------------------------------------
+    runAndReturnServer(server)(registration)

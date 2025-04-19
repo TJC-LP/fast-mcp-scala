@@ -53,14 +53,11 @@ object MacpRegistrationMacro:
     val registrationExprs: List[Expr[FastMcpServer]] = annotatedMethods.flatMap { method =>
       method.annotations.collectFirst {
         case toolAnnot if toolAnnot.tpe <:< TypeRepr.of[Tool] =>
-          toolAnnot.asExpr.asTerm
           ToolProcessor.processToolAnnotation(server, sym, method)
         case promptAnnot if promptAnnot.tpe <:< TypeRepr.of[Prompt] =>
-          promptAnnot.asExpr.asTerm
           PromptProcessor.processPromptAnnotation(server, sym, method)
         case resourceAnnot if resourceAnnot.tpe <:< TypeRepr.of[Resource] =>
-          val annotTerm = resourceAnnot.asExpr.asTerm
-          ResourceProcessor.processResourceAnnotation(server, sym, method, annotTerm)
+          ResourceProcessor.processResourceAnnotation(server, sym, method)
       }
     }
 
