@@ -47,3 +47,6 @@ build/
 ### Scala ###
 .bsp/
 .scala-build
+
+### Diff ###
+changes.txt
