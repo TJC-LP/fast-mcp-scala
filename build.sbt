@@ -121,7 +121,10 @@ coverageFailOnMinimum := true
 coverageMinimumStmtTotal := 80
 coverageHighlighting := true // default; false is faster but less precise
 // Exclude examples from coverage metrics
-coverageExcludedPackages := "com\\.tjclp\\.fastmcp\\.examples\\..*"
+// Exclude example servers as well as generated macro helpers and any vendored code
+// Exclude example servers, generated macro scaffolding, and vendored libraries from coverage
+coverageExcludedPackages :=
+  "com\\.tjclp\\.fastmcp\\.examples\\..*;com\\.tjclp\\.fastmcp\\.macros\\.generated\\..*;re2j\\..*"
 
 // ---------------------------------------------------------------------------
 // Snapshot & release publishing (sbt-ci-release)

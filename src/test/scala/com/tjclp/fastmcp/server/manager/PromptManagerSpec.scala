@@ -77,4 +77,17 @@ class PromptManagerSpec extends AnyFlatSpec with Matchers {
     }
     ex.getMessage should include("not found")
   }
+
+  "listDefinitions" should "return empty list when no prompts and populated after registration" in {
+    val pm = new PromptManager
+    pm.listDefinitions() shouldBe Nil
+
+    val defn1 = PromptDefinition("p", None, None)
+    Unsafe.unsafe { implicit u =>
+      Runtime.default.unsafe
+        .run(pm.addPrompt("p", _ => ZIO.succeed(Nil), defn1))
+        .getOrThrowFiberFailure()
+    }
+    pm.listDefinitions() shouldBe List(defn1)
+  }
 }

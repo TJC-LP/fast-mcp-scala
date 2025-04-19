@@ -357,7 +357,8 @@ class FastMcpServer(
   /** Converts a ZIO effect to a Reactor Mono. Executes the ZIO effect asynchronously and bridges
     * the result/error to the MonoSink.
     */
-  private def zioToMono[A](effect: ZIO[Any, Throwable, A]): Mono[A] = {
+  // Visible within server package so tests can exercise directly without reflection.
+  private[server] def zioToMono[A](effect: ZIO[Any, Throwable, A]): Mono[A] = {
     Mono.create { sink =>
       Unsafe.unsafe { implicit unsafe =>
         Runtime.default.unsafe.runToFuture(effect).onComplete {
@@ -371,7 +372,7 @@ class FastMcpServer(
   /** Converts a ZIO effect with potential Throwable error to a Reactor Mono with MCP error
     * handling. Errors are mapped to McpSchema.CallToolResult with isError flag set.
     */
-  private def zioToMonoWithErrorHandling[A](
+  private[server] def zioToMonoWithErrorHandling[A](
       effect: ZIO[Any, Throwable, A],
       resultTransform: A => McpSchema.CallToolResult
   ): Mono[McpSchema.CallToolResult] = {

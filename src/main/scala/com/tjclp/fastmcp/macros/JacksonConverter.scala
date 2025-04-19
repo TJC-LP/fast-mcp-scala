@@ -13,7 +13,7 @@ trait JacksonConverter[T]:
 object JacksonConverter:
 
   // Uniform null/missing handling
-  private def failNull(name: String, tpe: String) =
+  private def failNull(name: String, tpe: String): Unit =
     throw new RuntimeException(s"Null value provided for parameter '$name' of type $tpe")
 
   // DRY potent conversion with error wrapping
@@ -43,54 +43,6 @@ object JacksonConverter:
     def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): Int =
       if rawValue == null then failNull(name, "Int")
       doConvert[Int](name, rawValue, "Int", mapper)
-
-  given JacksonConverter[Long] with
-
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): Long =
-      if rawValue == null then failNull(name, "Long")
-      doConvert[Long](name, rawValue, "Long", mapper)
-
-  given JacksonConverter[Double] with
-
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): Double =
-      if rawValue == null then failNull(name, "Double")
-      doConvert[Double](name, rawValue, "Double", mapper)
-
-  given JacksonConverter[Boolean] with
-
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): Boolean =
-      if rawValue == null then failNull(name, "Boolean")
-      doConvert[Boolean](name, rawValue, "Boolean", mapper)
-
-  // Collection instances
-  given [A: ClassTag](using JacksonConverter[A]): JacksonConverter[List[A]] with
-
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): List[A] =
-      if rawValue == null then failNull(name, "List[A]")
-      doConvert[List[A]](name, rawValue, "List[A]", mapper)
-
-  given [A: ClassTag](using JacksonConverter[A]): JacksonConverter[Vector[A]] with
-
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): Vector[A] =
-      if rawValue == null then failNull(name, "Vector[A]")
-      doConvert[Vector[A]](name, rawValue, "Vector[A]", mapper)
-
-  given [A: ClassTag](using JacksonConverter[A]): JacksonConverter[Set[A]] with
-
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): Set[A] =
-      if rawValue == null then failNull(name, "Set[A]")
-      doConvert[Set[A]](name, rawValue, "Set[A]", mapper)
-
-  // Map with String keys
-  given [V: ClassTag](using JacksonConverter[V]): JacksonConverter[Map[String, V]] with
-
-    def convert(
-        name: String,
-        rawValue: Any,
-        mapper: JsonMapper & ClassTagExtensions
-    ): Map[String, V] =
-      if rawValue == null then failNull(name, "Map[String, V]")
-      doConvert[Map[String, V]](name, rawValue, "Map[String, V]", mapper)
 
   // Option instance treats null or missing as None
   given [A: ClassTag](using JacksonConverter[A]): JacksonConverter[Option[A]] with

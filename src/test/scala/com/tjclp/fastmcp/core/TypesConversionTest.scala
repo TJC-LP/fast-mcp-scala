@@ -106,4 +106,14 @@ class TypesConversionTest extends AnyFlatSpec with Matchers {
     ja.description() shouldBe "d"
     ja.required() shouldBe true
   }
+
+  "Message.toJava" should "convert Scala Message to Java PromptMessage" in {
+    val scalaMsg = Message(Role.User, TextContent("hi"))
+    val javaMsg = Message.toJava(scalaMsg)
+
+    javaMsg.role() shouldBe McpSchema.Role.USER
+    javaMsg.content() shouldBe a[McpSchema.TextContent]
+    val jt = javaMsg.content().asInstanceOf[McpSchema.TextContent]
+    jt.text() shouldBe "hi"
+  }
 }

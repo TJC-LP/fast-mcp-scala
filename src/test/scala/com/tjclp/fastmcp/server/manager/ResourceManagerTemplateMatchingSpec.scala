@@ -83,4 +83,30 @@ class ResourceManagerTemplateMatchingSpec extends AnyFlatSpec with Matchers {
     }
     ex.getMessage should include("not found")
   }
+
+  "getResourceDefinition / getResourceHandler" should "return Some for existing static resource" in {
+    val rm = new ResourceManager
+    val staticUri = "foo://static"
+    val defn = ResourceDefinition(staticUri, Some("n"), Some("d"))
+
+    Unsafe.unsafe { implicit u =>
+      Runtime.default.unsafe
+        .run(rm.addResource(staticUri, () => ZIO.succeed("ok"), defn))
+        .getOrThrowFiberFailure()
+    }
+
+    rm.getResourceDefinition(staticUri) shouldBe Some(
+      defn.copy(isTemplate = false, arguments = None)
+    )
+    val handlerOpt = rm.getResourceHandler(staticUri)
+    handlerOpt shouldBe defined
+    val result = Unsafe.unsafe { implicit u =>
+      Runtime.default.unsafe.run(handlerOpt.get()).getOrThrowFiberFailure()
+    }
+    result shouldBe "ok"
+
+    // Non‑existent URI returns None
+    rm.getResourceDefinition("missing://x") shouldBe None
+    rm.getResourceHandler("missing://x") shouldBe None
+  }
 }

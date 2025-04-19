@@ -2,7 +2,6 @@ package com.tjclp.fastmcp.core
 
 import scala.annotation.StaticAnnotation
 import scala.annotation.experimental
-import scala.annotation.unused
 
 /** Marker annotation for methods representing MCP Tools
   *
@@ -83,18 +82,10 @@ class ToolParam(
   * @param maxLength
   *   Optional maximum length for string fields
   */
-@unused class SchemaField( // TODO: Use this for
-    description: String = "",
-    example: Option[String] = None,
-    format: Option[String] = None,
-    deprecated: Boolean = false,
-    required: Boolean = true,
-    minimum: Option[Double] = None,
-    maximum: Option[Double] = None,
-    pattern: Option[String] = None,
-    minLength: Option[Int] = None,
-    maxLength: Option[Int] = None
-) extends StaticAnnotation
+// NOTE: this annotation was never consumed by the current macro pipeline and only existed as a
+// placeholder.  It has been removed to reduce the amount of dead code that needs to be
+// maintained and covered by tests.  Re‑introduce it once the schema generator actually inspects
+// case‑class field annotations.
 
 /** Marker annotation for methods representing MCP Resources If uri contains {placeholders}, it's
   * treated as a template resource. Placeholders in the URI must match the method parameter names
