@@ -5,12 +5,10 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.MacpRegistrationMacro.*
 import com.tjclp.fastmcp.server.*
 import sttp.tapir.*
+import sttp.tapir.Schema.annotations.*
+import sttp.tapir.generic.auto.*
 import zio.*
 import zio.json.*
-// Use auto schema generation by importing the line below
-import sttp.tapir.generic.auto.*
-// Use schema annotations when using case class tool arguments
-import sttp.tapir.Schema.annotations.*
 
 import java.lang.System as JSystem
 

@@ -4,9 +4,9 @@ package macros
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.manager.*
+import zio.*
 
 import scala.quoted.*
-import zio.*
 
 /** Refactored Resource processor that utilises [[AnnotationProcessorBase]]. The remaining logic is
   * limited to URI‑template handling and @Resource‑specific parameter processing.

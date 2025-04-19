@@ -4,9 +4,9 @@ package macros
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.manager.*
+import zio.*
 
 import scala.quoted.*
-import zio.*
 
 /** Refactored implementation that relies on [[AnnotationProcessorBase]] for the repetitive work so
   * this file only has to deal with Tool‑specific details (context injection & JSON‑schema tweaks).

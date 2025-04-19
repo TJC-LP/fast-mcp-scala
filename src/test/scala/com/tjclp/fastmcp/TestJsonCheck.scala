@@ -1,8 +1,8 @@
 package com.tjclp.fastmcp
 
-import zio.json.*
 import org.scalatest.Assertion
 import org.scalatest.matchers.should.Matchers
+import zio.json.*
 
 /** Small utility used by multiple codec specs to assert that a value `A` survives a ZIO‑JSON
   * round‑trip intact.

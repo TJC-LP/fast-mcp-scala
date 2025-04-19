@@ -1,11 +1,11 @@
 package com.tjclp.fastmcp.macros
 
+import com.tjclp.fastmcp.server.McpContext
 import io.circe.Json
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import sttp.tapir.Schema
 import sttp.tapir.generic.auto.*
-import com.tjclp.fastmcp.server.McpContext
 
 /** Tests for the JsonSchemaMacro that generates JSON schema for function parameters
   */

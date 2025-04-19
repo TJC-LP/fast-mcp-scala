@@ -65,13 +65,6 @@ jobs:
       - name: Tests & Coverage
         run: sbt '++ ${{ matrix.scala }}' coverage test coverageAggregate
 
-      - name: Upload coverage to Codecov
-        if: success()
-        run: |
-          bash
-          -lc
-          bash <(curl -s https://codecov.io/bash)
-
       - name: Check that workflows are up to date
         run: sbt '++ ${{ matrix.scala }}' githubWorkflowCheck
 

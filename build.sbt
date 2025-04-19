@@ -14,13 +14,13 @@ lazy val Versions = new {
 }
 
 ThisBuild / scalacOptions ++= Seq(
-  "-Wunused:all",
+  "-Wunused:all", // Specifically needed for OrganizeImports with removeUnused=true
   "-Wvalue-discard",
   "-Wsafe-init", // detect uninitialized vals
   "-Wnonunit-statement"
 )
 // In tests, disable most warnings since test methods often have intentionally unused parameters
-Test / scalacOptions --= Seq("-Wunused:all", "-Wvalue-discard", "-Wnonunit-statement")
+Test / scalacOptions --= Seq("-Wunused:imports", "-Wvalue-discard", "-Wnonunit-statement")
 
 lazy val root = (project in file("."))
   .settings(
@@ -31,6 +31,8 @@ lazy val root = (project in file("."))
     ThisBuild / scalafmtOnCompile := true,
     semanticdbEnabled := true,
     Test / semanticdbEnabled := true,
+    Compile / scalafix / semanticdbEnabled := true,
+    Compile / scalafix / scalafixOnCompile := true,
     libraryDependencies ++= Seq(
       // ZIO Core
       "dev.zio" %% "zio" % Versions.zio,
@@ -105,12 +107,12 @@ ThisBuild / githubWorkflowTargetTags := Seq("v*")
 
 ThisBuild / githubWorkflowBuildPreamble ++= Seq(
   WorkflowStep.Sbt(List("scalafmtCheckAll", "scalafixAll"), name = Some("Scalafmt & Scalafix")),
-  WorkflowStep.Sbt(List("coverage", "test", "coverageAggregate"), name = Some("Tests & Coverage")),
-  WorkflowStep.Run(
-    List("bash", "-lc", "bash <(curl -s https://codecov.io/bash)"),
-    name = Some("Upload coverage to Codecov"),
-    cond = Some("success()")
-  )
+  WorkflowStep.Sbt(List("coverage", "test", "coverageAggregate"), name = Some("Tests & Coverage"))
+//  WorkflowStep.Run(
+//    List("bash", "-lc", "bash <(curl -s https://codecov.io/bash)"),
+//    name = Some("Upload coverage to Codecov"),
+//    cond = Some("success()")
+//  )
 )
 
 // Enable coverage - no minimum coverage yet

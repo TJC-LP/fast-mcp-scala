@@ -3,9 +3,9 @@ package macros
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.*
+import zio.*
 
 import scala.quoted.*
-import zio.*
 
 /** Lightweight implementation thanks to [[AnnotationProcessorBase]]. */
 private[macros] object PromptProcessor extends AnnotationProcessorBase:
