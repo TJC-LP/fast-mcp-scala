@@ -21,36 +21,32 @@ libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.0"
 ```scala
 import fastmcp.core.{Tool, ToolParam, Prompt, PromptParam, Resource}
 import fastmcp.server.FastMcpServer
-import zio._
+import zio.*
 
 // Define annotated tools, prompts, and resources
-object Example
+object Example:
+    @Tool(name = Some("add"), description = Some("Add two numbers"))
+    def add(
+             @ToolParam("First operand") a: Double,
+             @ToolParam("Second operand") b: Double
+           ): Double = a + b
+    
+    @Prompt(name = Some("greet"), description = Some("Generate a greeting message"))
+    def greet(@PromptParam("Name to greet") name: String): String =
+      s"Hello, $name!"
+    
+    // Note: resource templates (templated URIs) are not yet supported;
+    // coming soon when the MCP java-sdk adds template support.
+    @Resource(uri = "file://test", description = Some("Test resource"))
+    def test(): String = "This is a test"
 
-:
-@Tool(name = Some("add"), description = Some("Add two numbers"))
-def add(
-         @ToolParam("First operand") a: Double,
-         @ToolParam("Second operand") b: Double
-       ): Double = a + b
-
-@Prompt(name = Some("greet"), description = Some("Generate a greeting message"))
-def greet(@PromptParam("Name to greet") name: String): String =
-  s"Hello, $name!"
-
-// Note: resource templates (templated URIs) are not yet supported;
-// coming soon when the MCP java-sdk adds template support.
-@Resource(uri = "file://test", description = Some("Test resource"))
-def test(): String = "This is a test"
-
-object ExampleServer extends ZIOAppDefault
-
-:
-override def run =
-  for
-    server <- ZIO.succeed(FastMcpServer("AllInOneServer", "0.1.0"))
-    _ <- ZIO.attempt(server.scanAnnotations[Example.type])
-    _ <- server.runStdio()
-  yield ()
+object ExampleServer extends ZIOAppDefault:
+    override def run =
+      for
+        server <- ZIO.succeed(FastMcpServer("AllInOneServer", "0.1.0"))
+        _ <- ZIO.attempt(server.scanAnnotations[Example.type])
+        _ <- server.runStdio()
+      yield ()
 ```
 
 For more examples and detailed docs, see the `docs/guide.md`.
