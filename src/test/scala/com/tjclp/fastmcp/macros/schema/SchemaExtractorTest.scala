@@ -62,6 +62,6 @@ class SchemaExtractorTest extends AnyFunSuite with Matchers {
 
     // We can't easily access the enum values directly,
     // so just verify the schema properties instead
-    assert(enumSchema.schemaType.isInstanceOf[sttp.tapir.SchemaType.SCoproduct[_]])
+    assert(enumSchema.schemaType.isInstanceOf[sttp.tapir.SchemaType.SCoproduct[?]])
   }
 }

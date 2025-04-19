@@ -19,8 +19,8 @@ ThisBuild / scalacOptions ++= Seq(
   "-Wsafe-init", // detect uninitialized vals
   "-Wnonunit-statement"
 )
-// remove only the discard/statement warnings in tests
-Test / scalacOptions --= Seq("-Wvalue-discard", "-Wnonunit-statement")
+// In tests, disable most warnings since test methods often have intentionally unused parameters
+Test / scalacOptions --= Seq("-Wunused:all", "-Wvalue-discard", "-Wnonunit-statement")
 
 lazy val root = (project in file("."))
   .settings(
@@ -28,8 +28,6 @@ lazy val root = (project in file("."))
     // Enable Scala 3 macros with reasonable inline limits for better compilation performance
     // resolvers += Resolver.mavenLocal,
     scalacOptions ++= Seq("-Xcheck-macros", "-experimental", "-Xmax-inlines:128"),
-    Compile / scalafix / semanticdbEnabled := true,
-    Compile / scalafix / scalafixOnCompile := true,
     ThisBuild / scalafmtOnCompile := true,
     semanticdbEnabled := true,
     Test / semanticdbEnabled := true,

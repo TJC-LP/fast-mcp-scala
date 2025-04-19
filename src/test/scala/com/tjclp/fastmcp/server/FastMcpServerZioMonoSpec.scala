@@ -33,7 +33,7 @@ class FastMcpServerZioMonoSpec extends AnyFlatSpec with Matchers {
       _ => new McpSchema.CallToolResult("seven", false)
     )
     val result = mono.block()
-    result.isError() shouldBe false
+    result.isError shouldBe false
   }
 
   it should "convert ZIO failures into CallToolResult with isError=true" in {
@@ -42,10 +42,9 @@ class FastMcpServerZioMonoSpec extends AnyFlatSpec with Matchers {
       _ => new McpSchema.CallToolResult("dummy", false)
     )
     val result = mono.block()
-    result.isError() shouldBe true
+    result.isError shouldBe true
     // Message is lower‑cased by ErrorMapper, so just check substring
-    import scala.jdk.CollectionConverters.*
     val textContent = result.content().asScala.head.asInstanceOf[McpSchema.TextContent]
-    textContent.text() shouldBe "bad args"
+    textContent.text() should be("bad args")
   }
 }

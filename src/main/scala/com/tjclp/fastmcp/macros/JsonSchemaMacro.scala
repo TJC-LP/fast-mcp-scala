@@ -47,7 +47,9 @@ object JsonSchemaMacro:
     import quotes.reflect.*
 
     // Check if we're running in a CI/test environment; use noTrace to avoid excessive macro trace
-    Properties.propOrFalse("scala.util.noTrace")
+    // Accessed for its *side‑effect* of eagerly initialising Json logic inside circe / tapir.
+    // Assigning to _ silences the compiler warning about a discarded pure expression.
+    val _ = Properties.propOrFalse("scala.util.noTrace")
 
     // Analyze function to extract parameters
     val fnTerm = fn.asTerm

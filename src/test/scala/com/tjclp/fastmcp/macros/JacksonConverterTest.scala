@@ -1,20 +1,9 @@
 package com.tjclp.fastmcp.macros
 
-import org.scalatest.funsuite.AnyFunSuite
-import org.scalatest.matchers.should.Matchers
-import com.fasterxml.jackson.databind.JsonNode
-import com.fasterxml.jackson.databind.node.{
-  BooleanNode,
-  DoubleNode,
-  IntNode,
-  TextNode,
-  ArrayNode,
-  ObjectNode,
-  NullNode
-}
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.tjclp.fastmcp.server.McpContext
+class JacksonConverterTest {}
 
+// Commented out test class to avoid empty compilation unit warning
+/*
 //class JacksonConverterTest extends AnyFunSuite with Matchers {
 //  private val mapper = new ObjectMapper()
 //
@@ -55,3 +44,4 @@ import com.tjclp.fastmcp.server.McpContext
 //    assert(result == 3.14)
 //  }
 //}
+ */

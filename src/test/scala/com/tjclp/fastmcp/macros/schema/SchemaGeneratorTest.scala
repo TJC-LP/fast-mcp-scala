@@ -54,7 +54,8 @@ class SchemaGeneratorTest extends AnyFunSuite with Matchers {
     val field = createProductField("user", userSchema)
 
     assert(field.name.name == "user")
-    assert(field.schema.schemaType.isInstanceOf[SProduct[User]])
+    // Check product schema type without specific type parameter to avoid runtime check warning
+    assert(field.schema.schemaType.isInstanceOf[SProduct[?]])
   }
 
   test("createArgumentsSchema should create a schema with the given fields") {

@@ -1,7 +1,6 @@
 package com.tjclp.fastmcp
 package macros
 
-import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.*
 
 import scala.quoted.*

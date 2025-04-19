@@ -94,7 +94,7 @@ object PromptDefinition:
 // --- Content Types ---
 // Use sealed trait for ADT pattern, enabling exhaustive matching
 @jsonDiscriminator("type")
-sealed trait Content(`type`: String):
+sealed trait Content(@scala.annotation.unused `type`: String):
   def toJava: McpSchema.Content // Abstract method to convert to Java SDK type
 
 object Content:

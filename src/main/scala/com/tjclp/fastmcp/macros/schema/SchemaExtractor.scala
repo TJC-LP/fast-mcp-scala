@@ -44,7 +44,7 @@ object SchemaExtractor:
     val schemaExpr: Expr[Schema[T]] =
       if (isEnum) then
         // Explicitly use string-based derivation for enums
-        Expr.summon[Mirror.SumOf[T]].getOrElse {
+        val _ = Expr.summon[Mirror.SumOf[T]].getOrElse {
           report.errorAndAbort(
             s"Cannot derive enum schema for ${Type.show[T]}: Missing Mirror.SumOf[T]. Ensure it's a standard Scala 3 enum."
           )
