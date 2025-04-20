@@ -51,9 +51,18 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
         arguments = $maybeArgs,
         handler = (args: Map[String, Any]) =>
           ZIO.attempt {
-            MapToFunctionMacro
+            val result = MapToFunctionMacro
               .callByMap($methodRefExpr)
-              .asInstanceOf[Map[String, Any] => List[Message]](args)
+              .asInstanceOf[Map[String, Any] => Any](args)
+
+            result match {
+              case msgs: List[?] if msgs.nonEmpty && msgs.head.isInstanceOf[Message] =>
+                msgs.asInstanceOf[List[Message]]
+              case s: String =>
+                List(Message(role = Role.User, content = TextContent(s)))
+              case other =>
+                List(Message(role = Role.User, content = TextContent(other.toString)))
+            }
           }
       )
     }
