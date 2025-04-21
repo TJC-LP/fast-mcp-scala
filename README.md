@@ -58,23 +58,12 @@ Unmanaged JARs placed in a project’s `lib/` folder are picked up automatically
 
 ### 🚀Using with **scala‑cli**
 
-> Publishing is a *power* command; enable it once:
->
-> ```bash
-> scala-cli config power true  # or pass --power each time
-> ```
-
-1. From the *FastMCP‑Scala* root:
-   ```bash
-   scala-cli --power publish local .
-   ```
-
-2. In another scala‑cli project:
-   ```scala
-   //> using scala 3.6.4
-   //> using dep com.tjclp::fast-mcp-scala:0.1.0-SNAPSHOT
-   //> using options "-Xcheck-macros" "-experimental"
-   ```
+You can use `fast-mcp-scala` in another scala‑cli project:
+```scala
+//> using scala 3.6.4
+//> using dep com.tjclp::fast-mcp-scala:0.1.0-SNAPSHOT
+//> using options "-Xcheck-macros" "-experimental"
+```
 
 You can also point directly at the local JAR:
 
@@ -86,7 +75,6 @@ You can also point directly at the local JAR:
 
 ---
 
-
 ## Quickstart (Annotation‑based)
 
 ```scala
@@ -96,6 +84,7 @@ You can also point directly at the local JAR:
 
 import com.tjclp.fastmcp.core.{Tool, ToolParam, Prompt, PromptParam, Resource}
 import com.tjclp.fastmcp.server.FastMcpServer
+import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import zio.*
 
 // Define annotated tools, prompts, and resources
@@ -118,7 +107,7 @@ object Example:
 object ExampleServer extends ZIOAppDefault:
   override def run =
     for
-      server <- ZIO.succeed(FastMcpServer("ExampleServer", "0.1.0"))
+      server <- ZIO.succeed(FastMcpServer("ExampleServer"))
       _      <- ZIO.attempt(server.scanAnnotations[Example.type])
       _      <- server.runStdio()
     yield ()

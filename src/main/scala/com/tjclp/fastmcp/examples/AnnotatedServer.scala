@@ -2,7 +2,7 @@ package com.tjclp.fastmcp
 package examples
 
 import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.macros.MacpRegistrationMacro.*
+import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import com.tjclp.fastmcp.server.*
 import sttp.tapir.*
 import sttp.tapir.Schema.annotations.*

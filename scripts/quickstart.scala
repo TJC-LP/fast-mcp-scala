@@ -4,7 +4,7 @@
 
 import com.tjclp.fastmcp.core.{Tool, ToolParam, Prompt, PromptParam, Resource}
 import com.tjclp.fastmcp.server.FastMcpServer
-import com.tjclp.fastmcp.macros.MacpRegistrationMacro.*
+import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import zio.*
 
 // Define annotated tools, prompts, and resources

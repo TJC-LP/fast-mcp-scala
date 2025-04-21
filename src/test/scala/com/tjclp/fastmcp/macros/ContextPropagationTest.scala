@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 import server.*
 import server.manager.*
-import MacpRegistrationMacro.*
+import RegistrationMacro.*
 
 class ContextPropagationTest extends AnyFunSuite:
 

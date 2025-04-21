@@ -2,7 +2,7 @@ package com.tjclp.fastmcp
 package macros
 
 import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.macros.MacpRegistrationMacro.scanAnnotations
+import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.manager.ResourceArgument
 import org.scalatest.funsuite.AnyFunSuite

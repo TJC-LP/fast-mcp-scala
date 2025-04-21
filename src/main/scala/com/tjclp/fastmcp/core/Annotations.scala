@@ -58,35 +58,6 @@ class ToolParam(
     val schema: Option[String] = None
 ) extends StaticAnnotation
 
-/** Annotation for case class fields to provide schema metadata Used with ZIO Schema to enhance the
-  * generated JSON schemas
-  *
-  * @param description
-  *   Description of the field
-  * @param example
-  *   Optional example value for documentation
-  * @param format
-  *   Optional format string (e.g. "date-time", "email", etc.)
-  * @param deprecated
-  *   Whether this field is deprecated
-  * @param required
-  *   Whether this field is required (for Option fields)
-  * @param minimum
-  *   Optional minimum value for numeric fields
-  * @param maximum
-  *   Optional maximum value for numeric fields
-  * @param pattern
-  *   Optional regex pattern for string fields
-  * @param minLength
-  *   Optional minimum length for string fields
-  * @param maxLength
-  *   Optional maximum length for string fields
-  */
-// NOTE: this annotation was never consumed by the current macro pipeline and only existed as a
-// placeholder.  It has been removed to reduce the amount of dead code that needs to be
-// maintained and covered by tests.  Re‑introduce it once the schema generator actually inspects
-// case‑class field annotations.
-
 /** Marker annotation for methods representing MCP Resources If uri contains {placeholders}, it's
   * treated as a template resource. Placeholders in the URI must match the method parameter names
   * unless @ResourceParam is used. Static resources (no placeholders) should have methods with no

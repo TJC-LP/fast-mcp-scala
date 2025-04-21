@@ -9,7 +9,7 @@ import scala.quoted.*
 /** Main object containing extension method for registering annotated tools, prompts, and resources.
   * Delegates actual processing to specialized objects.
   */
-object MacpRegistrationMacro:
+object RegistrationMacro:
 
   /** Extension method for FastMCPScala that scans an object for MCP annotations (@Tool, @Prompt,
     * \@Resource) and registers them with the server.
@@ -69,4 +69,4 @@ object MacpRegistrationMacro:
       val block = Block(registrationTerms.init, registrationTerms.last)
       block.asExprOf[FastMcpServer]
 
-end MacpRegistrationMacro // End main object
+end RegistrationMacro // End main object
