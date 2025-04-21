@@ -41,7 +41,7 @@ libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.0-SNAPSHOT"
 
 ---
 
-### 📦Use the JAR Directly (Unmanaged Dependencies)
+### 📦 Use the JAR Directly (Unmanaged Dependencies)
 
 ```bash
 # Package the library
@@ -56,7 +56,7 @@ Unmanaged JARs placed in a project’s `lib/` folder are picked up automatically
 
 ---
 
-### 🚀Using with **scala‑cli**
+### 🚀 Using with **scala‑cli**
 
 You can use `fast-mcp-scala` in another scala‑cli project:
 ```scala
