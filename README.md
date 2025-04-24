@@ -10,7 +10,7 @@ Features
 
 ---
 
-## Installation (Coming Soon)
+## Installation
 
 Add to your **`build.sbt`** (defaulting to **Scala 3.6.4**):
 
@@ -24,7 +24,7 @@ libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.0"
 
 When hacking on *FastMCP‑Scala* itself, you can consume a local build in any project.
 
-### 🔨 Publish to the Local Ivy Repository with `sbt` (Recommended)
+### 🔨 Publish to the Local Ivy Repository with `sbt`
 
 ```bash
 # From the fast-mcp-scala root
@@ -34,7 +34,7 @@ sbt publishLocal
 Then, in your consuming sbt project:
 
 ```scala
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.0-SNAPSHOT"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.1-SNAPSHOT"
 ```
 
 > `publishLocal` installs the artifact under `~/.ivy2/local` (or the Coursier cache when enabled).
@@ -48,7 +48,7 @@ libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.0-SNAPSHOT"
 sbt package
 
 # Copy the JAR – adjust Scala version / name if you change them
-cp target/scala-3.6.4/fast-mcp-scala_3-0.1.0-SNAPSHOT.jar \
+cp target/scala-3.6.4/fast-mcp-scala_3-0.1.1-SNAPSHOT.jar \
    /path/to/other-project/lib/
 ```
 
@@ -61,7 +61,7 @@ Unmanaged JARs placed in a project’s `lib/` folder are picked up automatically
 You can use `fast-mcp-scala` in another scala‑cli project:
 ```scala
 //> using scala 3.6.4
-//> using dep com.tjclp::fast-mcp-scala:0.1.0-SNAPSHOT
+//> using dep com.tjclp::fast-mcp-scala:0.1.0
 //> using options "-Xcheck-macros" "-experimental"
 ```
 
@@ -69,7 +69,7 @@ You can also point directly at the local JAR:
 
 ```scala
 //> using scala 3.6.4
-//> using lib "/absolute/path/to/fast-mcp-scala_3-0.1.0-SNAPSHOT.jar"
+//> using lib "/absolute/path/to/fast-mcp-scala_3-0.1.0.jar"
 //> using options "-Xcheck-macros" "-experimental"
 ```
 
@@ -79,7 +79,7 @@ You can also point directly at the local JAR:
 
 ```scala
 //> using scala 3.6.4
-//> using dep com.tjclp::fast-mcp-scala:0.1.0-SNAPSHOT
+//> using dep com.tjclp::fast-mcp-scala:0.1.0
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.core.{Tool, ToolParam, Prompt, PromptParam, Resource}
@@ -116,6 +116,16 @@ object ExampleServer extends ZIOAppDefault:
 The above example can be run using `scala-cli scripts/quickstart.scala` from the repo root (make sure to run `sbt publishLocal` first). You can run the server via the MCP inspector by running
 ```bash 
  npx @modelcontextprotocol/inspector scala-cli <path_to_repo>/scripts/quickstart.scala
+```
+
+You can also run examples directly from the command line:
+```bash 
+scala-cli run \
+    --scala 3.6.4 \
+    --dep com.tjclp::fast-mcp-scala:0.1.0 \
+    --scala-opt "-Xcheck-macros" \
+    --scala-opt "-experimental" \
+    --main-class com.tjclp.fastmcp.examples.AnnotatedServer
 ```
 
 For additional examples and in‑depth docs, see **`docs/guide.md`**.
