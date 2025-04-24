@@ -49,4 +49,7 @@ build/
 .scala-build
 
 ### Diff ###
-changes.txt
+*.txt
+
+### Environment ###
+.env
