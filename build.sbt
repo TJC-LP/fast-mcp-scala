@@ -2,7 +2,7 @@ import xerial.sbt.Sonatype.sonatypeCentralHost
 
 ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
 
-ThisBuild / version := "0.1.0"
+ThisBuild / version := "0.1.0-RC1"
 
 ThisBuild / scalaVersion := "3.6.4" // Using Scala 3
 ThisBuild / versionScheme := Some("semver-spec")
