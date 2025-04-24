@@ -15,8 +15,8 @@ import scala.concurrent.ExecutionContext.Implicits.global
 import scala.jdk.CollectionConverters.*
 import scala.util.Failure
 import scala.util.Success
-
 import core.*
+import io.modelcontextprotocol.server.transport.StdioServerTransportProvider
 import server.manager.* // Needed for runToFuture onComplete
 
 /** Main server class for FastMCP-Scala
@@ -157,13 +157,21 @@ class FastMcpServer(
   /** Run the server with stdio transport
     */
   def runStdio(): ZIO[Any, Throwable, Unit] =
-    ZIO.attemptBlocking {
-      val stdioTransportProvider =
-        new io.modelcontextprotocol.server.transport.StdioServerTransportProvider()
-      this.setupServer(stdioTransportProvider)
-      JSystem.err.println(s"FastMCPScala server '${this.name}' running with stdio transport.")
-      Thread.sleep(Long.MaxValue)
-    }.unit
+    ZIO.scoped { // ⬅ drops the `Scope` requirement
+      ZIO.acquireRelease(
+        for {
+          provider <- ZIO.attempt(new StdioServerTransportProvider())
+          _ <- ZIO.attempt(setupServer(provider))
+          _ <- ZIO.attempt(
+            JSystem.err.println(
+              s"[FastMCPScala] '$name' running on stdio – press Ctrl-C to stop."
+            )
+          )
+        } yield ()
+      )(_ => ZIO.attempt(underlyingJavaServer.foreach(_.close())).orDie) *> ZIO.never.as(
+        ()
+      ) // ⬅ turn `Nothing` into `Unit`
+    }
 
   /** Set up the Java MCP Server with the given transport provider
     */
@@ -287,7 +295,7 @@ class FastMcpServer(
     // --- Build Server ---
     // Build the McpAsyncServer
     underlyingJavaServer = Some(serverBuilder.build())
-    JSystem.err.println(s"MCP Server '$name' configured.")
+    JSystem.err.println(s"[FastMCPScala] MCP Server '$name' configured.")
 
   /** Creates a Java BiFunction handler for a specific static resource URI. Returns a Mono that
     * completes with the result.
