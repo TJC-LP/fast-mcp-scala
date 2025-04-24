@@ -1,8 +1,11 @@
 import xerial.sbt.Sonatype.sonatypeCentralHost
+import xerial.sbt.Sonatype.autoImport.*
+
+sonatypeTimeoutMillis := 60000
 
 ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
 
-ThisBuild / version := "0.1.0-RC1"
+ThisBuild / version := "0.1.0-RC2"
 
 ThisBuild / scalaVersion := "3.6.4" // Using Scala 3
 ThisBuild / versionScheme := Some("semver-spec")
@@ -120,7 +123,7 @@ ThisBuild / githubWorkflowBuildPreamble ++= Seq(
 )
 
 // Enable coverage - no minimum coverage yet
-coverageEnabled := true
+coverageEnabled := false
 coverageFailOnMinimum := false
 // coverageMinimumStmtTotal := 60
 coverageHighlighting := true // default; false is faster but less precise
