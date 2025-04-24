@@ -26,6 +26,11 @@ When hacking on *FastMCP‑Scala* itself, you can consume a local build in any p
 
 ### 🔨 Publish to the Local Ivy Repository with `sbt`
 
+In your cloned repository, set a working version
+```scala 
+ThisBuild / version := "0.1.1-SNAPSHOT"
+```
+
 ```bash
 # From the fast-mcp-scala root
 sbt publishLocal
@@ -56,7 +61,7 @@ Unmanaged JARs placed in a project’s `lib/` folder are picked up automatically
 
 ---
 
-### 🚀 Using with **scala‑cli**
+### 🚀 Using with `scala‑cli`
 
 You can use `fast-mcp-scala` in another scala‑cli project:
 ```scala
@@ -75,7 +80,7 @@ You can also point directly at the local JAR:
 
 ---
 
-## Quickstart (Annotation‑based)
+## Quickstart
 
 ```scala
 //> using scala 3.6.4
@@ -113,20 +118,37 @@ object ExampleServer extends ZIOAppDefault:
     yield ()
 ```
 
-The above example can be run using `scala-cli scripts/quickstart.scala` from the repo root (make sure to run `sbt publishLocal` first). You can run the server via the MCP inspector by running
+The above example can be run using `scala-cli scripts/quickstart.scala` from the repo root. You can run the server via the MCP inspector by running
 ```bash 
  npx @modelcontextprotocol/inspector scala-cli <path_to_repo>/scripts/quickstart.scala
 ```
 
 You can also run examples directly from the command line:
 ```bash 
-scala-cli run \
-    --scala 3.6.4 \
-    --dep com.tjclp::fast-mcp-scala:0.1.0 \
-    --scala-opt "-Xcheck-macros" \
-    --scala-opt "-experimental" \
+scala-cli \
+    -e '//> using dep com.tjclp::fast-mcp-scala:0.1.0' \
     --main-class com.tjclp.fastmcp.examples.AnnotatedServer
 ```
+
+In Claude desktop, you can add the following to your `claude_desktop_config.json`:
+
+```json 
+{
+  "mcpServers": {
+    "example-fast-mcp-server": {
+      "command": "scala-cli",
+      "args": [
+        "-e",
+        "//> using dep com.tjclp::fast-mcp-scala:0.1.0",
+        "--main-class",
+        "com.tjclp.fastmcp.examples.AnnotatedServer"
+      ]
+    }
+  }
+}
+```
+
+> Note: FastMCP-Scala example servers are for demo purposes only and don't do anything useful
 
 For additional examples and in‑depth docs, see **`docs/guide.md`**.
 
