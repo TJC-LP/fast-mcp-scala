@@ -1,4 +1,8 @@
-ThisBuild / version := "0.1.0-SNAPSHOT"
+import xerial.sbt.Sonatype.sonatypeCentralHost
+
+ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
+
+ThisBuild / version := "0.1.0"
 
 ThisBuild / scalaVersion := "3.6.4" // Using Scala 3
 ThisBuild / versionScheme := Some("semver-spec")
@@ -142,8 +146,7 @@ inThisBuild(
         "rcaputo3@tjclp.com",
         url("https://tjclp.com")
       )
-    ),
-    sonatypeCredentialHost := "s01.oss.sonatype.org"
+    )
   )
 )
 
