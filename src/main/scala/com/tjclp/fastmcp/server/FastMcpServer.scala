@@ -5,6 +5,7 @@ import io.modelcontextprotocol.server.McpAsyncServer
 import io.modelcontextprotocol.server.McpAsyncServerExchange
 import io.modelcontextprotocol.server.McpServer
 import io.modelcontextprotocol.server.McpServerFeatures
+import io.modelcontextprotocol.server.transport.StdioServerTransportProvider
 import io.modelcontextprotocol.spec.McpSchema
 import io.modelcontextprotocol.spec.McpServerTransportProvider
 import reactor.core.publisher.Mono
@@ -15,8 +16,8 @@ import scala.concurrent.ExecutionContext.Implicits.global
 import scala.jdk.CollectionConverters.*
 import scala.util.Failure
 import scala.util.Success
+
 import core.*
-import io.modelcontextprotocol.server.transport.StdioServerTransportProvider
 import server.manager.* // Needed for runToFuture onComplete
 
 /** Main server class for FastMCP-Scala
