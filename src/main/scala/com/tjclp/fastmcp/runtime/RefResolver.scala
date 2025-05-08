@@ -1,9 +1,5 @@
 package com.tjclp.fastmcp.runtime
 
-import java.lang.invoke.MethodHandles
-import java.lang.invoke.MethodType
-import scala.jdk.CollectionConverters.*
-
 /** Runtime utility for resolving function references and invoking methods. This class is extracted
   * from the macro utilities to allow for runtime resolution without requiring macro expansion.
   */
@@ -20,6 +16,8 @@ object RefResolver:
     *   The result of the function invocation
     * @throws IllegalArgumentException
     *   if the function cannot be invoked with the given arguments
+    * @throws IllegalArgumentException
+    *   if more than 22 arguments are provided (Scala function limitation)
     */
   def invokeFunctionWithArgs(fun: Any, args: List[Any]): Any =
     (args.length, fun) match
@@ -483,12 +481,9 @@ object RefResolver:
           args(20),
           args(21)
         )
-      case _ => // universal fallback
-        val handle = MethodHandles
-          .lookup()
-          .findVirtual(
-            fun.getClass,
-            "apply",
-            MethodType.genericMethodType(args.length)
-          )
-        handle.invokeWithArguments((fun :: args).map(_.asInstanceOf[Object]).asJava)
+      case _ => // Unsupported, but you shouldn't do this anyway...
+        throw new IllegalArgumentException(
+          s"Function invocation with ${args.length} arguments is not supported. " +
+            "FastMCP's RefResolver is limited to a maximum of 22 arguments per function. " +
+            "Consider simplifying your implementation."
+        )
