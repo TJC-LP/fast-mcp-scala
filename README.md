@@ -13,14 +13,14 @@ Features
 Add to your **`build.sbt`** (defaulting to **Scala 3.6.4**):
 
 ```scala
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.0"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.1"
 ```
 
 ## Quickstart
 
 ```scala
 //> using scala 3.6.4
-//> using dep com.tjclp::fast-mcp-scala:0.1.0
+//> using dep com.tjclp::fast-mcp-scala:0.1.1
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.core.{Tool, ToolParam, Prompt, PromptParam, Resource}
@@ -65,7 +65,7 @@ npx @modelcontextprotocol/inspector scala-cli <path_to_repo>/scripts/quickstart.
 You can also run examples directly from the command line:
 ```bash 
 scala-cli \
-    -e '//> using dep com.tjclp::fast-mcp-scala:0.1.0' \
+    -e '//> using dep com.tjclp::fast-mcp-scala:0.1.1' \
     --main-class com.tjclp.fastmcp.examples.AnnotatedServer
 ```
 
@@ -80,7 +80,7 @@ In Claude desktop, you can add the following to your `claude_desktop_config.json
       "command": "scala-cli",
       "args": [
         "-e",
-        "//> using dep com.tjclp::fast-mcp-scala:0.1.0",
+        "//> using dep com.tjclp::fast-mcp-scala:0.1.1",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]
@@ -143,7 +143,7 @@ Unmanaged JARs placed in a project's `lib/` folder are picked up automatically b
 You can use `fast-mcp-scala` in another scala‑cli project:
 ```scala
 //> using scala 3.6.4
-//> using dep com.tjclp::fast-mcp-scala:0.1.0
+//> using dep com.tjclp::fast-mcp-scala:0.1.1
 //> using options "-Xcheck-macros" "-experimental"
 ```
 
@@ -151,6 +151,6 @@ You can also point directly at the local JAR:
 
 ```scala
 //> using scala 3.6.4
-//> using lib "/absolute/path/to/fast-mcp-scala_3-0.1.0.jar"
+//> using lib "/absolute/path/to/fast-mcp-scala_3-0.1.1.jar"
 //> using options "-Xcheck-macros" "-experimental"
 ```
