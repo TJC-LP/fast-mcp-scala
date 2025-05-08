@@ -1,8 +1,8 @@
 package com.tjclp.fastmcp.macros
 
 import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.server.FastMcpServer
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
+import com.tjclp.fastmcp.server.FastMcpServer
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
