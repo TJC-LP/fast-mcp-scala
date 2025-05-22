@@ -164,7 +164,7 @@ This is the main user-facing class.
 *   **`run`, `runStdio`, `runSse`:**
     *   `run(transport)`: Selects `runStdio` or `runSse` based on the argument.
     *   `runStdio()`: Creates a Java `StdioServerTransportProvider`, calls `setupServer` with it, and then blocks the ZIO fiber indefinitely (as the Java transport handles the main loop). Log server start.
-    *   `runSse()`: More complex. Would need to:
+    *   `runSse()`: **NOT YET SUPPORTED**. More complex. Would need to:
         *   Create a Java SSE transport provider (e.g., `WebFluxSseServerTransportProvider` or `HttpServletSseServerTransportProvider`).
         *   Call `setupServer` with it.
         *   Start the underlying web server (e.g., Netty via ZIO HTTP or Http4s, or potentially leverage the Spring Boot context if run within it, or even Tomcat embedded as in Java SDK tests). This requires careful integration between the ZIO runtime and the web server's lifecycle. Initial implementation might focus on `stdio`.
