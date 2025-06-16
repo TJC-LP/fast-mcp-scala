@@ -5,7 +5,7 @@ sonatypeTimeoutMillis := 60000
 
 ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
 
-ThisBuild / version := "0.1.1"
+ThisBuild / version := "0.1.2-SNAPSHOT"
 
 ThisBuild / scalaVersion := "3.6.4" // Using Scala 3
 ThisBuild / versionScheme := Some("semver-spec")

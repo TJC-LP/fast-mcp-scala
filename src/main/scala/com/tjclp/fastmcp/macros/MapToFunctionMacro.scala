@@ -14,13 +14,23 @@ import scala.quoted.*
 object MapToFunctionMacro:
 
   // Shared Jackson mapper
-  private val mapperBuilder = JsonMapper
+  private val baseMapperBuilder = JsonMapper
     .builder()
     .addModule(DefaultScalaModule)
     .enable(DeserializationFeature.FAIL_ON_NULL_CREATOR_PROPERTIES)
 
-  private val mapper: JsonMapper & ClassTagExtensions =
-    mapperBuilder.build() :: ClassTagExtensions
+  private val baseMapper: JsonMapper & ClassTagExtensions =
+    baseMapperBuilder.build() :: ClassTagExtensions
+
+  // Create mapper with custom modules if needed
+  private def getMapperWithModules(converters: Seq[JacksonConverter[?]]): JsonMapper &
+    ClassTagExtensions =
+    val modules = converters.flatMap(_.customModule).distinct
+    if modules.isEmpty then baseMapper
+    else
+      val builder = baseMapper.rebuild()
+      modules.foreach(builder.addModule)
+      builder.build() :: ClassTagExtensions
 
   /** Entry point: lifts f into a Map-based handler. */
   transparent inline def callByMap[F](inline f: F): Any =
@@ -106,7 +116,7 @@ object MapToFunctionMacro:
             val key = $nameExpr
             val rawOpt: Option[Any] = $mapExpr.get(key)
             val raw: Any = rawOpt.getOrElse(None)
-            $convExpr.convert(key, raw, MapToFunctionMacro.mapper)
+            $convExpr.convert(key, raw, MapToFunctionMacro.baseMapper)
           }.asExprOf[Any]
         else
           '{
@@ -115,7 +125,7 @@ object MapToFunctionMacro:
               key,
               throw new NoSuchElementException("Key not found in map: " + key)
             )
-            $convExpr.convert(key, raw, MapToFunctionMacro.mapper)
+            $convExpr.convert(key, raw, MapToFunctionMacro.baseMapper)
           }.asExprOf[Any]
       })
 
