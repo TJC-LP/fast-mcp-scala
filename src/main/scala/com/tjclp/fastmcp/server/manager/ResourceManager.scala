@@ -145,6 +145,18 @@ class ResourceManager extends Manager[ResourceDefinition]:
   ): ZIO[Any, Throwable, Unit] =
     ZIO
       .attempt {
+        // Validate that all placeholders in uriPattern have corresponding arguments
+        val pattern = ResourceTemplatePattern(uriPattern)
+        val placeholderNames = pattern.paramNames
+        val argumentNames = definition.arguments.map(_.map(_.name)).getOrElse(List.empty).toSet
+
+        val missingArgs = placeholderNames.filterNot(argumentNames.contains)
+        if missingArgs.nonEmpty then
+          throw new IllegalArgumentException(
+            s"Template URI pattern '$uriPattern' contains placeholders [${missingArgs.mkString(", ")}] " +
+              s"that don't have corresponding arguments in the definition"
+          )
+
         // Ensure isTemplate is true and arguments are stored (using the passed definition)
         val templateDefinition =
           definition.copy(isTemplate = true) // Arguments should be in the passed definition
@@ -180,6 +192,24 @@ class ResourceManager extends Manager[ResourceDefinition]:
     val staticResourcesList = resources.values().asScala.map(_._1).toList
     val templateResourcesList = resourceTemplates.values().asScala.map(_._1).toList
     staticResourcesList ++ templateResourcesList
+
+  /** List only template resource definitions
+    *
+    * @return
+    *   List of all templated resource definitions
+    */
+  def listTemplateDefinitions(): List[ResourceDefinition] =
+    resourceTemplates.values().asScala.map(_._1).toList
+
+  /** Get a template handler by its exact pattern string
+    *
+    * @param uriPattern
+    *   The exact URI pattern (e.g., "users://{userId}")
+    * @return
+    *   Option containing the handler if found
+    */
+  def getTemplateHandler(uriPattern: String): Option[ResourceTemplateHandler] =
+    Option(resourceTemplates.get(uriPattern)).map(_._2)
 
   /** Read a resource by URI
     *
@@ -249,7 +279,7 @@ case class ResourceTemplatePattern(pattern: String):
   // Regex to find placeholders like {userId}
   private val paramRegex = """\{([^{}]+)\}""".r
   // Extract the names of the placeholders
-  private val paramNames = paramRegex.findAllMatchIn(pattern).map(_.group(1)).toList
+  val paramNames = paramRegex.findAllMatchIn(pattern).map(_.group(1)).toList
 
   // Convert the pattern string into a regex that captures the placeholder values
   // Example: "users://{id}/profile" -> "^users://([^/]+)/profile$"

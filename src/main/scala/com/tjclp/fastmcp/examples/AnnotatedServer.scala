@@ -104,23 +104,61 @@ object AnnotatedServer extends ZIOAppDefault:
   def welcomeResource(): String =
     "Welcome to the FastMCP-Scala Annotated Server!"
 
-  /** A template resource that takes a user ID from the URI. Annotated with @Resource. The URI
-    * pattern {userId} matches the parameter name.
+  /** A template resource that takes a user ID from the URI. The URI pattern {userId} matches the
+    * parameter name.
     */
   @Resource(
-    uri = "users://profile",
+    uri = "users://{userId}/profile",
     name = Some("UserProfile"),
-    description = Some("Dynamically generated user profile."),
+    description = Some("Dynamically generated user profile based on user ID."),
     mimeType = Some("application/json")
   )
-  def userProfileResource(): String =
+  def userProfileResource(
+      @ResourceParam("The unique identifier of the user") userId: String
+  ): String =
     // In a real app, fetch user data based on userId
-    val userId = "123"
     Map(
       "userId" -> userId,
       "name" -> s"User $userId",
-      "email" -> s"user$userId@example.com"
+      "email" -> s"user$userId@example.com",
+      "joined" -> "2024-01-15"
     ).toJsonPretty
+
+  /** A template resource demonstrating multiple path parameters.
+    */
+  @Resource(
+    uri = "repos://{owner}/{repo}/issues/{id}",
+    name = Some("RepoIssue"),
+    description = Some("Get a specific issue from a repository."),
+    mimeType = Some("application/json")
+  )
+  def getRepositoryIssue(
+      @ResourceParam("Repository owner") owner: String,
+      @ResourceParam("Repository name") repo: String,
+      @ResourceParam("Issue ID") id: String
+  ): String =
+    Map(
+      "owner" -> owner,
+      "repo" -> repo,
+      "id" -> id,
+      "title" -> s"Issue #$id in $owner/$repo",
+      "status" -> "open",
+      "created" -> "2024-06-01"
+    ).toJsonPretty
+
+  /** A template resource for file access with custom MIME type detection.
+    */
+  @Resource(
+    uri = "files://{path}",
+    name = Some("FileContent"),
+    description = Some("Read file content from a specific path.")
+  )
+  def readFileResource(
+      @ResourceParam("File path relative to the server root") path: String
+  ): String =
+    // In a real implementation, you would read the actual file
+    // For demo purposes, we'll return mock content
+    s"Content of file: $path\n\nThis is a demo file content."
 
   /** A simple prompt with no arguments. Annotated with @Prompt.
     */

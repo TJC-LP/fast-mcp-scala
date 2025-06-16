@@ -17,8 +17,8 @@ import scala.jdk.CollectionConverters.*
 import scala.util.Failure
 import scala.util.Success
 
-import core.*
-import server.manager.* // Needed for runToFuture onComplete
+import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.server.manager.*
 
 /** Main server class for FastMCP-Scala
   *
@@ -48,7 +48,7 @@ class FastMcpServer(
       handler: ContextualToolHandler,
       description: Option[String] = None,
       inputSchema: Either[McpSchema.JsonSchema, String] = Left(
-        new McpSchema.JsonSchema("object", null, null, true)
+        new McpSchema.JsonSchema("object", null, null, true, null, null)
       ),
       options: ToolRegistrationOptions = ToolRegistrationOptions()
   ): ZIO[Any, Throwable, FastMcpServer] =
@@ -123,19 +123,9 @@ class FastMcpServer(
     ZIO.succeed {
       val javaResources = resourceManager
         .listDefinitions()
-        .map { resourceDef =>
-          ResourceDefinition.toJava(resourceDef) match {
-            case res: McpSchema.Resource => res
-            case template: McpSchema.ResourceTemplate =>
-              new McpSchema.Resource(
-                template.uriTemplate(),
-                template.name(),
-                template.description(),
-                template.mimeType(),
-                template.annotations()
-              )
-          }
-        }
+        .filter(!_.isTemplate) // Only include static resources
+        .map(ResourceDefinition.toJava)
+        .collect { case res: McpSchema.Resource => res }
         .asJava
       new McpSchema.ListResourcesResult(javaResources, null)
     }
@@ -144,6 +134,16 @@ class FastMcpServer(
     ZIO.succeed {
       val prompts = promptManager.listDefinitions().map(PromptDefinition.toJava).asJava
       new McpSchema.ListPromptsResult(prompts, null)
+    }
+
+  def listResourceTemplates(): ZIO[Any, Throwable, McpSchema.ListResourceTemplatesResult] =
+    ZIO.succeed {
+      val templates = resourceManager
+        .listTemplateDefinitions()
+        .map(ResourceDefinition.toJava)
+        .collect { case template: McpSchema.ResourceTemplate => template }
+        .asJava
+      new McpSchema.ListResourceTemplatesResult(templates, null)
     }
 
   /** Run the server with the specified transport
@@ -183,7 +183,6 @@ class FastMcpServer(
       .serverInfo(name, version)
 
     // --- Capabilities Setup ---
-    val experimental = new java.util.HashMap[String, Object]()
     val toolCapabilities =
       if (toolManager.listDefinitions().nonEmpty)
         new McpSchema.ServerCapabilities.ToolCapabilities(true)
@@ -199,7 +198,8 @@ class FastMcpServer(
     val loggingCapabilities = new McpSchema.ServerCapabilities.LoggingCapabilities()
 
     val capabilities = new McpSchema.ServerCapabilities(
-      experimental,
+      null,
+      null, // experimental
       loggingCapabilities,
       promptCapabilities,
       resourceCapabilities,
@@ -216,65 +216,83 @@ class FastMcpServer(
     }
 
     // --- Resource and Template Registration with Java Server ---
+    // Register static resources and templates separately
+    val staticResources = resourceManager.listDefinitions().filter(!_.isTemplate)
+    val templateResources = resourceManager.listDefinitions().filter(_.isTemplate)
+
     JSystem.err.println(
-      s"[FastMCPScala] Processing ${resourceManager.listDefinitions().size} resource definitions for Java server registration..."
+      s"[FastMCPScala] Processing ${staticResources.size} static resources and ${templateResources.size} resource templates..."
     )
-    val resourceSpecs = new java.util.ArrayList[McpServerFeatures.AsyncResourceSpecification]()
-    val templateDefs = new java.util.ArrayList[McpSchema.ResourceTemplate]()
 
-    resourceManager.listDefinitions().foreach { resDef =>
-      JSystem.err.println(
-        s"[FastMCPScala] - Processing definition for URI: ${resDef.uri}, isTemplate: ${resDef.isTemplate}"
-      )
+    // Register static resources
+    if (staticResources.nonEmpty) {
+      val resourceSpecs = new java.util.ArrayList[McpServerFeatures.AsyncResourceSpecification]()
 
-      if (resDef.isTemplate) {
-        // 1. Add Template Definition for discovery via .resourceTemplates()
-        ResourceDefinition.toJava(resDef) match {
-          case template: McpSchema.ResourceTemplate =>
-            templateDefs.add(template)
-            JSystem.err.println(
-              s"[FastMCPScala]   - Added ResourceTemplate definition for discovery: ${resDef.uri}"
-            )
-          case _ =>
-            JSystem.err.println(
-              s"[FastMCPScala]   - Warning: ResourceDefinition marked as template but did not convert to ResourceTemplate: ${resDef.uri}"
-            )
-        }
+      staticResources.foreach { resDef =>
         JSystem.err.println(
-          s"[FastMCPScala]   - Added Generic Handler spec keyed by template URI: ${resDef.uri}"
+          s"[FastMCPScala] - Processing static resource: ${resDef.uri}"
         )
 
-      } else {
-        // --- Static Resource ---
         ResourceDefinition.toJava(resDef) match {
           case resource: McpSchema.Resource =>
-            val resourceSpec = new McpServerFeatures.AsyncResourceSpecification(
+            val spec = new McpServerFeatures.AsyncResourceSpecification(
               resource,
               javaStaticResourceReadHandler(resDef.uri)
             )
-            resourceSpecs.add(resourceSpec)
-            JSystem.err.println(
-              s"[FastMCPScala]   - Added AsyncResourceSpecification for static resource: ${resDef.uri}"
-            )
+            resourceSpecs.add(spec)
           case _ =>
             JSystem.err.println(
               s"[FastMCPScala]   - Warning: ResourceDefinition marked as static but did not convert to Resource: ${resDef.uri}"
             )
         }
       }
-    }
 
-    if (!resourceSpecs.isEmpty) {
       serverBuilder.resources(resourceSpecs)
       JSystem.err.println(
-        s"[FastMCPScala] Registered ${resourceSpecs.size()} resource handler specifications with Java server via .resources()"
+        s"[FastMCPScala] Registered ${resourceSpecs.size()} static resources with Java server"
       )
     }
-    if (!templateDefs.isEmpty) {
-      serverBuilder.resourceTemplates(templateDefs)
+
+    // Register resource templates
+    if (templateResources.nonEmpty) {
+      val templateSpecs = new java.util.ArrayList[McpServerFeatures.AsyncResourceSpecification]()
+
+      templateResources.foreach { resDef =>
+        JSystem.err.println(
+          s"[FastMCPScala] - Processing resource template: ${resDef.uri}"
+        )
+
+        // For templates, create a Resource object for the spec.
+        // The Java SDK will automatically infer it's a template from the URI format.
+        val resource = new McpSchema.Resource(
+          resDef.uri,
+          resDef.name.orNull,
+          resDef.description.orNull,
+          resDef.mimeType.getOrElse("text/plain"),
+          null // annotations
+        )
+        val spec = new McpServerFeatures.AsyncResourceSpecification(
+          resource,
+          javaTemplateResourceReadHandler(resDef.uri)
+        )
+        templateSpecs.add(spec)
+      }
+
+      // Register all templates as resources - the SDK will recognize them as templates
+      serverBuilder.resources(templateSpecs)
       JSystem.err.println(
-        s"[FastMCPScala] Registered ${templateDefs.size()} resource template definitions with Java server via .resourceTemplates()"
+        s"[FastMCPScala] Registered ${templateSpecs.size()} resource templates with Java server"
       )
+
+//      // Also register templates for the resources/templates/list endpoint
+//      val javaTemplates = templateResources
+//        .map(ResourceDefinition.toJava)
+//        .collect { case template: McpSchema.ResourceTemplate => template }
+//        .asJava
+//      serverBuilder.resourceTemplates(javaTemplates)
+//      JSystem.err.println(
+//        s"[FastMCPScala] Registered ${javaTemplates.size()} templates for discovery endpoint"
+//      )
     }
 
     // --- Prompt Registration ---
@@ -333,6 +351,57 @@ class FastMcpServer(
         case None =>
           Mono.error(
             new RuntimeException(s"Static resource handler not found for URI: $registeredUri")
+          )
+      }
+    }
+
+  /** Creates a Java BiFunction handler for template resources. The Java server will call this
+    * handler when a URI matches the template pattern.
+    */
+  private def javaTemplateResourceReadHandler(
+      templatePattern: String
+  ): java.util.function.BiFunction[McpAsyncServerExchange, McpSchema.ReadResourceRequest, Mono[
+    McpSchema.ReadResourceResult
+  ]] =
+    (exchange, request) => {
+      resourceManager.getTemplateHandler(templatePattern) match {
+        case Some(handler) =>
+          // Use the Java SDK's template manager to extract parameters
+          val templateManager =
+            new io.modelcontextprotocol.util.DeafaultMcpUriTemplateManagerFactory()
+              .create(templatePattern)
+          val requestedUri = request.uri()
+          val params = templateManager.extractVariableValues(requestedUri).asScala.toMap
+
+          // Execute the handler with extracted parameters
+          val contentEffect = handler(params)
+
+          val finalEffect: ZIO[Any, Throwable, McpSchema.ReadResourceResult] = contentEffect
+            .flatMap { content =>
+              // Get MIME type from the template definition
+              val mimeTypeOpt = resourceManager
+                .listDefinitions()
+                .find(d => d.isTemplate && d.uri == templatePattern)
+                .flatMap(_.mimeType)
+              createReadResourceResult(requestedUri, content, mimeTypeOpt)
+            }
+            .catchAll(e =>
+              ZIO.fail(
+                new RuntimeException(
+                  s"Error executing template resource handler for $requestedUri (pattern: $templatePattern)",
+                  e
+                )
+              )
+            )
+
+          // Convert the final ZIO effect to Mono using the helper
+          zioToMono(finalEffect)
+
+        case None =>
+          Mono.error(
+            new RuntimeException(
+              s"Template resource handler not found for pattern: $templatePattern"
+            )
           )
       }
     }
