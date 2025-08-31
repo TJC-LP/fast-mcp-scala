@@ -1,6 +1,7 @@
 package com.tjclp.fastmcp.core
 
 import io.modelcontextprotocol.spec.McpSchema
+import io.modelcontextprotocol.spec.McpSchema.Tool
 import zio.json.*
 
 import scala.jdk.CollectionConverters.* // For Java/Scala collection conversions
@@ -38,27 +39,16 @@ object ToolDefinition:
 
   // Helper to convert to Java SDK Tool
   def toJava(td: ToolDefinition): McpSchema.Tool =
-    val tool = td.inputSchema match {
+    val baseToolBuilder = Tool.Builder().name(td.name).description(td.description.orNull)
+    val toolBuilder = td.inputSchema match {
       case Left(mcpSchema) =>
         // Directly use McpSchema.JsonSchema
-        new McpSchema.Tool(
-          td.name,
-          td.description.orNull,
-          mcpSchema
-        )
+        baseToolBuilder.inputSchema(mcpSchema)
       case Right(stringSchema) =>
         // Use string schema - MCP SDK will parse it
-        new McpSchema.Tool(
-          td.name,
-          td.description.orNull,
-          stringSchema
-        )
+        baseToolBuilder.inputSchema(stringSchema)
     }
-
-    // Add any additional properties via setters if needed
-    // (will depend on future Java SDK enhancements)
-
-    tool
+    toolBuilder.build()
 
 // --- Resource Related Types ---
 // REMOVED ResourceDefinition case class and companion object from here.

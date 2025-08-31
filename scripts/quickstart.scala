@@ -1,4 +1,5 @@
 //> using scala 3.6.4
+//> using repository m2Local
 //> using dep com.tjclp::fast-mcp-scala:0.1.2-SNAPSHOT
 //> using options "-Xcheck-macros" "-experimental"
 

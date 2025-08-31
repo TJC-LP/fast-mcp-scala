@@ -16,7 +16,7 @@ lazy val Versions = new {
   val jackson = "2.18.3"
   val tapir = "1.11.25"
   val jsonSchemaCirce = "0.11.9"
-  val mcpSdk = "0.10.0"
+  val mcpSdk = "0.11.3"
   val scalaTest = "3.2.19"
 }
 
@@ -33,7 +33,7 @@ lazy val root = (project in file("."))
   .settings(
     name := "fast-mcp-scala",
     // Enable Scala 3 macros with reasonable inline limits for better compilation performance
-    // resolvers += Resolver.mavenLocal,
+    resolvers += Resolver.mavenLocal,
     scalacOptions ++= Seq("-Xcheck-macros", "-experimental", "-Xmax-inlines:128"),
     ThisBuild / scalafmtOnCompile := true,
     semanticdbEnabled := true,

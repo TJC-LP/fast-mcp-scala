@@ -178,7 +178,8 @@ class FastMcpServer(
     */
   def setupServer(transportProvider: McpServerTransportProvider): Unit =
     // Use McpServer.async builder
-    val serverBuilder = McpServer
+    // Help Scala 3 infer the F-bounded generic of AsyncSpecification
+    val serverBuilder: McpServer.AsyncSpecification[?] = McpServer
       .async(transportProvider)
       .serverInfo(name, version)
 

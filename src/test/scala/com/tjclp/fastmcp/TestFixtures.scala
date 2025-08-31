@@ -3,21 +3,49 @@ package com.tjclp.fastmcp
 import com.tjclp.fastmcp.server.McpContext
 import io.modelcontextprotocol.server.McpAsyncServerExchange
 import io.modelcontextprotocol.spec.McpSchema
+import io.modelcontextprotocol.spec.{McpLoggableSession, McpSchema => Schema}
+import reactor.core.publisher.Mono
+import com.fasterxml.jackson.core.`type`.TypeReference
 
 /** Test fixtures and helpers for MCP tests.
   */
 object TestFixtures {
 
+  class NoopLoggableSession extends McpLoggableSession {
+    override def setMinLoggingLevel(level: Schema.LoggingLevel): Unit = ()
+    override def isNotificationForLevelAllowed(level: Schema.LoggingLevel): Boolean = false
+
+    override def sendRequest[T](
+        method: String,
+        params: Object,
+        typeRef: TypeReference[T]
+    ): Mono[T] = Mono.empty()
+    override def sendNotification(method: String): Mono[Void] = Mono.empty()
+    override def sendNotification(method: String, obj: Object): Mono[Void] = Mono.empty()
+    override def closeGracefully(): Mono[Void] = Mono.empty()
+    override def close(): Unit = ()
+  }
+
   /** Mock implementation of McpAsyncServerExchange for testing contexts. */
   class MockServerExchange(clientInfo: McpSchema.Implementation)
-      extends McpAsyncServerExchange(null, null, clientInfo) {
+      extends McpAsyncServerExchange(
+        new NoopLoggableSession(),
+        new McpSchema.ClientCapabilities(
+          null,
+          new McpSchema.ClientCapabilities.RootCapabilities(true),
+          new McpSchema.ClientCapabilities.Sampling(),
+          new McpSchema.ClientCapabilities.Elicitation()
+        ),
+        clientInfo
+      ) {
     override def getClientInfo(): McpSchema.Implementation = clientInfo
 
     override def getClientCapabilities(): McpSchema.ClientCapabilities =
       new McpSchema.ClientCapabilities(
         null,
         new McpSchema.ClientCapabilities.RootCapabilities(true),
-        new McpSchema.ClientCapabilities.Sampling()
+        new McpSchema.ClientCapabilities.Sampling(),
+        new McpSchema.ClientCapabilities.Elicitation()
       )
   }
 
