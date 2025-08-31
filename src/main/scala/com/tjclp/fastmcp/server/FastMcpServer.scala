@@ -218,8 +218,12 @@ class FastMcpServer(
 
     // --- Resource and Template Registration with Java Server ---
     // Register static resources and templates separately
-    val staticResources = resourceManager.listDefinitions().filter(!_.isTemplate)
-    val templateResources = resourceManager.listDefinitions().filter(_.isTemplate)
+    val defs = resourceManager.listDefinitions()
+    // Treat any URI containing '{' or '}' as a template regardless of flags
+    val staticResources =
+      defs.filter(d => !d.isTemplate && !d.uri.exists(ch => ch == '{' || ch == '}'))
+    val templateResources =
+      defs.filter(d => d.isTemplate || d.uri.exists(ch => ch == '{' || ch == '}'))
 
     JSystem.err.println(
       s"[FastMCPScala] Processing ${staticResources.size} static resources and ${templateResources.size} resource templates..."
@@ -263,9 +267,9 @@ class FastMcpServer(
           s"[FastMCPScala] - Processing resource template: ${resDef.uri}"
         )
 
-        // For templates, create a Resource object for the spec.
-        // The Java SDK will automatically infer it's a template from the URI format.
-        val resource = new McpSchema.Resource(
+        // Attach a read handler for the template pattern using an AsyncResourceSpecification.
+        // Note: In MCP SDK 0.11.x this uses a Resource with a URI template pattern.
+        val resourceForHandler = new McpSchema.Resource(
           resDef.uri,
           resDef.name.orNull,
           resDef.description.orNull,
@@ -273,27 +277,21 @@ class FastMcpServer(
           null // annotations
         )
         val spec = new McpServerFeatures.AsyncResourceSpecification(
-          resource,
+          resourceForHandler,
           javaTemplateResourceReadHandler(resDef.uri)
         )
         templateSpecs.add(spec)
       }
 
-      // Register all templates as resources - the SDK will recognize them as templates
-      serverBuilder.resources(templateSpecs)
+      // Also register template definitions for the resources/templates/list endpoint.
+      val javaTemplates = templateResources
+        .map(ResourceDefinition.toJava)
+        .collect { case template: McpSchema.ResourceTemplate => template }
+        .asJava
+      serverBuilder.resourceTemplates(javaTemplates)
       JSystem.err.println(
-        s"[FastMCPScala] Registered ${templateSpecs.size()} resource templates with Java server"
+        s"[FastMCPScala] Registered ${javaTemplates.size()} templates for discovery endpoint"
       )
-
-//      // Also register templates for the resources/templates/list endpoint
-//      val javaTemplates = templateResources
-//        .map(ResourceDefinition.toJava)
-//        .collect { case template: McpSchema.ResourceTemplate => template }
-//        .asJava
-//      serverBuilder.resourceTemplates(javaTemplates)
-//      JSystem.err.println(
-//        s"[FastMCPScala] Registered ${javaTemplates.size()} templates for discovery endpoint"
-//      )
     }
 
     // --- Prompt Registration ---
