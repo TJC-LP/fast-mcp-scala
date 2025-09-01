@@ -1,6 +1,5 @@
 //> using scala 3.6.4
-//> using repository m2Local
-//> using dep com.tjclp::fast-mcp-scala:0.1.2-SNAPSHOT
+//> using dep com.tjclp::fast-mcp-scala:0.1.2
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.core.{Tool, ToolParam, Prompt, PromptParam, Resource, ResourceParam}
@@ -31,7 +30,9 @@ object ExampleServer extends ZIOAppDefault:
 
   override def run =
     for
-      server <- ZIO.succeed(FastMcpServer("ExampleServer", "0.1.1"))
+      server <- ZIO.succeed(FastMcpServer("ExampleServer", "0.1.2"))
       _ <- ZIO.attempt(server.scanAnnotations[Example.type])
       _ <- server.runStdio()
     yield ()
+
+ExampleServer.main(args)

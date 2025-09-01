@@ -10,17 +10,17 @@ Features
 
 ## Installation
 
-Add to your **`build.sbt`** (defaulting to **Scala 3.6.4**):
+Add to your **`build.sbt`** (defaulting to **Scala 3.7.2**):
 
 ```scala
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.1"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.2"
 ```
 
 ## Quickstart
 
 ```scala
-//> using scala 3.6.4
-//> using dep com.tjclp::fast-mcp-scala:0.1.2-SNAPSHOT
+//> using scala 3.7.2
+//> using dep com.tjclp::fast-mcp-scala:0.1.2
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.core.{Tool, ToolParam, Prompt, PromptParam, Resource, ResourceParam}
@@ -51,7 +51,7 @@ object ExampleServer extends ZIOAppDefault:
 
 override def run =
   for
-    server <- ZIO.succeed(FastMcpServer("ExampleServer", "0.1.1"))
+    server <- ZIO.succeed(FastMcpServer("ExampleServer", "0.1.2"))
     _ <- ZIO.attempt(server.scanAnnotations[Example.type])
     _ <- server.runStdio()
   yield ()
@@ -68,7 +68,7 @@ npx @modelcontextprotocol/inspector scala-cli <path_to_repo>/scripts/quickstart.
 You can also run examples directly from the command line:
 ```bash 
 scala-cli \
-    -e '//> using dep com.tjclp::fast-mcp-scala:0.1.1' \
+    -e '//> using dep com.tjclp::fast-mcp-scala:0.1.2' \
     --main-class com.tjclp.fastmcp.examples.AnnotatedServer
 ```
 
@@ -83,7 +83,7 @@ In Claude desktop, you can add the following to your `claude_desktop_config.json
       "command": "scala-cli",
       "args": [
         "-e",
-        "//> using dep com.tjclp::fast-mcp-scala:0.1.1",
+        "//> using dep com.tjclp::fast-mcp-scala:0.1.2",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]
@@ -112,7 +112,7 @@ When hacking on *FastMCP‑Scala* itself, you can consume a local build in any p
 
 In your cloned repository, set a working version
 ```scala 
-ThisBuild / version := "0.1.1-SNAPSHOT"
+ThisBuild / version := "0.1.3-SNAPSHOT"
 ```
 
 ```bash
@@ -123,7 +123,7 @@ sbt publishLocal
 Then, in your consuming sbt project:
 
 ```scala
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.1-SNAPSHOT"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.3-SNAPSHOT"
 ```
 
 > `publishLocal` installs the artifact under `~/.ivy2/local` (or the Coursier cache when enabled).
@@ -145,15 +145,15 @@ Unmanaged JARs placed in a project's `lib/` folder are picked up automatically b
 
 You can use `fast-mcp-scala` in another scala‑cli project:
 ```scala
-//> using scala 3.6.4
-//> using dep com.tjclp::fast-mcp-scala:0.1.1
+//> using scala 3.7.2
+//> using dep com.tjclp::fast-mcp-scala:0.1.2
 //> using options "-Xcheck-macros" "-experimental"
 ```
 
 You can also point directly at the local JAR:
 
 ```scala
-//> using scala 3.6.4
-//> using lib "/absolute/path/to/fast-mcp-scala_3-0.1.1.jar"
+//> using scala 3.7.2
+//> using jar "/absolute/path/to/fast-mcp-scala_3-0.1.2.jar"
 //> using options "-Xcheck-macros" "-experimental"
 ```
