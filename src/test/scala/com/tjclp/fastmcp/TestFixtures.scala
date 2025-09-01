@@ -1,11 +1,12 @@
 package com.tjclp.fastmcp
 
+import com.fasterxml.jackson.core.`type`.TypeReference
 import com.tjclp.fastmcp.server.McpContext
 import io.modelcontextprotocol.server.McpAsyncServerExchange
+import io.modelcontextprotocol.spec.McpLoggableSession
 import io.modelcontextprotocol.spec.McpSchema
-import io.modelcontextprotocol.spec.{McpLoggableSession, McpSchema => Schema}
+import io.modelcontextprotocol.spec.McpSchema as Schema
 import reactor.core.publisher.Mono
-import com.fasterxml.jackson.core.`type`.TypeReference
 
 /** Test fixtures and helpers for MCP tests.
   */

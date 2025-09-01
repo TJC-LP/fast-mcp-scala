@@ -2,12 +2,11 @@ package com.tjclp.fastmcp.macros
 
 import com.fasterxml.jackson.databind.json.JsonMapper
 import com.fasterxml.jackson.databind.module.SimpleModule
-import com.fasterxml.jackson.databind.{DeserializationFeature, JsonDeserializer, JsonSerializer}
 import com.fasterxml.jackson.module.scala.ClassTagExtensions
 import com.tjclp.fastmcp.server.McpContext
 
-import scala.reflect.ClassTag
 import scala.jdk.CollectionConverters.*
+import scala.reflect.ClassTag
 
 /** Typeclass that converts a raw `Any` value (from a Map) to `T` using Jackson. */
 trait JacksonConverter[T]:

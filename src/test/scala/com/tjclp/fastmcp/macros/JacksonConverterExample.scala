@@ -1,9 +1,11 @@
 package com.tjclp.fastmcp.macros.test
 
-import com.tjclp.fastmcp.macros.{JacksonConverter, DeriveJacksonConverter}
 import com.fasterxml.jackson.databind.json.JsonMapper
-import com.fasterxml.jackson.module.scala.{ClassTagExtensions, DefaultScalaModule}
-import scala.deriving.Mirror
+import com.fasterxml.jackson.module.scala.ClassTagExtensions
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
+import com.tjclp.fastmcp.macros.DeriveJacksonConverter
+import com.tjclp.fastmcp.macros.JacksonConverter
+
 import scala.reflect.ClassTag
 
 // Example: Complex filter class similar to the one in the external app

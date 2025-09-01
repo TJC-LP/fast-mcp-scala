@@ -4,7 +4,6 @@ package examples
 import com.tjclp.fastmcp.macros.JsonSchemaMacro
 import com.tjclp.fastmcp.macros.MapToFunctionMacro
 import com.tjclp.fastmcp.server.*
-import com.tjclp.fastmcp.server.manager.*
 import sttp.tapir.*
 import zio.*
 import zio.json.*

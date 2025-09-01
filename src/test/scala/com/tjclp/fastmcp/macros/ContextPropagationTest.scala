@@ -1,16 +1,15 @@
 package com.tjclp.fastmcp
 package macros
 
+import com.fasterxml.jackson.core.`type`.TypeReference
 import io.modelcontextprotocol.server.McpAsyncServerExchange
 import io.modelcontextprotocol.spec.McpSchema
 import org.scalatest.funsuite.AnyFunSuite
 import zio.*
-import com.fasterxml.jackson.core.`type`.TypeReference
 
 import java.util.concurrent.atomic.AtomicReference
 
 import server.*
-import server.manager.*
 import RegistrationMacro.*
 
 class ContextPropagationTest extends AnyFunSuite:
