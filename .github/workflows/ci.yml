@@ -23,7 +23,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest]
-        scala: [ScalaVersion]
+        scala: [3.7.2]
         java: [temurin@17, temurin@21, temurin@24]
     runs-on: ${{ matrix.os }}
     steps:
@@ -123,12 +123,12 @@ jobs:
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
 
-      - name: Download target directories (ScalaVersion)
+      - name: Download target directories (3.7.2)
         uses: actions/download-artifact@v4
         with:
-          name: target-${{ matrix.os }}-ScalaVersion-${{ matrix.java }}
+          name: target-${{ matrix.os }}-3.7.2-${{ matrix.java }}
 
-      - name: Inflate target directories (ScalaVersion)
+      - name: Inflate target directories (3.7.2)
         run: |
           tar xf targets.tar
           rm targets.tar

@@ -7,7 +7,8 @@ ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
 
 ThisBuild / version := "0.1.2-SNAPSHOT"
 
-ThisBuild / scalaVersion := "3.7.2" // Using Scala 3
+val sv = "3.7.2"
+ThisBuild / scalaVersion := sv // Using Scala 3
 ThisBuild / versionScheme := Some("semver-spec")
 
 lazy val Versions = new {
@@ -96,7 +97,7 @@ ThisBuild / githubWorkflowJavaVersions := Seq(
   JavaSpec.temurin("24")
 )
 
-ThisBuild / githubWorkflowScalaVersions := Seq(ScalaVersion.toString())
+ThisBuild / githubWorkflowScalaVersions := Seq(sv)
 
 // Only run on main branch and version tags (vX.Y.Z)
 ThisBuild / githubWorkflowTargetBranches := Seq(
