@@ -7,15 +7,15 @@ ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
 
 ThisBuild / version := "0.1.2-SNAPSHOT"
 
-ThisBuild / scalaVersion := "3.6.4" // Using Scala 3
+ThisBuild / scalaVersion := "3.7.2" // Using Scala 3
 ThisBuild / versionScheme := Some("semver-spec")
 
 lazy val Versions = new {
-  val zio = "2.1.17"
-  val zioSchema = "1.6.6"
-  val jackson = "2.18.3"
-  val tapir = "1.11.25"
-  val jsonSchemaCirce = "0.11.9"
+  val zio = "2.1.20"
+  val zioSchema = "1.7.4"
+  val jackson = "2.20.0"
+  val tapir = "1.11.42"
+  val jsonSchemaCirce = "0.11.10"
   val mcpSdk = "0.11.3"
   val scalaTest = "3.2.19"
 }
@@ -43,7 +43,7 @@ lazy val root = (project in file("."))
     libraryDependencies ++= Seq(
       // ZIO Core
       "dev.zio" %% "zio" % Versions.zio,
-      "dev.zio" %% "zio-json" % "0.7.42",
+      "dev.zio" %% "zio-json" % "0.7.44",
 
       // ZIO Schema for schema generation
       "dev.zio" %% "zio-schema" % Versions.zioSchema,
@@ -96,7 +96,7 @@ ThisBuild / githubWorkflowJavaVersions := Seq(
   JavaSpec.temurin("24")
 )
 
-ThisBuild / githubWorkflowScalaVersions := Seq("3.6.4")
+ThisBuild / githubWorkflowScalaVersions := Seq(ScalaVersion.toString())
 
 // Only run on main branch and version tags (vX.Y.Z)
 ThisBuild / githubWorkflowTargetBranches := Seq(
