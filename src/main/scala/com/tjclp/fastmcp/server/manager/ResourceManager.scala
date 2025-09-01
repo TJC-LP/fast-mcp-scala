@@ -63,14 +63,15 @@ object ResourceDefinition:
         // experimentalAnnotationsMap // Cannot pass experimental data directly here yet
       )
     else
-      // --- Create static Resource ---
-      new McpSchema.Resource(
-        rd.uri,
-        rd.name.orNull,
-        rd.description.orNull,
-        rd.mimeType.getOrElse("text/plain"),
-        null // No specific annotations needed for static resources here
-      )
+      // --- Create static Resource using builder ---
+      McpSchema.Resource
+        .builder()
+        .uri(rd.uri)
+        .name(rd.name.orNull)
+        .description(rd.description.orNull)
+        .mimeType(rd.mimeType.getOrElse("text/plain"))
+        .annotations(new McpSchema.Annotations(null, null))
+        .build()
 
 /** Function type for resource handlers Returns either a String or a byte array wrapped in ZIO
   */

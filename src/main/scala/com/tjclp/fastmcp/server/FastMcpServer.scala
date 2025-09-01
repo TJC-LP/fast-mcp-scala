@@ -190,7 +190,10 @@ class FastMcpServer(
       else null
     val resourceCapabilities =
       if (resourceManager.listDefinitions().nonEmpty)
-        new McpSchema.ServerCapabilities.ResourceCapabilities(true, true)
+        new McpSchema.ServerCapabilities.ResourceCapabilities(
+          /* list */ true,
+          /* templates endpoint */ settings.exposeTemplatesEndpoint
+        )
       else null
     val promptCapabilities =
       if (promptManager.listDefinitions().nonEmpty)
@@ -213,7 +216,7 @@ class FastMcpServer(
     JSystem.err.println(s"[FastMCPScala] Registering ${tools.size} tools with the MCP server:")
     tools.foreach { toolDef =>
       JSystem.err.println(s"[FastMCPScala] - Registering Tool: ${toolDef.name}")
-      serverBuilder.tool(ToolDefinition.toJava(toolDef), javaToolHandler(toolDef.name))
+      serverBuilder.toolCall(ToolDefinition.toJava(toolDef), javaToolCallHandler(toolDef.name))
     }
 
     // --- Resource and Template Registration with Java Server ---
@@ -260,22 +263,28 @@ class FastMcpServer(
 
     // Register resource templates
     if (templateResources.nonEmpty) {
+      // Bind read handlers for template URIs via resources().
       val templateSpecs = new java.util.ArrayList[McpServerFeatures.AsyncResourceSpecification]()
-
       templateResources.foreach { resDef =>
-        JSystem.err.println(
-          s"[FastMCPScala] - Processing resource template: ${resDef.uri}"
-        )
+        JSystem.err.println(s"[FastMCPScala] - Processing resource template: ${resDef.uri}")
+        val resourceForHandler = {
+          val meta = new java.util.HashMap[String, Object]()
+          meta.put("fastmcp_is_template", java.lang.Boolean.TRUE)
+          // Expose parameter names to clients that may choose to hide templates in resources list
+          val paramRegex = """\{([^{}]+)\}""".r
+          val params = paramRegex.findAllMatchIn(resDef.uri).map(_.group(1)).toList.asJava
+          meta.put("fastmcp_template_params", params)
 
-        // Attach a read handler for the template pattern using an AsyncResourceSpecification.
-        // Note: In MCP SDK 0.11.x this uses a Resource with a URI template pattern.
-        val resourceForHandler = new McpSchema.Resource(
-          resDef.uri,
-          resDef.name.orNull,
-          resDef.description.orNull,
-          resDef.mimeType.getOrElse("text/plain"),
-          null // annotations
-        )
+          McpSchema.Resource
+            .builder()
+            .uri(resDef.uri)
+            .name(resDef.name.orNull)
+            .description(resDef.description.orNull)
+            .mimeType(resDef.mimeType.getOrElse("text/plain"))
+            .annotations(new McpSchema.Annotations(null, null))
+            .meta(meta)
+            .build()
+        }
         val spec = new McpServerFeatures.AsyncResourceSpecification(
           resourceForHandler,
           javaTemplateResourceReadHandler(resDef.uri)
@@ -283,15 +292,19 @@ class FastMcpServer(
         templateSpecs.add(spec)
       }
 
-      // Also register template definitions for the resources/templates/list endpoint.
-      val javaTemplates = templateResources
-        .map(ResourceDefinition.toJava)
-        .collect { case template: McpSchema.ResourceTemplate => template }
-        .asJava
-      serverBuilder.resourceTemplates(javaTemplates)
-      JSystem.err.println(
-        s"[FastMCPScala] Registered ${javaTemplates.size()} templates for discovery endpoint"
-      )
+      // Register template read handlers
+      serverBuilder.resources(templateSpecs)
+
+      // Optionally advertise templates for the discovery endpoint
+      if settings.exposeTemplatesEndpoint then
+        val javaTemplates = templateResources
+          .map(ResourceDefinition.toJava)
+          .collect { case template: McpSchema.ResourceTemplate => template }
+          .asJava
+        serverBuilder.resourceTemplates(javaTemplates)
+        JSystem.err.println(
+          s"[FastMCPScala] Registered ${javaTemplates.size()} templates for discovery endpoint"
+        )
     }
 
     // --- Prompt Registration ---
@@ -354,56 +367,8 @@ class FastMcpServer(
       }
     }
 
-  /** Creates a Java BiFunction handler for template resources. The Java server will call this
-    * handler when a URI matches the template pattern.
-    */
-  private def javaTemplateResourceReadHandler(
-      templatePattern: String
-  ): java.util.function.BiFunction[McpAsyncServerExchange, McpSchema.ReadResourceRequest, Mono[
-    McpSchema.ReadResourceResult
-  ]] =
-    (exchange, request) => {
-      resourceManager.getTemplateHandler(templatePattern) match {
-        case Some(handler) =>
-          // Use the Java SDK's template manager to extract parameters
-          val templateManager =
-            new io.modelcontextprotocol.util.DeafaultMcpUriTemplateManagerFactory()
-              .create(templatePattern)
-          val requestedUri = request.uri()
-          val params = templateManager.extractVariableValues(requestedUri).asScala.toMap
-
-          // Execute the handler with extracted parameters
-          val contentEffect = handler(params)
-
-          val finalEffect: ZIO[Any, Throwable, McpSchema.ReadResourceResult] = contentEffect
-            .flatMap { content =>
-              // Get MIME type from the template definition
-              val mimeTypeOpt = resourceManager
-                .listDefinitions()
-                .find(d => d.isTemplate && d.uri == templatePattern)
-                .flatMap(_.mimeType)
-              createReadResourceResult(requestedUri, content, mimeTypeOpt)
-            }
-            .catchAll(e =>
-              ZIO.fail(
-                new RuntimeException(
-                  s"Error executing template resource handler for $requestedUri (pattern: $templatePattern)",
-                  e
-                )
-              )
-            )
-
-          // Convert the final ZIO effect to Mono using the helper
-          zioToMono(finalEffect)
-
-        case None =>
-          Mono.error(
-            new RuntimeException(
-              s"Template resource handler not found for pattern: $templatePattern"
-            )
-          )
-      }
-    }
+  // Note: Template read handlers are not bound via resources() in 0.11.x.
+  // When SDK exposes a template+handler API, bind handlers there.
 
   // --- Server Lifecycle Methods ---
 
@@ -430,6 +395,66 @@ class FastMcpServer(
     }
     new McpSchema.ReadResourceResult(List(javaContent).asJava)
   }
+
+  /** Creates a Java BiFunction handler for template resources. The Java server will call this
+    * handler when a URI matches the template pattern.
+    */
+  private def javaTemplateResourceReadHandler(
+      templatePattern: String
+  ): java.util.function.BiFunction[McpAsyncServerExchange, McpSchema.ReadResourceRequest, Mono[
+    McpSchema.ReadResourceResult
+  ]] =
+    (exchange, request) => {
+      val requestedUri = request.uri()
+      if requestedUri != null && (requestedUri.contains("{") || requestedUri.contains("}")) then
+        // Prevent reading unresolved template URIs (e.g. the literal pattern from listResources)
+        val paramRegex = """\{([^{}]+)\}""".r
+        val params = paramRegex.findAllMatchIn(templatePattern).map(_.group(1)).toList
+        val msg =
+          if params.nonEmpty then
+            s"Template URI not resolved; provide values for: ${params.mkString(", ")}"
+          else "Template URI not resolved; provide parameter values"
+        Mono.error(new IllegalArgumentException(msg))
+      else {
+        resourceManager.getTemplateHandler(templatePattern) match
+          case Some(handler) => {
+            val templateManager =
+              new io.modelcontextprotocol.util.DeafaultMcpUriTemplateManagerFactory()
+                .create(templatePattern)
+            val params =
+              templateManager.extractVariableValues(requestedUri).asScala.toMap
+
+            val contentEffect = handler(params)
+            val finalEffect: ZIO[Any, Throwable, McpSchema.ReadResourceResult] = contentEffect
+              .flatMap { content =>
+                val mimeTypeOpt = resourceManager
+                  .listDefinitions()
+                  .find(d =>
+                    (d.isTemplate || d.uri
+                      .exists(ch => ch == '{' || ch == '}')) && d.uri == templatePattern
+                  )
+                  .flatMap(_.mimeType)
+                createReadResourceResult(requestedUri, content, mimeTypeOpt)
+              }
+              .catchAll(e =>
+                ZIO.fail(
+                  new RuntimeException(
+                    s"Error executing template resource handler for $requestedUri (pattern: $templatePattern)",
+                    e
+                  )
+                )
+              )
+
+            zioToMono(finalEffect)
+          }
+          case None =>
+            Mono.error(
+              new RuntimeException(
+                s"Template resource handler not found for pattern: $templatePattern"
+              )
+            )
+      }
+    }
 
   /** Converts a ZIO effect to a Reactor Mono. Executes the ZIO effect asynchronously and bridges
     * the result/error to the MonoSink.
@@ -519,13 +544,15 @@ class FastMcpServer(
     * implicit encoders. ToolHandlers returning complex types should serialize them to JSON String
     * *within* the handler. Returns a Mono that completes with the result.
     */
-  private def javaToolHandler(
+  private def javaToolCallHandler(
       toolName: String
-  ): java.util.function.BiFunction[McpAsyncServerExchange, java.util.Map[String, Object], Mono[
+  ): java.util.function.BiFunction[McpAsyncServerExchange, McpSchema.CallToolRequest, Mono[
     McpSchema.CallToolResult
   ]] =
-    (exchange, args) => {
-      val scalaArgs = args.asScala.toMap.asInstanceOf[Map[String, Any]]
+    (exchange, request) => {
+      val scalaArgs = Option(request.arguments())
+        .map(_.asScala.toMap.asInstanceOf[Map[String, Any]])
+        .getOrElse(Map.empty)
       val context = McpContext(Some(exchange))
 
       // Execute the user-provided ToolHandler
@@ -537,12 +564,12 @@ class FastMcpServer(
         // Convert the result to Java McpSchema.Content list
         val contentList: java.util.List[McpSchema.Content] = result match {
           case s: String =>
-            List(new McpSchema.TextContent(null, null, s)).asJava
+            val ann = new McpSchema.Annotations(null, null)
+            List(new McpSchema.TextContent(ann, s)).asJava
           case bytes: Array[Byte] =>
             val base64Data = java.util.Base64.getEncoder.encodeToString(bytes)
-            List(
-              new McpSchema.ImageContent(null, null, base64Data, "application/octet-stream")
-            ).asJava
+            val ann = new McpSchema.Annotations(null, null)
+            List(new McpSchema.ImageContent(ann, base64Data, "application/octet-stream")).asJava
           case c: Content =>
             List(c.toJava).asJava
           case lst: List[?] if lst.nonEmpty && lst.head.isInstanceOf[Content] =>
@@ -556,7 +583,8 @@ class FastMcpServer(
             JSystem.err.println(
               s"[FastMCPScala] Warning: Tool handler for '$toolName' returned type ${other.getClass.getName}, using toString representation."
             )
-            List(new McpSchema.TextContent(null, null, other.toString)).asJava
+            val ann = new McpSchema.Annotations(null, null)
+            List(new McpSchema.TextContent(ann, other.toString)).asJava
         }
         // Construct the final result for the MCP protocol
         new McpSchema.CallToolResult(contentList, false) // false for isError

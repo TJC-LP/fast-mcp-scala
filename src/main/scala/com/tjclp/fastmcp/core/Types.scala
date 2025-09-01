@@ -98,11 +98,11 @@ case class TextContent(
 ) extends Content("text"):
 
   override def toJava: McpSchema.TextContent =
-    new McpSchema.TextContent(
+    val ann = new McpSchema.Annotations(
       audience.map(roles => roles.map(Role.toJava).asJava).orNull,
-      priority.map(Double.box).orNull,
-      text
+      priority.map(Double.box).orNull
     )
+    new McpSchema.TextContent(ann, text)
 
 object TextContent:
   given JsonCodec[TextContent] = DeriveJsonCodec.gen[TextContent]
@@ -115,12 +115,11 @@ case class ImageContent(
 ) extends Content("image"):
 
   override def toJava: McpSchema.ImageContent =
-    new McpSchema.ImageContent(
+    val ann = new McpSchema.Annotations(
       audience.map(roles => roles.map(Role.toJava).asJava).orNull,
-      priority.map(Double.box).orNull,
-      data,
-      mimeType
+      priority.map(Double.box).orNull
     )
+    new McpSchema.ImageContent(ann, data, mimeType)
 
 object ImageContent:
   given JsonCodec[ImageContent] = DeriveJsonCodec.gen[ImageContent]
@@ -149,11 +148,11 @@ case class EmbeddedResource(
 ) extends Content("resource"):
 
   override def toJava: McpSchema.EmbeddedResource =
-    new McpSchema.EmbeddedResource(
+    val ann = new McpSchema.Annotations(
       audience.map(roles => roles.map(Role.toJava).asJava).orNull,
-      priority.map(Double.box).orNull,
-      resource.toJava
+      priority.map(Double.box).orNull
     )
+    new McpSchema.EmbeddedResource(ann, resource.toJava)
 
 object EmbeddedResource:
   given JsonCodec[EmbeddedResource] = DeriveJsonCodec.gen[EmbeddedResource]
