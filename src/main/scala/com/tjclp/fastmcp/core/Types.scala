@@ -1,6 +1,7 @@
 package com.tjclp.fastmcp.core
 
 import io.modelcontextprotocol.spec.McpSchema
+import io.modelcontextprotocol.spec.McpSchema.Tool
 import zio.json.*
 
 import scala.jdk.CollectionConverters.* // For Java/Scala collection conversions
@@ -38,27 +39,16 @@ object ToolDefinition:
 
   // Helper to convert to Java SDK Tool
   def toJava(td: ToolDefinition): McpSchema.Tool =
-    val tool = td.inputSchema match {
+    val baseToolBuilder = Tool.Builder().name(td.name).description(td.description.orNull)
+    val toolBuilder = td.inputSchema match {
       case Left(mcpSchema) =>
         // Directly use McpSchema.JsonSchema
-        new McpSchema.Tool(
-          td.name,
-          td.description.orNull,
-          mcpSchema
-        )
+        baseToolBuilder.inputSchema(mcpSchema)
       case Right(stringSchema) =>
         // Use string schema - MCP SDK will parse it
-        new McpSchema.Tool(
-          td.name,
-          td.description.orNull,
-          stringSchema
-        )
+        baseToolBuilder.inputSchema(stringSchema)
     }
-
-    // Add any additional properties via setters if needed
-    // (will depend on future Java SDK enhancements)
-
-    tool
+    toolBuilder.build()
 
 // --- Resource Related Types ---
 // REMOVED ResourceDefinition case class and companion object from here.
@@ -108,11 +98,11 @@ case class TextContent(
 ) extends Content("text"):
 
   override def toJava: McpSchema.TextContent =
-    new McpSchema.TextContent(
+    val ann = new McpSchema.Annotations(
       audience.map(roles => roles.map(Role.toJava).asJava).orNull,
-      priority.map(Double.box).orNull,
-      text
+      priority.map(Double.box).orNull
     )
+    new McpSchema.TextContent(ann, text)
 
 object TextContent:
   given JsonCodec[TextContent] = DeriveJsonCodec.gen[TextContent]
@@ -125,12 +115,11 @@ case class ImageContent(
 ) extends Content("image"):
 
   override def toJava: McpSchema.ImageContent =
-    new McpSchema.ImageContent(
+    val ann = new McpSchema.Annotations(
       audience.map(roles => roles.map(Role.toJava).asJava).orNull,
-      priority.map(Double.box).orNull,
-      data,
-      mimeType
+      priority.map(Double.box).orNull
     )
+    new McpSchema.ImageContent(ann, data, mimeType)
 
 object ImageContent:
   given JsonCodec[ImageContent] = DeriveJsonCodec.gen[ImageContent]
@@ -159,11 +148,11 @@ case class EmbeddedResource(
 ) extends Content("resource"):
 
   override def toJava: McpSchema.EmbeddedResource =
-    new McpSchema.EmbeddedResource(
+    val ann = new McpSchema.Annotations(
       audience.map(roles => roles.map(Role.toJava).asJava).orNull,
-      priority.map(Double.box).orNull,
-      resource.toJava
+      priority.map(Double.box).orNull
     )
+    new McpSchema.EmbeddedResource(ann, resource.toJava)
 
 object EmbeddedResource:
   given JsonCodec[EmbeddedResource] = DeriveJsonCodec.gen[EmbeddedResource]

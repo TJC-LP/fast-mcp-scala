@@ -10,7 +10,7 @@ class ToolDefinitionConversionTest extends AnyFlatSpec with Matchers {
 
   "ToolDefinition.toJava" should "convert the Left(JsonSchema) case" in {
     // A minimal JSON schema – the Java SDK accepts the raw json string.
-    val jsonSchema = new McpSchema.JsonSchema("object", null, null, true)
+    val jsonSchema = new McpSchema.JsonSchema("object", null, null, true, null, null)
 
     val td = ToolDefinition(
       name = "td‑left",
@@ -41,6 +41,6 @@ class ToolDefinitionConversionTest extends AnyFlatSpec with Matchers {
 
     j.name() shouldBe "td‑right"
     j.description() shouldBe null // description was None
-    j.inputSchema() shouldBe McpSchema.JsonSchema("object", null, null, null)
+    j.inputSchema() shouldBe new McpSchema.JsonSchema("object", null, null, null, null, null)
   }
 }

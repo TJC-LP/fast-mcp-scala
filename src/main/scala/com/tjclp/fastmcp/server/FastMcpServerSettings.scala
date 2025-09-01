@@ -10,5 +10,8 @@ case class FastMcpServerSettings(
     warnOnDuplicateResources: Boolean = true,
     warnOnDuplicateTools: Boolean = true,
     warnOnDuplicatePrompts: Boolean = true,
-    dependencies: List[String] = List.empty
+    dependencies: List[String] = List.empty,
+    // If true, advertise templates via the resources/templates/list endpoint.
+    // If false, rely on clients that derive templates from resource URIs containing `{}`.
+    exposeTemplatesEndpoint: Boolean = false
 )

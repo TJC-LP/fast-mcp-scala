@@ -1,8 +1,9 @@
 //> using scala 3.6.4
-//> using dep com.tjclp::fast-mcp-scala:0.1.1
+//> using repository m2Local
+//> using dep com.tjclp::fast-mcp-scala:0.1.2-SNAPSHOT
 //> using options "-Xcheck-macros" "-experimental"
 
-import com.tjclp.fastmcp.core.{Tool, ToolParam, Prompt, PromptParam, Resource}
+import com.tjclp.fastmcp.core.{Tool, ToolParam, Prompt, PromptParam, Resource, ResourceParam}
 import com.tjclp.fastmcp.server.FastMcpServer
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import zio.*
@@ -20,10 +21,11 @@ object Example:
   def greet(@PromptParam("Name to greet") name: String): String =
     s"Hello, $name!"
 
-  // Note: resource templates (templated URIs) are not yet supported;
-  // coming soon when the MCP java‑sdk adds template support.
   @Resource(uri = "file://test", description = Some("Test resource"))
   def test(): String = "This is a test"
+
+  @Resource(uri = "user://{userId}", description = Some("Test resource"))
+  def getUser(@ResourceParam("The user id") userId: String): String = s"User ID: $userId"
 
 object ExampleServer extends ZIOAppDefault:
 

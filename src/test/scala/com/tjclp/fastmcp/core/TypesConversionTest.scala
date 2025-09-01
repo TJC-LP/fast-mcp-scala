@@ -82,13 +82,14 @@ class TypesConversionTest extends AnyFlatSpec with Matchers {
     je.priority() shouldBe Double.box(1.0)
   }
 
-  "PromptDefinition.toJava" should "convert name, description, and null arguments when None" in {
+  "PromptDefinition.toJava" should "convert name, description, and empty arguments when None" in {
     val pd = PromptDefinition("p1", Some("desc"), None)
     val j = PromptDefinition.toJava(pd)
     j.getClass.getSimpleName should include("Prompt")
     j.name() shouldBe "p1"
     j.description() shouldBe "desc"
-    j.arguments() shouldBe null
+    val args = j.arguments()
+    assert(args == null || args.isEmpty, "arguments should be null or empty when None")
   }
 
   it should "convert arguments list to Java list when defined" in {

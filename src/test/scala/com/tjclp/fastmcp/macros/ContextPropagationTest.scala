@@ -5,6 +5,7 @@ import io.modelcontextprotocol.server.McpAsyncServerExchange
 import io.modelcontextprotocol.spec.McpSchema
 import org.scalatest.funsuite.AnyFunSuite
 import zio.*
+import com.fasterxml.jackson.core.`type`.TypeReference
 
 import java.util.concurrent.atomic.AtomicReference
 
@@ -123,13 +124,43 @@ class ContextPropagationTest extends AnyFunSuite:
 end ContextPropagationTest
 
 // A simple mock for McpAsyncServerExchange for testing
+class NoopLoggableSession extends io.modelcontextprotocol.spec.McpLoggableSession:
+  override def setMinLoggingLevel(level: McpSchema.LoggingLevel): Unit = ()
+  override def isNotificationForLevelAllowed(level: McpSchema.LoggingLevel): Boolean = false
+
+  override def sendRequest[T](
+      method: String,
+      params: Object,
+      typeRef: TypeReference[T]
+  ): reactor.core.publisher.Mono[T] = reactor.core.publisher.Mono.empty()
+
+  override def sendNotification(method: String): reactor.core.publisher.Mono[Void] =
+    reactor.core.publisher.Mono.empty()
+
+  override def sendNotification(method: String, obj: Object): reactor.core.publisher.Mono[Void] =
+    reactor.core.publisher.Mono.empty()
+
+  override def closeGracefully(): reactor.core.publisher.Mono[Void] =
+    reactor.core.publisher.Mono.empty()
+  override def close(): Unit = ()
+
 class MockServerExchange(clientInfo: McpSchema.Implementation)
-    extends McpAsyncServerExchange(null, null, clientInfo):
+    extends McpAsyncServerExchange(
+      new NoopLoggableSession(),
+      new McpSchema.ClientCapabilities(
+        null, // experimental
+        new McpSchema.ClientCapabilities.RootCapabilities(true), // roots with listChanged=true
+        new McpSchema.ClientCapabilities.Sampling(), // sampling
+        new McpSchema.ClientCapabilities.Elicitation() // elicitation
+      ),
+      clientInfo
+    ):
   override def getClientInfo(): McpSchema.Implementation = clientInfo
 
   override def getClientCapabilities(): McpSchema.ClientCapabilities =
     new McpSchema.ClientCapabilities(
       null, // experimental
       new McpSchema.ClientCapabilities.RootCapabilities(true), // roots with listChanged=true
-      new McpSchema.ClientCapabilities.Sampling() // sampling
+      new McpSchema.ClientCapabilities.Sampling(), // sampling
+      new McpSchema.ClientCapabilities.Elicitation() // elicitation
     )
