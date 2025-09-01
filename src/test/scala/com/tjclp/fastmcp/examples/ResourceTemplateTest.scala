@@ -1,12 +1,12 @@
 package com.tjclp.fastmcp
 package examples
 
-import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.manager.*
 import zio.*
 import zio.test.*
 import zio.test.Assertion.*
+
 import scala.jdk.CollectionConverters.*
 
 object ResourceTemplateTest extends ZIOSpecDefault:
