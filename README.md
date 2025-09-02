@@ -12,13 +12,13 @@ Features
 
 Add to your **`build.sbt`** (defaulting to **Scala 3.7.2**):
 
-```scala
+```scala 3 ignore
 libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.2"
 ```
 
 ## Quickstart
 
-```scala
+```scala 3 raw
 //> using scala 3.7.2
 //> using dep com.tjclp::fast-mcp-scala:0.1.2
 //> using options "-Xcheck-macros" "-experimental"
@@ -53,16 +53,19 @@ object ExampleServer extends ZIOAppDefault:
         _ <- ZIO.attempt(server.scanAnnotations[Example.type])
         _ <- server.runStdio()
       yield ()
-
-ExampleServer.main(args)  
 ```
 
 ### Running Examples
 
-The above example can be run using `scala-cli scripts/quickstart.sc` from the repo root. You can run the server via the MCP inspector by running:
+The above example can be run using `scala-cli README.md` or `scala-cli scripts/quickstart.sc` from the repo root. You can run the server via the MCP inspector by running:
+
 
 ```bash 
-npx @modelcontextprotocol/inspector scala-cli <path_to_repo>/scripts/quickstart.sc
+npx @modelcontextprotocol/inspector scala-cli README.md
+```
+or
+```bash 
+npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc
 ```
 
 You can also run examples directly from the command line:
@@ -71,6 +74,13 @@ scala-cli \
     -e '//> using dep com.tjclp::fast-mcp-scala:0.1.2' \
     --main-class com.tjclp.fastmcp.examples.AnnotatedServer
 ```
+
+> [!WARNING]
+> Resource templates are listed via both `resources/list` and `resource/templates/list` due to a [known issue with the MCP java SDK](https://github.com/modelcontextprotocol/java-sdk/issues/319) 
+
+> [!WARNING]
+> As of now, only STDIO is supported. We plan to support streamable http in the future.
+
 
 ### Integration with Claude Desktop
 
@@ -111,7 +121,7 @@ When hacking on *FastMCP‑Scala* itself, you can consume a local build in any p
 #### 🔨 Publish to the Local Ivy Repository with `sbt`
 
 In your cloned repository, set a working version
-```scala 
+```scala 3 ignore
 ThisBuild / version := "0.1.3-SNAPSHOT"
 ```
 
@@ -122,7 +132,7 @@ sbt publishLocal
 
 Then, in your consuming sbt project:
 
-```scala
+```scala 3 ignore
 libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.3-SNAPSHOT"
 ```
 
@@ -135,7 +145,7 @@ libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.1.3-SNAPSHOT"
 sbt package
 
 # Copy the JAR – adjust Scala version / name if you change them
-cp target/scala-3.6.4/fast-mcp-scala_3-0.1.1-SNAPSHOT.jar \
+cp target/scala-3.7.2/fast-mcp-scala_3-0.1.1-SNAPSHOT.jar \
    /path/to/other-project/lib/
 ```
 
@@ -144,7 +154,7 @@ Unmanaged JARs placed in a project's `lib/` folder are picked up automatically b
 #### 🚀 Using with `scala‑cli`
 
 You can use `fast-mcp-scala` in another scala‑cli project:
-```scala
+```scala 3 ignore
 //> using scala 3.7.2
 //> using dep com.tjclp::fast-mcp-scala:0.1.2
 //> using options "-Xcheck-macros" "-experimental"
@@ -152,7 +162,7 @@ You can use `fast-mcp-scala` in another scala‑cli project:
 
 You can also point directly at the local JAR:
 
-```scala
+```scala 3 ignore
 //> using scala 3.7.2
 //> using jar "/absolute/path/to/fast-mcp-scala_3-0.1.2.jar"
 //> using options "-Xcheck-macros" "-experimental"
