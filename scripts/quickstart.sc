@@ -1,4 +1,4 @@
-//> using scala 3.6.4
+//> using scala 3.7.2
 //> using dep com.tjclp::fast-mcp-scala:0.1.2
 //> using options "-Xcheck-macros" "-experimental"
 

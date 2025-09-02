@@ -30,39 +30,39 @@ import zio.*
 
 // Define annotated tools, prompts, and resources
 object Example:
-
-@Tool(name = Some("add"), description = Some("Add two numbers"))
-def add(
-         @ToolParam("First operand") a: Double,
-         @ToolParam("Second operand") b: Double
-       ): Double = a + b
-
-@Prompt(name = Some("greet"), description = Some("Generate a greeting message"))
-def greet(@PromptParam("Name to greet") name: String): String =
-  s"Hello, $name!"
-
-@Resource(uri = "file://test", description = Some("Test resource"))
-def test(): String = "This is a test"
-
-@Resource(uri = "user://{userId}", description = Some("Test resource"))
-def getUser(@ResourceParam("The user id") userId: String): String = s"User ID: $userId"
+    @Tool(name = Some("add"), description = Some("Add two numbers"))
+    def add(
+             @ToolParam("First operand") a: Double,
+             @ToolParam("Second operand") b: Double
+           ): Double = a + b
+    
+    @Prompt(name = Some("greet"), description = Some("Generate a greeting message"))
+    def greet(@PromptParam("Name to greet") name: String): String =
+      s"Hello, $name!"
+    
+    @Resource(uri = "file://test", description = Some("Test resource"))
+    def test(): String = "This is a test"
+    
+    @Resource(uri = "user://{userId}", description = Some("Test resource"))
+    def getUser(@ResourceParam("The user id") userId: String): String = s"User ID: $userId"
 
 object ExampleServer extends ZIOAppDefault:
+    override def run =
+      for
+        server <- ZIO.succeed(FastMcpServer("ExampleServer", "0.1.2"))
+        _ <- ZIO.attempt(server.scanAnnotations[Example.type])
+        _ <- server.runStdio()
+      yield ()
 
-override def run =
-  for
-    server <- ZIO.succeed(FastMcpServer("ExampleServer", "0.1.2"))
-    _ <- ZIO.attempt(server.scanAnnotations[Example.type])
-    _ <- server.runStdio()
-  yield ()
+ExampleServer.main(args)  
 ```
 
 ### Running Examples
 
-The above example can be run using `scala-cli scripts/quickstart.scala` from the repo root. You can run the server via the MCP inspector by running:
+The above example can be run using `scala-cli scripts/quickstart.sc` from the repo root. You can run the server via the MCP inspector by running:
 
 ```bash 
-npx @modelcontextprotocol/inspector scala-cli <path_to_repo>/scripts/quickstart.scala
+npx @modelcontextprotocol/inspector scala-cli <path_to_repo>/scripts/quickstart.sc
 ```
 
 You can also run examples directly from the command line:
