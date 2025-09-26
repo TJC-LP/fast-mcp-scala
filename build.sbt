@@ -5,7 +5,7 @@ sonatypeTimeoutMillis := 60000
 
 ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
 
-ThisBuild / version := "0.2.1"
+ThisBuild / version := "0.2.2-SNAPSHOT"
 
 val sv = "3.7.2"
 ThisBuild / scalaVersion := sv // Using Scala 3

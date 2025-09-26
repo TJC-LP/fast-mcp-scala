@@ -119,7 +119,7 @@ When hacking on *FastMCP‑Scala* itself, you can consume a local build in any p
 
 In your cloned repository, set a working version
 ```scala 3 ignore
-ThisBuild / version := "0.2.1-SNAPSHOT"
+ThisBuild / version := "0.2.2-SNAPSHOT"
 ```
 
 ```bash
@@ -130,7 +130,7 @@ sbt publishLocal
 Then, in your consuming sbt project:
 
 ```scala 3 ignore
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.2.1-SNAPSHOT"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.2.2-SNAPSHOT"
 ```
 
 > `publishLocal` installs the artifact under `~/.ivy2/local` (or the Coursier cache when enabled).
@@ -142,7 +142,7 @@ libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.2.1-SNAPSHOT"
 sbt package
 
 # Copy the JAR – adjust Scala version / name if you change them
-cp target/scala-3.7.2/fast-mcp-scala_3-0.2.1-SNAPSHOT.jar \
+cp target/scala-3.7.2/fast-mcp-scala_3-0.2.2-SNAPSHOT.jar \
    /path/to/other-project/lib/
 ```
 
@@ -161,6 +161,6 @@ You can also point directly at the local JAR:
 
 ```scala 3 ignore
 //> using scala 3.7.2
-//> using jar "/absolute/path/to/fast-mcp-scala_3-0.2.0.jar"
+//> using jar "/absolute/path/to/fast-mcp-scala_3-0.2.1.jar"
 //> using options "-Xcheck-macros" "-experimental"
 ```
