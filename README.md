@@ -76,9 +76,6 @@ scala-cli \
 ```
 
 > [!WARNING]
-> Resource templates are listed via both `resources/list` and `resource/templates/list` due to a [known issue with the MCP java SDK](https://github.com/modelcontextprotocol/java-sdk/issues/319) 
-
-> [!WARNING]
 > As of now, only STDIO is supported. We plan to support streamable http in the future.
 
 
