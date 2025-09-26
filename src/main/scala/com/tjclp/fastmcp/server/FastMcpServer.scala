@@ -3,6 +3,7 @@ package server
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.manager.*
+import io.modelcontextprotocol.json.McpJsonMapper
 import io.modelcontextprotocol.server.McpAsyncServer
 import io.modelcontextprotocol.server.McpAsyncServerExchange
 import io.modelcontextprotocol.server.McpServer
@@ -160,7 +161,8 @@ class FastMcpServer(
     ZIO.scoped { // ⬅ drops the `Scope` requirement
       ZIO.acquireRelease(
         for {
-          provider <- ZIO.attempt(new StdioServerTransportProvider())
+          jsonMapper <- ZIO.attempt(McpJsonMapper.createDefault())
+          provider <- ZIO.attempt(new StdioServerTransportProvider(jsonMapper))
           _ <- ZIO.attempt(setupServer(provider))
           _ <- ZIO.attempt(
             JSystem.err.println(

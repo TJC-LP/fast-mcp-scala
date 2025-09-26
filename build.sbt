@@ -17,7 +17,7 @@ lazy val Versions = new {
   val jackson = "2.20.0"
   val tapir = "1.11.42"
   val jsonSchemaCirce = "0.11.10"
-  val mcpSdk = "0.11.3"
+  val mcpSdk = "0.13.1"
   val scalaTest = "3.2.19"
 }
 

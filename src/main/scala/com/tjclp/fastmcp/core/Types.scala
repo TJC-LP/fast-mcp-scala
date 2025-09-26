@@ -1,5 +1,6 @@
 package com.tjclp.fastmcp.core
 
+import io.modelcontextprotocol.json.McpJsonMapper
 import io.modelcontextprotocol.spec.McpSchema
 import io.modelcontextprotocol.spec.McpSchema.Tool
 import zio.json.*
@@ -45,8 +46,10 @@ object ToolDefinition:
         // Directly use McpSchema.JsonSchema
         baseToolBuilder.inputSchema(mcpSchema)
       case Right(stringSchema) =>
-        // Use string schema - MCP SDK will parse it
-        baseToolBuilder.inputSchema(stringSchema)
+        // Parse string schema to JsonSchema using McpJsonMapper
+        val jsonMapper = McpJsonMapper.createDefault()
+        val jsonSchema = jsonMapper.readValue(stringSchema, classOf[McpSchema.JsonSchema])
+        baseToolBuilder.inputSchema(jsonSchema)
     }
     toolBuilder.build()
 
