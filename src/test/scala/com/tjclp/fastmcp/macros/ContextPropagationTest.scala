@@ -1,7 +1,7 @@
 package com.tjclp.fastmcp
 package macros
 
-import com.fasterxml.jackson.core.`type`.TypeReference
+import io.modelcontextprotocol.json.TypeRef
 import io.modelcontextprotocol.server.McpAsyncServerExchange
 import io.modelcontextprotocol.spec.McpSchema
 import org.scalatest.funsuite.AnyFunSuite
@@ -130,7 +130,7 @@ class NoopLoggableSession extends io.modelcontextprotocol.spec.McpLoggableSessio
   override def sendRequest[T](
       method: String,
       params: Object,
-      typeRef: TypeReference[T]
+      typeRef: TypeRef[T]
   ): reactor.core.publisher.Mono[T] = reactor.core.publisher.Mono.empty()
 
   override def sendNotification(method: String): reactor.core.publisher.Mono[Void] =

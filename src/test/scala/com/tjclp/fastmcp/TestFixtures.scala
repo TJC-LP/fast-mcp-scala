@@ -1,7 +1,7 @@
 package com.tjclp.fastmcp
 
-import com.fasterxml.jackson.core.`type`.TypeReference
 import com.tjclp.fastmcp.server.McpContext
+import io.modelcontextprotocol.json.TypeRef
 import io.modelcontextprotocol.server.McpAsyncServerExchange
 import io.modelcontextprotocol.spec.McpLoggableSession
 import io.modelcontextprotocol.spec.McpSchema
@@ -19,7 +19,7 @@ object TestFixtures {
     override def sendRequest[T](
         method: String,
         params: Object,
-        typeRef: TypeReference[T]
+        typeRef: TypeRef[T]
     ): Mono[T] = Mono.empty()
     override def sendNotification(method: String): Mono[Void] = Mono.empty()
     override def sendNotification(method: String, obj: Object): Mono[Void] = Mono.empty()
