@@ -1,5 +1,5 @@
 //> using scala 3.7.2
-//> using dep com.tjclp::fast-mcp-scala:0.1.2
+//> using dep com.tjclp::fast-mcp-scala:0.2.0
 //> using options "-Xcheck-macros" "-experimental" // Enable verbose macro processing
 
 // This is a launcher file for scala-cli

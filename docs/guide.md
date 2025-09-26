@@ -19,7 +19,7 @@ The `build.sbt` file needs to declare the necessary dependencies.
 
 ```sbt
 // build.sbt
-ThisBuild / version := "0.1.0-SNAPSHOT"
+ThisBuild / version := "0.2.1-SNAPSHOT"
 ThisBuild / scalaVersion := "3.6.4"
 
 val zioVersion        = "2.1.16"
