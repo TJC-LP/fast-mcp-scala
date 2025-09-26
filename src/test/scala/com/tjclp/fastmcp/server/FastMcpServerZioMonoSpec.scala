@@ -1,12 +1,12 @@
 package com.tjclp.fastmcp.server
 
+import scala.jdk.CollectionConverters.*
+
 import io.modelcontextprotocol.spec.McpSchema
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import reactor.core.publisher.Mono
 import zio.*
-
-import scala.jdk.CollectionConverters.*
 
 /** Simple unit tests for the internal ZIO ⇢ Reactor bridge helpers contained in FastMcpServer.
   *

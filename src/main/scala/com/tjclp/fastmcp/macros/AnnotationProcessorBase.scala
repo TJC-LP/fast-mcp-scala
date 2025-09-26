@@ -1,9 +1,9 @@
 package com.tjclp.fastmcp
 package macros
 
-import com.tjclp.fastmcp.server.*
-
 import scala.quoted.*
+
+import com.tjclp.fastmcp.server.*
 
 /** Helper trait that captures the common boiler‑plate shared by the three annotation processors
   * (Tool / Prompt / Resource).

@@ -1,8 +1,9 @@
 package com.tjclp.fastmcp.macros
 
-import com.tjclp.fastmcp.core.ToolParam
 import org.scalatest.funsuite.AnyFunSuite
-import org.scalatest.matchers.should.Matchers // Needed for Schema derivation
+import org.scalatest.matchers.should.Matchers
+
+import com.tjclp.fastmcp.core.ToolParam // Needed for Schema derivation
 
 /** Tests that the description provided in the @Param annotation is correctly included in the
   * generated JSON schema by JsonSchemaMacro.

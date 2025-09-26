@@ -1,9 +1,9 @@
 package com.tjclp.fastmcp.server
 
+import java.util.concurrent.atomic.AtomicBoolean
+
 import zio.*
 import zio.test.*
-
-import java.util.concurrent.atomic.AtomicBoolean
 
 object FastMcpServerShutdownSpec extends ZIOSpecDefault {
 

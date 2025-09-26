@@ -1,13 +1,14 @@
 package com.tjclp.fastmcp
 package macros
 
-import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
-import com.tjclp.fastmcp.server.*
 import org.scalatest.funsuite.AnyFunSuite
 import sttp.tapir.Schema
 import zio.*
 import zio.json.*
+
+import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
+import com.tjclp.fastmcp.server.*
 
 /** Integration test for Tool annotation and processor This tests the full workflow of tool
   * annotation processing

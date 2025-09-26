@@ -1,13 +1,14 @@
 package com.tjclp.fastmcp.server.manager
 
+import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
+import zio.*
+
 import com.tjclp.fastmcp.core.Message
 import com.tjclp.fastmcp.core.PromptArgument
 import com.tjclp.fastmcp.core.PromptDefinition
 import com.tjclp.fastmcp.core.Role
 import com.tjclp.fastmcp.core.TextContent
-import org.scalatest.flatspec.AnyFlatSpec
-import org.scalatest.matchers.should.Matchers
-import zio.*
 
 /** Tests for PromptManager argument validation and rendering behavior.
   */

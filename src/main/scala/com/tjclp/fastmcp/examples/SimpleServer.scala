@@ -1,12 +1,13 @@
 package com.tjclp.fastmcp
 package examples
 
-import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.server.*
+import scala.util.Random
+
 import zio.*
 import zio.json.*
 
-import scala.util.Random
+import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.server.*
 
 /** A simple example showing how to use FastMCPScala
   */

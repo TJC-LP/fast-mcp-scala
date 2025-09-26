@@ -1,11 +1,12 @@
 package com.tjclp.fastmcp
 package macros
 
-import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.server.*
+import scala.quoted.*
+
 import zio.*
 
-import scala.quoted.*
+import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.server.*
 
 /** Lightweight implementation thanks to [[AnnotationProcessorBase]]. */
 private[macros] object PromptProcessor extends AnnotationProcessorBase:

@@ -1,10 +1,10 @@
 package com.tjclp.fastmcp.macros.schema
 
+import scala.quoted.*
+
 import sttp.tapir.*
 import sttp.tapir.Schema.SName
 import sttp.tapir.SchemaType.*
-
-import scala.quoted.*
 
 /** Helper for generating schemas from function parameters. Part of the JsonSchemaMacro refactoring
   * to reduce compilation time.

@@ -1,11 +1,13 @@
 package com.tjclp.fastmcp.server.manager
 
-import com.tjclp.fastmcp.server.McpContext
-import zio.*
-
 import java.util.concurrent.ConcurrentHashMap
+
 import scala.jdk.CollectionConverters.*
 import scala.util.matching.Regex
+
+import zio.*
+
+import com.tjclp.fastmcp.server.McpContext
 
 /** Describes one argument for a resource template placeholder. Similar to PromptArgument.
   */

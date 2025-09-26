@@ -2,7 +2,7 @@
 //> using dep com.tjclp::fast-mcp-scala:0.2.2-SNAPSHOT
 //> using options "-Xcheck-macros" "-experimental"
 
-import com.tjclp.fastmcp.core.{Tool, Param, Prompt, Resource}
+import com.tjclp.fastmcp.core.{Param, Prompt, Resource, Tool}
 import com.tjclp.fastmcp.server.FastMcpServer
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import zio.*

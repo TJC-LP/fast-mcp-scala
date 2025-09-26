@@ -1,11 +1,11 @@
 package com.tjclp.fastmcp.macros
 
-import com.fasterxml.jackson.databind.json.JsonMapper
-import com.fasterxml.jackson.module.scala.ClassTagExtensions
-
 import scala.deriving.Mirror
 import scala.quoted.*
 import scala.reflect.ClassTag
+
+import com.fasterxml.jackson.databind.json.JsonMapper
+import com.fasterxml.jackson.module.scala.ClassTagExtensions
 
 /** Macro to automatically derive JacksonConverter instances for case classes */
 object DeriveJacksonConverter:

@@ -1,14 +1,15 @@
 package com.tjclp.fastmcp
 package examples
 
-import com.tjclp.fastmcp.macros.JsonSchemaMacro
-import com.tjclp.fastmcp.macros.MapToFunctionMacro
-import com.tjclp.fastmcp.server.*
+import java.lang.System as JSystem
+
 import sttp.tapir.*
 import zio.*
 import zio.json.*
 
-import java.lang.System as JSystem
+import com.tjclp.fastmcp.macros.JsonSchemaMacro
+import com.tjclp.fastmcp.macros.MapToFunctionMacro
+import com.tjclp.fastmcp.server.*
 
 /** Example server using annotation-based tool definitions with macro processing
   *

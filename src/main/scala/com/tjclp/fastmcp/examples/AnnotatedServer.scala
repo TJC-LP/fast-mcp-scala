@@ -1,16 +1,17 @@
 package com.tjclp.fastmcp
 package examples
 
-import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.macros.RegistrationMacro.*
-import com.tjclp.fastmcp.server.*
+import java.lang.System as JSystem
+
 import sttp.tapir.*
 import sttp.tapir.Schema.annotations.*
 import sttp.tapir.generic.auto.*
 import zio.*
 import zio.json.*
 
-import java.lang.System as JSystem
+import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.macros.RegistrationMacro.*
+import com.tjclp.fastmcp.server.*
 
 /** Enhanced server example demonstrating the zero-boilerplate experience with @Tool annotations.
   *

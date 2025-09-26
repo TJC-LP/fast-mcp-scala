@@ -1,8 +1,9 @@
 package com.tjclp.fastmcp
 package examples
 
-import com.tjclp.fastmcp.server.*
 import zio.*
+
+import com.tjclp.fastmcp.server.*
 
 /** A simple example server demonstrating the use of contextual tool handlers
   *

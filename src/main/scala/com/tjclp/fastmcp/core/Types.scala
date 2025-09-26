@@ -1,11 +1,11 @@
 package com.tjclp.fastmcp.core
 
+import scala.jdk.CollectionConverters.*
+
 import io.modelcontextprotocol.json.McpJsonMapper
 import io.modelcontextprotocol.spec.McpSchema
 import io.modelcontextprotocol.spec.McpSchema.Tool
-import zio.json.*
-
-import scala.jdk.CollectionConverters.* // For Java/Scala collection conversions
+import zio.json.* // For Java/Scala collection conversions
 
 // Define basic types mirroring MCP Schema
 

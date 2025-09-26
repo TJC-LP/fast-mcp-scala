@@ -1,11 +1,12 @@
 package com.tjclp.fastmcp
 package macros
 
-import com.tjclp.fastmcp.runtime.RefResolver
+import scala.quoted.*
+
 import io.circe.Json
 import io.circe.JsonObject
 
-import scala.quoted.*
+import com.tjclp.fastmcp.runtime.RefResolver
 
 /** Utility methods shared between the processor objects (Compressed)
   */
@@ -141,7 +142,6 @@ private[macros] object MacroUtils:
       sym: quotes.reflect.Symbol,
       fallbackAnnotationType: Option[String] = None
   ): Option[quotes.reflect.Term] =
-    import quotes.reflect.*
 
     // First check for the new unified @Param annotation
     val paramAnnot = extractAnnotation[com.tjclp.fastmcp.core.Param](sym)

@@ -1,12 +1,13 @@
 package com.tjclp.fastmcp
 package macros
 
-import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
-import com.tjclp.fastmcp.server.*
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import zio.*
+
+import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
+import com.tjclp.fastmcp.server.*
 
 /** Simplified test for ToolProcessor to improve coverage */
 class ToolProcessorExtendedTest extends AnyFunSuite with Matchers {

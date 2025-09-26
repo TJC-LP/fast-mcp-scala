@@ -1,16 +1,18 @@
 package com.tjclp.fastmcp.examples
 
-import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.macros.*
-import com.tjclp.fastmcp.macros.RegistrationMacro.*
-import com.tjclp.fastmcp.server.*
+import java.time.LocalDateTime
+import java.util.UUID
+
+import scala.collection.mutable
+
 import sttp.tapir.*
 import sttp.tapir.generic.auto.*
 import zio.*
 
-import java.time.LocalDateTime
-import java.util.UUID
-import scala.collection.mutable
+import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.macros.*
+import com.tjclp.fastmcp.macros.RegistrationMacro.*
+import com.tjclp.fastmcp.server.*
 
 /** Example MCP server demonstrating complex task management with nested case classes and
   * collections - showcasing the enhanced JacksonConverter capabilities.

@@ -1,11 +1,12 @@
 package com.tjclp.fastmcp.server
 
+import java.util.concurrent.TimeoutException
+
+import scala.jdk.CollectionConverters.*
+
 import io.modelcontextprotocol.spec.McpSchema
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-
-import java.util.concurrent.TimeoutException
-import scala.jdk.CollectionConverters.*
 
 class ErrorMapperTest extends AnyFunSuite with Matchers {
   test("toCallToolResult should create result with error flag set to true") {

@@ -1,12 +1,13 @@
 package com.tjclp.fastmcp
 package macros
 
+import org.scalatest.funsuite.AnyFunSuite
+import zio.*
+
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.manager.ResourceArgument
-import org.scalatest.funsuite.AnyFunSuite
-import zio.*
 
 /** Integration test for Resource annotation and processor This tests the full workflow of resource
   * annotation processing

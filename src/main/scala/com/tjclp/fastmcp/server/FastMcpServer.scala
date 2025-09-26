@@ -1,8 +1,13 @@
 package com.tjclp.fastmcp
 package server
 
-import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.server.manager.*
+import java.lang.System as JSystem
+
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.jdk.CollectionConverters.*
+import scala.util.Failure
+import scala.util.Success
+
 import io.modelcontextprotocol.json.McpJsonMapper
 import io.modelcontextprotocol.server.McpAsyncServer
 import io.modelcontextprotocol.server.McpAsyncServerExchange
@@ -14,11 +19,8 @@ import io.modelcontextprotocol.spec.McpServerTransportProvider
 import reactor.core.publisher.Mono
 import zio.*
 
-import java.lang.System as JSystem
-import scala.concurrent.ExecutionContext.Implicits.global
-import scala.jdk.CollectionConverters.*
-import scala.util.Failure
-import scala.util.Success
+import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.server.manager.*
 
 /** Main server class for FastMCP-Scala
   *

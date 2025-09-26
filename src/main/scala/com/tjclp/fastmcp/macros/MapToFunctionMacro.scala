@@ -1,12 +1,12 @@
 package com.tjclp.fastmcp.macros
 
+import scala.annotation.tailrec
+import scala.quoted.*
+
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.json.JsonMapper
 import com.fasterxml.jackson.module.scala.ClassTagExtensions
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
-
-import scala.annotation.tailrec
-import scala.quoted.*
 
 /** Macro that converts a function f: (T1, T2, ..., TN) => R into a handler: Map[String, Any] => R
   * by using JacksonConverter to convert each Map entry to the correct type.

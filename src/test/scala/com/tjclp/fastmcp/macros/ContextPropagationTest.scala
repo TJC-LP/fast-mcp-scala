@@ -1,13 +1,13 @@
 package com.tjclp.fastmcp
 package macros
 
+import java.util.concurrent.atomic.AtomicReference
+
 import io.modelcontextprotocol.json.TypeRef
 import io.modelcontextprotocol.server.McpAsyncServerExchange
 import io.modelcontextprotocol.spec.McpSchema
 import org.scalatest.funsuite.AnyFunSuite
 import zio.*
-
-import java.util.concurrent.atomic.AtomicReference
 
 import server.*
 import RegistrationMacro.*

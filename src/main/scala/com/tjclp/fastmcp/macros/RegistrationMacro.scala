@@ -1,10 +1,10 @@
 package com.tjclp.fastmcp
 package macros
 
+import scala.quoted.*
+
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.*
-
-import scala.quoted.*
 
 /** Main object containing extension method for registering annotated tools, prompts, and resources.
   * Delegates actual processing to specialized objects.

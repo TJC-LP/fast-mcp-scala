@@ -1,7 +1,8 @@
 package com.tjclp.fastmcp.macros
 
-import com.tjclp.fastmcp.macros.schema.FunctionAnalyzer
-import com.tjclp.fastmcp.macros.schema.SchemaGenerator
+import scala.quoted.*
+import scala.util.Properties
+
 import io.circe.Json
 import io.circe.syntax.*
 import sttp.apispec.circe.*
@@ -9,8 +10,8 @@ import sttp.tapir.*
 import sttp.tapir.SchemaType.SProductField
 import sttp.tapir.docs.apispec.schema.TapirSchemaToJsonSchema
 
-import scala.quoted.*
-import scala.util.Properties
+import com.tjclp.fastmcp.macros.schema.FunctionAnalyzer
+import com.tjclp.fastmcp.macros.schema.SchemaGenerator
 
 /** Macro that generates JSON Schema for function parameters. The implementation is split across
   * multiple helpers to reduce compile time.
