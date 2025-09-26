@@ -135,6 +135,26 @@ private[macros] object MacroUtils:
       case None => (None, true) // Defaults if no @PromptParam
     }
 
+  // Generic helper to extract parameter annotations (Param or legacy specific ones)
+  // First checks for new @Param, then falls back to context-specific annotation
+  def extractParamAnnotation(using quotes: Quotes)(
+      sym: quotes.reflect.Symbol,
+      fallbackAnnotationType: Option[String] = None
+  ): Option[quotes.reflect.Term] =
+    import quotes.reflect.*
+
+    // First check for the new unified @Param annotation
+    val paramAnnot = extractAnnotation[com.tjclp.fastmcp.core.Param](sym)
+    if (paramAnnot.isDefined) return paramAnnot
+
+    // Fall back to specific annotations based on context
+    fallbackAnnotationType match {
+      case Some("Tool") => extractAnnotation[com.tjclp.fastmcp.core.ToolParam](sym)
+      case Some("Resource") => extractAnnotation[com.tjclp.fastmcp.core.ResourceParam](sym)
+      case Some("Prompt") => extractAnnotation[com.tjclp.fastmcp.core.PromptParam](sym)
+      case _ => None
+    }
+
   // Helper to parse @Param annotation arguments for @Tool methods
   // Returns: (description: Option[String], example: Option[String], required: Boolean, schema: Option[String])
   def parseToolParam(using quotes: Quotes)(

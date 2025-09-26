@@ -35,7 +35,7 @@ object AnnotatedServer extends ZIOAppDefault:
 
   @Tool(name = Some("description"))
   def generateDescription(
-      @ToolParam("A description to generate") description: Description
+      @Param("A description to generate") description: Description
   ): String =
     if description.isUpper then description.text.toUpperCase else description.text
 
@@ -48,8 +48,8 @@ object AnnotatedServer extends ZIOAppDefault:
     // description = Some("Add two numbers together")
   )
   def add(
-      @ToolParam("First number") a: Int,
-      @ToolParam("Second number") b: Int
+      @Param("First number") a: Int,
+      @Param("Second number") b: Int
   ): Int = a + b
 
   /** More complex calculator tool that handles different operations.
@@ -60,9 +60,9 @@ object AnnotatedServer extends ZIOAppDefault:
     tags = List("math", "calculation")
   )
   def calculate(
-      @ToolParam("First number") a: Double,
-      @ToolParam("Second number") b: Double,
-      @ToolParam(
+      @Param("First number") a: Double,
+      @Param("Second number") b: Double,
+      @Param(
         "Operation to perform (add, subtract, multiply, divide)",
         required = false
       ) operation: String = "add"
@@ -114,7 +114,7 @@ object AnnotatedServer extends ZIOAppDefault:
     mimeType = Some("application/json")
   )
   def userProfileResource(
-      @ResourceParam("The unique identifier of the user") userId: String
+      @Param("The unique identifier of the user") userId: String
   ): String =
     // In a real app, fetch user data based on userId
     Map(
@@ -133,9 +133,9 @@ object AnnotatedServer extends ZIOAppDefault:
     mimeType = Some("application/json")
   )
   def getRepositoryIssue(
-      @ResourceParam("Repository owner") owner: String,
-      @ResourceParam("Repository name") repo: String,
-      @ResourceParam("Issue ID") id: String
+      @Param("Repository owner") owner: String,
+      @Param("Repository name") repo: String,
+      @Param("Issue ID") id: String
   ): String =
     Map(
       "owner" -> owner,

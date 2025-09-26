@@ -60,13 +60,13 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       )
     }
 
-    // Collect @ToolParam descriptions so we can inject them into the schema
+    // Collect @Param/@ToolParam descriptions so we can inject them into the schema
     val paramDescriptions: Map[String, String] =
       methodSym.paramSymss.headOption
         .getOrElse(Nil)
         .flatMap { pSym =>
           MacroUtils
-            .extractAnnotation[ToolParam](pSym)
+            .extractParamAnnotation(pSym, Some("Tool"))
             .flatMap { annotTerm =>
               // description is either the first String literal or the named arg "description"
               annotTerm match

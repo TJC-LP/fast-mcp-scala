@@ -40,6 +40,28 @@ class Tool(
     val timeoutMillis: Option[Long] = None
 ) extends StaticAnnotation
 
+/** Unified annotation for method parameters across Tools, Resources, and Prompts
+  *
+  * This annotation can be used with any @Tool, @Resource, or @Prompt annotated method to provide
+  * descriptions and metadata for parameters.
+  *
+  * @param description
+  *   Description of the parameter for documentation
+  * @param example
+  *   Optional example value for the parameter
+  * @param required
+  *   Whether the parameter is required (defaults to true)
+  * @param schema
+  *   Optional JSON schema override for the parameter type
+  * @since 0.2.1
+  */
+class Param(
+    val description: String,
+    val example: Option[String] = None,
+    val required: Boolean = true,
+    val schema: Option[String] = None
+) extends StaticAnnotation
+
 /** Annotation for method parameters in Tool methods
   *
   * @param description
@@ -50,7 +72,10 @@ class Tool(
   *   Whether the parameter is required (defaults to true)
   * @param schema
   *   Optional JSON schema override for the parameter type
+  * @deprecated
+  *   Use [[Param]] instead. Will be removed in 0.3.0.
   */
+@deprecated("Use @Param instead", "0.2.1")
 class ToolParam(
     val description: String,
     val example: Option[String] = None,
@@ -86,7 +111,10 @@ class Resource(
   *   A human-readable description for the parameter
   * @param required
   *   Whether the parameter is required (defaults to true)
+  * @deprecated
+  *   Use [[Param]] instead. Will be removed in 0.3.0.
   */
+@deprecated("Use @Param instead", "0.2.1")
 class ResourceParam(
     val description: String,
     val required: Boolean = true
@@ -110,7 +138,10 @@ class Prompt(
   *   Description of the parameter for prompt documentation
   * @param required
   *   Whether the parameter is required (defaults to true)
+  * @deprecated
+  *   Use [[Param]] instead. Will be removed in 0.3.0.
   */
+@deprecated("Use @Param instead", "0.2.1")
 class PromptParam(
     val description: String,
     val required: Boolean = true
