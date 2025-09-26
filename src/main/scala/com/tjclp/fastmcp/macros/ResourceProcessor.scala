@@ -57,9 +57,9 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
       if !isTemplate then '{ None }
       else
         val list = paramSyms.map { pSym =>
-          // Extract @ResourceParam description / required
+          // Extract @Param/@ResourceParam description / required
           val (descOpt, required) =
-            MacroUtils.extractAnnotation[ResourceParam](pSym) match
+            MacroUtils.extractParamAnnotation(pSym, Some("Resource")) match
               case Some(annotTerm) =>
                 var d: Option[String] = None
                 var req: Boolean = true

@@ -27,11 +27,11 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
     // 2️⃣  name / description with Scaladoc fallback ------------------------------------------
     val (finalName, finalDesc) = nameAndDescription(promptAnnot, methodSym)
 
-    // 3️⃣  Collect @PromptParam metadata -------------------------------------------------------
+    // 3️⃣  Collect @Param/@PromptParam metadata -------------------------------------------------------
     val argExprs: List[Expr[PromptArgument]] =
       methodSym.paramSymss.headOption.getOrElse(Nil).map { pSym =>
         val (descOpt, required) = MacroUtils.parsePromptParamArgs(
-          MacroUtils.extractAnnotation[PromptParam](pSym)
+          MacroUtils.extractParamAnnotation(pSym, Some("Prompt"))
         )
         '{ PromptArgument(${ Expr(pSym.name) }, ${ Expr(descOpt) }, ${ Expr(required) }) }
       }

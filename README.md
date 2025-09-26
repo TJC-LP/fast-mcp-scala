@@ -23,7 +23,7 @@ libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.2.0"
 //> using dep com.tjclp::fast-mcp-scala:0.2.0
 //> using options "-Xcheck-macros" "-experimental"
 
-import com.tjclp.fastmcp.core.{Tool, ToolParam, Prompt, PromptParam, Resource, ResourceParam}
+import com.tjclp.fastmcp.core.{Tool, Param, Prompt, Resource}
 import com.tjclp.fastmcp.server.FastMcpServer
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import zio.*
@@ -32,19 +32,19 @@ import zio.*
 object Example:
     @Tool(name = Some("add"), description = Some("Add two numbers"))
     def add(
-             @ToolParam("First operand") a: Double,
-             @ToolParam("Second operand") b: Double
+             @Param("First operand") a: Double,
+             @Param("Second operand") b: Double
            ): Double = a + b
     
     @Prompt(name = Some("greet"), description = Some("Generate a greeting message"))
-    def greet(@PromptParam("Name to greet") name: String): String =
+    def greet(@Param("Name to greet") name: String): String =
       s"Hello, $name!"
     
     @Resource(uri = "file://test", description = Some("Test resource"))
     def test(): String = "This is a test"
     
     @Resource(uri = "user://{userId}", description = Some("Test resource"))
-    def getUser(@ResourceParam("The user id") userId: String): String = s"User ID: $userId"
+    def getUser(@Param("The user id") userId: String): String = s"User ID: $userId"
 
 object ExampleServer extends ZIOAppDefault:
     override def run =
