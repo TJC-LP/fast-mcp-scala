@@ -61,7 +61,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       )
     }
 
-    // Collect all @Param/@ToolParam metadata (description, example, required, schema)
+    // Collect all @Param/@ToolParam metadata (description, examples, required, schema)
     // Also validate that required=false is only used with Option types or default values
     val params = methodSym.paramSymss.headOption.getOrElse(Nil)
 
@@ -84,7 +84,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
         MacroUtils
           .extractParamAnnotation(pSym, Some("Tool"))
           .map { annotTerm =>
-            val (desc, example, required, schema) = MacroUtils.parseToolParam(Some(annotTerm))
+            val (desc, examples, required, schema) = MacroUtils.parseToolParam(Some(annotTerm))
 
             // Validate: required=false must have Option type or default value
             if (!required) {
@@ -100,7 +100,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
               }
             }
 
-            pSym.name -> ParamMetadata(desc, example, required, schema)
+            pSym.name -> ParamMetadata(desc, examples, required, schema)
           }
       }
 
@@ -110,12 +110,13 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       else {
         val metadataEntries: List[Expr[(String, ParamMetadata)]] = paramMetadata.map {
           case (name, meta) =>
+            val examplesExprs = meta.examples.map(Expr(_))
             '{
               (
                 ${ Expr(name) },
                 ParamMetadata(
                   ${ Expr(meta.description) },
-                  ${ Expr(meta.example) },
+                  List(${ Varargs(examplesExprs) }*),
                   ${ Expr(meta.required) },
                   ${ Expr(meta.schema) }
                 )

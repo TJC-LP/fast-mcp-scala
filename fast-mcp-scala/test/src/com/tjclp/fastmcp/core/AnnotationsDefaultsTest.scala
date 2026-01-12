@@ -25,7 +25,7 @@ class AnnotationsDefaultsTest extends AnyFlatSpec with Matchers {
   "@ToolParam" should "default to required = true" in {
     val ann = new ToolParam(description = "desc")
     ann.required shouldBe true
-    ann.example shouldBe None
+    ann.examples shouldBe Nil
   }
 
   "@Resource" should "default optional params to None" in {

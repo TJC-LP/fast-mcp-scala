@@ -47,8 +47,8 @@ class Tool(
   *
   * @param description
   *   Description of the parameter for documentation
-  * @param example
-  *   Optional example value for the parameter
+  * @param examples
+  *   List of example values for the parameter (follows JSON Schema specification)
   * @param required
   *   Whether the parameter is required (defaults to true)
   * @param schema
@@ -57,7 +57,7 @@ class Tool(
   */
 class Param(
     val description: String,
-    val example: Option[String] = None,
+    val examples: List[String] = Nil,
     val required: Boolean = true,
     val schema: Option[String] = None
 ) extends StaticAnnotation
@@ -66,8 +66,8 @@ class Param(
   *
   * @param description
   *   Description of the parameter for tool documentation
-  * @param example
-  *   Optional example value for the parameter
+  * @param examples
+  *   List of example values for the parameter
   * @param required
   *   Whether the parameter is required (defaults to true)
   * @param schema
@@ -78,7 +78,7 @@ class Param(
 @deprecated("Use @Param instead", "0.2.1")
 class ToolParam(
     val description: String,
-    val example: Option[String] = None,
+    val examples: List[String] = Nil,
     val required: Boolean = true,
     val schema: Option[String] = None
 ) extends StaticAnnotation

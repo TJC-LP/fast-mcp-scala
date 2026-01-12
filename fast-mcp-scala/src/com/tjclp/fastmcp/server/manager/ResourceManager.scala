@@ -174,7 +174,10 @@ class ResourceManager extends Manager[ResourceDefinition]:
         ()
       }
       .mapError(e =>
-        new ResourceRegistrationError(s"Failed to register resource template '$uriPattern'", Some(e))
+        new ResourceRegistrationError(
+          s"Failed to register resource template '$uriPattern'",
+          Some(e)
+        )
       )
 
   /** Find a resource definition by URI
@@ -228,7 +231,9 @@ class ResourceManager extends Manager[ResourceDefinition]:
     Option(resources.get(uri)) match
       case Some((_, handler)) =>
         handler() // Static handler takes no params
-          .mapError(e => new ResourceAccessError(s"Error accessing static resource '$uri'", Some(e)))
+          .mapError(e =>
+            new ResourceAccessError(s"Error accessing static resource '$uri'", Some(e))
+          )
       // 2. If no static match, check templates
       case None =>
         findMatchingTemplate(uri) match
