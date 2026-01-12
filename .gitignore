@@ -48,6 +48,9 @@ build/
 .bsp/
 .scala-build
 
+### Mill ###
+.mill-output/
+
 ### Diff ###
 *.txt
 

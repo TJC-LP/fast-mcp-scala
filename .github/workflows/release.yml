@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # Triggers on version tags like v0.1.0, v1.0.0
+
+# Prevent concurrent releases
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish to Maven Central
+    runs-on: ubuntu-latest
+    # Only run on the main repository, not forks
+    if: github.repository == 'TJC-LP/fast-mcp-scala'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up JDK
+        uses: coursier/setup-action@v1
+        with:
+          jvm: temurin:21
+
+      - name: Cache Coursier
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.ivy2/cache
+          key: ${{ runner.os }}-coursier-${{ hashFiles('**/build.mill') }}
+          restore-keys: |
+            ${{ runner.os }}-coursier-
+
+      - name: Cache Mill
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.mill
+          key: ${{ runner.os }}-mill-${{ hashFiles('**/build.mill') }}
+          restore-keys: |
+            ${{ runner.os }}-mill-
+
+      - name: Fetch annotated tags
+        run: git fetch --tags --force
+
+      - name: Extract version
+        id: version
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "Publishing version: $TAG_VERSION"
+          # Verify the tag matches semver pattern
+          if ! [[ "$TAG_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "Error: Tag must be a valid semver version (e.g., v0.1.0, v1.0.0-RC1)"
+            exit 1
+          fi
+          echo "version=$TAG_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Run Tests
+        run: ./mill -i fast-mcp-scala.test
+
+      - name: Verify Publishing Setup
+        run: |
+          echo "Version: $PUBLISH_VERSION"
+          ./mill show fast-mcp-scala.publishVersion
+        env:
+          PUBLISH_VERSION: ${{ steps.version.outputs.version }}
+
+      - name: Publish to Maven Central
+        run: ./mill -i mill.scalalib.PublishModule/publishAll --publishArtifacts fast-mcp-scala.publishArtifacts --sonatypeUri https://central.sonatype.com/api/v1/publisher --sonatypeSnapshotUri https://central.sonatype.com/api/v1/publisher
+        env:
+          PUBLISH_VERSION: ${{ steps.version.outputs.version }}
+          MILL_SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          MILL_SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+          MILL_PGP_SECRET_BASE64: ${{ secrets.PGP_SECRET }}
+          MILL_PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
