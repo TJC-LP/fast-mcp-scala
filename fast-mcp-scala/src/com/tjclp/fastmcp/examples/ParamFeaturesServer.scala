@@ -10,9 +10,8 @@ import com.tjclp.fastmcp.server.*
 /** Example server demonstrating the enhanced @Param annotation features.
   *
   * This example showcases:
-  *   1. `examples` field - adds examples array to JSON schema (multiple values supported)
-  *   2. `required` field - override required status
-  *   3. `schema` field - custom JSON Schema override
+  *   1. `examples` field - adds examples array to JSON schema (multiple values supported) 2.
+  *      `required` field - override required status 3. `schema` field - custom JSON Schema override
   *
   * To run with MCP Inspector:
   * {{{
@@ -52,9 +51,8 @@ object ParamFeaturesServer extends ZIOAppDefault:
 
   /** Tool demonstrating the `required` field.
     *
-    * The `bio` parameter is optional (required=false) even though it doesn't have a default
-    * value. This is useful when you want to make a parameter optional but handle the None case
-    * explicitly.
+    * The `bio` parameter is optional (required=false) even though it doesn't have a default value.
+    * This is useful when you want to make a parameter optional but handle the None case explicitly.
     */
   @Tool(
     name = Some("update_profile"),
@@ -93,7 +91,10 @@ object ParamFeaturesServer extends ZIOAppDefault:
     description = Some("Create a task with custom status and priority enums")
   )
   def createTask(
-      @Param(description = "Task name", examples = List("Fix bug #123", "Implement feature X", "Write documentation"))
+      @Param(
+        description = "Task name",
+        examples = List("Fix bug #123", "Implement feature X", "Write documentation")
+      )
       name: String,
       @Param(
         description = "Current status of the task",
@@ -125,7 +126,8 @@ object ParamFeaturesServer extends ZIOAppDefault:
   def advancedSearch(
       @Param(
         description = "Search query",
-        examples = List("scala functional programming", "machine learning tutorial", "rust concurrency"),
+        examples =
+          List("scala functional programming", "machine learning tutorial", "rust concurrency"),
         required = true
       )
       query: String,
