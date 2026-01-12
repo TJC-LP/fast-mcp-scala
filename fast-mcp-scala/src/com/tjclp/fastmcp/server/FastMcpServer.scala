@@ -267,59 +267,29 @@ class FastMcpServer(
 
     // Register resource templates
     if (templateResources.nonEmpty) {
-      // Bind read handlers for template URIs via resources().
-      val templateSpecs = new java.util.ArrayList[McpServerFeatures.AsyncResourceSpecification]()
-      templateResources.foreach { resDef =>
-        JSystem.err.println(s"[FastMCPScala] - Processing resource template: ${resDef.uri}")
-        val resourceForHandler = {
-          val meta = new java.util.HashMap[String, Object]()
-          meta.put("fastmcp_is_template", java.lang.Boolean.TRUE)
-          // Expose parameter names to clients that may choose to hide templates in resources list
-          val paramRegex = """\{([^{}]+)\}""".r
-          val params = paramRegex.findAllMatchIn(resDef.uri).map(_.group(1)).toList.asJava
-          meta.put("fastmcp_template_params", params)
-
-          McpSchema.Resource
-            .builder()
-            .uri(resDef.uri)
-            .name(resDef.name.orNull)
-            .description(resDef.description.orNull)
-            .mimeType(resDef.mimeType.getOrElse("text/plain"))
-            .annotations(new McpSchema.Annotations(null, null))
-            .meta(meta)
-            .build()
-        }
-        val spec = new McpServerFeatures.AsyncResourceSpecification(
-          resourceForHandler,
-          javaTemplateResourceReadHandler(resDef.uri)
-        )
-        templateSpecs.add(spec)
-      }
-
-      // Register template read handlers
-      serverBuilder.resources(templateSpecs)
-
-      // Optionally advertise templates for the discovery endpoint
-      if settings.exposeTemplatesEndpoint then
-        val javaTemplateSpecs = templateResources
-          .map { resDef =>
-            val template = ResourceDefinition.toJava(resDef) match {
-              case t: McpSchema.ResourceTemplate => t
-              case _ => null
-            }
-            if (template != null) {
-              new McpServerFeatures.AsyncResourceTemplateSpecification(
-                template,
-                javaTemplateResourceReadHandler(resDef.uri)
-              )
-            } else null
+      JSystem.err.println(
+        s"[FastMCPScala] Registering ${templateResources.size} resource templates..."
+      )
+      val javaTemplateSpecs = templateResources
+        .map { resDef =>
+          JSystem.err.println(s"[FastMCPScala] - Processing resource template: ${resDef.uri}")
+          val template = ResourceDefinition.toJava(resDef) match {
+            case t: McpSchema.ResourceTemplate => t
+            case _ => null
           }
-          .filter(_ != null)
-          .asJava
-        serverBuilder.resourceTemplates(javaTemplateSpecs)
-        JSystem.err.println(
-          s"[FastMCPScala] Registered ${javaTemplateSpecs.size()} templates for discovery endpoint"
-        )
+          if (template != null) {
+            new McpServerFeatures.AsyncResourceTemplateSpecification(
+              template,
+              javaTemplateResourceReadHandler(resDef.uri)
+            )
+          } else null
+        }
+        .filter(_ != null)
+        .asJava
+      serverBuilder.resourceTemplates(javaTemplateSpecs)
+      JSystem.err.println(
+        s"[FastMCPScala] Registered ${javaTemplateSpecs.size()} resource templates"
+      )
     }
 
     // --- Prompt Registration ---
