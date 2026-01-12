@@ -11,7 +11,7 @@ import com.tjclp.fastmcp.runtime.RefResolver
 /** Metadata extracted from @Param/@ToolParam annotations */
 case class ParamMetadata(
     description: Option[String] = None,
-    example: Option[String] = None,
+    examples: List[String] = Nil,
     required: Boolean = true,
     schema: Option[String] = None
 )
@@ -53,6 +53,41 @@ private[macros] object MacroUtils:
     }
     Select(Ref(companionSym), methodSymOpt).etaExpand(Symbol.spliceOwner).asExprOf[Any]
 
+  private def stripTerm(using quotes: Quotes)(term: quotes.reflect.Term): quotes.reflect.Term =
+    import quotes.reflect.*
+    term match {
+      case Inlined(_, _, inner) => stripTerm(inner)
+      case Typed(inner, _) => stripTerm(inner)
+      case Block(_, inner) => stripTerm(inner)
+      case _ => term
+    }
+
+  /** Parses a List[String] from an annotation argument term.
+    *
+    * Handles list literals, `::` chains, SeqLiteral, and Nil.
+    */
+  private def parseListString(using quotes: Quotes)(argTerm: quotes.reflect.Term): List[String] =
+    import quotes.reflect.*
+
+    def loop(term: Term): List[String] = term match {
+      case Inlined(_, _, inner) => loop(inner)
+      case Typed(inner, _) => loop(inner)
+      case Repeated(elems, _) =>
+        elems.flatMap(loop)
+      case Block(stats, expr) =>
+        val statStrings = stats.collect { case ValDef(_, _, Some(rhs)) => loop(rhs) }.flatten
+        statStrings ++ loop(expr)
+      case Apply(_, elems) =>
+        elems.flatMap(loop)
+      case Literal(StringConstant(item)) =>
+        List(item)
+      case Select(_, "Nil") | Ident("Nil") =>
+        Nil
+      case _ => Nil
+    }
+
+    loop(argTerm)
+
   // Helper to parse @Tool annotation arguments
   def parseToolParams(using quotes: Quotes)(
       term: quotes.reflect.Term
@@ -62,14 +97,6 @@ private[macros] object MacroUtils:
     var toolName: Option[String] = None
     var toolDesc: Option[String] = None
     var toolTags: List[String] = Nil
-
-    // Specific helper for List[String]
-    def parseListString(argTerm: Term): List[String] = argTerm match {
-      case Apply(TypeApply(Select(Ident("List"), "apply"), _), elems) =>
-        elems.collect { case Literal(StringConstant(item)) => item }
-      case Select(Ident("Nil"), _) | Apply(TypeApply(Select(Ident("List"), "apply"), _), Nil) => Nil
-      case _ => Nil
-    }
 
     term match {
       case Apply(Select(New(_), _), argTerms) =>
@@ -120,23 +147,31 @@ private[macros] object MacroUtils:
         annotTerm match {
           case Apply(_, args) =>
             args.foreach {
-              // Positional description: Only take the first one encountered
-              case Literal(StringConstant(s)) if paramDesc.isEmpty =>
-                paramDesc = Some(s)
-                descriptionSetPositionally = true
               // Named description
-              case NamedArg("description", Literal(StringConstant(s))) =>
-                paramDesc = Some(s)
+              case NamedArg("description", valueTerm) =>
+                stripTerm(valueTerm) match {
+                  case Literal(StringConstant(s)) => paramDesc = Some(s)
+                  case _ => ()
+                }
               // Named required
-              case NamedArg("required", Literal(BooleanConstant(b))) =>
-                paramRequired = b
-                requiredSetByName = true
-              // Positional boolean: Only if description was set positionally and required wasn't set by name.
-              case Literal(BooleanConstant(b))
-                  if descriptionSetPositionally && !requiredSetByName =>
-                paramRequired = b
-              // Ignore other argument types or structures
-              case _ => ()
+              case NamedArg("required", valueTerm) =>
+                stripTerm(valueTerm) match {
+                  case Literal(BooleanConstant(b)) =>
+                    paramRequired = b
+                    requiredSetByName = true
+                  case _ => ()
+                }
+              // Positional description/required handling
+              case term =>
+                stripTerm(term) match {
+                  case Literal(StringConstant(s)) if paramDesc.isEmpty =>
+                    paramDesc = Some(s)
+                    descriptionSetPositionally = true
+                  case Literal(BooleanConstant(b))
+                      if descriptionSetPositionally && !requiredSetByName =>
+                    paramRequired = b
+                  case _ => ()
+                }
             }
           case _ => () // Ignore if annotation term is not an Apply
         }
@@ -164,74 +199,75 @@ private[macros] object MacroUtils:
     }
 
   // Helper to parse @Param annotation arguments for @Tool methods
-  // Returns: (description: Option[String], example: Option[String], required: Boolean, schema: Option[String])
+  // Returns: (description: Option[String], examples: List[String], required: Boolean, schema: Option[String])
   def parseToolParam(using quotes: Quotes)(
       paramAnnotOpt: Option[quotes.reflect.Term]
-  ): (Option[String], Option[String], Boolean, Option[String]) =
+  ): (Option[String], List[String], Boolean, Option[String]) =
     import quotes.reflect.*
 
     paramAnnotOpt match {
       case Some(annotTerm) =>
         var paramDesc: Option[String] = None
-        var paramExample: Option[String] = None
+        var paramExamples: List[String] = Nil
         var paramRequired: Boolean = true // Default required for @Param
         var paramSchema: Option[String] = None
-        var descriptionSetPositionally = false
-        var exampleSetByName = false
+        var examplesSetByName = false
         var requiredSetByName = false
         var schemaSetByName = false
 
         annotTerm match {
           case Apply(_, args) =>
+            var positionalIndex = 0
             args.foreach {
-              // Positional description: Only take the first one encountered
-              case Literal(StringConstant(s)) if paramDesc.isEmpty =>
-                paramDesc = Some(s)
-                descriptionSetPositionally = true
               // Named description
-              case NamedArg("description", Literal(StringConstant(s))) =>
-                paramDesc = Some(s)
-              // Named example
-              case NamedArg("example", valueTerm) =>
-                valueTerm match {
-                  case Apply(
-                        TypeApply(Select(Ident("Some"), "apply"), _),
-                        List(Literal(StringConstant(ex)))
-                      ) =>
-                    paramExample = Some(ex)
-                    exampleSetByName = true
-                  case Select(Ident("None"), _) | Ident("None") =>
-                    paramExample = None
+              case NamedArg("description", valueTerm) =>
+                stripTerm(valueTerm) match {
+                  case Literal(StringConstant(s)) => paramDesc = Some(s)
                   case _ => ()
                 }
+              // Named examples (List[String])
+              case NamedArg("examples", valueTerm) =>
+                paramExamples = parseListString(valueTerm)
+                examplesSetByName = true
               // Named required
-              case NamedArg("required", Literal(BooleanConstant(b))) =>
-                paramRequired = b
-                requiredSetByName = true
+              case NamedArg("required", valueTerm) =>
+                stripTerm(valueTerm) match {
+                  case Literal(BooleanConstant(b)) =>
+                    paramRequired = b
+                    requiredSetByName = true
+                  case _ => ()
+                }
               // Named schema
               case NamedArg("schema", valueTerm) =>
-                valueTerm match {
-                  case Apply(
-                        TypeApply(Select(Ident("Some"), "apply"), _),
-                        List(Literal(StringConstant(sch)))
-                      ) =>
-                    paramSchema = Some(sch)
-                    schemaSetByName = true
-                  case Select(Ident("None"), _) | Ident("None") =>
-                    paramSchema = None
+                paramSchema = parseOptionStringLiteral(valueTerm)
+                schemaSetByName = true
+              // Positional args: description, examples, required, schema
+              case term =>
+                positionalIndex match {
+                  case 0 =>
+                    stripTerm(term) match {
+                      case Literal(StringConstant(s)) if paramDesc.isEmpty =>
+                        paramDesc = Some(s)
+                      case _ => ()
+                    }
+                  case 1 if !examplesSetByName =>
+                    val parsed = parseListString(term)
+                    if parsed.nonEmpty then paramExamples = parsed
+                  case 2 if !requiredSetByName =>
+                    stripTerm(term) match {
+                      case Literal(BooleanConstant(b)) => paramRequired = b
+                      case _ => ()
+                    }
+                  case 3 if !schemaSetByName =>
+                    paramSchema = parseOptionStringLiteral(term)
                   case _ => ()
                 }
-              // Positional boolean: Only if description was set positionally and required wasn't set by name.
-              case Literal(BooleanConstant(b))
-                  if descriptionSetPositionally && !requiredSetByName =>
-                paramRequired = b
-              // Ignore other argument types or structures
-              case _ => ()
+                positionalIndex += 1
             }
           case _ => () // Ignore if annotation term is not an Apply
         }
-        (paramDesc, paramExample, paramRequired, paramSchema)
-      case None => (None, None, true, None) // Defaults if no @Param
+        (paramDesc, paramExamples, paramRequired, paramSchema)
+      case None => (None, Nil, true, None) // Defaults if no @Param
     }
 
   // Helper to parse @Resource annotation arguments
@@ -267,12 +303,19 @@ private[macros] object MacroUtils:
       argTerm: quotes.reflect.Term
   ): Option[String] =
     import quotes.reflect.*
-    argTerm match {
+
+    def parseLiteral(term: Term): Option[String] = stripTerm(term) match {
+      case Literal(StringConstant(s)) => Some(s)
+      case _ => None
+    }
+
+    stripTerm(argTerm) match {
       // Matches Some("literal") created via Some.apply[String]("literal")
-      case Apply(TypeApply(Select(Ident("Some"), "apply"), _), List(Literal(StringConstant(s)))) =>
-        Some(s)
+      case Apply(TypeApply(Select(Ident("Some"), "apply"), _), List(arg)) =>
+        parseLiteral(arg)
       // Matches Some("literal") created via Some("literal")
-      case Apply(Select(Ident("Some"), "apply"), List(Literal(StringConstant(s)))) => Some(s)
+      case Apply(Select(Ident("Some"), "apply"), List(arg)) =>
+        parseLiteral(arg)
       // Matches None
       case Select(Ident("None"), _) | Ident("None") => None
       case _ =>
@@ -422,9 +465,11 @@ private[macros] object MacroUtils:
                 val withDesc = meta.description.fold(baseObj)(d =>
                   baseObj.add("description", Json.fromString(d))
                 )
-                val withExamples = meta.example.fold(withDesc)(ex =>
-                  withDesc.add("examples", Json.arr(Json.fromString(ex)))
-                )
+                val withExamples =
+                  if (meta.examples.nonEmpty) {
+                    val examplesJson = Json.fromValues(meta.examples.map(Json.fromString))
+                    withDesc.add("examples", examplesJson)
+                  } else withDesc
                 fieldName -> Json.fromJsonObject(withExamples)
             }
           case None => fieldName -> fieldJson

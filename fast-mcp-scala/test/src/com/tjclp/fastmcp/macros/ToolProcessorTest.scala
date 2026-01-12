@@ -124,7 +124,7 @@ class ToolProcessorTest extends AnyFunSuite {
     assert(calculation.operation == "SUBTRACT")
   }
 
-  // Test @Param annotation with all fields (description, example, required, schema)
+  // Test @Param annotation with all fields (description, examples, required, schema)
   test("@Param annotation with all fields generates correct schema") {
     // Create a separate server for this test to avoid interference
     val paramTestServer = new FastMcpServer("ParamTestServer", "0.1.0")
@@ -254,13 +254,13 @@ object ParamMetadataTestTools {
   def testTool(
       @Param(
         description = "The username for login",
-        example = Some("john_doe"),
+        examples = List("john_doe"),
         required = true
       )
       username: String,
       @Param(
         description = "User's age in years",
-        example = Some("25"),
+        examples = List("25"),
         required = false
       )
       age: Option[Int]

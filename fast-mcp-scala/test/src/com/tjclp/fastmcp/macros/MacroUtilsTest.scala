@@ -275,7 +275,7 @@ class MacroUtilsTest extends AnyFunSuite { // Ensure this matches the import
       "required": ["name"]
     }"""
     val inputJson = unsafeParse(inputJsonString)
-    val metadata = Map("name" -> ParamMetadata(example = Some("john_doe")))
+    val metadata = Map("name" -> ParamMetadata(examples = List("john_doe")))
 
     val actualJson = MacroUtils.injectParamMetadata(inputJson, metadata)
     val examples = actualJson.hcursor.downField("properties").downField("name").downField("examples").as[List[String]]
@@ -348,12 +348,12 @@ class MacroUtilsTest extends AnyFunSuite { // Ensure this matches the import
     val metadata = Map(
       "username" -> ParamMetadata(
         description = Some("The username"),
-        example = Some("john_doe"),
+        examples = List("john_doe"),
         required = true
       ),
       "age" -> ParamMetadata(
         description = Some("User's age"),
-        example = Some("25"),
+        examples = List("25"),
         required = false
       )
     )
