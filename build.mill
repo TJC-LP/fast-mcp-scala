@@ -1,0 +1,145 @@
+//| mvnDeps: ["com.lihaoyi::mill-contrib-scoverage:$MILL_VERSION"]
+// Mill 1.1.0-RC3 is used for improved Scala 3.7.x support and build performance.
+// Version is controlled via .mill-version file.
+import mill._
+import mill.scalalib._
+import mill.scalalib.publish._
+import mill.scalalib.scalafmt._
+import contrib.scoverage.ScoverageModule
+
+val scala3Version = "3.7.2"
+val organization = "com.tjclp"
+
+/** Version constants - centralized for maintenance */
+object Versions {
+  val zio = "2.1.20"
+  val zioSchema = "1.7.4"
+  val zioJson = "0.7.44"
+  val jackson = "2.20.0"
+  val tapir = "1.11.42"
+  val jsonSchemaCirce = "0.11.10"
+  val mcpSdk = "0.13.1"
+  val scalaTest = "3.2.19"
+  val scalaCheck = "1.18.1"
+}
+
+/** Shared build configuration constants */
+object BuildConfig {
+  /** JVM options to silence Scala 3 LazyVals sun.misc.Unsafe deprecation warnings (JDK 21+) */
+  val lazyValsJvmArgs: Seq[String] = Seq(
+    "--add-opens=java.base/sun.misc=ALL-UNNAMED",
+    "--add-opens=java.base/java.util=ALL-UNNAMED",
+    "--add-opens=java.base/java.lang=ALL-UNNAMED",
+    "-XX:+IgnoreUnrecognizedVMOptions"
+  )
+}
+
+/** Base trait for FastMCP modules - shared compiler settings, formatting, and coverage */
+trait FastMCPModuleBase extends ScalaModule with ScalafmtModule with ScoverageModule {
+  override def scalaVersion: T[String] = scala3Version
+
+  // JVM options for forked processes (run, test execution)
+  override def forkArgs: T[Seq[String]] = BuildConfig.lazyValsJvmArgs
+
+  // WartRemover compiler plugin for enhanced code quality
+  def scalacPluginMvnDeps = Seq(
+    mvn"org.wartremover:::wartremover:3.4.1"
+  )
+
+  override def scalacOptions = Seq(
+    "-encoding", "utf-8",
+    "-feature",
+    "-unchecked",
+    "-deprecation",
+    // Warnings from original build.sbt
+    "-Wunused:all",
+    "-Wvalue-discard",
+    "-Wsafe-init",
+    "-Wnonunit-statement",
+    // Macro-specific options (CRITICAL for this project)
+    "-Xcheck-macros",
+    "-experimental",
+    "-Xmax-inlines:128",
+    // WartRemover Tier 1: Core purity warts (errors - fail builds)
+    "-P:wartremover:traverser:org.wartremover.warts.Null",
+    "-P:wartremover:traverser:org.wartremover.warts.TryPartial",
+    "-P:wartremover:traverser:org.wartremover.warts.TripleQuestionMark",
+    "-P:wartremover:traverser:org.wartremover.warts.ArrayEquals",
+    // WartRemover Tier 2: Code quality warts (warnings only)
+    "-P:wartremover:only-warn-traverser:org.wartremover.warts.Var",
+    "-P:wartremover:only-warn-traverser:org.wartremover.warts.Return",
+    "-P:wartremover:only-warn-traverser:org.wartremover.warts.AsInstanceOf",
+    "-P:wartremover:only-warn-traverser:org.wartremover.warts.IsInstanceOf"
+  )
+
+  // Coverage settings
+  override def scoverageVersion = "2.3.1"
+}
+
+/** Publishable module trait - for Maven Central publishing via Sonatype */
+trait FastMCPModule extends FastMCPModuleBase with PublishModule {
+
+  /** Version derived from PUBLISH_VERSION env var (set by CI), or SNAPSHOT for local dev */
+  override def publishVersion: T[String] =
+    sys.env.getOrElse("PUBLISH_VERSION", "0.2.2-SNAPSHOT")
+
+  override def pomSettings: T[PomSettings] = PomSettings(
+    description = artifactDescription,
+    organization = organization,
+    url = "https://github.com/TJC-LP/fast-mcp-scala",
+    licenses = Seq(License.MIT),
+    versionControl = VersionControl.github("TJC-LP", "fast-mcp-scala"),
+    developers = Seq(
+      Developer("arcaputo3", "Richie Caputo", "https://github.com/arcaputo3")
+    )
+  )
+
+  /** Override in each module to provide module-specific description */
+  def artifactDescription: String = "Fast MCP Scala - High-performance Model Context Protocol SDK for Scala 3"
+}
+
+/** Test module trait */
+trait FastMCPTestModule extends TestModule.ScalaTest {
+  override def forkArgs: T[Seq[String]] = BuildConfig.lazyValsJvmArgs
+}
+
+// Main module
+object `fast-mcp-scala` extends FastMCPModule {
+
+  override def artifactName = "fast-mcp-scala"
+
+  override def mvnDeps = Seq(
+    // ZIO Core
+    mvn"dev.zio::zio:${Versions.zio}",
+    mvn"dev.zio::zio-json:${Versions.zioJson}",
+    // ZIO Schema for schema generation
+    mvn"dev.zio::zio-schema:${Versions.zioSchema}",
+    mvn"dev.zio::zio-schema-json:${Versions.zioSchema}",
+    mvn"dev.zio::zio-schema-derivation:${Versions.zioSchema}",
+    // Jackson for JSON serialization/deserialization
+    mvn"com.fasterxml.jackson.core:jackson-databind:${Versions.jackson}",
+    mvn"com.fasterxml.jackson.module::jackson-module-scala:${Versions.jackson}",
+    mvn"com.fasterxml.jackson.datatype:jackson-datatype-jdk8:${Versions.jackson}",
+    mvn"com.fasterxml.jackson.datatype:jackson-datatype-jsr310:${Versions.jackson}",
+    // Tapir
+    mvn"com.softwaremill.sttp.tapir::tapir-core:${Versions.tapir}",
+    mvn"com.softwaremill.sttp.tapir::tapir-apispec-docs:${Versions.tapir}",
+    mvn"com.softwaremill.sttp.tapir::tapir-json-circe:${Versions.tapir}",
+    mvn"com.softwaremill.sttp.apispec::jsonschema-circe:${Versions.jsonSchemaCirce}",
+    // MCP SDK (Java library - note single colon)
+    mvn"io.modelcontextprotocol.sdk:mcp:${Versions.mcpSdk}"
+  )
+
+  override def mainClass = Some("fastmcp.FastMCPMain")
+
+  object test extends ScalaTests with FastMCPTestModule {
+    override def mvnDeps = Seq(
+      mvn"org.scalatest::scalatest:${Versions.scalaTest}",
+      mvn"org.scalacheck::scalacheck:${Versions.scalaCheck}",
+      mvn"org.scalatestplus::mockito-5-12:3.2.19.0",
+      mvn"dev.zio::zio-test:${Versions.zio}",
+      mvn"dev.zio::zio-test-sbt:${Versions.zio}",
+      mvn"dev.zio::zio-test-magnolia:${Versions.zio}"
+    )
+  }
+}
