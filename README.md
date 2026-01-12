@@ -115,16 +115,32 @@ For additional examples and in‑depth docs, see **`docs/guide.md`**.
 
 When hacking on *FastMCP‑Scala* itself, you can consume a local build in any project.
 
-#### 🔨 Publish to the Local Ivy Repository with `sbt`
+#### 🔨 Build Commands (Mill)
 
-In your cloned repository, set a working version
-```scala 3 ignore
-ThisBuild / version := "0.2.2-SNAPSHOT"
+FastMCP-Scala uses [Mill](https://mill-build.org/) as its build tool.
+
+```bash
+# Compile the library
+./mill fast-mcp-scala.compile
+
+# Run tests
+./mill fast-mcp-scala.test
+
+# Check code formatting
+./mill fast-mcp-scala.checkFormat
+
+# Auto-format code
+./mill fast-mcp-scala.reformat
+
+# Generate test coverage report
+./mill fast-mcp-scala.scoverage.htmlReport
 ```
+
+#### 🔨 Publish to the Local Ivy Repository
 
 ```bash
 # From the fast-mcp-scala root
-sbt publishLocal
+./mill fast-mcp-scala.publishLocal
 ```
 
 Then, in your consuming sbt project:
@@ -133,20 +149,25 @@ Then, in your consuming sbt project:
 libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.2.2-SNAPSHOT"
 ```
 
-> `publishLocal` installs the artifact under `~/.ivy2/local` (or the Coursier cache when enabled).
+Or in Mill:
+
+```scala 3 ignore
+def ivyDeps = Agg(
+  ivy"com.tjclp::fast-mcp-scala:0.2.2-SNAPSHOT"
+)
+```
+
+> `publishLocal` installs the artifact under `~/.ivy2/local`.
 
 #### 📦 Use the JAR Directly (Unmanaged Dependencies)
 
 ```bash
-# Package the library
-sbt package
+# Build the JAR
+./mill fast-mcp-scala.jar
 
-# Copy the JAR – adjust Scala version / name if you change them
-cp target/scala-3.7.2/fast-mcp-scala_3-0.2.2-SNAPSHOT.jar \
-   /path/to/other-project/lib/
+# The JAR is located at:
+# out/fast-mcp-scala/jar.dest/out.jar
 ```
-
-Unmanaged JARs placed in a project's `lib/` folder are picked up automatically by sbt.
 
 #### 🚀 Using with `scala‑cli`
 
@@ -161,6 +182,6 @@ You can also point directly at the local JAR:
 
 ```scala 3 ignore
 //> using scala 3.7.2
-//> using jar "/absolute/path/to/fast-mcp-scala_3-0.2.1.jar"
+//> using jar "/absolute/path/to/out/fast-mcp-scala/jar.dest/out.jar"
 //> using options "-Xcheck-macros" "-experimental"
 ```

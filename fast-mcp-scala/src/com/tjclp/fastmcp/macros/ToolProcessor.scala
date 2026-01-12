@@ -61,33 +61,72 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       )
     }
 
-    // Collect @Param/@ToolParam descriptions so we can inject them into the schema
-    val paramDescriptions: Map[String, String] =
-      methodSym.paramSymss.headOption
-        .getOrElse(Nil)
-        .flatMap { pSym =>
-          MacroUtils
-            .extractParamAnnotation(pSym, Some("Tool"))
-            .flatMap { annotTerm =>
-              // description is either the first String literal or the named arg "description"
-              annotTerm match
-                case Apply(_, args) =>
-                  args
-                    .collectFirst { case NamedArg("description", Literal(StringConstant(d))) =>
-                      d
-                    }
-                    .orElse {
-                      args.collectFirst { case Literal(StringConstant(d)) => d }
-                    }
-                case _ => None
-            }
-            .map(pSym.name -> _)
-        }
-        .toMap
+    // Collect all @Param/@ToolParam metadata (description, example, required, schema)
+    // Also validate that required=false is only used with Option types or default values
+    val params = methodSym.paramSymss.headOption.getOrElse(Nil)
 
-    val schemaWithDescriptions: Expr[io.circe.Json] = {
-      if paramDescriptions.isEmpty then rawSchema
-      else '{ MacroUtils.injectParamDescriptions($rawSchema, ${ Expr(paramDescriptions) }) }
+    // Find which parameters have default values
+    // For objects (modules), default methods are on the object itself
+    // For classes, they're on the companion module
+    val defaultMethodOwner =
+      if ownerSym.flags.is(Flags.Module) then ownerSym
+      else ownerSym.companionModule
+
+    val paramsWithDefaults: Set[String] = params.zipWithIndex.collect {
+      case (pSym, idx)
+          if defaultMethodOwner != Symbol.noSymbol &&
+            defaultMethodOwner.declaredMethod(s"${methodSym.name}$$default$$${idx + 1}").nonEmpty =>
+        pSym.name
+    }.toSet
+
+    val paramMetadata: List[(String, ParamMetadata)] =
+      params.flatMap { pSym =>
+        MacroUtils
+          .extractParamAnnotation(pSym, Some("Tool"))
+          .map { annotTerm =>
+            val (desc, example, required, schema) = MacroUtils.parseToolParam(Some(annotTerm))
+
+            // Validate: required=false must have Option type or default value
+            if (!required) {
+              val isOptionType = pSym.info <:< TypeRepr.of[Option[?]]
+              val hasDefault = paramsWithDefaults.contains(pSym.name)
+
+              if (!isOptionType && !hasDefault) {
+                report.errorAndAbort(
+                  s"Parameter '${pSym.name}' in method '$methodName' is marked as required=false " +
+                    s"but is not an Option type and has no default value. " +
+                    s"Use Option[${pSym.info.show}] or provide a default value."
+                )
+              }
+            }
+
+            pSym.name -> ParamMetadata(desc, example, required, schema)
+          }
+      }
+
+    // Convert compile-time metadata to runtime expression
+    val schemaWithMetadata: Expr[io.circe.Json] = {
+      if paramMetadata.isEmpty then rawSchema
+      else {
+        val metadataEntries: List[Expr[(String, ParamMetadata)]] = paramMetadata.map {
+          case (name, meta) =>
+            '{
+              (
+                ${ Expr(name) },
+                ParamMetadata(
+                  ${ Expr(meta.description) },
+                  ${ Expr(meta.example) },
+                  ${ Expr(meta.required) },
+                  ${ Expr(meta.schema) }
+                )
+              )
+            }
+        }
+        val metadataMapExpr: Expr[Map[String, ParamMetadata]] = '{
+          Map(${ Varargs(metadataEntries) }*)
+        }
+        '{ MacroUtils.injectParamMetadata($rawSchema, $metadataMapExpr) }
+      }
     }
 
     // 7️⃣  Compose registration effect --------------------------------------------------------
@@ -97,7 +136,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
         name = ${ Expr(finalName) },
         description = ${ Expr(finalDesc) },
         handler = $handler,
-        inputSchema = Right($schemaWithDescriptions.spaces2)
+        inputSchema = Right($schemaWithMetadata.spaces2)
       )
     }
 

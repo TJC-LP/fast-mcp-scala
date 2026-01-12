@@ -234,4 +234,181 @@ class MacroUtilsTest extends AnyFunSuite { // Ensure this matches the import
     assert(actualJson == expectedJson) // Use ScalaTest's assert
   }
 
+  // --- injectParamMetadata Tests ---
+
+  test("injectParamMetadata should return original JSON for empty metadata map") {
+    val inputJsonString = """{
+      "type": "object",
+      "properties": { "name": { "type": "string" } },
+      "required": ["name"]
+    }"""
+    val inputJson = unsafeParse(inputJsonString)
+    val metadata = Map.empty[String, ParamMetadata]
+    val expectedJson = inputJson // Expect no change
+
+    val actualJson = MacroUtils.injectParamMetadata(inputJson, metadata)
+    assert(actualJson == expectedJson)
+  }
+
+  test("injectParamMetadata should add description to properties") {
+    val inputJsonString = """{
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" }
+      },
+      "required": ["name"]
+    }"""
+    val inputJson = unsafeParse(inputJsonString)
+    val metadata = Map("name" -> ParamMetadata(description = Some("The user's name")))
+
+    val actualJson = MacroUtils.injectParamMetadata(inputJson, metadata)
+    val desc = actualJson.hcursor.downField("properties").downField("name").downField("description").as[String]
+    assert(desc == Right("The user's name"))
+  }
+
+  test("injectParamMetadata should add examples array to properties") {
+    val inputJsonString = """{
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" }
+      },
+      "required": ["name"]
+    }"""
+    val inputJson = unsafeParse(inputJsonString)
+    val metadata = Map("name" -> ParamMetadata(example = Some("john_doe")))
+
+    val actualJson = MacroUtils.injectParamMetadata(inputJson, metadata)
+    val examples = actualJson.hcursor.downField("properties").downField("name").downField("examples").as[List[String]]
+    assert(examples == Right(List("john_doe")))
+  }
+
+  test("injectParamMetadata should update required array when required=false") {
+    val inputJsonString = """{
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "age": { "type": "integer" }
+      },
+      "required": ["name", "age"]
+    }"""
+    val inputJson = unsafeParse(inputJsonString)
+    // Mark "age" as not required
+    val metadata = Map("age" -> ParamMetadata(required = false))
+
+    val actualJson = MacroUtils.injectParamMetadata(inputJson, metadata)
+    val required = actualJson.hcursor.downField("required").as[List[String]]
+    assert(required == Right(List("name")))
+  }
+
+  test("injectParamMetadata should add to required array when required=true") {
+    val inputJsonString = """{
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "age": { "type": "integer" }
+      },
+      "required": ["name"]
+    }"""
+    val inputJson = unsafeParse(inputJsonString)
+    // Mark "age" as required
+    val metadata = Map("age" -> ParamMetadata(required = true))
+
+    val actualJson = MacroUtils.injectParamMetadata(inputJson, metadata)
+    val required = actualJson.hcursor.downField("required").as[List[String]].getOrElse(Nil).toSet
+    assert(required == Set("name", "age"))
+  }
+
+  test("injectParamMetadata should replace property with custom schema") {
+    val inputJsonString = """{
+      "type": "object",
+      "properties": {
+        "status": { "type": "string" }
+      },
+      "required": ["status"]
+    }"""
+    val inputJson = unsafeParse(inputJsonString)
+    val customSchema = """{"type": "string", "enum": ["active", "inactive", "pending"]}"""
+    val metadata = Map("status" -> ParamMetadata(schema = Some(customSchema)))
+
+    val actualJson = MacroUtils.injectParamMetadata(inputJson, metadata)
+    val enumValues = actualJson.hcursor.downField("properties").downField("status").downField("enum").as[List[String]]
+    assert(enumValues == Right(List("active", "inactive", "pending")))
+  }
+
+  test("injectParamMetadata should handle all fields together") {
+    val inputJsonString = """{
+      "type": "object",
+      "properties": {
+        "username": { "type": "string" },
+        "age": { "type": "integer" }
+      },
+      "required": ["username", "age"]
+    }"""
+    val inputJson = unsafeParse(inputJsonString)
+    val metadata = Map(
+      "username" -> ParamMetadata(
+        description = Some("The username"),
+        example = Some("john_doe"),
+        required = true
+      ),
+      "age" -> ParamMetadata(
+        description = Some("User's age"),
+        example = Some("25"),
+        required = false
+      )
+    )
+
+    val actualJson = MacroUtils.injectParamMetadata(inputJson, metadata)
+
+    // Check username has description and examples
+    val usernameDesc = actualJson.hcursor.downField("properties").downField("username").downField("description").as[String]
+    val usernameExamples = actualJson.hcursor.downField("properties").downField("username").downField("examples").as[List[String]]
+    assert(usernameDesc == Right("The username"))
+    assert(usernameExamples == Right(List("john_doe")))
+
+    // Check age has description and examples
+    val ageDesc = actualJson.hcursor.downField("properties").downField("age").downField("description").as[String]
+    val ageExamples = actualJson.hcursor.downField("properties").downField("age").downField("examples").as[List[String]]
+    assert(ageDesc == Right("User's age"))
+    assert(ageExamples == Right(List("25")))
+
+    // Check required array only contains "username" (age was marked as not required)
+    val required = actualJson.hcursor.downField("required").as[List[String]]
+    assert(required == Right(List("username")))
+  }
+
+  test("injectParamMetadata should remove required array when all params are optional") {
+    val inputJsonString = """{
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" }
+      },
+      "required": ["name"]
+    }"""
+    val inputJson = unsafeParse(inputJsonString)
+    val metadata = Map("name" -> ParamMetadata(required = false))
+
+    val actualJson = MacroUtils.injectParamMetadata(inputJson, metadata)
+    val hasRequired = actualJson.hcursor.downField("required").succeeded
+    assert(!hasRequired, "required array should be removed when empty")
+  }
+
+  test("injectParamMetadata should handle invalid custom schema gracefully") {
+    val inputJsonString = """{
+      "type": "object",
+      "properties": {
+        "status": { "type": "string" }
+      },
+      "required": ["status"]
+    }"""
+    val inputJson = unsafeParse(inputJsonString)
+    // Invalid JSON in schema
+    val metadata = Map("status" -> ParamMetadata(schema = Some("not valid json {")))
+
+    val actualJson = MacroUtils.injectParamMetadata(inputJson, metadata)
+    // Should fall back to original property definition
+    val propType = actualJson.hcursor.downField("properties").downField("status").downField("type").as[String]
+    assert(propType == Right("string"))
+  }
+
 }

@@ -123,6 +123,67 @@ class ToolProcessorTest extends AnyFunSuite {
     assert(calculation.result == 8.0)
     assert(calculation.operation == "SUBTRACT")
   }
+
+  // Test @Param annotation with all fields (description, example, required, schema)
+  test("@Param annotation with all fields generates correct schema") {
+    // Create a separate server for this test to avoid interference
+    val paramTestServer = new FastMcpServer("ParamTestServer", "0.1.0")
+    paramTestServer.scanAnnotations[ParamMetadataTestTools.type]
+
+    // Get the tool definition
+    val toolDef = paramTestServer.toolManager.getToolDefinition("param-metadata-test")
+    assert(toolDef.isDefined, "Tool 'param-metadata-test' should be registered")
+
+    // Parse the schema JSON
+    val schemaStr = toolDef.get.inputSchema match {
+      case Right(s) => s
+      case Left(js) => js.toString
+    }
+    val schemaJson = io.circe.parser.parse(schemaStr).getOrElse(io.circe.Json.Null)
+
+    // Check username has description and examples
+    val usernameDesc = schemaJson.hcursor.downField("properties").downField("username").downField("description").as[String]
+    assert(usernameDesc == Right("The username for login"), s"Expected username description, got: $usernameDesc")
+
+    val usernameExamples = schemaJson.hcursor.downField("properties").downField("username").downField("examples").as[List[String]]
+    assert(usernameExamples == Right(List("john_doe")), s"Expected username examples, got: $usernameExamples")
+
+    // Check age has description and examples
+    val ageDesc = schemaJson.hcursor.downField("properties").downField("age").downField("description").as[String]
+    assert(ageDesc == Right("User's age in years"), s"Expected age description, got: $ageDesc")
+
+    val ageExamples = schemaJson.hcursor.downField("properties").downField("age").downField("examples").as[List[String]]
+    assert(ageExamples == Right(List("25")), s"Expected age examples, got: $ageExamples")
+
+    // Check required array - username should be required, age should not be
+    val required = schemaJson.hcursor.downField("required").as[List[String]].getOrElse(Nil)
+    assert(required.contains("username"), s"Required should contain 'username', got: $required")
+    assert(!required.contains("age"), s"Required should not contain 'age' (marked as required=false), got: $required")
+  }
+
+  // Test @Param annotation with custom schema override
+  test("@Param annotation with schema override replaces property definition") {
+    val schemaTestServer = new FastMcpServer("SchemaTestServer", "0.1.0")
+    schemaTestServer.scanAnnotations[CustomSchemaTestTools.type]
+
+    val toolDef = schemaTestServer.toolManager.getToolDefinition("custom-schema-test")
+    assert(toolDef.isDefined, "Tool 'custom-schema-test' should be registered")
+
+    val schemaStr = toolDef.get.inputSchema match {
+      case Right(s) => s
+      case Left(js) => js.toString
+    }
+    val schemaJson = io.circe.parser.parse(schemaStr).getOrElse(io.circe.Json.Null)
+
+    // Check that status uses the custom enum schema
+    val statusEnum = schemaJson.hcursor.downField("properties").downField("status").downField("enum").as[List[String]]
+    assert(statusEnum == Right(List("pending", "active", "completed", "cancelled")),
+      s"Expected custom enum schema, got: $statusEnum")
+
+    // Check that the custom description is preserved
+    val statusDesc = schemaJson.hcursor.downField("properties").downField("status").downField("description").as[String]
+    assert(statusDesc == Right("Current status of the task"), s"Expected custom description, got: $statusDesc")
+  }
 }
 
 /** Companion object for ToolProcessorTest containing the tools to be processed by annotations
@@ -185,4 +246,37 @@ object ToolProcessorTest {
     def apply(op: Operation, numbers: List[Double], result: Double): CalculationResult =
       new CalculationResult(op.toString, numbers, result)
   }
+}
+
+/** Test object for @Param annotation with all fields */
+object ParamMetadataTestTools {
+  @Tool(name = Some("param-metadata-test"))
+  def testTool(
+      @Param(
+        description = "The username for login",
+        example = Some("john_doe"),
+        required = true
+      )
+      username: String,
+      @Param(
+        description = "User's age in years",
+        example = Some("25"),
+        required = false
+      )
+      age: Option[Int]
+  ): String = s"Hello $username, you are ${age.getOrElse("unknown")} years old"
+}
+
+/** Test object for @Param annotation with custom schema override */
+object CustomSchemaTestTools {
+  @Tool(name = Some("custom-schema-test"))
+  def processTask(
+      @Param(description = "Task name")
+      name: String,
+      @Param(
+        description = "Current status of the task",
+        schema = Some("""{"type": "string", "enum": ["pending", "active", "completed", "cancelled"], "description": "Current status of the task"}""")
+      )
+      status: String
+  ): String = s"Task '$name' has status: $status"
 }
