@@ -301,13 +301,24 @@ class FastMcpServer(
 
       // Optionally advertise templates for the discovery endpoint
       if settings.exposeTemplatesEndpoint then
-        val javaTemplates = templateResources
-          .map(ResourceDefinition.toJava)
-          .collect { case template: McpSchema.ResourceTemplate => template }
+        val javaTemplateSpecs = templateResources
+          .map { resDef =>
+            val template = ResourceDefinition.toJava(resDef) match {
+              case t: McpSchema.ResourceTemplate => t
+              case _ => null
+            }
+            if (template != null) {
+              new McpServerFeatures.AsyncResourceTemplateSpecification(
+                template,
+                javaTemplateResourceReadHandler(resDef.uri)
+              )
+            } else null
+          }
+          .filter(_ != null)
           .asJava
-        serverBuilder.resourceTemplates(javaTemplates)
+        serverBuilder.resourceTemplates(javaTemplateSpecs)
         JSystem.err.println(
-          s"[FastMCPScala] Registered ${javaTemplates.size()} templates for discovery endpoint"
+          s"[FastMCPScala] Registered ${javaTemplateSpecs.size()} templates for discovery endpoint"
         )
     }
 
@@ -423,7 +434,7 @@ class FastMcpServer(
         resourceManager.getTemplateHandler(templatePattern) match
           case Some(handler) => {
             val templateManager =
-              new io.modelcontextprotocol.util.DeafaultMcpUriTemplateManagerFactory()
+              new io.modelcontextprotocol.util.DefaultMcpUriTemplateManagerFactory()
                 .create(templatePattern)
             val params =
               templateManager.extractVariableValues(requestedUri).asScala.toMap

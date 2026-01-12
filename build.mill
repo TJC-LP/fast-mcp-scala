@@ -7,7 +7,7 @@ import mill.scalalib.publish._
 import mill.scalalib.scalafmt._
 import contrib.scoverage.ScoverageModule
 
-val scala3Version = "3.7.2"
+val scala3Version = "3.7.4"
 val organization = "com.tjclp"
 
 /** Version constants - centralized for maintenance */
@@ -18,7 +18,7 @@ object Versions {
   val jackson = "2.20.0"
   val tapir = "1.11.42"
   val jsonSchemaCirce = "0.11.10"
-  val mcpSdk = "0.13.1"
+  val mcpSdk = "0.17.0"
   val scalaTest = "3.2.19"
   val scalaCheck = "1.18.1"
 }
