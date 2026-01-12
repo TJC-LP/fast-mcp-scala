@@ -8,6 +8,14 @@ import io.circe.JsonObject
 
 import com.tjclp.fastmcp.runtime.RefResolver
 
+/** Metadata extracted from @Param/@ToolParam annotations */
+case class ParamMetadata(
+    description: Option[String] = None,
+    example: Option[String] = None,
+    required: Boolean = true,
+    schema: Option[String] = None
+)
+
 /** Utility methods shared between the processor objects (Compressed)
   */
 private[macros] object MacroUtils:
@@ -373,6 +381,65 @@ private[macros] object MacroUtils:
       case _ =>
         // No properties object to inject into
         schemaJson
+    }
+  }
+
+  /** Injects all @Param metadata into JSON schema properties.
+    *   - description: Added to each property object
+    *   - examples: Added as array to each property object (JSON Schema format)
+    *   - required: Updates top-level "required" array
+    *   - schema: Replaces entire property definition with custom schema
+    */
+  def injectParamMetadata(schemaJson: Json, metadataMap: Map[String, ParamMetadata]): Json = {
+    import io.circe.parser.parse
+
+    if (metadataMap.isEmpty) return schemaJson
+
+    val cursor = schemaJson.hcursor
+
+    // 1. Get current required array (or empty)
+    val currentRequired = cursor.downField("required").as[List[String]].getOrElse(Nil).toSet
+
+    // 2. Compute new required array based on metadata
+    // Only modify required status for params that have metadata
+    val newRequired = metadataMap.foldLeft(currentRequired) { case (acc, (name, meta)) =>
+      if (meta.required) acc + name else acc - name
+    }
+
+    // 3. Update properties with description, examples, or custom schema
+    val maybeProps = cursor.downField("properties").focus
+    val newPropsJson = maybeProps.flatMap(_.asObject).map { propsObj =>
+      val updatedFields = propsObj.toMap.map { case (fieldName, fieldJson) =>
+        metadataMap.get(fieldName) match {
+          case Some(meta) =>
+            meta.schema match {
+              case Some(customSchema) =>
+                // Replace entire property with parsed custom schema
+                fieldName -> parse(customSchema).getOrElse(fieldJson)
+              case None =>
+                // Add description and examples to existing property
+                val baseObj = fieldJson.asObject.getOrElse(JsonObject.empty)
+                val withDesc = meta.description.fold(baseObj)(d =>
+                  baseObj.add("description", Json.fromString(d))
+                )
+                val withExamples = meta.example.fold(withDesc)(ex =>
+                  withDesc.add("examples", Json.arr(Json.fromString(ex)))
+                )
+                fieldName -> Json.fromJsonObject(withExamples)
+            }
+          case None => fieldName -> fieldJson
+        }
+      }
+      JsonObject.fromMap(updatedFields)
+    }
+
+    // 4. Rebuild schema with updated properties and required
+    schemaJson.mapObject { obj =>
+      val withProps = newPropsJson.fold(obj)(p => obj.add("properties", Json.fromJsonObject(p)))
+      if (newRequired.nonEmpty)
+        withProps.add("required", Json.fromValues(newRequired.toSeq.sorted.map(Json.fromString)))
+      else
+        withProps.remove("required")
     }
   }
 end MacroUtils
