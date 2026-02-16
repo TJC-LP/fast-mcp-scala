@@ -13,14 +13,14 @@ Features
 Add to your **`build.sbt`** (defaulting to **Scala 3.7.2**):
 
 ```scala 3 ignore
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.2.2"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.2.3"
 ```
 
 ## Quickstart
 
 ```scala 3 raw
 //> using scala 3.7.2
-//> using dep com.tjclp::fast-mcp-scala:0.2.2
+//> using dep com.tjclp::fast-mcp-scala:0.2.3
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.core.{Tool, Param, Prompt, Resource}
@@ -71,7 +71,7 @@ npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc
 You can also run examples directly from the command line:
 ```bash 
 scala-cli \
-    -e '//> using dep com.tjclp::fast-mcp-scala:0.2.2' \
+    -e '//> using dep com.tjclp::fast-mcp-scala:0.2.3' \
     --main-class com.tjclp.fastmcp.examples.AnnotatedServer
 ```
 
@@ -90,7 +90,7 @@ In Claude desktop, you can add the following to your `claude_desktop_config.json
       "command": "scala-cli",
       "args": [
         "-e",
-        "//> using dep com.tjclp::fast-mcp-scala:0.2.2",
+        "//> using dep com.tjclp::fast-mcp-scala:0.2.3",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]
@@ -174,7 +174,7 @@ def ivyDeps = Agg(
 You can use `fast-mcp-scala` in another scala‑cli project:
 ```scala 3 ignore
 //> using scala 3.7.2
-//> using dep com.tjclp::fast-mcp-scala:0.2.2
+//> using dep com.tjclp::fast-mcp-scala:0.2.3
 //> using options "-Xcheck-macros" "-experimental"
 ```
 
