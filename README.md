@@ -146,14 +146,14 @@ FastMCP-Scala uses [Mill](https://mill-build.org/) as its build tool.
 Then, in your consuming sbt project:
 
 ```scala 3 ignore
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.2.3-SNAPSHOT"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.2.4-SNAPSHOT"
 ```
 
 Or in Mill:
 
 ```scala 3 ignore
 def ivyDeps = Agg(
-  ivy"com.tjclp::fast-mcp-scala:0.2.3-SNAPSHOT"
+  ivy"com.tjclp::fast-mcp-scala:0.2.4-SNAPSHOT"
 )
 ```
 
