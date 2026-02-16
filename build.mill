@@ -1,5 +1,5 @@
 //| mvnDeps: ["com.lihaoyi::mill-contrib-scoverage:$MILL_VERSION"]
-// Mill 1.1.0-RC3 is used for improved Scala 3.7.x support and build performance.
+// Mill 1.1.0-RC3 is used for improved Scala 3.8.x support and build performance.
 // Version is controlled via .mill-version file.
 import mill._
 import mill.scalalib._
@@ -7,7 +7,7 @@ import mill.scalalib.publish._
 import mill.scalalib.scalafmt._
 import contrib.scoverage.ScoverageModule
 
-val scala3Version = "3.7.4"
+val scala3Version = "3.8.1"
 val organization = "com.tjclp"
 
 /** Version constants - centralized for maintenance */
@@ -18,7 +18,7 @@ object Versions {
   val jackson = "2.20.0"
   val tapir = "1.11.42"
   val jsonSchemaCirce = "0.11.10"
-  val mcpSdk = "0.17.0"
+  val mcpSdk = "0.17.2"
   val scalaTest = "3.2.19"
   val scalaCheck = "1.18.1"
 }
@@ -43,7 +43,7 @@ trait FastMCPModuleBase extends ScalaModule with ScalafmtModule with ScoverageMo
 
   // WartRemover compiler plugin for enhanced code quality
   def scalacPluginMvnDeps = Seq(
-    mvn"org.wartremover:::wartremover:3.4.1"
+    mvn"org.wartremover:::wartremover:3.5.5"
   )
 
   override def scalacOptions = Seq(

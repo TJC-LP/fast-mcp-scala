@@ -1,6 +1,7 @@
 package com.tjclp.fastmcp
 package server
 
+import java.io.FilterInputStream
 import java.lang.System as JSystem
 
 import scala.concurrent.ExecutionContext.Implicits.global
@@ -158,24 +159,45 @@ class FastMcpServer(
 
   // --- Public Listing Methods ---
 
-  /** Run the server with stdio transport
+  /** Run the server with stdio transport. Completes when stdin reaches EOF or the fiber is
+    * interrupted, allowing clean shutdown when an MCP client closes the subprocess stdin.
     */
   def runStdio(): ZIO[Any, Throwable, Unit] =
-    ZIO.scoped { // ⬅ drops the `Scope` requirement
-      ZIO.acquireRelease(
-        for {
-          jsonMapper <- ZIO.attempt(McpJsonMapper.createDefault())
-          provider <- ZIO.attempt(new StdioServerTransportProvider(jsonMapper))
-          _ <- ZIO.attempt(setupServer(provider))
-          _ <- ZIO.attempt(
-            JSystem.err.println(
-              s"[FastMCPScala] '$name' running on stdio – press Ctrl-C to stop."
+    ZIO.scoped {
+      for {
+        stdinClosed <- Promise.make[Nothing, Unit]
+        wrappedIn = new FilterInputStream(JSystem.in) {
+          override def read(): Int = {
+            val b = super.read()
+            if (b == -1) signalEof(stdinClosed)
+            b
+          }
+          override def read(buf: Array[Byte], off: Int, len: Int): Int = {
+            val n = super.read(buf, off, len)
+            if (n == -1) signalEof(stdinClosed)
+            n
+          }
+          private def signalEof(p: Promise[Nothing, Unit]): Unit =
+            Unsafe.unsafe { implicit unsafe =>
+              val _ = Runtime.default.unsafe.run(p.succeed(())).getOrThrowFiberFailure()
+            }
+        }
+        _ <- ZIO.acquireRelease(
+          for {
+            jsonMapper <- ZIO.attempt(McpJsonMapper.createDefault())
+            provider <- ZIO.attempt(
+              new StdioServerTransportProvider(jsonMapper, wrappedIn, JSystem.out)
             )
-          )
-        } yield ()
-      )(_ => ZIO.attempt(underlyingJavaServer.foreach(_.close())).orDie) *> ZIO.never.as(
-        ()
-      ) // ⬅ turn `Nothing` into `Unit`
+            _ <- ZIO.attempt(setupServer(provider))
+            _ <- ZIO.attempt(
+              JSystem.err.println(
+                s"[FastMCPScala] '$name' running on stdio – will exit on stdin EOF or Ctrl-C."
+              )
+            )
+          } yield ()
+        )(_ => ZIO.attempt(underlyingJavaServer.foreach(_.close())).orDie)
+        _ <- stdinClosed.await
+      } yield ()
     }
 
   /** Set up the Java MCP Server with the given transport provider
