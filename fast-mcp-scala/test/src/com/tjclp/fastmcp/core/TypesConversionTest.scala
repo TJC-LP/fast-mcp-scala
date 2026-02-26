@@ -26,8 +26,8 @@ class TypesConversionTest extends AnyFlatSpec with Matchers {
     j shouldBe a[McpSchema.TextContent]
     val jt = j.asInstanceOf[McpSchema.TextContent]
     jt.text() shouldBe "hello"
-    jt.audience().asScala.map(_.toString.toLowerCase) should contain allOf ("user", "assistant")
-    jt.priority() shouldBe Double.box(2.5)
+    jt.annotations().audience().asScala.map(_.toString.toLowerCase) should contain allOf ("user", "assistant")
+    jt.annotations().priority() shouldBe Double.box(2.5)
   }
 
   it should "set null for optional audience and priority when None" in {
@@ -35,8 +35,8 @@ class TypesConversionTest extends AnyFlatSpec with Matchers {
     val j = content.toJava
     val jt = j.asInstanceOf[McpSchema.TextContent]
     jt.text() shouldBe "hi"
-    jt.audience() shouldBe null
-    jt.priority() shouldBe null
+    jt.annotations().audience() shouldBe null
+    jt.annotations().priority() shouldBe null
   }
 
   "ImageContent.toJava" should "populate data, mimeType, audience, and priority fields" in {
@@ -45,8 +45,8 @@ class TypesConversionTest extends AnyFlatSpec with Matchers {
     val ji = j.asInstanceOf[McpSchema.ImageContent]
     ji.data() shouldBe "data64"
     ji.mimeType() shouldBe "image/png"
-    ji.audience().asScala.map(_.toString.toLowerCase) should contain("user")
-    ji.priority() shouldBe Double.box(0.5)
+    ji.annotations().audience().asScala.map(_.toString.toLowerCase) should contain("user")
+    ji.annotations().priority() shouldBe Double.box(0.5)
   }
 
   "EmbeddedResourceContent.toJava" should "produce TextResourceContents when text is defined" in {
@@ -79,8 +79,8 @@ class TypesConversionTest extends AnyFlatSpec with Matchers {
     val j = er.toJava
     val je = j.asInstanceOf[McpSchema.EmbeddedResource]
     je.resource() shouldBe a[McpSchema.TextResourceContents]
-    je.audience().asScala.map(_.toString.toLowerCase) should contain("assistant")
-    je.priority() shouldBe Double.box(1.0)
+    je.annotations().audience().asScala.map(_.toString.toLowerCase) should contain("assistant")
+    je.annotations().priority() shouldBe Double.box(1.0)
   }
 
   "PromptDefinition.toJava" should "convert name, description, and empty arguments when None" in {

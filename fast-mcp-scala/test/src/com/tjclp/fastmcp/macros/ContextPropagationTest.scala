@@ -3,6 +3,7 @@ package macros
 
 import java.util.concurrent.atomic.AtomicReference
 
+import io.modelcontextprotocol.common.McpTransportContext
 import io.modelcontextprotocol.json.TypeRef
 import io.modelcontextprotocol.server.McpAsyncServerExchange
 import io.modelcontextprotocol.spec.McpSchema
@@ -147,6 +148,7 @@ class NoopLoggableSession extends io.modelcontextprotocol.spec.McpLoggableSessio
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
 class MockServerExchange(clientInfo: McpSchema.Implementation)
     extends McpAsyncServerExchange(
+      "test-session",
       new NoopLoggableSession(),
       new McpSchema.ClientCapabilities(
         null, // experimental
@@ -154,7 +156,8 @@ class MockServerExchange(clientInfo: McpSchema.Implementation)
         new McpSchema.ClientCapabilities.Sampling(), // sampling
         new McpSchema.ClientCapabilities.Elicitation() // elicitation
       ),
-      clientInfo
+      clientInfo,
+      McpTransportContext.EMPTY
     ):
   override def getClientInfo(): McpSchema.Implementation = clientInfo
 

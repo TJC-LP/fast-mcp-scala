@@ -10,7 +10,7 @@ import scala.util.Failure
 import scala.util.Success
 
 import io.modelcontextprotocol.common.McpTransportContext
-import io.modelcontextprotocol.json.McpJsonMapper
+import io.modelcontextprotocol.json.McpJsonDefaults
 import io.modelcontextprotocol.server.McpAsyncServer
 import io.modelcontextprotocol.server.McpAsyncServerExchange
 import io.modelcontextprotocol.server.McpServer
@@ -191,7 +191,7 @@ class FastMcpServer(
         }
         _ <- ZIO.acquireRelease(
           for {
-            jsonMapper <- ZIO.attempt(McpJsonMapper.createDefault())
+            jsonMapper <- ZIO.attempt(McpJsonDefaults.getMapper())
             provider <- ZIO.attempt(
               new StdioServerTransportProvider(jsonMapper, wrappedIn, JSystem.out)
             )
@@ -215,7 +215,7 @@ class FastMcpServer(
   def runHttp(): ZIO[Any, Throwable, Unit] =
     ZIO.scoped {
       for {
-        jsonMapper <- ZIO.attempt(McpJsonMapper.createDefault())
+        jsonMapper <- ZIO.attempt(McpJsonDefaults.getMapper())
         transport = new ZioHttpStatelessTransport(jsonMapper, settings.httpEndpoint)
         _ <- ZIO.attempt(setupStatelessServer(transport))
         _ <- ZIO.attempt(
@@ -887,7 +887,7 @@ class FastMcpServer(
         val ann = new McpSchema.Annotations(null, null)
         List(new McpSchema.TextContent(ann, other.toString)).asJava
     }
-    new McpSchema.CallToolResult(contentList, false)
+    McpSchema.CallToolResult.builder().content(contentList).isError(false).build()
   }
 
 end FastMcpServer

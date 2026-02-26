@@ -31,7 +31,12 @@ class FastMcpServerZioMonoSpec extends AnyFlatSpec with Matchers {
   "zioToMonoWithErrorHandling" should "wrap success into CallToolResult with isError=false" in {
     val mono: Mono[McpSchema.CallToolResult] = server.zioToMonoWithErrorHandling[Int](
       ZIO.succeed(7),
-      _ => new McpSchema.CallToolResult("seven", false)
+      _ =>
+        McpSchema.CallToolResult
+          .builder()
+          .content(java.util.List.of(new McpSchema.TextContent("seven")))
+          .isError(false)
+          .build()
     )
     val result = mono.block()
     result.isError shouldBe false
@@ -40,7 +45,12 @@ class FastMcpServerZioMonoSpec extends AnyFlatSpec with Matchers {
   it should "convert ZIO failures into CallToolResult with isError=true" in {
     val mono: Mono[McpSchema.CallToolResult] = server.zioToMonoWithErrorHandling[Int](
       ZIO.fail(new IllegalArgumentException("bad args")),
-      _ => new McpSchema.CallToolResult("dummy", false)
+      _ =>
+        McpSchema.CallToolResult
+          .builder()
+          .content(java.util.List.of(new McpSchema.TextContent("dummy")))
+          .isError(false)
+          .build()
     )
     val result = mono.block()
     result.isError shouldBe true

@@ -19,7 +19,7 @@ object Versions {
   val tapir = "1.11.42"
   val jsonSchemaCirce = "0.11.10"
   val zioHttp = "3.4.0"
-  val mcpSdk = "0.17.2"
+  val mcpSdk = "1.0.0"
   val scalaTest = "3.2.19"
   val scalaCheck = "1.18.1"
 }
@@ -129,8 +129,9 @@ object `fast-mcp-scala` extends FastMCPModule {
     mvn"com.softwaremill.sttp.apispec::jsonschema-circe:${Versions.jsonSchemaCirce}",
     // ZIO HTTP for stateless HTTP transport
     mvn"dev.zio::zio-http:${Versions.zioHttp}",
-    // MCP SDK (Java library - note single colon)
-    mvn"io.modelcontextprotocol.sdk:mcp:${Versions.mcpSdk}"
+    // MCP SDK (Java library - split into core + jackson2 for Jackson 2.x compat)
+    mvn"io.modelcontextprotocol.sdk:mcp-core:${Versions.mcpSdk}",
+    mvn"io.modelcontextprotocol.sdk:mcp-json-jackson2:${Versions.mcpSdk}"
   )
 
   override def mainClass = Some("fastmcp.FastMCPMain")
