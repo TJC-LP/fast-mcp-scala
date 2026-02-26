@@ -18,6 +18,7 @@ object Versions {
   val jackson = "2.20.0"
   val tapir = "1.11.42"
   val jsonSchemaCirce = "0.11.10"
+  val zioHttp = "3.4.0"
   val mcpSdk = "0.17.2"
   val scalaTest = "3.2.19"
   val scalaCheck = "1.18.1"
@@ -126,6 +127,8 @@ object `fast-mcp-scala` extends FastMCPModule {
     mvn"com.softwaremill.sttp.tapir::tapir-apispec-docs:${Versions.tapir}",
     mvn"com.softwaremill.sttp.tapir::tapir-json-circe:${Versions.tapir}",
     mvn"com.softwaremill.sttp.apispec::jsonschema-circe:${Versions.jsonSchemaCirce}",
+    // ZIO HTTP for stateless HTTP transport
+    mvn"dev.zio::zio-http:${Versions.zioHttp}",
     // MCP SDK (Java library - note single colon)
     mvn"io.modelcontextprotocol.sdk:mcp:${Versions.mcpSdk}"
   )
