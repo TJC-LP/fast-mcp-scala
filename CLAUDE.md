@@ -56,8 +56,11 @@ fast-mcp-scala/
 │   │   ├── runtime/           # Runtime utilities (RefResolver)
 │   │   ├── server/            # Server implementation
 │   │   │   ├── FastMcpServer.scala       # Main server class
+│   │   │   ├── FastMcpServerSettings.scala # Server configuration
 │   │   │   ├── McpContext.scala          # Request context
-│   │   │   └── manager/                  # Tool/Resource/Prompt managers
+│   │   │   ├── manager/                  # Tool/Resource/Prompt managers
+│   │   │   └── transport/               # Transport implementations
+│   │   │       └── ZioHttpStatelessTransport.scala  # Stateless HTTP via zio-http
 │   │   └── examples/          # Example servers
 │   └── test/src/              # Test sources (mirrors src structure)
 └── scripts/                   # Example scripts for scala-cli
@@ -88,11 +91,20 @@ The main entry point is `scanAnnotations[T]` which:
 2. Generates JSON schemas for parameters
 3. Registers handlers with the appropriate managers
 
+### Transports
+
+FastMCP-Scala supports two transport modes:
+- **Stdio** (`runStdio()`) — communicates via stdin/stdout, used by MCP clients that launch the server as a subprocess
+- **Stateless HTTP** (`runHttp()`) — each POST to the `/mcp` endpoint is independently dispatched via `ZioHttpStatelessTransport`; no session state between requests
+
+HTTP settings are configured via `FastMcpServerSettings` (`host`, `port`, `httpEndpoint`).
+
 ### Java SDK Interop
 
-FastMCP-Scala wraps the Java MCP SDK (`io.modelcontextprotocol:mcp`). Key interop points:
+FastMCP-Scala wraps the Java MCP SDK 1.0.0 (`io.modelcontextprotocol.sdk:mcp-core`). Key interop points:
 - `Types.scala` - Scala ADTs with `toJava` methods
-- `FastMcpServer.scala` - Bridges ZIO effects to Reactor Mono
+- `FastMcpServer.scala` - Bridges ZIO effects to Reactor Mono; has both stateful (`setupServer`) and stateless (`setupStatelessServer`) setup paths
+- `McpContext.scala` - Wraps either `McpAsyncServerExchange` (stdio) or `McpTransportContext` (HTTP)
 - Use `@SuppressWarnings(Array("org.wartremover.warts.Null"))` at Java boundaries
 
 ## Code Quality
@@ -119,6 +131,7 @@ Tests are in `fast-mcp-scala/test/src/`. Key test classes:
 - `ToolProcessorTest` - Integration tests for @Tool processing
 - `JsonSchemaMacroTest` - Schema generation tests
 - `ContextPropagationTest` - Context injection tests
+- `ZioHttpStatelessTransportTest` - HTTP transport integration tests (full MCP lifecycle)
 
 Run all tests: `./mill fast-mcp-scala.test`
 
@@ -160,9 +173,10 @@ Then in your project use version `0.2.4-SNAPSHOT`.
 
 Key dependencies (versions in `build.mill`):
 - ZIO 2.1.20 - Effect system
+- ZIO HTTP 3.4.0 - Stateless HTTP transport
 - Tapir 1.11.42 - Schema derivation
 - Circe - JSON handling
-- Java MCP SDK 0.13.1 - Protocol implementation
+- Java MCP SDK 1.0.0 - Protocol implementation (`mcp-core` + `mcp-json-jackson2`)
 - ScalaTest 3.2.19 - Testing
 
 ## Troubleshooting

@@ -6,7 +6,8 @@ Features
 - ZIO‑based effect handling and async support
 - Annotation‑driven API (`@Tool`, `@Resource`, `@Prompt`)
 - Automatic JSON Schema & handler generation via Scala 3 macros
-- Seamless integration with the Java MCP SDK
+- **Stdio and stateless HTTP transports** — run with `runStdio()` or `runHttp()`
+- Seamless integration with the Java MCP SDK 1.0.0
 
 ## Installation
 
@@ -75,9 +76,61 @@ scala-cli \
     --main-class com.tjclp.fastmcp.examples.AnnotatedServer
 ```
 
-> [!WARNING]
-> As of now, only STDIO is supported. We plan to support streamable http in the future.
+### HTTP Transport
 
+FastMCP-Scala also supports stateless HTTP transport. Swap `runStdio()` for `runHttp()`:
+
+```scala 3 raw
+//> using scala 3.7.2
+//> using dep com.tjclp::fast-mcp-scala:0.2.3
+//> using options "-Xcheck-macros" "-experimental"
+
+import com.tjclp.fastmcp.core.{Tool, Param, Resource, Prompt, Message, Role, TextContent}
+import com.tjclp.fastmcp.server.{FastMcpServer, FastMcpServerSettings}
+import com.tjclp.fastmcp.macros.RegistrationMacro.*
+import zio.*
+
+object HttpExample:
+  @Tool(name = Some("greet"), description = Some("Greet someone by name"))
+  def greet(@Param("Name to greet") name: String): String =
+    s"Hello, $name!"
+
+object HttpServer extends ZIOAppDefault:
+  override def run =
+    val server = FastMcpServer(
+      name = "HttpExample",
+      version = "0.1.0",
+      settings = FastMcpServerSettings(port = 8090)
+    )
+    for
+      _ <- ZIO.attempt(server.scanAnnotations[HttpExample.type])
+      _ <- server.runHttp()
+    yield ()
+```
+
+Then test with curl:
+
+```bash
+# Initialize
+curl -s -X POST http://localhost:8090/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl-test","version":"1.0"}}}'
+
+# Call tool
+curl -s -X POST http://localhost:8090/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"greet","arguments":{"name":"World"}}}'
+```
+
+The HTTP transport settings are configured via `FastMcpServerSettings`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `host` | `0.0.0.0` | Bind address |
+| `port` | `8000` | Listen port |
+| `httpEndpoint` | `/mcp` | JSON-RPC endpoint path |
 
 ### Integration with Claude Desktop
 
