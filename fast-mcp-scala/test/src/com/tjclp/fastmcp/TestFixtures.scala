@@ -1,5 +1,6 @@
 package com.tjclp.fastmcp
 
+import io.modelcontextprotocol.common.McpTransportContext
 import io.modelcontextprotocol.json.TypeRef
 import io.modelcontextprotocol.server.McpAsyncServerExchange
 import io.modelcontextprotocol.spec.McpLoggableSession
@@ -32,6 +33,7 @@ object TestFixtures {
   /** Mock implementation of McpAsyncServerExchange for testing contexts. */
   class MockServerExchange(clientInfo: McpSchema.Implementation)
       extends McpAsyncServerExchange(
+        "test-session",
         new NoopLoggableSession(),
         new McpSchema.ClientCapabilities(
           null,
@@ -39,7 +41,8 @@ object TestFixtures {
           new McpSchema.ClientCapabilities.Sampling(),
           new McpSchema.ClientCapabilities.Elicitation()
         ),
-        clientInfo
+        clientInfo,
+        McpTransportContext.EMPTY
       ) {
     override def getClientInfo(): McpSchema.Implementation = clientInfo
 

@@ -2,7 +2,7 @@ package com.tjclp.fastmcp.core
 
 import scala.jdk.CollectionConverters.*
 
-import io.modelcontextprotocol.json.McpJsonMapper
+import io.modelcontextprotocol.json.McpJsonDefaults
 import io.modelcontextprotocol.spec.McpSchema
 import io.modelcontextprotocol.spec.McpSchema.Tool
 import zio.json.* // For Java/Scala collection conversions
@@ -48,7 +48,7 @@ object ToolDefinition:
         baseToolBuilder.inputSchema(mcpSchema)
       case Right(stringSchema) =>
         // Parse string schema to JsonSchema using McpJsonMapper
-        val jsonMapper = McpJsonMapper.createDefault()
+        val jsonMapper = McpJsonDefaults.getMapper()
         val jsonSchema = jsonMapper.readValue(stringSchema, classOf[McpSchema.JsonSchema])
         baseToolBuilder.inputSchema(jsonSchema)
     }

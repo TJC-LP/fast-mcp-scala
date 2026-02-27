@@ -7,6 +7,7 @@ case class FastMcpServerSettings(
     logLevel: String = "INFO",
     host: String = "0.0.0.0",
     port: Int = 8000,
+    httpEndpoint: String = "/mcp",
     warnOnDuplicateResources: Boolean = true,
     warnOnDuplicateTools: Boolean = true,
     warnOnDuplicatePrompts: Boolean = true,
