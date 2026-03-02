@@ -14,5 +14,8 @@ case class FastMcpServerSettings(
     dependencies: List[String] = List.empty,
     // If true, advertise templates via the resources/templates/list endpoint.
     // If false, rely on clients that derive templates from resource URIs containing `{}`.
-    exposeTemplatesEndpoint: Boolean = false
+    exposeTemplatesEndpoint: Boolean = false,
+    // Streamable HTTP transport settings
+    keepAliveInterval: Option[java.time.Duration] = None,
+    disallowDelete: Boolean = false
 )
