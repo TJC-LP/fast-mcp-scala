@@ -21,6 +21,7 @@ import io.modelcontextprotocol.server.transport.StdioServerTransportProvider
 import io.modelcontextprotocol.spec.McpSchema
 import io.modelcontextprotocol.spec.McpServerTransportProvider
 import io.modelcontextprotocol.spec.McpStatelessServerTransport
+import io.modelcontextprotocol.spec.McpStreamableServerTransportProvider
 import reactor.core.publisher.Mono
 import zio.*
 import zio.http.Server as ZHttpServer
@@ -28,6 +29,7 @@ import zio.http.Server as ZHttpServer
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.manager.*
 import com.tjclp.fastmcp.server.transport.ZioHttpStatelessTransport
+import com.tjclp.fastmcp.server.transport.ZioHttpStreamableTransportProvider
 
 /** Main server class for FastMCP-Scala
   *
@@ -162,6 +164,7 @@ class FastMcpServer(
     transport.toLowerCase match
       case "stdio" => runStdio()
       case "http" => runHttp()
+      case "streamable-http" => runStreamableHttp()
       case _ => ZIO.fail(new IllegalArgumentException(s"Unsupported transport: $transport"))
 
   // --- Public Listing Methods ---
@@ -234,14 +237,70 @@ class FastMcpServer(
       } yield ()
     }
 
+  /** Run the server with Streamable HTTP transport via zio-http.
+    *
+    * Provides full MCP Streamable HTTP support: session management via `mcp-session-id` header, SSE
+    * streaming for server-to-client messages, and POST/GET/DELETE endpoint handling.
+    */
+  def runStreamableHttp(): ZIO[Any, Throwable, Unit] =
+    ZIO.scoped {
+      for {
+        jsonMapper <- ZIO.attempt(McpJsonDefaults.getMapper())
+        provider = new ZioHttpStreamableTransportProvider(
+          jsonMapper,
+          settings.httpEndpoint,
+          settings.disallowDelete,
+          settings.keepAliveInterval
+        )
+        _ <- ZIO.attempt(setupStreamableServer(provider))
+        _ <- ZIO.attempt(
+          JSystem.err.println(
+            s"[FastMCPScala] '$name' running streamable HTTP on http://${settings.host}:${settings.port}${settings.httpEndpoint}"
+          )
+        )
+        _ <- ZIO.acquireRelease(ZIO.unit)(_ =>
+          ZIO.attempt(underlyingJavaServer.foreach(_.close())).orDie
+        )
+        _ <- ZHttpServer
+          .serve(provider.routes)
+          .provideLayer(
+            ZHttpServer.defaultWith(config => config.binding(settings.host, settings.port))
+          )
+      } yield ()
+    }
+
   /** Set up the Java MCP Server with the given transport provider
     */
   def setupServer(transportProvider: McpServerTransportProvider): Unit =
-    // Use McpServer.async builder
-    // Help Scala 3 infer the F-bounded generic of AsyncSpecification
     val serverBuilder: McpServer.AsyncSpecification[?] = McpServer
       .async(transportProvider)
-      .serverInfo(name, version)
+    configureServerBuilder(serverBuilder)
+    underlyingJavaServer = Some(serverBuilder.build())
+    JSystem.err.println(s"[FastMCPScala] MCP Server '$name' configured.")
+
+  /** Set up a streamable MCP server for Streamable HTTP transport.
+    *
+    * Uses the SDK's streamable builder which supports session management, SSE streaming, and
+    * bidirectional communication via [[McpStreamableServerTransportProvider]].
+    */
+  def setupStreamableServer(
+      transportProvider: McpStreamableServerTransportProvider
+  ): Unit =
+    val serverBuilder: McpServer.AsyncSpecification[?] = McpServer
+      .async(transportProvider)
+    configureServerBuilder(serverBuilder)
+    underlyingJavaServer = Some(serverBuilder.build())
+    JSystem.err.println(s"[FastMCPScala] Streamable MCP Server '$name' configured.")
+
+  /** Shared builder configuration for tool/resource/prompt registration.
+    *
+    * Used by both [[setupServer]] (stdio) and [[setupStreamableServer]] (streamable HTTP). Both use
+    * [[McpAsyncServerExchange]]-based handlers.
+    */
+  private def configureServerBuilder(
+      serverBuilder: McpServer.AsyncSpecification[?]
+  ): Unit =
+    serverBuilder.serverInfo(name, version)
 
     // --- Capabilities Setup ---
     serverBuilder.capabilities(buildCapabilities())
@@ -334,15 +393,8 @@ class FastMcpServer(
         javaPrompt,
         javaPromptHandler(promptDef.name)
       )
-      serverBuilder.prompts(
-        promptSpec
-      ) // Note: .prompts() might take a list or varargs depending on the Java library version
+      serverBuilder.prompts(promptSpec)
     }
-
-    // --- Build Server ---
-    // Build the McpAsyncServer
-    underlyingJavaServer = Some(serverBuilder.build())
-    JSystem.err.println(s"[FastMCPScala] MCP Server '$name' configured.")
 
   /** Set up a stateless MCP server for HTTP transport.
     *
@@ -904,6 +956,15 @@ object FastMcpServer:
       settings: FastMcpServerSettings = FastMcpServerSettings()
   ): ZIO[Any, Throwable, Unit] =
     ZIO.succeed(apply(name, version, settings)).flatMap(_.runHttp())
+
+  /** Create a new FastMCPScala instance and run it with Streamable HTTP transport
+    */
+  def streamableHttp(
+      name: String = "FastMCPScala",
+      version: String = "0.1.0",
+      settings: FastMcpServerSettings = FastMcpServerSettings()
+  ): ZIO[Any, Throwable, Unit] =
+    ZIO.succeed(apply(name, version, settings)).flatMap(_.runStreamableHttp())
 
   /** Create a new FastMCPScala instance and run it with stdio transport
     */
