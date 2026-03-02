@@ -60,7 +60,8 @@ fast-mcp-scala/
 │   │   │   ├── McpContext.scala          # Request context
 │   │   │   ├── manager/                  # Tool/Resource/Prompt managers
 │   │   │   └── transport/               # Transport implementations
-│   │   │       └── ZioHttpStatelessTransport.scala  # Stateless HTTP via zio-http
+│   │   │       ├── ZioHttpStatelessTransport.scala           # Stateless HTTP
+│   │   │       └── ZioHttpStreamableTransportProvider.scala  # Streamable HTTP (sessions + SSE)
 │   │   └── examples/          # Example servers
 │   └── test/src/              # Test sources (mirrors src structure)
 └── scripts/                   # Example scripts for scala-cli
@@ -95,9 +96,9 @@ The main entry point is `scanAnnotations[T]` which:
 
 FastMCP-Scala supports two transport modes:
 - **Stdio** (`runStdio()`) — communicates via stdin/stdout, used by MCP clients that launch the server as a subprocess
-- **Stateless HTTP** (`runHttp()`) — each POST to the `/mcp` endpoint is independently dispatched via `ZioHttpStatelessTransport`; no session state between requests
+- **HTTP** (`runHttp()`) — by default uses streamable transport (sessions + SSE). Set `stateless = true` in `FastMcpServerSettings` for lightweight stateless mode (no sessions, no SSE)
 
-HTTP settings are configured via `FastMcpServerSettings` (`host`, `port`, `httpEndpoint`).
+HTTP settings are configured via `FastMcpServerSettings` (`host`, `port`, `httpEndpoint`, `stateless`, `keepAliveInterval`, `disallowDelete`).
 
 ### Java SDK Interop
 

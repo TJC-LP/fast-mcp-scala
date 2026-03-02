@@ -45,7 +45,7 @@ object HttpExampleServer extends ZIOAppDefault:
     val server = FastMcpServer(
       name = "HttpExample",
       version = "0.1.0",
-      settings = FastMcpServerSettings(port = 8090)
+      settings = FastMcpServerSettings(port = 8090, stateless = true)
     )
     for
       _ <- ZIO.attempt(server.scanAnnotations[HttpExampleServer.type])

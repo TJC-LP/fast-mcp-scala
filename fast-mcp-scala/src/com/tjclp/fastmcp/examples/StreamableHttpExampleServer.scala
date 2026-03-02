@@ -65,5 +65,5 @@ object StreamableHttpExampleServer extends ZIOAppDefault:
     )
     for
       _ <- ZIO.attempt(server.scanAnnotations[StreamableHttpExampleServer.type])
-      _ <- server.runStreamableHttp()
+      _ <- server.runHttp()
     yield ()

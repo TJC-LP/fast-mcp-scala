@@ -164,7 +164,6 @@ class FastMcpServer(
     transport.toLowerCase match
       case "stdio" => runStdio()
       case "http" => runHttp()
-      case "streamable-http" => runStreamableHttp()
       case _ => ZIO.fail(new IllegalArgumentException(s"Unsupported transport: $transport"))
 
   // --- Public Listing Methods ---
@@ -210,12 +209,21 @@ class FastMcpServer(
       } yield ()
     }
 
+  /** Run the server with HTTP transport via zio-http.
+    *
+    * When `settings.stateless` is true, uses stateless transport (no sessions, no SSE). When false
+    * (default), uses streamable transport with session management and SSE streaming.
+    */
+  def runHttp(): ZIO[Any, Throwable, Unit] =
+    if settings.stateless then runStatelessHttp()
+    else runStreamableHttp()
+
   /** Run the server with stateless HTTP transport via zio-http.
     *
     * Each HTTP POST to the configured endpoint is independently dispatched to the Java SDK's
     * McpStatelessServerHandler. No session state is maintained between requests.
     */
-  def runHttp(): ZIO[Any, Throwable, Unit] =
+  private def runStatelessHttp(): ZIO[Any, Throwable, Unit] =
     ZIO.scoped {
       for {
         jsonMapper <- ZIO.attempt(McpJsonDefaults.getMapper())
@@ -223,7 +231,7 @@ class FastMcpServer(
         _ <- ZIO.attempt(setupStatelessServer(transport))
         _ <- ZIO.attempt(
           JSystem.err.println(
-            s"[FastMCPScala] '$name' running on http://${settings.host}:${settings.port}${settings.httpEndpoint}"
+            s"[FastMCPScala] '$name' running stateless HTTP on http://${settings.host}:${settings.port}${settings.httpEndpoint}"
           )
         )
         _ <- ZIO.acquireRelease(ZIO.unit)(_ =>
@@ -242,7 +250,7 @@ class FastMcpServer(
     * Provides full MCP Streamable HTTP support: session management via `mcp-session-id` header, SSE
     * streaming for server-to-client messages, and POST/GET/DELETE endpoint handling.
     */
-  def runStreamableHttp(): ZIO[Any, Throwable, Unit] =
+  private def runStreamableHttp(): ZIO[Any, Throwable, Unit] =
     ZIO.scoped {
       for {
         jsonMapper <- ZIO.attempt(McpJsonDefaults.getMapper())
@@ -283,7 +291,7 @@ class FastMcpServer(
     * Uses the SDK's streamable builder which supports session management, SSE streaming, and
     * bidirectional communication via [[McpStreamableServerTransportProvider]].
     */
-  def setupStreamableServer(
+  private[server] def setupStreamableServer(
       transportProvider: McpStreamableServerTransportProvider
   ): Unit =
     val serverBuilder: McpServer.AsyncSpecification[?] = McpServer
@@ -401,7 +409,7 @@ class FastMcpServer(
     * Uses the SDK's stateless builder which takes [[McpTransportContext]] instead of
     * [[McpAsyncServerExchange]] in handler BiFunction signatures.
     */
-  def setupStatelessServer(
+  private[server] def setupStatelessServer(
       transport: McpStatelessServerTransport
   ): Unit =
     val serverBuilder = McpServer
@@ -948,7 +956,10 @@ end FastMcpServer
   */
 object FastMcpServer:
 
-  /** Create a new FastMCPScala instance and run it with stateless HTTP transport
+  /** Create a new FastMCPScala instance and run it with HTTP transport.
+    *
+    * Uses streamable transport (sessions + SSE) by default. Set `settings.stateless = true` for
+    * stateless transport (no sessions, no SSE).
     */
   def http(
       name: String = "FastMCPScala",
@@ -956,15 +967,6 @@ object FastMcpServer:
       settings: FastMcpServerSettings = FastMcpServerSettings()
   ): ZIO[Any, Throwable, Unit] =
     ZIO.succeed(apply(name, version, settings)).flatMap(_.runHttp())
-
-  /** Create a new FastMCPScala instance and run it with Streamable HTTP transport
-    */
-  def streamableHttp(
-      name: String = "FastMCPScala",
-      version: String = "0.1.0",
-      settings: FastMcpServerSettings = FastMcpServerSettings()
-  ): ZIO[Any, Throwable, Unit] =
-    ZIO.succeed(apply(name, version, settings)).flatMap(_.runStreamableHttp())
 
   /** Create a new FastMCPScala instance and run it with stdio transport
     */
