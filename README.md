@@ -6,7 +6,7 @@ Features
 - ZIO‑based effect handling and async support
 - Annotation‑driven API (`@Tool`, `@Resource`, `@Prompt`)
 - Automatic JSON Schema & handler generation via Scala 3 macros
-- **Stdio and stateless HTTP transports** — run with `runStdio()` or `runHttp()`
+- **Two transports** — `runStdio()` or `runHttp()` (streamable by default, `stateless = true` for lightweight mode)
 - Seamless integration with the Java MCP SDK 1.0.0
 
 ## Installation
@@ -76,9 +76,61 @@ scala-cli \
     --main-class com.tjclp.fastmcp.examples.AnnotatedServer
 ```
 
-### HTTP Transport
+### HTTP Transport (Recommended for Remote)
 
-FastMCP-Scala also supports stateless HTTP transport. Swap `runStdio()` for `runHttp()`:
+FastMCP-Scala supports the full MCP Streamable HTTP spec with session management and SSE streaming. Just call `runHttp()`:
+
+```scala 3 raw
+//> using scala 3.7.2
+//> using dep com.tjclp::fast-mcp-scala:0.2.3
+//> using options "-Xcheck-macros" "-experimental"
+
+import com.tjclp.fastmcp.core.{Tool, Param}
+import com.tjclp.fastmcp.server.{FastMcpServer, FastMcpServerSettings}
+import com.tjclp.fastmcp.macros.RegistrationMacro.*
+import zio.*
+
+object StreamableExample:
+  @Tool(name = Some("greet"), description = Some("Greet someone by name"))
+  def greet(@Param("Name to greet") name: String): String =
+    s"Hello, $name!"
+
+object StreamableServer extends ZIOAppDefault:
+  override def run =
+    val server = FastMcpServer(
+      name = "StreamableExample",
+      version = "0.1.0",
+      settings = FastMcpServerSettings(port = 8090)
+    )
+    for
+      _ <- ZIO.attempt(server.scanAnnotations[StreamableExample.type])
+      _ <- server.runHttp()
+    yield ()
+```
+
+Then test with curl:
+
+```bash
+# Initialize (returns mcp-session-id header)
+curl -s -D- -X POST http://localhost:8090/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
+
+# Call tool (SSE stream response)
+curl -N -X POST http://localhost:8090/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "mcp-session-id: <session-id>" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"greet","arguments":{"name":"World"}}}'
+
+# Delete session
+curl -X DELETE http://localhost:8090/mcp -H "mcp-session-id: <session-id>"
+```
+
+### Stateless HTTP Transport
+
+For lightweight servers that don't need sessions or SSE, set `stateless = true`:
 
 ```scala 3 raw
 //> using scala 3.7.2
@@ -100,7 +152,7 @@ object HttpServer extends ZIOAppDefault:
     val server = FastMcpServer(
       name = "HttpExample",
       version = "0.1.0",
-      settings = FastMcpServerSettings(port = 8090)
+      settings = FastMcpServerSettings(port = 8090, stateless = true)
     )
     for
       _ <- ZIO.attempt(server.scanAnnotations[HttpExample.type])
@@ -131,6 +183,7 @@ The HTTP transport settings are configured via `FastMcpServerSettings`:
 | `host` | `0.0.0.0` | Bind address |
 | `port` | `8000` | Listen port |
 | `httpEndpoint` | `/mcp` | JSON-RPC endpoint path |
+| `stateless` | `false` | When true, disables sessions and SSE (stateless mode) |
 
 ### Integration with Claude Desktop
 

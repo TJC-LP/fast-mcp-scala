@@ -15,7 +15,10 @@ case class FastMcpServerSettings(
     // If true, advertise templates via the resources/templates/list endpoint.
     // If false, rely on clients that derive templates from resource URIs containing `{}`.
     exposeTemplatesEndpoint: Boolean = false,
-    // Streamable HTTP transport settings
+    // HTTP transport settings
+    // When true, runHttp() uses the stateless transport (no sessions, no SSE).
+    // When false (default), runHttp() uses the streamable transport (sessions + SSE).
+    stateless: Boolean = false,
     keepAliveInterval: Option[java.time.Duration] = None,
     disallowDelete: Boolean = false
 )
