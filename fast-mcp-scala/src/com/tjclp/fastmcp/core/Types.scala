@@ -9,6 +9,35 @@ import zio.json.* // For Java/Scala collection conversions
 
 // Define basic types mirroring MCP Schema
 
+// --- Tool Annotations (MCP behavioral hints for clients) ---
+
+/** Scala representation of MCP Tool Annotations.
+  *
+  * All hint fields are Option[Boolean] -- None means the hint is not specified, which maps to null
+  * in the Java SDK (nullable Boolean).
+  */
+case class ToolAnnotations(
+    title: Option[String] = None,
+    readOnlyHint: Option[Boolean] = None,
+    destructiveHint: Option[Boolean] = None,
+    idempotentHint: Option[Boolean] = None,
+    openWorldHint: Option[Boolean] = None,
+    returnDirect: Option[Boolean] = None
+)
+
+@SuppressWarnings(Array("org.wartremover.warts.Null"))
+object ToolAnnotations:
+
+  def toJava(ta: ToolAnnotations): McpSchema.ToolAnnotations =
+    new McpSchema.ToolAnnotations(
+      ta.title.orNull,
+      ta.readOnlyHint.map(Boolean.box).orNull,
+      ta.destructiveHint.map(Boolean.box).orNull,
+      ta.idempotentHint.map(Boolean.box).orNull,
+      ta.openWorldHint.map(Boolean.box).orNull,
+      ta.returnDirect.map(Boolean.box).orNull
+    )
+
 // --- Tool Related Types ---
 // For now we'll use a simpler ToolExample representation
 case class ToolExample(
@@ -33,7 +62,8 @@ case class ToolDefinition(
     deprecated: Boolean = false,
     deprecationMessage: Option[String] = None,
     tags: List[String] = List.empty,
-    timeoutMillis: Option[Long] = None
+    timeoutMillis: Option[Long] = None,
+    annotations: Option[ToolAnnotations] = None
 )
 
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
@@ -42,12 +72,17 @@ object ToolDefinition:
   // Helper to convert to Java SDK Tool
   def toJava(td: ToolDefinition): McpSchema.Tool =
     val baseToolBuilder = Tool.Builder().name(td.name).description(td.description.orNull)
+
+    // Set title and annotations from ToolAnnotations if present
+    td.annotations.foreach { ta =>
+      ta.title.foreach(t => baseToolBuilder.title(t))
+      baseToolBuilder.annotations(ToolAnnotations.toJava(ta))
+    }
+
     val toolBuilder = td.inputSchema match {
       case Left(mcpSchema) =>
-        // Directly use McpSchema.JsonSchema
         baseToolBuilder.inputSchema(mcpSchema)
       case Right(stringSchema) =>
-        // Parse string schema to JsonSchema using McpJsonMapper
         val jsonMapper = McpJsonDefaults.getMapper()
         val jsonSchema = jsonMapper.readValue(stringSchema, classOf[McpSchema.JsonSchema])
         baseToolBuilder.inputSchema(jsonSchema)

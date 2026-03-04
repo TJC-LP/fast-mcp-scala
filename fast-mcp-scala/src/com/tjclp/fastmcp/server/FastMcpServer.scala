@@ -62,12 +62,14 @@ class FastMcpServer(
       inputSchema: Either[McpSchema.JsonSchema, String] = Left(
         new McpSchema.JsonSchema("object", null, null, true, null, null)
       ),
-      options: ToolRegistrationOptions = ToolRegistrationOptions()
+      options: ToolRegistrationOptions = ToolRegistrationOptions(),
+      annotations: Option[ToolAnnotations] = None
   ): ZIO[Any, Throwable, FastMcpServer] =
     val definition = ToolDefinition(
       name = name,
       description = description,
-      inputSchema = inputSchema
+      inputSchema = inputSchema,
+      annotations = annotations
     )
     toolManager.addTool(name, handler, definition, options).as(this)
 

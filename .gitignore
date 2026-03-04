@@ -55,4 +55,4 @@ build/
 *.txt
 
 ### Environment ###
-.env
+.env.metals/

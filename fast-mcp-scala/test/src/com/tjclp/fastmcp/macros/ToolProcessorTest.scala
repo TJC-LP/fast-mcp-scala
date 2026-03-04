@@ -124,6 +124,39 @@ class ToolProcessorTest extends AnyFunSuite {
     assert(calculation.operation == "SUBTRACT")
   }
 
+  // Test MCP Tool Annotations propagate through macro
+  test("@Tool annotation with MCP tool annotations should propagate to ToolDefinition") {
+    val annotTestServer = new FastMcpServer("AnnotTestServer", "0.1.0")
+    annotTestServer.scanAnnotations[ToolAnnotationsTestTools.type]
+
+    // Tool with annotations
+    val readOnlyTool = annotTestServer.toolManager.getToolDefinition("read-only-tool")
+    assert(readOnlyTool.isDefined, "Tool 'read-only-tool' should be registered")
+    assert(readOnlyTool.get.annotations.isDefined, "annotations should be Some(...)")
+    val annots = readOnlyTool.get.annotations.get
+    assert(annots.title.contains("Read Only Tool"))
+    assert(annots.readOnlyHint.contains(true))
+    assert(annots.destructiveHint.contains(false))
+    assert(annots.openWorldHint.contains(true))
+    assert(annots.idempotentHint.isEmpty, "idempotentHint should be None when not specified")
+    assert(annots.returnDirect.isEmpty, "returnDirect should be None when not specified")
+
+    // Tool without annotations -- should have None
+    val noHintsTool = annotTestServer.toolManager.getToolDefinition("no-hints-tool")
+    assert(noHintsTool.isDefined)
+    assert(
+      noHintsTool.get.annotations.isEmpty,
+      "annotations should be None when no hints specified"
+    )
+
+    // Verify Java SDK Tool has annotations set
+    val javaTool = ToolDefinition.toJava(readOnlyTool.get)
+    assert(javaTool.title() == "Read Only Tool")
+    assert(javaTool.annotations() != null)
+    assert(javaTool.annotations().readOnlyHint() == java.lang.Boolean.TRUE)
+    assert(javaTool.annotations().destructiveHint() == java.lang.Boolean.FALSE)
+  }
+
   // Test @Param annotation with all fields (description, examples, required, schema)
   test("@Param annotation with all fields generates correct schema") {
     // Create a separate server for this test to avoid interference
@@ -246,6 +279,26 @@ object ToolProcessorTest {
     def apply(op: Operation, numbers: List[Double], result: Double): CalculationResult =
       new CalculationResult(op.toString, numbers, result)
   }
+}
+
+/** Test object for MCP Tool Annotations */
+object ToolAnnotationsTestTools {
+  @Tool(
+    name = Some("read-only-tool"),
+    description = Some("A tool that only reads data"),
+    title = Some("Read Only Tool"),
+    readOnlyHint = Some(true),
+    destructiveHint = Some(false),
+    openWorldHint = Some(true)
+  )
+  def readData(@Param("Query string") query: String): String =
+    s"Results for: $query"
+
+  @Tool(
+    name = Some("no-hints-tool"),
+    description = Some("A tool with no annotation hints")
+  )
+  def noHints(@Param("Input") input: String): String = input
 }
 
 /** Test object for @Param annotation with all fields */

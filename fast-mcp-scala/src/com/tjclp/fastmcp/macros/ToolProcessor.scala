@@ -31,6 +31,42 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
     // 2️⃣  Extract name / description (with Scaladoc fallback) --------------------------------
     val (finalName, finalDesc) = nameAndDescription(toolAnnot, methodSym)
 
+    // 2.5  Extract MCP Tool Annotations (behavioral hints) ------------------------------------
+    val (
+      hintTitle,
+      hintReadOnly,
+      hintDestructive,
+      hintIdempotent,
+      hintOpenWorld,
+      hintReturnDirect
+    ) =
+      MacroUtils.parseToolAnnotationHints(toolAnnot)
+
+    val hasAnyAnnotation = List(
+      hintTitle,
+      hintReadOnly,
+      hintDestructive,
+      hintIdempotent,
+      hintOpenWorld,
+      hintReturnDirect
+    ).exists(_.isDefined)
+
+    val annotationsExpr: Expr[Option[com.tjclp.fastmcp.core.ToolAnnotations]] =
+      if (!hasAnyAnnotation) '{ None }
+      else
+        '{
+          Some(
+            com.tjclp.fastmcp.core.ToolAnnotations(
+              title = ${ optionStringExpr(hintTitle) },
+              readOnlyHint = ${ optionBoolExpr(hintReadOnly) },
+              destructiveHint = ${ optionBoolExpr(hintDestructive) },
+              idempotentHint = ${ optionBoolExpr(hintIdempotent) },
+              openWorldHint = ${ optionBoolExpr(hintOpenWorld) },
+              returnDirect = ${ optionBoolExpr(hintReturnDirect) }
+            )
+          )
+        }
+
     // 3️⃣  Stable method reference -------------------------------------------------------------
     val methodRefExpr = methodRef(ownerSym, methodSym)
 
@@ -137,9 +173,20 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
         name = ${ Expr(finalName) },
         description = ${ Expr(finalDesc) },
         handler = $handler,
-        inputSchema = Right($schemaWithMetadata.spaces2)
+        inputSchema = Right($schemaWithMetadata.spaces2),
+        annotations = $annotationsExpr
       )
     }
 
     // 8️⃣  Run effect & return server ---------------------------------------------------------
     runAndReturnServer(server)(registration)
+
+  private def optionStringExpr(using Quotes)(opt: Option[String]): Expr[Option[String]] =
+    opt match
+      case Some(s) => '{ Some(${ Expr(s) }) }
+      case None => '{ None }
+
+  private def optionBoolExpr(using Quotes)(opt: Option[Boolean]): Expr[Option[Boolean]] =
+    opt match
+      case Some(b) => '{ Some(${ Expr(b) }) }
+      case None => '{ None }
