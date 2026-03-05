@@ -71,7 +71,13 @@ fast-mcp-scala/
 
 ### Annotations
 
-- `@Tool` - Marks a method as an MCP tool
+- `@Tool` - Marks a method as an MCP tool. Supports behavioral hints via MCP Tool Annotations:
+  - `title: Option[String]` - Human-readable title
+  - `readOnlyHint: Option[Boolean]` - Tool only reads data
+  - `destructiveHint: Option[Boolean]` - Tool may be destructive/irreversible
+  - `idempotentHint: Option[Boolean]` - Same args produce same effect
+  - `openWorldHint: Option[Boolean]` - Interacts with external world
+  - `returnDirect: Option[Boolean]` - Result goes directly to user
 - `@Resource` - Marks a method as an MCP resource (static or templated)
 - `@Prompt` - Marks a method as an MCP prompt
 - `@Param` - Describes method parameters with metadata:

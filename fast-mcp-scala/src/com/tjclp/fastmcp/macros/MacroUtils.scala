@@ -323,6 +323,68 @@ private[macros] object MacroUtils:
         None
     }
 
+  // Helper to parse Option[Boolean] literals from annotation arguments
+  private def parseOptionBooleanLiteral(using quotes: Quotes)(
+      argTerm: quotes.reflect.Term
+  ): Option[Boolean] =
+    import quotes.reflect.*
+
+    def parseLiteral(term: Term): Option[Boolean] = stripTerm(term) match {
+      case Literal(BooleanConstant(b)) => Some(b)
+      case _ => None
+    }
+
+    stripTerm(argTerm) match {
+      case Apply(TypeApply(Select(Ident("Some"), "apply"), _), List(arg)) =>
+        parseLiteral(arg)
+      case Apply(Select(Ident("Some"), "apply"), List(arg)) =>
+        parseLiteral(arg)
+      case Select(Ident("None"), _) | Ident("None") => None
+      case _ => None
+    }
+
+  /** Extract MCP ToolAnnotation hints from a @Tool annotation term.
+    */
+  def parseToolAnnotationHints(using quotes: Quotes)(
+      term: quotes.reflect.Term
+  ): (
+      Option[String],
+      Option[Boolean],
+      Option[Boolean],
+      Option[Boolean],
+      Option[Boolean],
+      Option[Boolean]
+  ) =
+    import quotes.reflect.*
+
+    var title: Option[String] = None
+    var readOnlyHint: Option[Boolean] = None
+    var destructiveHint: Option[Boolean] = None
+    var idempotentHint: Option[Boolean] = None
+    var openWorldHint: Option[Boolean] = None
+    var returnDirect: Option[Boolean] = None
+
+    term match {
+      case Apply(Select(New(_), _), argTerms) =>
+        argTerms.foreach {
+          case NamedArg("title", valueTerm) =>
+            title = parseOptionStringLiteral(valueTerm)
+          case NamedArg("readOnlyHint", valueTerm) =>
+            readOnlyHint = parseOptionBooleanLiteral(valueTerm)
+          case NamedArg("destructiveHint", valueTerm) =>
+            destructiveHint = parseOptionBooleanLiteral(valueTerm)
+          case NamedArg("idempotentHint", valueTerm) =>
+            idempotentHint = parseOptionBooleanLiteral(valueTerm)
+          case NamedArg("openWorldHint", valueTerm) =>
+            openWorldHint = parseOptionBooleanLiteral(valueTerm)
+          case NamedArg("returnDirect", valueTerm) =>
+            returnDirect = parseOptionBooleanLiteral(valueTerm)
+          case _ => ()
+        }
+      case _ => ()
+    }
+    (title, readOnlyHint, destructiveHint, idempotentHint, openWorldHint, returnDirect)
+
   // Helper method to invoke a function (runtime)
   // Delegates to the RefResolver implementation which uses MethodHandles
   def invokeFunctionWithArgs(function: Any, args: List[Any]): Any =

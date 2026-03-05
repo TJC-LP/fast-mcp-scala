@@ -20,6 +20,12 @@ class AnnotationsDefaultsTest extends AnyFlatSpec with Matchers {
     ann.deprecationMessage shouldBe None
     ann.tags shouldBe Nil
     ann.timeoutMillis shouldBe None
+    ann.title shouldBe None
+    ann.readOnlyHint shouldBe None
+    ann.destructiveHint shouldBe None
+    ann.idempotentHint shouldBe None
+    ann.openWorldHint shouldBe None
+    ann.returnDirect shouldBe None
   }
 
   "@ToolParam" should "default to required = true" in {

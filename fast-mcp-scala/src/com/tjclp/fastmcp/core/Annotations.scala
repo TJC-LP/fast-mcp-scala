@@ -28,6 +28,18 @@ import scala.annotation.experimental
   *   Optional list of tags to categorize the tool
   * @param timeoutMillis
   *   Optional timeout for tool execution in milliseconds
+  * @param title
+  *   Optional human-readable title for the tool
+  * @param readOnlyHint
+  *   If Some(true), the tool only reads data and does not modify anything
+  * @param destructiveHint
+  *   If Some(true), the tool may perform destructive/irreversible operations
+  * @param idempotentHint
+  *   If Some(true), calling multiple times with the same args has the same effect
+  * @param openWorldHint
+  *   If Some(true), the tool interacts with the external world (network, filesystem, etc.)
+  * @param returnDirect
+  *   If Some(true), the result should go directly to the user without LLM post-processing
   */
 class Tool(
     val name: Option[String] = None,
@@ -37,7 +49,14 @@ class Tool(
     val deprecated: Boolean = false,
     val deprecationMessage: Option[String] = None,
     val tags: List[String] = List.empty,
-    val timeoutMillis: Option[Long] = None
+    val timeoutMillis: Option[Long] = None,
+    // MCP Tool Annotations (behavioral hints for clients)
+    val title: Option[String] = None,
+    val readOnlyHint: Option[Boolean] = None,
+    val destructiveHint: Option[Boolean] = None,
+    val idempotentHint: Option[Boolean] = None,
+    val openWorldHint: Option[Boolean] = None,
+    val returnDirect: Option[Boolean] = None
 ) extends StaticAnnotation
 
 /** Unified annotation for method parameters across Tools, Resources, and Prompts
