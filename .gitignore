@@ -59,3 +59,8 @@ build/
 
 ### Metals ###
 .metals/
+
+### Bun / TypeScript ###
+node_modules/
+bun.lockb
+bun.lock
