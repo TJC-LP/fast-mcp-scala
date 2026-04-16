@@ -7,21 +7,21 @@ Features
 - Annotation‑driven API (`@Tool`, `@Resource`, `@Prompt`)
 - Automatic JSON Schema & handler generation via Scala 3 macros
 - **Two transports** — `runStdio()` or `runHttp()` (streamable by default, `stateless = true` for lightweight mode)
-- Seamless integration with the Java MCP SDK 1.0.0
+- Seamless integration with the Java MCP SDK 1.1.1
 
 ## Installation
 
-Add to your **`build.sbt`** (defaulting to **Scala 3.7.2**):
+Add to your **`build.sbt`** (built against **Scala 3.8.3**):
 
 ```scala 3 ignore
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.2.3"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.3.0"
 ```
 
 ## Quickstart
 
 ```scala 3 raw
-//> using scala 3.7.2
-//> using dep com.tjclp::fast-mcp-scala:0.2.3
+//> using scala 3.8.3
+//> using dep com.tjclp::fast-mcp-scala:0.3.0
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.*
@@ -66,8 +66,8 @@ instead of direct Jackson mapper/module types. The common DSL stays under
 For reusable manual definitions across JVM and Scala.js, prefer typed contracts:
 
 ```scala 3 raw
-//> using scala 3.7.2
-//> using dep com.tjclp::fast-mcp-scala:0.2.3
+//> using scala 3.8.3
+//> using dep com.tjclp::fast-mcp-scala:0.3.0
 //> using options "-Xcheck-macros" "-experimental"
 
 import sttp.tapir.generic.auto.*
@@ -124,7 +124,7 @@ npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc
 You can also run examples directly from the command line:
 ```bash 
 scala-cli \
-    -e '//> using dep com.tjclp::fast-mcp-scala:0.2.3' \
+    -e '//> using dep com.tjclp::fast-mcp-scala:0.3.0' \
     --main-class com.tjclp.fastmcp.examples.AnnotatedServer
 ```
 
@@ -133,8 +133,8 @@ scala-cli \
 FastMCP-Scala supports the full MCP Streamable HTTP spec with session management and SSE streaming. Just call `runHttp()`:
 
 ```scala 3 raw
-//> using scala 3.7.2
-//> using dep com.tjclp::fast-mcp-scala:0.2.3
+//> using scala 3.8.3
+//> using dep com.tjclp::fast-mcp-scala:0.3.0
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.*
@@ -183,8 +183,8 @@ curl -X DELETE http://localhost:8090/mcp -H "mcp-session-id: <session-id>"
 For lightweight servers that don't need sessions or SSE, set `stateless = true`:
 
 ```scala 3 raw
-//> using scala 3.7.2
-//> using dep com.tjclp::fast-mcp-scala:0.2.3
+//> using scala 3.8.3
+//> using dep com.tjclp::fast-mcp-scala:0.3.0
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.*
@@ -244,7 +244,7 @@ In Claude desktop, you can add the following to your `claude_desktop_config.json
       "command": "scala-cli",
       "args": [
         "-e",
-        "//> using dep com.tjclp::fast-mcp-scala:0.2.3",
+        "//> using dep com.tjclp::fast-mcp-scala:0.3.0",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]
@@ -300,14 +300,14 @@ FastMCP-Scala uses [Mill](https://mill-build.org/) as its build tool.
 Then, in your consuming sbt project:
 
 ```scala 3 ignore
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.2.4-SNAPSHOT"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.3.0-SNAPSHOT"
 ```
 
 Or in Mill:
 
 ```scala 3 ignore
 def ivyDeps = Agg(
-  ivy"com.tjclp::fast-mcp-scala:0.2.4-SNAPSHOT"
+  ivy"com.tjclp::fast-mcp-scala:0.3.0-SNAPSHOT"
 )
 ```
 
@@ -327,15 +327,15 @@ def ivyDeps = Agg(
 
 You can use `fast-mcp-scala` in another scala‑cli project:
 ```scala 3 ignore
-//> using scala 3.7.2
-//> using dep com.tjclp::fast-mcp-scala:0.2.3
+//> using scala 3.8.3
+//> using dep com.tjclp::fast-mcp-scala:0.3.0
 //> using options "-Xcheck-macros" "-experimental"
 ```
 
 You can also point directly at the local JAR:
 
 ```scala 3 ignore
-//> using scala 3.7.2
+//> using scala 3.8.3
 //> using jar "/absolute/path/to/out/fast-mcp-scala/jar.dest/out.jar"
 //> using options "-Xcheck-macros" "-experimental"
 ```

@@ -59,7 +59,7 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
         val list = paramSyms.map { pSym =>
           // Extract @Param description / required
           val (descOpt, required) =
-            MacroUtils.extractParamAnnotation(pSym, Some("Resource")) match
+            MacroUtils.extractParamAnnotation(pSym) match
               case Some(annotTerm) =>
                 var d: Option[String] = None
                 var req: Boolean = true

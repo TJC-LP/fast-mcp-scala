@@ -15,11 +15,11 @@ class StringPromptTest extends AnyFlatSpec with Matchers {
   object TestPrompts {
 
     @Prompt(name = Some("string_prompt"))
-    def stringPrompt(@PromptParam("A parameter") param: String): String =
+    def stringPrompt(@Param("A parameter") param: String): String =
       s"This is a prompt with parameter: $param"
 
     @Prompt(name = Some("list_prompt"))
-    def listPrompt(@PromptParam("A parameter") param: String): List[Message] =
+    def listPrompt(@Param("A parameter") param: String): List[Message] =
       List(Message(Role.User, TextContent(s"This is a message with parameter: $param")))
   }
 

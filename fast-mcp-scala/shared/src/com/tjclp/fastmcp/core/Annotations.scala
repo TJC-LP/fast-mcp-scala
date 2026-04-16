@@ -1,7 +1,6 @@
 package com.tjclp.fastmcp.core
 
 import scala.annotation.StaticAnnotation
-import scala.annotation.experimental
 
 /** Marker annotation for methods representing MCP Tools
   *
@@ -81,30 +80,9 @@ class Param(
     val schema: Option[String] = None
 ) extends StaticAnnotation
 
-/** Annotation for method parameters in Tool methods
-  *
-  * @param description
-  *   Description of the parameter for tool documentation
-  * @param examples
-  *   List of example values for the parameter
-  * @param required
-  *   Whether the parameter is required (defaults to true)
-  * @param schema
-  *   Optional JSON schema override for the parameter type
-  * @deprecated
-  *   Use [[Param]] instead. Will be removed in 0.3.0.
-  */
-@deprecated("Use @Param instead", "0.2.1")
-class ToolParam(
-    val description: String,
-    val examples: List[String] = Nil,
-    val required: Boolean = true,
-    val schema: Option[String] = None
-) extends StaticAnnotation
-
-/** Marker annotation for methods representing MCP Resources If uri contains {placeholders}, it's
-  * treated as a template resource. Placeholders in the URI must match the method parameter names
-  * unless @ResourceParam is used. Static resources (no placeholders) should have methods with no
+/** Marker annotation for methods representing MCP Resources. If uri contains {placeholders}, it's
+  * treated as a template resource. Placeholders in the URI must match the method parameter names,
+  * described with `@Param`. Static resources (no placeholders) should have methods with no
   * parameters.
   *
   * @param uri
@@ -124,21 +102,6 @@ class Resource(
     val mimeType: Option[String] = None
 ) extends StaticAnnotation
 
-/** Marker annotation for resource method parameters, used to describe template arguments.
-  *
-  * @param description
-  *   A human-readable description for the parameter
-  * @param required
-  *   Whether the parameter is required (defaults to true)
-  * @deprecated
-  *   Use [[Param]] instead. Will be removed in 0.3.0.
-  */
-@deprecated("Use @Param instead", "0.2.1")
-class ResourceParam(
-    val description: String,
-    val required: Boolean = true
-) extends StaticAnnotation
-
 /** Marker annotation for methods representing MCP Prompts
   *
   * @param name
@@ -149,19 +112,4 @@ class ResourceParam(
 class Prompt(
     val name: Option[String] = None,
     val description: Option[String] = None
-) extends StaticAnnotation
-
-/** Annotation for method parameters in Prompt methods
-  *
-  * @param description
-  *   Description of the parameter for prompt documentation
-  * @param required
-  *   Whether the parameter is required (defaults to true)
-  * @deprecated
-  *   Use [[Param]] instead. Will be removed in 0.3.0.
-  */
-@deprecated("Use @Param instead", "0.2.1")
-class PromptParam(
-    val description: String,
-    val required: Boolean = true
 ) extends StaticAnnotation

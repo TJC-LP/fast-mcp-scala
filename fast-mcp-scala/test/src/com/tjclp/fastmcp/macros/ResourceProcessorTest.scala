@@ -137,7 +137,7 @@ object ResourceProcessorTest {
     mimeType = Some("application/json")
   )
   def userResource(
-      @ResourceParam("The user ID") userId: String
+      @Param("The user ID") userId: String
   ): Map[String, String] = {
     Map("id" -> userId, "name" -> s"User $userId", "role" -> "member")
   }
@@ -149,8 +149,8 @@ object ResourceProcessorTest {
     mimeType = Some("text/plain")
   )
   def itemResource(
-      @ResourceParam("The category of the item") category: String,
-      @ResourceParam("The unique identifier for the item") itemId: String
+      @Param("The category of the item") category: String,
+      @Param("The unique identifier for the item") itemId: String
   ): String = {
     s"Item $itemId in category $category"
   }

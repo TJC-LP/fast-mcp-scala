@@ -32,7 +32,7 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
     val argExprs: List[Expr[PromptArgument]] =
       methodSym.paramSymss.headOption.getOrElse(Nil).map { pSym =>
         val (descOpt, required) = MacroUtils.parsePromptParamArgs(
-          MacroUtils.extractParamAnnotation(pSym, Some("Prompt"))
+          MacroUtils.extractParamAnnotation(pSym)
         )
         '{ PromptArgument(${ Expr(pSym.name) }, ${ Expr(descOpt) }, ${ Expr(required) }) }
       }
