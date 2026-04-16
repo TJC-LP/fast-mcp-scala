@@ -155,7 +155,7 @@ object AnnotatedServer extends ZIOAppDefault:
     description = Some("Read file content from a specific path.")
   )
   def readFileResource(
-      @ResourceParam("File path relative to the server root") path: String
+      @Param("File path relative to the server root") path: String
   ): String =
     // In a real implementation, you would read the actual file
     // For demo purposes, we'll return mock content
@@ -172,16 +172,16 @@ object AnnotatedServer extends ZIOAppDefault:
       Message(role = Role.User, content = TextContent("Say hello to the world."))
     )
 
-  /** A prompt with required and optional arguments. Uses @PromptParam for documentation. Annotated
-    * with @Prompt.
+  /** A prompt with required and optional arguments. Uses @Param for documentation. Annotated with
+    * \@Prompt.
     */
   @Prompt(
     name = Some("greeting_prompt"),
     description = Some("Generates a personalized greeting.")
   )
   def greetingPrompt(
-      @PromptParam("The name of the person to greet.") name: String,
-      @PromptParam("Optional title (e.g., Dr., Ms.).", required = false) title: String = ""
+      @Param("The name of the person to greet.") name: String,
+      @Param("Optional title (e.g., Dr., Ms.).", required = false) title: String = ""
   ): List[Message] =
     val fullGreeting = if title.nonEmpty then s"$title $name" else name
     List(

@@ -1,47 +1,43 @@
 package com.tjclp.fastmcp.macros
 
-class JacksonConverterTest {}
+import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.matchers.should.Matchers
 
-// Commented out test class to avoid empty compilation unit warning
-/*
-//class JacksonConverterTest extends AnyFunSuite with Matchers {
-//  private val mapper = new ObjectMapper()
-//
-//  // Test static helper methods
-//  test("JacksonConverter.toString should handle TextNode") {
-//    val textNode = TextNode.valueOf("hello")
-//    val result = JacksonConverter.toString(textNode)
-//
-//    assert(result == "hello")
-//  }
-//
-//  test("JacksonConverter.toString should handle NullNode") {
-//    val nullNode = NullNode.getInstance()
-//    val result = JacksonConverter.toString(nullNode)
-//
-//    assert(result == null)
-//  }
-//
-//  test("JacksonConverter.toBoolean should handle BooleanNode") {
-//    val trueNode = BooleanNode.TRUE
-//    val falseNode = BooleanNode.FALSE
-//
-//    assert(JacksonConverter.toBoolean(trueNode) == true)
-//    assert(JacksonConverter.toBoolean(falseNode) == false)
-//  }
-//
-//  test("JacksonConverter.toInt should handle IntNode") {
-//    val intNode = IntNode.valueOf(42)
-//    val result = JacksonConverter.toInt(intNode)
-//
-//    assert(result == 42)
-//  }
-//
-//  test("JacksonConverter.toDouble should handle DoubleNode") {
-//    val doubleNode = DoubleNode.valueOf(3.14)
-//    val result = JacksonConverter.toDouble(doubleNode)
-//
-//    assert(result == 3.14)
-//  }
-//}
- */
+object JacksonConverterTestFixtures:
+  enum RenderMode:
+    case plain, bold
+
+  case class Address(city: String, postalCode: Option[String] = None)
+  case class UserProfile(
+      name: String,
+      age: Int = 18,
+      address: Address,
+      aliases: List[String] = Nil
+  )
+
+class JacksonConverterTest extends AnyFunSuite with Matchers:
+
+  import JacksonConverterTestFixtures.*
+
+  private val context = JacksonConversionContext.default
+
+  test("default product converter handles nested case classes and defaults") {
+    val raw = Map(
+      "name" -> "Alice",
+      "address" -> Map("city" -> "New York")
+    )
+
+    val profile = summon[JacksonConverter[UserProfile]].convert("profile", raw, context)
+
+    profile shouldBe UserProfile(
+      name = "Alice",
+      age = 18,
+      address = Address("New York", None),
+      aliases = Nil
+    )
+  }
+
+  test("default fallback converter handles Scala 3 enum values") {
+    val mode = summon[JacksonConverter[RenderMode]].convert("mode", "bold", context)
+    mode shouldBe RenderMode.bold
+  }

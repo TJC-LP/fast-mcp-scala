@@ -57,6 +57,10 @@ object ExampleServer extends ZIOAppDefault:
 For most use cases, `import com.tjclp.fastmcp.*` is sufficient. If you need the default `JacksonConverter`
 instances in scope explicitly, use `import com.tjclp.fastmcp.{given, *}`.
 
+Low-level custom `JacksonConverter` implementations now receive a `JacksonConversionContext`
+instead of direct Jackson mapper/module types. The common DSL stays under
+`import com.tjclp.fastmcp.*`.
+
 ### Running Examples
 
 The above example can be run using `scala-cli README.md` or `scala-cli scripts/quickstart.sc` from the repo root. You can run the server via the MCP inspector by running:

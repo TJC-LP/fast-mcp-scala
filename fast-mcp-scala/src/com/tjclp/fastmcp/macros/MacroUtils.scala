@@ -8,7 +8,7 @@ import io.circe.JsonObject
 
 import com.tjclp.fastmcp.runtime.RefResolver
 
-/** Metadata extracted from @Param/@ToolParam annotations */
+/** Metadata extracted from @Param annotations */
 case class ParamMetadata(
     description: Option[String] = None,
     examples: List[String] = Nil,
@@ -131,7 +131,7 @@ private[macros] object MacroUtils:
     }
     (promptName, promptDesc)
 
-  // Helper to parse @PromptParam annotation arguments
+  // Helper to parse @Param annotation arguments for prompts
   def parsePromptParamArgs(using quotes: Quotes)(
       paramAnnotOpt: Option[quotes.reflect.Term]
   ): (Option[String], Boolean) =
@@ -140,7 +140,7 @@ private[macros] object MacroUtils:
     paramAnnotOpt match {
       case Some(annotTerm) =>
         var paramDesc: Option[String] = None
-        var paramRequired: Boolean = true // Default required for @PromptParam
+        var paramRequired: Boolean = true // Default required for @Param
         var descriptionSetPositionally = false
         var requiredSetByName = false
 
@@ -176,7 +176,7 @@ private[macros] object MacroUtils:
           case _ => () // Ignore if annotation term is not an Apply
         }
         (paramDesc, paramRequired)
-      case None => (None, true) // Defaults if no @PromptParam
+      case None => (None, true) // Defaults if no @Param
     }
 
   // Generic helper to extract parameter annotations (Param or legacy specific ones)

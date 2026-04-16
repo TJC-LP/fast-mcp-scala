@@ -119,12 +119,12 @@ object TaskManagerServer extends ZIOAppDefault:
     description = Some("Create a new task with the specified details")
   )
   def createTask(
-      @ToolParam("Task title") title: String,
-      @ToolParam("Task description") description: String,
-      @ToolParam("Priority level") priority: Priority,
-      @ToolParam("Tags for categorization") tags: List[String],
-      @ToolParam("Assignee username") assignee: Option[String] = None,
-      @ToolParam("Due date in ISO format") dueDate: Option[LocalDateTime] = None
+      @Param("Task title") title: String,
+      @Param("Task description") description: String,
+      @Param("Priority level") priority: Priority,
+      @Param("Tags for categorization") tags: List[String],
+      @Param("Assignee username") assignee: Option[String] = None,
+      @Param("Due date in ISO format") dueDate: Option[LocalDateTime] = None
   ): Task =
     val task = Task(
       id = UUID.randomUUID().toString,
@@ -145,8 +145,8 @@ object TaskManagerServer extends ZIOAppDefault:
     description = Some("Update an existing task with new values")
   )
   def updateTask(
-      @ToolParam("Task ID") taskId: String,
-      @ToolParam("Fields to update") update: TaskUpdate
+      @Param("Task ID") taskId: String,
+      @Param("Fields to update") update: TaskUpdate
   ): String =
     tasks.get(taskId) match
       case None => s"Error: Task $taskId not found"
@@ -168,7 +168,7 @@ object TaskManagerServer extends ZIOAppDefault:
     description = Some("List tasks with optional filtering")
   )
   def listTasks(
-      @ToolParam("Filter criteria") filter: TaskFilter
+      @Param("Filter criteria") filter: TaskFilter
   ): List[Task] =
     tasks.values
       .filter { task =>
@@ -204,7 +204,7 @@ object TaskManagerServer extends ZIOAppDefault:
     description = Some("Search tasks by text in title or description")
   )
   def searchTasks(
-      @ToolParam("Search query") query: String
+      @Param("Search query") query: String
   ): List[Task] =
     val lowerQuery = query.toLowerCase
     tasks.values
@@ -216,10 +216,10 @@ object TaskManagerServer extends ZIOAppDefault:
       .sortBy(_.createdAt)
       .reverse
 
-  override def run: URIO[Any, ExitCode] =
-    (for
+  override def run =
+    for
       _ <- Console.printLine("Starting Task Manager MCP Server...")
       server <- ZIO.succeed(FastMcpServer("TaskManagerServer"))
       _ <- ZIO.attempt(server.scanAnnotations[TaskManagerServer.type])
       _ <- server.runStdio()
-    yield ()).exitCode
+    yield ()

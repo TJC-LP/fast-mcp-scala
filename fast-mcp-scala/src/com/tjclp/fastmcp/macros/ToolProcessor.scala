@@ -89,7 +89,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
         }
     }
 
-    // 6️⃣  Auto‑generate JSON schema & inject @ToolParam descriptions --------------------------
+    // 6️⃣  Auto‑generate JSON schema & inject @Param descriptions --------------------------
     val rawSchema: Expr[io.circe.Json] = '{
       JsonSchemaMacro.schemaForFunctionArgs(
         $methodRefExpr,
@@ -97,7 +97,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       )
     }
 
-    // Collect all @Param/@ToolParam metadata (description, examples, required, schema)
+    // Collect all @Param/@Param metadata (description, examples, required, schema)
     // Also validate that required=false is only used with Option types or default values
     val params = methodSym.paramSymss.headOption.getOrElse(Nil)
 
