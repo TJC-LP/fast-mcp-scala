@@ -42,9 +42,16 @@ import com.tjclp.fastmcp.server.manager.ResourceConversions.*
 import com.tjclp.fastmcp.server.transport.ZioHttpStatelessTransport
 import com.tjclp.fastmcp.server.transport.ZioHttpStreamableTransportProvider
 
-/** Main server class for FastMCP-Scala
+/** JVM implementation of the shared `McpServer` trait — the thing you actually run.
   *
-  * This class provides a high-level API for creating MCP servers using Scala and ZIO
+  * `FastMcpServer` wraps the Java MCP SDK (`mcp-core` 1.1.1) and exposes the high-level API users
+  * interact with: `.tool(...)`, `.prompt(...)`, `.resource(...)`, plus the annotation macro entry
+  * point `.scanAnnotations[T]` (via `RegistrationMacro`). Transports are chosen at run time — call
+  * `.runStdio()` for stdin/stdout (Claude Desktop, MCP Inspector) or `.runHttp()` for the full MCP
+  * Streamable HTTP spec (SSE + sessions by default, `stateless = true` opt-in).
+  *
+  * Prefer the [[com.tjclp.fastmcp.server.McpServer$]] factory (`McpServer("name", ...)`) over
+  * constructing this class directly — the factory keeps the call site framework-agnostic.
   */
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
 class FastMcpServer(

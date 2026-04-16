@@ -1,21 +1,26 @@
-//> using scala 3.7.2
-//> using dep com.tjclp::fast-mcp-scala:0.2.3
-//> using options "-Xcheck-macros" "-experimental" // Enable verbose macro processing
+//> using scala 3.8.3
+//> using dep com.tjclp::fast-mcp-scala:0.3.0
+//> using options "-Xcheck-macros" "-experimental"
 
-// This is a launcher file for scala-cli
-// You can run any of the MCP server classes with:
+// Launcher for FastMCP-Scala example servers. Point `scala-cli` at this file and
+// pick a main class:
 //
-// scala-cli examples.sc --main-class com.tjclp.fastmcp.examples.SimpleServer       (Basic server example)
-// scala-cli examples.sc --main-class com.tjclp.fastmcp.examples.AnnotatedServer    (Annotation-based server with macros)
-// scala-cli examples.sc --main-class com.tjclp.fastmcp.examples.ManualServer       (Manual tool registration example)
+// scala-cli examples.sc --main-class com.tjclp.fastmcp.examples.HelloWorld
+//     Minimum viable server — one tool, stdio.
 //
-// MACRO ENHANCEMENTS:
-// - The AnnotatedServer example demonstrates the enhanced macro-driven approach for
-//   automatic schema generation and tool registration with @Tool annotations
-// - The ManualServer example shows manual tool registration with enum conversion through Jackson
+// scala-cli examples.sc --main-class com.tjclp.fastmcp.examples.AnnotatedServer
+//     Flagship annotation path: @Tool / @Resource / @Prompt with hints and @Param metadata.
 //
-// These examples showcase how to use Scala 3's metaprogramming capabilities to create
-// a zero-boilerplate MCP tool registration experience with advanced schema generation.
+// scala-cli examples.sc --main-class com.tjclp.fastmcp.examples.ContractServer
+//     Typed contracts — macro-free, testable, cross-platform-shareable.
 //
-// The stdout is redirected to stderr in each server implementation
-// for MCP compatibility.
+// scala-cli examples.sc --main-class com.tjclp.fastmcp.examples.TaskManagerServer
+//     Realistic domain server with custom JacksonConverters and tool hints.
+//
+// scala-cli examples.sc --main-class com.tjclp.fastmcp.examples.ContextEchoServer
+//     McpContext introspection from inside a tool handler.
+//
+// scala-cli examples.sc --main-class com.tjclp.fastmcp.examples.HttpServer
+//     HTTP transport: Streamable (default) and Stateless (flag).
+//
+// stdout is redirected to stderr inside each server so the stdio transport stays clean.

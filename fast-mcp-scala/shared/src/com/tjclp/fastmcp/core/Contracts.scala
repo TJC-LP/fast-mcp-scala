@@ -9,8 +9,11 @@ import com.tjclp.fastmcp.server.McpContext
 
 /** Platform-neutral low-level decode context used by [[McpDecoder]] implementations.
   *
-  * JVM currently backs this with Jackson 3. JS can provide a different implementation later without
-  * changing the public decoder contract.
+  * The JVM supplies a Jackson 3 backed implementation (`JacksonConversionContext`); Scala.js can
+  * plug in a different one without changing the public decoder contract.
+  *
+  * Most users never touch this — it's the bridge that lets `McpDecoder[T]` implementations convert
+  * raw JSON-RPC argument values (typically `Map[String, Any]` on the JVM) into typed Scala values.
   */
 trait McpDecodeContext:
   def convertValue[T: ClassTag](name: String, rawValue: Any): T
@@ -18,7 +21,16 @@ trait McpDecodeContext:
   def parseJsonObject(name: String, rawJson: String): Map[String, Any]
   def writeValueAsString(value: Any): String
 
-/** Public typed decoder used by the shared contract layer. */
+/** Public typed decoder used by the shared contract layer to translate incoming MCP arguments into
+  * a case-class shape.
+  *
+  * Most users get one of these for free: the JVM's `JacksonConverter` derivation produces an
+  * `McpDecoder[T]` for any case class whose fields Jackson 3 can handle natively. Implement
+  * manually only when the default derivation can't express your wire format.
+  *
+  * @tparam T
+  *   the target Scala type produced from the decoded argument
+  */
 trait McpDecoder[T]:
   def decode(name: String, rawValue: Any, context: McpDecodeContext): T
 
@@ -39,7 +51,16 @@ object McpDecoder:
       def decode(name: String, rawValue: Any, context: McpDecodeContext): T =
         f(name, rawValue, context)
 
-/** Public typed result encoder used by mounted tool contracts. */
+/** Public typed result encoder used by mounted tool contracts.
+  *
+  * Any type with a given `JsonEncoder[A]` (from `zio-json`) gets an `McpEncoder[A]` for free via
+  * the low-priority fallback, serializing to a single `TextContent`. Supply your own `McpEncoder`
+  * when you want structured `Content` output — e.g., returning `ImageContent`, `EmbeddedResource`,
+  * or a custom multi-content composition.
+  *
+  * @tparam A
+  *   contravariant in the source type; supply a narrower encoder to get broader coverage
+  */
 trait McpEncoder[-A]:
   def encode(value: A): List[Content]
 
@@ -119,7 +140,12 @@ trait McpCodec[A] extends McpDecoder[A] with McpEncoder[A]
 object McpCodec:
   def apply[A](using codec: McpCodec[A]): McpCodec[A] = codec
 
-/** Platform hook for deriving a tool input schema from a typed request. */
+/** Platform hook for deriving a tool input schema from a typed request.
+  *
+  * The JVM supplies a given instance via macro (`JsonSchemaMacro.schemaForCaseClass`) for any case
+  * class that Tapir's `Schema` derivation can handle, honoring `@Param` metadata on fields.
+  * `McpTool.derived` picks it up implicitly.
+  */
 trait ToolSchemaProvider[A]:
   def inputSchema: ToolInputSchema
 
@@ -147,7 +173,21 @@ case class ResourceDefinition(
     arguments: Option[List[ResourceArgument]] = None
 )
 
-/** Shared typed contract for MCP tools. */
+/** Shared typed contract for an MCP tool.
+  *
+  * A first-class, macro-free value pairing an MCP `ToolDefinition` (name, schema, annotations) with
+  * a typed `ZIO` handler. Prefer the `McpTool.derived` factory when the input is a case class — it
+  * pulls the `ToolInputSchema` from the implicit `ToolSchemaProvider` so you never hand-write JSON
+  * schemas.
+  *
+  * Compiles under Scala.js, so definitions can be shared with a cross-platform module. The server
+  * runtime itself is JVM-only.
+  *
+  * @tparam In
+  *   the typed request argument (decoded from the JSON-RPC `arguments` object)
+  * @tparam Out
+  *   the typed handler result (encoded to `Content` via `McpEncoder`)
+  */
 final case class McpTool[In, Out] private (
     definition: ToolDefinition,
     handler: (In, Option[McpContext]) => ZIO[Any, Throwable, Out]
@@ -195,6 +235,23 @@ object McpTool:
       )
     )(handler)
 
+  /** Build an `McpTool` with the input schema derived automatically from a `ToolSchemaProvider[In]`
+    * (the JVM summons one via macro for any Tapir-derivable case class, honoring `@Param` metadata
+    * on fields).
+    *
+    * @param name
+    *   tool name exposed to the MCP client
+    * @param description
+    *   optional human-readable description
+    * @param annotations
+    *   optional MCP Tool Annotations (hints like `readOnlyHint`, `destructiveHint`)
+    * @param handler
+    *   effectful function producing the typed `Out` from an `In`
+    * @tparam In
+    *   typed request shape — must have an implicit `ToolSchemaProvider[In]`
+    * @tparam Out
+    *   typed result shape — must have an implicit `McpEncoder[Out]` at mount time
+    */
   def derived[In, Out](
       name: String,
       description: Option[String] = None,
@@ -213,7 +270,16 @@ object McpTool:
   ): McpTool[In, Out] =
     contextual(name, description, schemaProvider.inputSchema, annotations)(handler)
 
-/** Shared typed contract for MCP prompts. */
+/** Shared typed contract for an MCP prompt.
+  *
+  * Pairs a `PromptDefinition` with a handler that turns the typed argument into the list of
+  * `Message`s the prompt should emit. Unlike `McpTool`, prompts do not carry a `ToolInputSchema` —
+  * MCP prompts use a simple `arguments` list (name + description + required) that you supply
+  * explicitly.
+  *
+  * @tparam In
+  *   typed argument shape — must have an implicit `McpDecoder[In]` at mount time
+  */
 final case class McpPrompt[In] private (
     definition: PromptDefinition,
     handler: In => ZIO[Any, Throwable, List[Message]]
@@ -242,7 +308,11 @@ object McpPrompt:
       )
     )(handler)
 
-/** Shared typed contract for static MCP resources. */
+/** Shared typed contract for a static (non-templated) MCP resource.
+  *
+  * Use this when the URI has no `{placeholders}`. The handler produces either text (`String`) or
+  * binary (`Array[Byte]`) content on each read.
+  */
 final case class McpStaticResource private (
     definition: ResourceDefinition,
     handler: () => ZIO[Any, Throwable, String | Array[Byte]]
@@ -272,7 +342,14 @@ object McpStaticResource:
       )
     )(handler)
 
-/** Shared typed contract for templated MCP resources. */
+/** Shared typed contract for a templated MCP resource (URI with `{placeholders}`).
+  *
+  * Placeholders in the URI pattern are matched against fields on the `In` argument shape and
+  * decoded via `McpDecoder[In]` before the handler runs.
+  *
+  * @tparam In
+  *   typed argument shape carrying the URI placeholder values
+  */
 final case class McpTemplateResource[In] private (
     definition: ResourceDefinition,
     handler: In => ZIO[Any, Throwable, String | Array[Byte]]
