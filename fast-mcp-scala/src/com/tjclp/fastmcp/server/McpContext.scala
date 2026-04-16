@@ -10,19 +10,27 @@ import io.modelcontextprotocol.spec.McpSchema
 private[fastmcp] class JvmMcpContext(
     val javaExchange: Option[McpAsyncServerExchange] = None,
     val transportContext: Option[McpTransportContext] = None
-) extends McpContext
+) extends McpContext(javaExchange, transportContext)
 
 /** Extension methods on McpContext that provide JVM capabilities when available.
   * These are safe to call on any McpContext — they return None on non-JVM platforms.
   */
 extension (context: McpContext)
 
+  def javaExchange: Option[McpAsyncServerExchange] =
+    context.javaExchangeToken.collect { case exchange: McpAsyncServerExchange => exchange }
+
+  def transportContext: Option[McpTransportContext] =
+    context.transportContextToken.collect { case transport: McpTransportContext => transport }
+
+  def copy(
+      javaExchange: Option[Any] = context.javaExchangeToken,
+      transportContext: Option[Any] = context.transportContextToken
+  ): McpContext =
+    McpContext(javaExchange, transportContext)
+
   def getClientCapabilities: Option[McpSchema.ClientCapabilities] =
-    context match
-      case jvm: JvmMcpContext => jvm.javaExchange.map(_.getClientCapabilities)
-      case _                  => None
+    context.javaExchange.map(_.getClientCapabilities)
 
   def getClientInfo: Option[McpSchema.Implementation] =
-    context match
-      case jvm: JvmMcpContext => jvm.javaExchange.map(_.getClientInfo)
-      case _                  => None
+    context.javaExchange.map(_.getClientInfo)

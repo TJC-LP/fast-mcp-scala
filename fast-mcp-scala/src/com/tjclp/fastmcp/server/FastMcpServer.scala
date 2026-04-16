@@ -13,7 +13,7 @@ import io.modelcontextprotocol.common.McpTransportContext
 import io.modelcontextprotocol.json.McpJsonDefaults
 import io.modelcontextprotocol.server.McpAsyncServer
 import io.modelcontextprotocol.server.McpAsyncServerExchange
-import io.modelcontextprotocol.server.McpServer
+import io.modelcontextprotocol.server.{McpServer as JavaMcpServer}
 import io.modelcontextprotocol.server.McpServerFeatures
 import io.modelcontextprotocol.server.McpStatelessAsyncServer
 import io.modelcontextprotocol.server.McpStatelessServerFeatures
@@ -27,6 +27,7 @@ import zio.*
 import zio.http.Server as ZHttpServer
 
 import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.core.JvmToolInputSchemaSupport.*
 import com.tjclp.fastmcp.core.TypeConversions.*
 import com.tjclp.fastmcp.server.manager.*
 import com.tjclp.fastmcp.server.manager.ResourceConversions.*
@@ -42,7 +43,7 @@ class FastMcpServer(
     val name: String = "FastMCPScala",
     version: String = "0.1.0",
     settings: FastMcpServerSettings = FastMcpServerSettings()
-):
+) extends com.tjclp.fastmcp.server.McpServer:
   val dependencies: List[String] = settings.dependencies
   // Initialize managers
   val toolManager = new ToolManager()
@@ -61,7 +62,7 @@ class FastMcpServer(
       name: String,
       handler: ContextualToolHandler,
       description: Option[String] = None,
-      inputSchema: String = """{"type":"object","additionalProperties":true}""",
+      inputSchema: ToolInputSchema = ToolInputSchema.default,
       options: ToolRegistrationOptions = ToolRegistrationOptions(),
       annotations: Option[ToolAnnotations] = None
   ): ZIO[Any, Throwable, FastMcpServer] =
@@ -72,6 +73,23 @@ class FastMcpServer(
       annotations = annotations
     )
     toolManager.addTool(name, handler, definition, options).as(this)
+
+  def tool(
+      name: String,
+      handler: ContextualToolHandler,
+      description: Option[String],
+      inputSchema: Either[McpSchema.JsonSchema, String],
+      options: ToolRegistrationOptions,
+      annotations: Option[ToolAnnotations]
+  ): ZIO[Any, Throwable, FastMcpServer] =
+    tool(
+      name = name,
+      handler = handler,
+      description = description,
+      inputSchema = fromEither(inputSchema),
+      options = options,
+      annotations = annotations
+    )
 
   /** Register a **static** resource with the server.
     */
@@ -282,7 +300,7 @@ class FastMcpServer(
   /** Set up the Java MCP Server with the given transport provider
     */
   def setupServer(transportProvider: McpServerTransportProvider): Unit =
-    val serverBuilder: McpServer.AsyncSpecification[?] = McpServer
+    val serverBuilder: JavaMcpServer.AsyncSpecification[?] = JavaMcpServer
       .async(transportProvider)
     configureServerBuilder(serverBuilder)
     underlyingJavaServer = Some(serverBuilder.build())
@@ -296,7 +314,7 @@ class FastMcpServer(
   private[server] def setupStreamableServer(
       transportProvider: McpStreamableServerTransportProvider
   ): Unit =
-    val serverBuilder: McpServer.AsyncSpecification[?] = McpServer
+    val serverBuilder: JavaMcpServer.AsyncSpecification[?] = JavaMcpServer
       .async(transportProvider)
     configureServerBuilder(serverBuilder)
     underlyingJavaServer = Some(serverBuilder.build())
@@ -308,7 +326,7 @@ class FastMcpServer(
     * [[McpAsyncServerExchange]]-based handlers.
     */
   private def configureServerBuilder(
-      serverBuilder: McpServer.AsyncSpecification[?]
+      serverBuilder: JavaMcpServer.AsyncSpecification[?]
   ): Unit =
     serverBuilder.serverInfo(name, version)
 
@@ -414,7 +432,7 @@ class FastMcpServer(
   private[server] def setupStatelessServer(
       transport: McpStatelessServerTransport
   ): Unit =
-    val serverBuilder = McpServer
+    val serverBuilder = JavaMcpServer
       .async(transport)
       .serverInfo(name, version)
 

@@ -2,6 +2,7 @@ package com.tjclp.fastmcp.macros
 
 import scala.annotation.tailrec
 import scala.quoted.*
+import scala.reflect.ClassTag
 
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.json.JsonMapper
@@ -91,10 +92,25 @@ object MapToFunctionMacro:
       // This case intentionally removed as it's unreachable in our code structure
       case _ => None
 
-    // Summon JacksonConverter[T] for a parameter type
+    // Summon JacksonConverter[T] for a parameter type.
+    // Option[A] and List[A] are resolved in two steps to avoid ambiguity with the low-priority fallback.
     def summonJacksonConverter(tpe: TypeRepr)(using Quotes): Expr[JacksonConverter[?]] =
       import quotes.reflect.report
       tpe.asType match
+        case '[Option[a]] =>
+          summonJacksonConverter(TypeRepr.of[a]) match
+            case '{ $inner: JacksonConverter[a] } =>
+              val ct = Expr.summon[ClassTag[a]].getOrElse(
+                report.errorAndAbort(s"No ClassTag for Option element type: ${TypeRepr.of[a].show}")
+              )
+              '{ DeriveJacksonConverter.containers.option[a](using $inner, $ct) }
+        case '[List[a]] =>
+          summonJacksonConverter(TypeRepr.of[a]) match
+            case '{ $inner: JacksonConverter[a] } =>
+              val ct = Expr.summon[ClassTag[a]].getOrElse(
+                report.errorAndAbort(s"No ClassTag for List element type: ${TypeRepr.of[a].show}")
+              )
+              '{ DeriveJacksonConverter.containers.list[a](using $inner, $ct) }
         case '[t] =>
           Expr.summon[JacksonConverter[t]] match
             case Some(conv) => conv

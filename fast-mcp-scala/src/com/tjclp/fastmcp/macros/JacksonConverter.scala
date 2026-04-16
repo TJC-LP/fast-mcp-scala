@@ -27,15 +27,10 @@ trait JacksonConverter[T]:
         self.convert(name, transformed, mapper)
       override def customModule = self.customModule
 
-@SuppressWarnings(Array("org.wartremover.warts.Null"))
-object JacksonConverter:
-
-  // Uniform null/missing handling
-  private def failNull(name: String, tpe: String): Unit =
-    throw new RuntimeException(s"Null value provided for parameter '$name' of type $tpe")
-
+/** Low-priority fallback — anything Jackson can handle via convertValue. */
+trait JacksonConverterLowPriority:
   // DRY potent conversion with error wrapping
-  private def doConvert[T: ClassTag](
+  protected def doConvert[T: ClassTag](
       name: String,
       rawValue: Any,
       tpe: String,
@@ -48,6 +43,17 @@ object JacksonConverter:
           s"Failed to convert value for parameter '$name' to type $tpe. Value: $rawValue",
           e
         )
+
+  protected def failNull(name: String, tpe: String): Unit =
+    throw new RuntimeException(s"Null value provided for parameter '$name' of type $tpe")
+
+  given [T: ClassTag]: JacksonConverter[T] with
+    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): T =
+      if rawValue == null then failNull(name, summon[ClassTag[T]].runtimeClass.getSimpleName)
+      doConvert[T](name, rawValue, summon[ClassTag[T]].runtimeClass.getSimpleName, mapper)
+
+@SuppressWarnings(Array("org.wartremover.warts.Null"))
+object JacksonConverter extends JacksonConverterLowPriority:
 
   // Basic instances
   given JacksonConverter[String] with
@@ -197,9 +203,4 @@ object JacksonConverter:
         val enhancedMapper = mapper.rebuild().addModule(module).build() :: ClassTagExtensions
         base.convert(name, rawValue, enhancedMapper)
 
-  // Fallback for any other type T with a ClassTag: let Jackson handle it directly
-  given [T: ClassTag]: JacksonConverter[T] with
-
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): T =
-      if rawValue == null then failNull(name, summon[ClassTag[T]].runtimeClass.getSimpleName)
-      doConvert[T](name, rawValue, summon[ClassTag[T]].runtimeClass.getSimpleName, mapper)
+  // Fallback given is inherited from JacksonConverterLowPriority

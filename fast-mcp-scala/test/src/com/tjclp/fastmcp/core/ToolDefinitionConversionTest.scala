@@ -17,7 +17,7 @@ class ToolDefinitionConversionTest extends AnyFlatSpec with Matchers {
     val td = ToolDefinition(
       name = "td-string",
       description = None,
-      inputSchema = schemaStr
+      inputSchema = ToolInputSchema.unsafeFromJsonString(schemaStr)
     )
 
     val j = td.toJava
@@ -27,11 +27,25 @@ class ToolDefinitionConversionTest extends AnyFlatSpec with Matchers {
     j.inputSchema() shouldBe new McpSchema.JsonSchema("object", null, null, null, null, null)
   }
 
+  it should "support converting JVM McpSchema.JsonSchema values into typed tool schemas" in {
+    val td = ToolDefinition(
+      name = "td-legacy",
+      description = Some("legacy"),
+      inputSchema =
+        JvmToolInputSchemaSupport.fromEither(
+          Left(new McpSchema.JsonSchema("object", null, null, true, null, null))
+        )
+    )
+
+    td.inputSchema.toJsonString should include(""""type":"object"""")
+    td.toJava.inputSchema() shouldBe new McpSchema.JsonSchema("object", null, null, true, null, null)
+  }
+
   it should "set annotations on the Java Tool when present" in {
     val td = ToolDefinition(
       name = "annotated-tool",
       description = Some("A tool with annotations"),
-      inputSchema = """{ "type": "object" }""",
+      inputSchema = ToolInputSchema.unsafeFromJsonString("""{ "type": "object" }"""),
       annotations = Some(
         ToolAnnotations(
           title = Some("Annotated Tool"),
@@ -54,7 +68,7 @@ class ToolDefinitionConversionTest extends AnyFlatSpec with Matchers {
     val td = ToolDefinition(
       name = "no-annot-tool",
       description = None,
-      inputSchema = """{ "type": "object" }"""
+      inputSchema = ToolInputSchema.unsafeFromJsonString("""{ "type": "object" }""")
     )
     val j = td.toJava
     j.annotations() shouldBe null

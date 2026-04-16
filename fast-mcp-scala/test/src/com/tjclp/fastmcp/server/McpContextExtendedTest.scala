@@ -20,4 +20,13 @@ class McpContextExtendedTest extends AnyFunSuite {
     assert(context.getClientCapabilities.isEmpty)
     assert(context.getClientInfo.isEmpty)
   }
+
+  test("McpContext.unapply should expose JVM compatibility fields") {
+    val context = McpContext()
+
+    val McpContext(javaExchange, transportContext) = context
+
+    assert(javaExchange.isEmpty)
+    assert(transportContext.isEmpty)
+  }
 }

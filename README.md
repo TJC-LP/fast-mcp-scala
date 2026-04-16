@@ -24,9 +24,7 @@ libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.2.3"
 //> using dep com.tjclp::fast-mcp-scala:0.2.3
 //> using options "-Xcheck-macros" "-experimental"
 
-import com.tjclp.fastmcp.core.{Tool, Param, Prompt, Resource}
-import com.tjclp.fastmcp.server.FastMcpServer
-import com.tjclp.fastmcp.macros.RegistrationMacro.*
+import com.tjclp.fastmcp.*
 import zio.*
 
 // Define annotated tools, prompts, and resources
@@ -55,6 +53,9 @@ object ExampleServer extends ZIOAppDefault:
         _ <- server.runStdio()
       yield ()
 ```
+
+For most use cases, `import com.tjclp.fastmcp.*` is sufficient. If you need the default `JacksonConverter`
+instances in scope explicitly, use `import com.tjclp.fastmcp.{given, *}`.
 
 ### Running Examples
 
@@ -85,9 +86,7 @@ FastMCP-Scala supports the full MCP Streamable HTTP spec with session management
 //> using dep com.tjclp::fast-mcp-scala:0.2.3
 //> using options "-Xcheck-macros" "-experimental"
 
-import com.tjclp.fastmcp.core.{Tool, Param}
-import com.tjclp.fastmcp.server.{FastMcpServer, FastMcpServerSettings}
-import com.tjclp.fastmcp.macros.RegistrationMacro.*
+import com.tjclp.fastmcp.*
 import zio.*
 
 object StreamableExample:
@@ -137,9 +136,7 @@ For lightweight servers that don't need sessions or SSE, set `stateless = true`:
 //> using dep com.tjclp::fast-mcp-scala:0.2.3
 //> using options "-Xcheck-macros" "-experimental"
 
-import com.tjclp.fastmcp.core.{Tool, Param, Resource, Prompt, Message, Role, TextContent}
-import com.tjclp.fastmcp.server.{FastMcpServer, FastMcpServerSettings}
-import com.tjclp.fastmcp.macros.RegistrationMacro.*
+import com.tjclp.fastmcp.*
 import zio.*
 
 object HttpExample:

@@ -1,6 +1,7 @@
 package com.tjclp.fastmcp.core
 
 import zio.json.*
+import zio.json.ast.Json
 
 // --- Tool Annotations (MCP behavioral hints for clients) ---
 
@@ -24,10 +25,38 @@ object ToolExample:
   given JsonEncoder[ToolExample] = DeriveJsonEncoder.gen[ToolExample]
   given JsonDecoder[ToolExample] = DeriveJsonDecoder.gen[ToolExample]
 
+opaque type ToolInputSchema = String
+
+object ToolInputSchema:
+  private val DefaultJson = """{"type":"object","additionalProperties":true}"""
+
+  val default: ToolInputSchema = unsafeFromJsonString(DefaultJson)
+
+  def fromJsonString(schema: String): Either[String, ToolInputSchema] =
+    schema.fromJson[Json].map(_ => schema)
+
+  def unsafeFromJsonString(schema: String): ToolInputSchema =
+    fromJsonString(schema).fold(
+      error => throw new IllegalArgumentException(s"Invalid tool input schema JSON: $error"),
+      identity
+    )
+
+  def fromAst(schema: Json): ToolInputSchema =
+    schema.toJson
+
+extension (schema: ToolInputSchema)
+  def toJsonString: String = schema
+
+  def toAst: Json =
+    schema.fromJson[Json].fold(
+      error => throw new IllegalStateException(s"Stored tool input schema is invalid JSON: $error"),
+      identity
+    )
+
 case class ToolDefinition(
     name: String,
     description: Option[String],
-    inputSchema: String = """{"type":"object","additionalProperties":true}""",
+    inputSchema: ToolInputSchema = ToolInputSchema.default,
     version: Option[String] = None,
     examples: List[ToolExample] = List.empty,
     deprecated: Boolean = false,

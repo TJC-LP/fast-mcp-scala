@@ -20,7 +20,7 @@ trait McpServer:
       name: String,
       handler: ContextualToolHandler,
       description: Option[String] = None,
-      inputSchema: String = """{"type":"object","additionalProperties":true}""",
+      inputSchema: ToolInputSchema = ToolInputSchema.default,
       options: ToolRegistrationOptions = ToolRegistrationOptions(),
       annotations: Option[ToolAnnotations] = None
   ): ZIO[Any, Throwable, McpServer]

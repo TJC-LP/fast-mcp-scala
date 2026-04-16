@@ -173,7 +173,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
         name = ${ Expr(finalName) },
         description = ${ Expr(finalDesc) },
         handler = $handler,
-        inputSchema = $schemaWithMetadata.spaces2,
+        inputSchema = ToolInputSchema.unsafeFromJsonString($schemaWithMetadata.spaces2),
         annotations = $annotationsExpr
       )
     }

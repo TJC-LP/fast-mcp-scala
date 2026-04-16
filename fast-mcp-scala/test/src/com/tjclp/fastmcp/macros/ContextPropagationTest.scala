@@ -10,6 +10,7 @@ import io.modelcontextprotocol.spec.McpSchema
 import org.scalatest.funsuite.AnyFunSuite
 import zio.*
 
+import core.toJsonString
 import server.*
 import RegistrationMacro.*
 
@@ -91,7 +92,7 @@ class ContextPropagationTest extends AnyFunSuite:
     assert(toolDef.isDefined, "Tool should be registered")
 
     // Create a schema parser to check the schema structure
-    val schemaStr = toolDef.get.inputSchema
+    val schemaStr = toolDef.get.inputSchema.toJsonString
 
     // Verify the schema doesn't include ctx
     assert(!schemaStr.contains("\"ctx\""), "Schema should not contain ctx parameter")

@@ -20,6 +20,13 @@ class ResourceManagerTemplateMatchingSpec extends AnyFlatSpec with Matchers {
     params shouldBe Some(Map("cat" -> "books", "itemId" -> "xyz-987"))
   }
 
+  it should "support placeholder names beyond \\w" in {
+    val rm = new ResourceManager
+    val params =
+      rm.extractTemplateParams("repos://{owner-name}/{repo_name}", "repos://tjc-lp/fast_mcp")
+    params shouldBe Some(Map("owner-name" -> "tjc-lp", "repo_name" -> "fast_mcp"))
+  }
+
   it should "not match URIs not fitting pattern" in {
     val rm = new ResourceManager
     val params = rm.extractTemplateParams("users://{id}/profile", "users://123/profile/extra")
@@ -79,6 +86,33 @@ class ResourceManagerTemplateMatchingSpec extends AnyFlatSpec with Matchers {
       }
     }
     ex.getMessage should include("not found")
+  }
+
+  it should "fail fast when template placeholders are missing matching arguments" in {
+    val rm = new ResourceManager
+
+    val ex = intercept[Throwable] {
+      Unsafe.unsafe { implicit u =>
+        Runtime.default.unsafe
+          .run(
+            rm.addTemplateResource(
+              "users://{user-id}",
+              _ => ZIO.succeed("nope"),
+              ResourceDefinition(
+                "users://{user-id}",
+                None,
+                None,
+                isTemplate = true,
+                arguments = Some(List(ResourceArgument("userId", None, required = true)))
+              )
+            )
+          )
+          .getOrThrowFiberFailure()
+      }
+    }
+
+    ex.getMessage should include("Failed to register resource template")
+    rm.listTemplateDefinitions() shouldBe Nil
   }
 
   "getResourceDefinition / getResourceHandler" should "return Some for existing static resource" in {

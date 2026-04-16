@@ -5,6 +5,17 @@ import scala.jdk.CollectionConverters.*
 import io.modelcontextprotocol.json.McpJsonDefaults
 import io.modelcontextprotocol.spec.McpSchema
 
+private[fastmcp] object JvmToolInputSchemaSupport:
+  private val jsonMapper = McpJsonDefaults.getMapper()
+
+  def fromJavaSchema(schema: McpSchema.JsonSchema): ToolInputSchema =
+    ToolInputSchema.unsafeFromJsonString(jsonMapper.writeValueAsString(schema))
+
+  def fromEither(schema: Either[McpSchema.JsonSchema, String]): ToolInputSchema =
+    schema match
+      case Left(javaSchema) => fromJavaSchema(javaSchema)
+      case Right(json)      => ToolInputSchema.unsafeFromJsonString(json)
+
 /** JVM-only toJava extension methods for shared MCP types.
   * These are internal to fast-mcp-scala and not part of the user-facing DSL.
   */
@@ -33,7 +44,7 @@ private[fastmcp] object TypeConversions:
       }
 
       val jsonMapper = McpJsonDefaults.getMapper()
-      val jsonSchema = jsonMapper.readValue(td.inputSchema, classOf[McpSchema.JsonSchema])
+      val jsonSchema = jsonMapper.readValue(td.inputSchema.toJsonString, classOf[McpSchema.JsonSchema])
       baseToolBuilder.inputSchema(jsonSchema).build()
 
   extension (pa: PromptArgument)
