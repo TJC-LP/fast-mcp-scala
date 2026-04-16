@@ -80,7 +80,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
         ZIO.attempt {
           val patchedArgs =
-            if ${ Expr(ctxParamPresent) } then args + ("ctx" -> ctxOpt.getOrElse(McpContext()))
+            if ${ Expr(ctxParamPresent) } then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
             else args
 
           MapToFunctionMacro
@@ -173,7 +173,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
         name = ${ Expr(finalName) },
         description = ${ Expr(finalDesc) },
         handler = $handler,
-        inputSchema = Right($schemaWithMetadata.spaces2),
+        inputSchema = $schemaWithMetadata.spaces2,
         annotations = $annotationsExpr
       )
     }

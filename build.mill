@@ -114,6 +114,9 @@ object `fast-mcp-scala` extends FastMCPModule {
 
   override def artifactName = "fast-mcp-scala"
 
+  // JVM module reads from both shared/ and src/ (its own JVM-specific code)
+  override def sources = Task.Sources(moduleDir / "src", moduleDir / "shared" / "src")
+
   override def mvnDeps = Seq(
     // ZIO Core
     mvn"dev.zio::zio:${Versions.zio}",
@@ -159,7 +162,14 @@ object `fast-mcp-scala` extends FastMCPModule {
 
     override def moduleKind = Task { ModuleKind.ESModule }
 
-    override def sources = Task.Sources(moduleDir / "src")
+    // JS module reads from both shared/ and js/src/
+    override def sources = Task.Sources(moduleDir / "src", moduleDir / os.up / "shared" / "src")
+
+    // Shared deps needed by shared/ sources (ZIO + ZIO JSON are cross-published for Scala.js)
+    override def mvnDeps = Seq(
+      mvn"dev.zio::zio::${Versions.zio}",
+      mvn"dev.zio::zio-json::${Versions.zioJson}"
+    )
 
     override def bunDeps = Task {
       Seq(bun"@modelcontextprotocol/sdk@1.29.0", bun"zod@4.3.6", bun"zod-to-json-schema@3.25.1")

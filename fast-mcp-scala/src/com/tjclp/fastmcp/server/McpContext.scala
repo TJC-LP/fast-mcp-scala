@@ -4,31 +4,25 @@ import io.modelcontextprotocol.common.McpTransportContext
 import io.modelcontextprotocol.server.McpAsyncServerExchange
 import io.modelcontextprotocol.spec.McpSchema
 
-/** Represents the context of an MCP request. Wraps either a stateful McpAsyncServerExchange (for
-  * stdio/streaming transports) or a stateless McpTransportContext (for HTTP transport).
+/** JVM-specific MCP context carrying the Java SDK exchange and transport objects.
+  * Internal — users interact via the [[McpContext]] base class and its extension methods.
   */
-case class McpContext(
-    // Underlying Java exchange object for advanced use or accessing client capabilities
-    javaExchange: Option[McpAsyncServerExchange] = None,
-    // Transport-level context for stateless HTTP transport (carries HTTP headers, auth, etc.)
-    transportContext: Option[McpTransportContext] = None
-)
+private[fastmcp] class JvmMcpContext(
+    val javaExchange: Option[McpAsyncServerExchange] = None,
+    val transportContext: Option[McpTransportContext] = None
+) extends McpContext
 
-/** Extension methods for McpContext to provide a richer API
+/** Extension methods on McpContext that provide JVM capabilities when available.
+  * These are safe to call on any McpContext — they return None on non-JVM platforms.
   */
 extension (context: McpContext)
 
-  /** Returns the client capabilities if available
-    */
   def getClientCapabilities: Option[McpSchema.ClientCapabilities] =
-    context.javaExchange.map(_.getClientCapabilities)
+    context match
+      case jvm: JvmMcpContext => jvm.javaExchange.map(_.getClientCapabilities)
+      case _                  => None
 
-  /** Returns the client information if available
-    */
   def getClientInfo: Option[McpSchema.Implementation] =
-    context.javaExchange.map(_.getClientInfo)
-
-// Future implementations:
-// def log(level: String, message: String): Task[Unit] = ???
-// def reportProgress(current: Double, total: Option[Double]): Task[Unit] = ???
-// def readResource(uri: String): Task[String | Array[Byte]] = ???
+    context match
+      case jvm: JvmMcpContext => jvm.javaExchange.map(_.getClientInfo)
+      case _                  => None

@@ -83,18 +83,12 @@ class ResourceProcessorTest extends AnyFunSuite {
     // Process annotations first to ensure resources are available
     testServer.scanAnnotations[ResourceProcessorTest.type]
 
-    // Access user resource with userId parameter
+    // Access user resource with userId parameter via readResource (handles template matching internally)
     val userResult = Unsafe.unsafe { implicit unsafe =>
       Runtime.default.unsafe
-        .run {
-          for {
-            matchResult <- ZIO.fromOption(
-              testServer.resourceManager.findMatchingTemplate("users://123")
-            )
-            (_, definition, handler, params) = matchResult
-            result <- handler(Map("userId" -> "123"))
-          } yield result
-        }
+        .run(
+          testServer.resourceManager.readResource("users://123", None)
+        )
         .getOrThrowFiberFailure()
     }
 
@@ -106,15 +100,9 @@ class ResourceProcessorTest extends AnyFunSuite {
     // Access item resource with multiple parameters
     val itemResult = Unsafe.unsafe { implicit unsafe =>
       Runtime.default.unsafe
-        .run {
-          for {
-            matchResult <- ZIO.fromOption(
-              testServer.resourceManager.findMatchingTemplate("items://electronics/phone-123")
-            )
-            (_, definition, handler, params) = matchResult
-            result <- handler(Map("category" -> "electronics", "itemId" -> "phone-123"))
-          } yield result
-        }
+        .run(
+          testServer.resourceManager.readResource("items://electronics/phone-123", None)
+        )
         .getOrThrowFiberFailure()
     }
 

@@ -14,8 +14,8 @@ class ToolManagerSpec extends AnyFlatSpec with Matchers {
 
   "addTool" should "overwrite existing tool by default and update definition" in {
     val manager = new ToolManager
-    val def1 = ToolDefinition("t1", Some("first"), Right("schema1"))
-    val def2 = ToolDefinition("t1", Some("second"), Right("schema2"))
+    val def1 = ToolDefinition("t1", Some("first"), "schema1")
+    val def2 = ToolDefinition("t1", Some("second"), "schema2")
     // First registration
     Unsafe.unsafe { implicit u =>
       Runtime.default.unsafe
@@ -35,8 +35,8 @@ class ToolManagerSpec extends AnyFlatSpec with Matchers {
   it should "fail when duplicates are disallowed and warnOnDuplicates is false" in {
     val manager = new ToolManager
     val options = ToolRegistrationOptions(warnOnDuplicates = false)
-    val def1 = ToolDefinition("t2", None, Right("s1"))
-    val def2 = ToolDefinition("t2", None, Right("s2"))
+    val def1 = ToolDefinition("t2", None, "s1")
+    val def2 = ToolDefinition("t2", None, "s2")
     // First registration succeeds
     Unsafe.unsafe { implicit u =>
       Runtime.default.unsafe
@@ -68,7 +68,7 @@ class ToolManagerSpec extends AnyFlatSpec with Matchers {
 
   it should "execute handler and return result" in {
     val manager = new ToolManager
-    val defn = ToolDefinition("t3", None, Right("{}"))
+    val defn = ToolDefinition("t3", None, "{}")
     Unsafe.unsafe { implicit u =>
       Runtime.default.unsafe
         .run(manager.addTool("t3", (_, _) => ZIO.succeed(123), defn))
@@ -84,7 +84,7 @@ class ToolManagerSpec extends AnyFlatSpec with Matchers {
     val manager = new ToolManager
     val captured = new java.util.concurrent.atomic.AtomicReference[Option[McpContext]](None)
     val handler: ContextualToolHandler = (_, ctx) => ZIO.succeed { captured.set(ctx); "ctx-ok" }
-    val defn = ToolDefinition("t4", None, Right("{}"))
+    val defn = ToolDefinition("t4", None, "{}")
     // Register with context-aware handler
     Unsafe.unsafe { implicit u =>
       Runtime.default.unsafe.run(manager.addTool("t4", handler, defn)).getOrThrowFiberFailure()

@@ -45,7 +45,7 @@ class ContextPropagationTest extends AnyFunSuite:
 
     // Create a mock context with client info
     val mockClient = new McpSchema.Implementation("TestClient", "1.0.0")
-    val mockContext = McpContext(
+    val mockContext = new JvmMcpContext(
       javaExchange = Some(new MockServerExchange(mockClient))
     )
 
@@ -91,17 +91,14 @@ class ContextPropagationTest extends AnyFunSuite:
     assert(toolDef.isDefined, "Tool should be registered")
 
     // Create a schema parser to check the schema structure
-    val schemaStr = toolDef.get.inputSchema match {
-      case Right(s) => s
-      case Left(js) => js.toString
-    }
+    val schemaStr = toolDef.get.inputSchema
 
     // Verify the schema doesn't include ctx
     assert(!schemaStr.contains("\"ctx\""), "Schema should not contain ctx parameter")
 
     // Now test calling the function
     val mockClient = new McpSchema.Implementation("AnnotationTestClient", "1.0.0")
-    val mockContext = McpContext(
+    val mockContext = new JvmMcpContext(
       javaExchange = Some(new MockServerExchange(mockClient))
     )
 

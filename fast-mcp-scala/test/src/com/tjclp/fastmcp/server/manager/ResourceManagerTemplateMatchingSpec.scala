@@ -4,29 +4,26 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import zio.*
 
-/** Tests for ResourceTemplatePattern matching and ResourceManager resolution behavior.
+/** Tests for ResourceManager template matching and resolution behavior.
   */
 class ResourceManagerTemplateMatchingSpec extends AnyFlatSpec with Matchers {
 
-  "ResourceTemplatePattern" should "match single placeholder and extract params" in {
-    val pattern = ResourceTemplatePattern("users://{id}/profile")
-    val m = pattern.matches("users://123/profile")
-    m shouldBe defined
-    val params = pattern.extractParams("users://123/profile", m.get)
-    params shouldBe Map("id" -> "123")
+  "extractTemplateParams" should "match single placeholder and extract params" in {
+    val rm = new ResourceManager
+    val params = rm.extractTemplateParams("users://{id}/profile", "users://123/profile")
+    params shouldBe Some(Map("id" -> "123"))
   }
 
   it should "match multiple placeholders and extract params" in {
-    val pattern = ResourceTemplatePattern("items://{cat}/{itemId}")
-    val m = pattern.matches("items://books/xyz-987")
-    m shouldBe defined
-    val params = pattern.extractParams("items://books/xyz-987", m.get)
-    params shouldBe Map("cat" -> "books", "itemId" -> "xyz-987")
+    val rm = new ResourceManager
+    val params = rm.extractTemplateParams("items://{cat}/{itemId}", "items://books/xyz-987")
+    params shouldBe Some(Map("cat" -> "books", "itemId" -> "xyz-987"))
   }
 
   it should "not match URIs not fitting pattern" in {
-    val pattern = ResourceTemplatePattern("users://{id}/profile")
-    pattern.matches("users://123/profile/extra") shouldBe None
+    val rm = new ResourceManager
+    val params = rm.extractTemplateParams("users://{id}/profile", "users://123/profile/extra")
+    params shouldBe None
   }
 
   "ResourceManager.readResource" should "prefer static resources over templates" in {
@@ -35,7 +32,7 @@ class ResourceManagerTemplateMatchingSpec extends AnyFlatSpec with Matchers {
     Unsafe.unsafe { implicit u =>
       Runtime.default.unsafe
         .run(
-          rm.addResource(
+          rm.addStaticResource(
             "test://static",
             () => ZIO.succeed("static-content"),
             ResourceDefinition("test://static", None, None)
@@ -47,7 +44,7 @@ class ResourceManagerTemplateMatchingSpec extends AnyFlatSpec with Matchers {
     Unsafe.unsafe { implicit u =>
       Runtime.default.unsafe
         .run(
-          rm.addResourceTemplate(
+          rm.addTemplateResource(
             "test://{foo}",
             params => ZIO.succeed(s"template-${params("foo")}"),
             ResourceDefinition(
@@ -91,7 +88,7 @@ class ResourceManagerTemplateMatchingSpec extends AnyFlatSpec with Matchers {
 
     Unsafe.unsafe { implicit u =>
       Runtime.default.unsafe
-        .run(rm.addResource(staticUri, () => ZIO.succeed("ok"), defn))
+        .run(rm.addStaticResource(staticUri, () => ZIO.succeed("ok"), defn))
         .getOrThrowFiberFailure()
     }
 
@@ -105,7 +102,7 @@ class ResourceManagerTemplateMatchingSpec extends AnyFlatSpec with Matchers {
     }
     result shouldBe "ok"
 
-    // Non‑existent URI returns None
+    // Non-existent URI returns None
     rm.getResourceDefinition("missing://x") shouldBe None
     rm.getResourceHandler("missing://x") shouldBe None
   }

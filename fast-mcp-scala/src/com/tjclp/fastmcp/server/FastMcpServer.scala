@@ -27,7 +27,9 @@ import zio.*
 import zio.http.Server as ZHttpServer
 
 import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.core.TypeConversions.*
 import com.tjclp.fastmcp.server.manager.*
+import com.tjclp.fastmcp.server.manager.ResourceConversions.*
 import com.tjclp.fastmcp.server.transport.ZioHttpStatelessTransport
 import com.tjclp.fastmcp.server.transport.ZioHttpStreamableTransportProvider
 
@@ -59,9 +61,7 @@ class FastMcpServer(
       name: String,
       handler: ContextualToolHandler,
       description: Option[String] = None,
-      inputSchema: Either[McpSchema.JsonSchema, String] = Left(
-        new McpSchema.JsonSchema("object", null, null, true, null, null)
-      ),
+      inputSchema: String = """{"type":"object","additionalProperties":true}""",
       options: ToolRegistrationOptions = ToolRegistrationOptions(),
       annotations: Option[ToolAnnotations] = None
   ): ZIO[Any, Throwable, FastMcpServer] =
@@ -90,7 +90,7 @@ class FastMcpServer(
       isTemplate = false,
       arguments = None
     )
-    resourceManager.addResource(uri, handler, definition).as(this)
+    resourceManager.addStaticResource(uri, handler, definition).as(this)
   }
 
   /** Register a **templated** resource with the server.
@@ -111,7 +111,7 @@ class FastMcpServer(
       isTemplate = true,
       arguments = arguments
     )
-    resourceManager.addResourceTemplate(uriPattern, handler, definition).as(this)
+    resourceManager.addTemplateResource(uriPattern, handler, definition).as(this)
   }
 
   /** Register a prompt with the server
@@ -129,7 +129,7 @@ class FastMcpServer(
 
   def listTools(): ZIO[Any, Throwable, McpSchema.ListToolsResult] =
     ZIO.succeed {
-      val tools = toolManager.listDefinitions().map(ToolDefinition.toJava).asJava
+      val tools = toolManager.listDefinitions().map(_.toJava).asJava
       new McpSchema.ListToolsResult(tools, null)
     }
 
@@ -138,7 +138,7 @@ class FastMcpServer(
       val javaResources = resourceManager
         .listDefinitions()
         .filter(!_.isTemplate) // Only include static resources
-        .map(ResourceDefinition.toJava)
+        .map(_.toJava)
         .collect { case res: McpSchema.Resource => res }
         .asJava
       new McpSchema.ListResourcesResult(javaResources, null)
@@ -146,7 +146,7 @@ class FastMcpServer(
 
   def listPrompts(): ZIO[Any, Throwable, McpSchema.ListPromptsResult] =
     ZIO.succeed {
-      val prompts = promptManager.listDefinitions().map(PromptDefinition.toJava).asJava
+      val prompts = promptManager.listDefinitions().map(_.toJava).asJava
       new McpSchema.ListPromptsResult(prompts, null)
     }
 
@@ -154,7 +154,7 @@ class FastMcpServer(
     ZIO.succeed {
       val templates = resourceManager
         .listTemplateDefinitions()
-        .map(ResourceDefinition.toJava)
+        .map(_.toJava)
         .collect { case template: McpSchema.ResourceTemplate => template }
         .asJava
       new McpSchema.ListResourceTemplatesResult(templates, null)
@@ -320,7 +320,7 @@ class FastMcpServer(
     JSystem.err.println(s"[FastMCPScala] Registering ${tools.size} tools with the MCP server:")
     tools.foreach { toolDef =>
       JSystem.err.println(s"[FastMCPScala] - Registering Tool: ${toolDef.name}")
-      serverBuilder.toolCall(ToolDefinition.toJava(toolDef), javaToolCallHandler(toolDef.name))
+      serverBuilder.toolCall(toolDef.toJava, javaToolCallHandler(toolDef.name))
     }
 
     // --- Resource and Template Registration with Java Server ---
@@ -345,7 +345,7 @@ class FastMcpServer(
           s"[FastMCPScala] - Processing static resource: ${resDef.uri}"
         )
 
-        ResourceDefinition.toJava(resDef) match {
+        resDef.toJava match {
           case resource: McpSchema.Resource =>
             val spec = new McpServerFeatures.AsyncResourceSpecification(
               resource,
@@ -373,7 +373,7 @@ class FastMcpServer(
       val javaTemplateSpecs = templateResources
         .map { resDef =>
           JSystem.err.println(s"[FastMCPScala] - Processing resource template: ${resDef.uri}")
-          val template = ResourceDefinition.toJava(resDef) match {
+          val template = resDef.toJava match {
             case t: McpSchema.ResourceTemplate => t
             case _ => null
           }
@@ -398,7 +398,7 @@ class FastMcpServer(
     )
     promptManager.listDefinitions().foreach { promptDef =>
       JSystem.err.println(s"[FastMCPScala] - Registering Prompt: ${promptDef.name}")
-      val javaPrompt = PromptDefinition.toJava(promptDef)
+      val javaPrompt = promptDef.toJava
       val promptSpec = new McpServerFeatures.AsyncPromptSpecification(
         javaPrompt,
         javaPromptHandler(promptDef.name)
@@ -429,7 +429,7 @@ class FastMcpServer(
     tools.foreach { toolDef =>
       JSystem.err.println(s"[FastMCPScala] - Registering Tool: ${toolDef.name}")
       serverBuilder.toolCall(
-        ToolDefinition.toJava(toolDef),
+        toolDef.toJava,
         statelessToolCallHandler(toolDef.name)
       )
     }
@@ -452,7 +452,7 @@ class FastMcpServer(
 
       staticResources.foreach { resDef =>
         JSystem.err.println(s"[FastMCPScala] - Processing static resource: ${resDef.uri}")
-        ResourceDefinition.toJava(resDef) match {
+        resDef.toJava match {
           case resource: McpSchema.Resource =>
             val spec = new McpStatelessServerFeatures.AsyncResourceSpecification(
               resource,
@@ -480,7 +480,7 @@ class FastMcpServer(
       val javaTemplateSpecs = templateResources
         .map { resDef =>
           JSystem.err.println(s"[FastMCPScala] - Processing resource template: ${resDef.uri}")
-          val template = ResourceDefinition.toJava(resDef) match {
+          val template = resDef.toJava match {
             case t: McpSchema.ResourceTemplate => t
             case _ => null
           }
@@ -505,7 +505,7 @@ class FastMcpServer(
     )
     promptManager.listDefinitions().foreach { promptDef =>
       JSystem.err.println(s"[FastMCPScala] - Registering Prompt: ${promptDef.name}")
-      val javaPrompt = PromptDefinition.toJava(promptDef)
+      val javaPrompt = promptDef.toJava
       val promptSpec = new McpStatelessServerFeatures.AsyncPromptSpecification(
         javaPrompt,
         statelessPromptHandler(promptDef.name)
@@ -734,14 +734,14 @@ class FastMcpServer(
       val scalaArgs = Option(request.arguments())
         .map(_.asScala.toMap.asInstanceOf[Map[String, Any]])
         .getOrElse(Map.empty)
-      val context = McpContext(Some(exchange))
+      val context = JvmMcpContext(Some(exchange))
 
       val messagesEffect: ZIO[Any, Throwable, List[Message]] =
         promptManager.getPrompt(promptName, scalaArgs, Some(context))
 
       val finalEffect: ZIO[Any, Throwable, McpSchema.GetPromptResult] = messagesEffect.map {
         messages =>
-          val javaMessages = messages.map(Message.toJava).asJava
+          val javaMessages = messages.map(_.toJava).asJava
           val description = promptManager
             .getPromptDefinition(promptName)
             .flatMap(_.description)
@@ -772,7 +772,7 @@ class FastMcpServer(
       val scalaArgs = Option(request.arguments())
         .map(_.asScala.toMap.asInstanceOf[Map[String, Any]])
         .getOrElse(Map.empty)
-      val context = McpContext(javaExchange = Some(exchange))
+      val context = JvmMcpContext(javaExchange = Some(exchange))
 
       val resultEffect: ZIO[Any, Throwable, Any] =
         toolManager.callTool(toolName, scalaArgs, Some(context))
@@ -793,7 +793,7 @@ class FastMcpServer(
       val scalaArgs = Option(request.arguments())
         .map(_.asScala.toMap.asInstanceOf[Map[String, Any]])
         .getOrElse(Map.empty)
-      val context = McpContext(transportContext = Some(ctx))
+      val context = JvmMcpContext(transportContext = Some(ctx))
 
       val resultEffect: ZIO[Any, Throwable, Any] =
         toolManager.callTool(toolName, scalaArgs, Some(context))
@@ -903,14 +903,14 @@ class FastMcpServer(
       val scalaArgs = Option(request.arguments())
         .map(_.asScala.toMap.asInstanceOf[Map[String, Any]])
         .getOrElse(Map.empty)
-      val context = McpContext(transportContext = Some(ctx))
+      val context = JvmMcpContext(transportContext = Some(ctx))
 
       val messagesEffect: ZIO[Any, Throwable, List[Message]] =
         promptManager.getPrompt(promptName, scalaArgs, Some(context))
 
       val finalEffect: ZIO[Any, Throwable, McpSchema.GetPromptResult] = messagesEffect.map {
         messages =>
-          val javaMessages = messages.map(Message.toJava).asJava
+          val javaMessages = messages.map(_.toJava).asJava
           val description = promptManager
             .getPromptDefinition(promptName)
             .flatMap(_.description)

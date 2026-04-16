@@ -6,18 +6,19 @@ import io.modelcontextprotocol.spec.McpSchema
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import com.tjclp.fastmcp.core.TypeConversions.*
+
 /** Tests for conversions from Scala core ADTs to Java MCP Schema types.
   */
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
 class TypesConversionTest extends AnyFlatSpec with Matchers {
 
   "Role.toJava" should "map Scala Role.User to Java Role.USER" in {
-    val j = Role.toJava(Role.User)
-    j shouldBe McpSchema.Role.USER
+    Role.User.toJava shouldBe McpSchema.Role.USER
   }
 
   it should "map Scala Role.Assistant to Java Role.ASSISTANT" in {
-    Role.toJava(Role.Assistant) shouldBe McpSchema.Role.ASSISTANT
+    Role.Assistant.toJava shouldBe McpSchema.Role.ASSISTANT
   }
 
   "TextContent.toJava" should "populate text, audience, and priority fields" in {
@@ -85,7 +86,7 @@ class TypesConversionTest extends AnyFlatSpec with Matchers {
 
   "PromptDefinition.toJava" should "convert name, description, and empty arguments when None" in {
     val pd = PromptDefinition("p1", Some("desc"), None)
-    val j = PromptDefinition.toJava(pd)
+    val j = pd.toJava
     j.getClass.getSimpleName should include("Prompt")
     j.name() shouldBe "p1"
     j.description() shouldBe "desc"
@@ -96,7 +97,7 @@ class TypesConversionTest extends AnyFlatSpec with Matchers {
   it should "convert arguments list to Java list when defined" in {
     val arg = PromptArgument("a", Some("d"), required = true)
     val pd = PromptDefinition("p2", None, Some(List(arg)))
-    val j = PromptDefinition.toJava(pd)
+    val j = pd.toJava
     j.name() shouldBe "p2"
     j.description() shouldBe null
     val args = j.arguments()
@@ -111,7 +112,7 @@ class TypesConversionTest extends AnyFlatSpec with Matchers {
 
   "Message.toJava" should "convert Scala Message to Java PromptMessage" in {
     val scalaMsg = Message(Role.User, TextContent("hi"))
-    val javaMsg = Message.toJava(scalaMsg)
+    val javaMsg = scalaMsg.toJava
 
     javaMsg.role() shouldBe McpSchema.Role.USER
     javaMsg.content() shouldBe a[McpSchema.TextContent]
