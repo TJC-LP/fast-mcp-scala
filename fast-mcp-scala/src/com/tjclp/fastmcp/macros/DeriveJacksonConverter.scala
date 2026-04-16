@@ -9,6 +9,7 @@ import scala.reflect.ClassTag
 object DeriveJacksonConverter:
 
   /** Derives a JacksonConverter for a case class `T` or Scala 3 enum `T`. */
+  @scala.annotation.nowarn("msg=unused implicit parameter")
   inline def derived[T](using Mirror.Of[T], ClassTag[T]): JacksonConverter[T] =
     ${ derivedImpl[T] }
 
@@ -39,7 +40,7 @@ object DeriveJacksonConverter:
     val ctorParams = typeSymbol.primaryConstructor.paramSymss.flatten
     val companion = typeSymbol.companionModule
 
-    def defaultValueExpr[F: Type](index: Int)(using Quotes): Option[Expr[F]] =
+    def defaultValueExpr[F: Type](index: Int): Option[Expr[F]] =
       if companion == Symbol.noSymbol then None
       else
         val candidateNames = List(

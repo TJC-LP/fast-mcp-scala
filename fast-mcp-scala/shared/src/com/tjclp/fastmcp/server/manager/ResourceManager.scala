@@ -7,7 +7,6 @@ import scala.util.matching.Regex
 
 import zio.*
 
-import com.tjclp.fastmcp.core.ResourceArgument
 import com.tjclp.fastmcp.core.ResourceDefinition
 import com.tjclp.fastmcp.server.McpContext
 
@@ -149,6 +148,7 @@ class ResourceManager extends Manager[ResourceDefinition]:
       }
       .collectFirst { case Some(result) => result }
 
+  @scala.annotation.nowarn("msg=unused explicit parameter")
   def readResource(
       uri: String,
       context: Option[McpContext]
@@ -184,6 +184,7 @@ case class ResourceTemplatePattern(pattern: String):
     new Regex("^" + regexString + "$")
   }
 
+  @scala.annotation.nowarn("msg=unused explicit parameter")
   def extractParams(
       uri: String,
       regexMatch: Regex.Match

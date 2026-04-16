@@ -363,10 +363,6 @@ private[macros] object MacroUtils:
                   }
                 case None => '{ None }
 
-              val nestedExpr = nested match
-                case Some(node) => '{ $node.properties }
-                case None => '{ Map.empty[String, SchemaMetadataNode] }
-
               val itemsExpr = nested match
                 case Some(node) if isCollectionType =>
                   '{ Some($node) }

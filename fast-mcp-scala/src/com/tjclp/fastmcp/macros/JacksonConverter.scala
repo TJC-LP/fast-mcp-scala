@@ -132,6 +132,7 @@ object JacksonConverter extends JacksonConverterLowPriority:
           )
 
   // Option instance treats null or missing as None
+  @scala.annotation.nowarn("msg=unused implicit parameter")
   given [A: ClassTag](using JacksonConverter[A]): JacksonConverter[Option[A]] with
 
     def convert(name: String, rawValue: Any, context: JacksonConversionContext): Option[A] =
@@ -151,6 +152,7 @@ object JacksonConverter extends JacksonConverterLowPriority:
       raw.asInstanceOf[McpContext]
 
   // Enhanced List/Seq converter that handles various input formats
+  @scala.annotation.nowarn("msg=unused implicit parameter")
   given [A: ClassTag](using conv: JacksonConverter[A]): JacksonConverter[List[A]] with
 
     def convert(name: String, rawValue: Any, context: JacksonConversionContext): List[A] =
