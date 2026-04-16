@@ -7,8 +7,6 @@ import zio.*
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.*
-import com.tjclp.fastmcp.server.manager.ResourceHandler
-import com.tjclp.fastmcp.server.manager.ResourceTemplateHandler
 
 /** Refactored Resource processor that utilises [[AnnotationProcessorBase]]. The remaining logic is
   * limited to URI‑template handling and @Resource‑specific parameter processing.

@@ -326,8 +326,8 @@ object ManualServer extends ZIOAppDefault:
         case (TextStyle.heading, OutputFormat.html) => s"<h1>$transformedText</h1>"
         case (TextStyle.heading, OutputFormat.markdown) => s"# $transformedText"
         case (TextStyle.heading, OutputFormat.json) => transformedText.toUpperCase
-        case (style, OutputFormat.json) => transformedText // In JSON mode, we ignore styling
-        case (style, _) => transformedText // Default for other combinations
+        case (_, OutputFormat.json) => transformedText // In JSON mode, we ignore styling
+        case (_, _) => transformedText // Default for other combinations
 
       FormattedOutput(
         originalText = text,

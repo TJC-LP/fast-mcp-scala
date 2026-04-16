@@ -64,3 +64,5 @@ build/
 node_modules/
 bun.lockb
 bun.lock
+*.class
+*.tasty

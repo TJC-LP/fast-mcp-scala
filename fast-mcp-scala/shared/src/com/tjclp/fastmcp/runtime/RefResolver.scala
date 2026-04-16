@@ -19,6 +19,7 @@ object RefResolver:
     * @throws IllegalArgumentException
     *   if more than 22 arguments are provided (Scala function limitation)
     */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
   def invokeFunctionWithArgs(fun: Any, args: List[Any]): Any =
     (args.length, fun) match
       case (0, f: Function0[?]) => f()

@@ -97,7 +97,7 @@ class ToolManager extends Manager[ToolDefinition]:
         .orElseFail(new ToolNotFoundError(s"Tool '$name' not found"))
 
       // Get the tool definition to validate arguments against schema (future enhancement)
-      definition <- ZIO
+      _ <- ZIO
         .fromOption(getToolDefinition(name))
         .orElseFail(
           new ToolExecutionError(s"Tool definition for '$name' not found but handler exists")

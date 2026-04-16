@@ -622,7 +622,7 @@ class FastMcpServer(
   ): java.util.function.BiFunction[McpAsyncServerExchange, McpSchema.ReadResourceRequest, Mono[
     McpSchema.ReadResourceResult
   ]] =
-    (exchange, request) => {
+    (_, _) => {
       val handlerOpt: Option[ResourceHandler] = resourceManager.getResourceHandler(registeredUri)
       handlerOpt match {
         case Some(handler) =>
@@ -690,7 +690,7 @@ class FastMcpServer(
   ): java.util.function.BiFunction[McpAsyncServerExchange, McpSchema.ReadResourceRequest, Mono[
     McpSchema.ReadResourceResult
   ]] =
-    (exchange, request) => {
+    (_, request) => {
       val requestedUri = request.uri()
       if requestedUri != null && (requestedUri.contains("{") || requestedUri.contains("}")) then
         // Prevent reading unresolved template URIs (e.g. the literal pattern from listResources)
@@ -875,7 +875,7 @@ class FastMcpServer(
   ): java.util.function.BiFunction[McpTransportContext, McpSchema.ReadResourceRequest, Mono[
     McpSchema.ReadResourceResult
   ]] =
-    (ctx, request) => {
+    (_, _) => {
       resourceManager.getResourceHandler(registeredUri) match {
         case Some(handler) =>
           val finalEffect: ZIO[Any, Throwable, McpSchema.ReadResourceResult] = handler()
@@ -908,7 +908,7 @@ class FastMcpServer(
   ): java.util.function.BiFunction[McpTransportContext, McpSchema.ReadResourceRequest, Mono[
     McpSchema.ReadResourceResult
   ]] =
-    (ctx, request) => {
+    (_, request) => {
       val requestedUri = request.uri()
       if requestedUri != null && (requestedUri.contains("{") || requestedUri.contains("}")) then
         val paramRegex = """\{([^{}]+)\}""".r

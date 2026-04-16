@@ -64,7 +64,7 @@ object MapToFunctionMacro:
       case select @ Select(_, _)
           if select.symbol.isDefDef && !select.symbol.flags.is(Flags.Synthetic) =>
         select.symbol.paramSymss.headOption.map(_.map(_.name))
-      case closure @ Closure(meth @ Ident(_), _) if meth.symbol.isDefDef =>
+      case Closure(meth @ Ident(_), _) if meth.symbol.isDefDef =>
         meth.symbol.paramSymss.headOption.map(_.map(_.name))
       case _ => None
 

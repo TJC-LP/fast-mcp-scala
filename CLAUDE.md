@@ -2,11 +2,18 @@
 
 ## Project Overview
 
-FastMCP-Scala is a high-level Scala 3 library for building Model Context Protocol (MCP) servers. It provides annotation-driven APIs (`@Tool`, `@Resource`, `@Prompt`) with automatic JSON Schema generation via Scala 3 macros.
+FastMCP-Scala is a high-level Scala 3 library for building Model Context Protocol (MCP) servers. It provides two registration paths:
+
+1. **Annotation-driven** (`@Tool`, `@Resource`, `@Prompt` + `scanAnnotations`) — zero-boilerplate, JVM-only
+2. **Typed contracts** (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) — explicit, cross-platform (JVM + Scala.js)
+
+Both paths converge on the same `McpServer` trait and support `@Param` metadata on parameters/fields.
 
 ## Build System
 
-**Build tool**: Mill 1.1.0-RC3 (configured in `.mill-version`)
+**Build tool**: Mill 1.1.5 (configured in `.mill-version`)
+**Scala**: 3.8.3
+**Plugins**: mill-bun-plugin 0.2.0 (Scala.js + Bun integration)
 
 ### Common Commands
 
@@ -14,8 +21,14 @@ FastMCP-Scala is a high-level Scala 3 library for building Model Context Protoco
 # Compile
 ./mill fast-mcp-scala.compile
 
-# Run tests
+# Run all tests (JVM + Scala.js conformance)
+./mill fast-mcp-scala.test + fast-mcp-scala.js.test.bunTest
+
+# Run JVM tests only
 ./mill fast-mcp-scala.test
+
+# Run Scala.js conformance tests only
+./mill fast-mcp-scala.js.test.bunTest
 
 # Run specific test class
 ./mill fast-mcp-scala.test com.tjclp.fastmcp.macros.ToolProcessorTest
@@ -26,9 +39,6 @@ FastMCP-Scala is a high-level Scala 3 library for building Model Context Protoco
 # Check formatting (CI uses this)
 ./mill fast-mcp-scala.checkFormat
 
-# Generate coverage report
-./mill fast-mcp-scala.scoverage.htmlReport
-
 # Publish locally for testing
 ./mill fast-mcp-scala.publishLocal
 ```
@@ -38,94 +48,136 @@ FastMCP-Scala is a high-level Scala 3 library for building Model Context Protoco
 ```
 fast-mcp-scala/
 ├── build.mill                 # Mill build definition
-├── .mill-version              # Mill version (1.1.0-RC3)
-├── .mill-jvm-opts             # JVM options for Mill
+├── .mill-version              # Mill version (1.1.5)
 ├── fast-mcp-scala/
-│   ├── src/com/tjclp/fastmcp/
-│   │   ├── core/              # Core types, annotations, ADTs
-│   │   │   ├── Annotations.scala    # @Tool, @Param, @Resource, @Prompt
-│   │   │   └── Types.scala          # ToolDefinition, Content types, etc.
-│   │   ├── macros/            # Scala 3 macro implementations
-│   │   │   ├── ToolProcessor.scala       # Processes @Tool annotations
-│   │   │   ├── ResourceProcessor.scala   # Processes @Resource annotations
-│   │   │   ├── PromptProcessor.scala     # Processes @Prompt annotations
-│   │   │   ├── MacroUtils.scala          # Shared macro utilities
-│   │   │   ├── JsonSchemaMacro.scala     # JSON Schema generation
-│   │   │   ├── RegistrationMacro.scala   # scanAnnotations entry point
-│   │   │   └── schema/                   # Schema extraction helpers
-│   │   ├── runtime/           # Runtime utilities (RefResolver)
-│   │   ├── server/            # Server implementation
-│   │   │   ├── FastMcpServer.scala       # Main server class
-│   │   │   ├── FastMcpServerSettings.scala # Server configuration
-│   │   │   ├── McpContext.scala          # Request context
-│   │   │   ├── manager/                  # Tool/Resource/Prompt managers
-│   │   │   └── transport/               # Transport implementations
-│   │   │       ├── ZioHttpStatelessTransport.scala           # Stateless HTTP
-│   │   │       └── ZioHttpStreamableTransportProvider.scala  # Streamable HTTP (sessions + SSE)
-│   │   └── examples/          # Example servers
-│   └── test/src/              # Test sources (mirrors src structure)
-└── scripts/                   # Example scripts for scala-cli
+│   ├── shared/src/            # Platform-independent code (JVM + JS)
+│   │   └── com/tjclp/fastmcp/
+│   │       ├── core/
+│   │       │   ├── Annotations.scala    # @Tool, @Param, @Resource, @Prompt
+│   │       │   ├── Types.scala          # ToolDefinition, Content, ToolInputSchema, etc.
+│   │       │   └── Contracts.scala      # McpTool, McpPrompt, McpDecoder, McpEncoder
+│   │       ├── runtime/                 # RefResolver
+│   │       └── server/
+│   │           ├── McpServer.scala      # McpServerPlatform trait (abstract API)
+│   │           ├── McpContext.scala     # Platform-independent context base
+│   │           ├── FastMcpServerSettings.scala
+│   │           └── manager/            # ToolManager, PromptManager, ResourceManager
+│   ├── src/                   # JVM-specific code
+│   │   └── com/tjclp/fastmcp/
+│   │       ├── core/Types.scala         # TypeConversions (toJava extensions, private[fastmcp])
+│   │       ├── macros/                  # Scala 3 macro implementations (JVM-only)
+│   │       │   ├── ToolProcessor.scala
+│   │       │   ├── ResourceProcessor.scala
+│   │       │   ├── PromptProcessor.scala
+│   │       │   ├── RegistrationMacro.scala  # scanAnnotations entry point
+│   │       │   ├── JsonSchemaMacro.scala
+│   │       │   ├── JacksonConverter.scala   # extends McpDecoder (bridges to shared)
+│   │       │   └── JacksonConversionContext.scala  # extends McpDecodeContext
+│   │       ├── server/
+│   │       │   ├── FastMcpServer.scala      # JVM implementation (extends McpServerPlatform)
+│   │       │   ├── McpContext.scala         # JvmMcpContext (private[fastmcp])
+│   │       │   ├── McpServerBuilders.scala  # McpServer companion (factory methods)
+│   │       │   └── transport/
+│   │       └── examples/
+│   ├── js/                    # Scala.js code (Bun runtime)
+│   │   ├── src/               # MCP TS SDK facades + McpTestClient
+│   │   └── test/src/          # Conformance tests + contract surface tests
+│   └── test/src/              # JVM test sources
 ```
 
 ## Key Concepts
 
+### Annotation Path (JVM-only)
+
+```scala
+object MyServer extends ZIOAppDefault:
+  @Tool(name = Some("add"), description = Some("Add two numbers"))
+  def add(@Param("First number") a: Int, @Param("Second number") b: Int): Int = a + b
+
+  override def run =
+    for
+      server <- ZIO.succeed(McpServer("MyServer"))
+      _ <- ZIO.attempt(server.scanAnnotations[MyServer.type])
+      _ <- server.runStdio()
+    yield ()
+```
+
+### Typed Contract Path (cross-platform)
+
+```scala
+case class AddArgs(@Param("First number") a: Int, @Param("Second number") b: Int)
+
+val addTool = McpTool.derived[AddArgs, Int](
+  name = "add",
+  description = Some("Add two numbers")
+) { args => ZIO.succeed(args.a + args.b) }
+
+// Mount:
+server.tool(addTool)
+```
+
+### When to Use Which
+
+| | Annotations | Typed Contracts |
+|---|---|---|
+| Platform | JVM only | JVM + Scala.js |
+| Boilerplate | Zero (macro-driven) | Minimal (case class + builder) |
+| Schema | Auto from method signature | Auto from case class via `ToolSchemaProvider` |
+| `@Param` | On method parameters | On case class fields |
+| Composability | Methods on an object | First-class values |
+| Best for | Quick servers, prototyping | Libraries, cross-platform, production |
+
 ### Annotations
 
-- `@Tool` - Marks a method as an MCP tool. Supports behavioral hints via MCP Tool Annotations:
-  - `title: Option[String]` - Human-readable title
-  - `readOnlyHint: Option[Boolean]` - Tool only reads data
-  - `destructiveHint: Option[Boolean]` - Tool may be destructive/irreversible
-  - `idempotentHint: Option[Boolean]` - Same args produce same effect
-  - `openWorldHint: Option[Boolean]` - Interacts with external world
-  - `returnDirect: Option[Boolean]` - Result goes directly to user
+- `@Tool` - Marks a method as an MCP tool. Supports behavioral hints:
+  - `title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`, `returnDirect`
 - `@Resource` - Marks a method as an MCP resource (static or templated)
 - `@Prompt` - Marks a method as an MCP prompt
-- `@Param` - Describes method parameters with metadata:
+- `@Param` - Describes parameters/fields with metadata:
   - `description: String` - Parameter description
-  - `example: Option[String]` - Example value (adds `examples` array to schema)
-  - `required: Boolean` - Override required status (must use `Option[T]` or default value if `false`)
+  - `example: Option[String]` - Example value
+  - `required: Boolean` - Override required status
   - `schema: Option[String]` - Custom JSON Schema override
 
-### Macro System
+### Typed Contracts
 
-The project uses Scala 3 macros extensively. Key compiler options:
-- `-Xcheck-macros` - Enable macro checking
-- `-experimental` - Enable experimental features
-- `-Xmax-inlines:128` - Increase inline limit for complex macros
-
-The main entry point is `scanAnnotations[T]` which:
-1. Finds all `@Tool`, `@Resource`, `@Prompt` methods in type `T`
-2. Generates JSON schemas for parameters
-3. Registers handlers with the appropriate managers
+- `McpTool[In, Out]` - Typed tool with `McpTool.derived` for auto-schema derivation
+- `McpPrompt[In]` - Typed prompt with manual argument metadata
+- `McpStaticResource` - Typed static resource
+- `McpTemplateResource[In]` - Typed resource template
+- `McpDecoder[T]` / `McpEncoder[A]` - Platform-neutral codecs
+- `ToolSchemaProvider[A]` - Auto-derives `inputSchema` from `@Param`-annotated case classes
+- `McpEncoder` falls back to `JsonEncoder[A]` → `TextContent(a.toJson)` via ZIO JSON
 
 ### Transports
 
-FastMCP-Scala supports two transport modes:
-- **Stdio** (`runStdio()`) — communicates via stdin/stdout, used by MCP clients that launch the server as a subprocess
-- **HTTP** (`runHttp()`) — by default uses streamable transport (sessions + SSE). Set `stateless = true` in `FastMcpServerSettings` for lightweight stateless mode (no sessions, no SSE)
+- **Stdio** (`runStdio()`) — stdin/stdout, used by MCP clients
+- **HTTP** (`runHttp()`) — streamable (sessions + SSE) by default, set `stateless = true` for stateless
 
-HTTP settings are configured via `FastMcpServerSettings` (`host`, `port`, `httpEndpoint`, `stateless`, `keepAliveInterval`, `disallowDelete`).
+### Cross-Platform Architecture
+
+The codebase is split into `shared/`, `src/` (JVM), and `js/` (Scala.js):
+- `shared/` — annotations, types, managers, `McpServerPlatform` trait, typed contracts
+- `src/` — Java SDK interop (`TypeConversions`, `JvmMcpContext`), macros, transports, examples
+- `js/` — Scala.js facades for `@modelcontextprotocol/sdk`, conformance tests
+
+JVM module reads from `shared/src/ + src/`. JS module reads from `shared/src/ + js/src/`.
 
 ### Java SDK Interop
 
-FastMCP-Scala wraps the Java MCP SDK 1.0.0 (`io.modelcontextprotocol.sdk:mcp-core`). Key interop points:
-- `Types.scala` - Scala ADTs with `toJava` methods
-- `FastMcpServer.scala` - Bridges ZIO effects to Reactor Mono; has both stateful (`setupServer`) and stateless (`setupStatelessServer`) setup paths
-- `McpContext.scala` - Wraps either `McpAsyncServerExchange` (stdio) or `McpTransportContext` (HTTP)
-- Use `@SuppressWarnings(Array("org.wartremover.warts.Null"))` at Java boundaries
+FastMCP-Scala wraps the Java MCP SDK 1.1.1 (`mcp-core` + `mcp-json-jackson3`). Interop is internal:
+- `TypeConversions` — `private[fastmcp]` extension methods (`.toJava`)
+- `JvmMcpContext` — `private[fastmcp]`, extends `McpContext`
+- `JacksonConverter extends McpDecoder` — bridges JVM converters to shared codec layer
+- `JacksonConversionContext extends McpDecodeContext` — Jackson 3 backed
 
 ## Code Quality
 
 ### WartRemover
 
-Configured in `build.mill`:
+Configured in `build.mill` (v3.5.6):
 - **Errors** (fail build): `Null`, `TryPartial`, `TripleQuestionMark`, `ArrayEquals`
 - **Warnings**: `Var`, `Return`, `AsInstanceOf`, `IsInstanceOf`
-
-To suppress warnings at Java SDK boundaries:
-```scala
-@SuppressWarnings(Array("org.wartremover.warts.Null"))
-```
 
 ### Formatting
 
@@ -133,14 +185,15 @@ Uses Scalafmt with config in `.scalafmt.conf`. Always run `./mill fast-mcp-scala
 
 ## Testing
 
-Tests are in `fast-mcp-scala/test/src/`. Key test classes:
-- `MacroUtilsTest` - Unit tests for macro utilities
+JVM tests in `fast-mcp-scala/test/src/`. Scala.js tests in `fast-mcp-scala/js/test/src/`.
+
+Key test classes:
 - `ToolProcessorTest` - Integration tests for @Tool processing
 - `JsonSchemaMacroTest` - Schema generation tests
-- `ContextPropagationTest` - Context injection tests
-- `ZioHttpStatelessTransportTest` - HTTP transport integration tests (full MCP lifecycle)
-
-Run all tests: `./mill fast-mcp-scala.test`
+- `TypedContractsTest` - Typed contract mounting tests
+- `ZioHttpStatelessTransportTest` - HTTP transport integration tests
+- `ZioHttpStreamableTransportProviderTest` - SSE transport tests
+- `ConformanceTest` (JS) - 17 cross-platform conformance tests against AnnotatedServer
 
 ## CI/CD
 
@@ -151,24 +204,20 @@ Run all tests: `./mill fast-mcp-scala.test`
 
 ### Adding a New Feature
 
-1. Implement in appropriate package under `fast-mcp-scala/src/`
-2. Add tests in `fast-mcp-scala/test/src/`
-3. Run `./mill fast-mcp-scala.test`
-4. Run `./mill fast-mcp-scala.checkFormat` (or `reformat`)
+1. Platform-independent code goes in `shared/src/`
+2. JVM-specific code stays in `src/`
+3. Add tests in `test/src/` (JVM) or `js/test/src/` (Scala.js)
+4. Run `./mill fast-mcp-scala.test + fast-mcp-scala.js.test.bunTest`
+5. Run `./mill fast-mcp-scala.checkFormat` (or `reformat`)
 
 ### Modifying Macros
 
-Macros are in `fast-mcp-scala/src/com/tjclp/fastmcp/macros/`. Key files:
-- `ToolProcessor.scala` - Start here for @Tool changes
-- `MacroUtils.scala` - Shared utilities (schema injection, annotation parsing)
-- `JsonSchemaMacro.scala` - Schema generation from types
-
-After macro changes, clean and recompile:
+Macros are in `fast-mcp-scala/src/com/tjclp/fastmcp/macros/`. After changes:
 ```bash
 rm -rf out/fast-mcp-scala && ./mill fast-mcp-scala.compile
 ```
 
-### Testing Locally with Another Project
+### Testing Locally
 
 ```bash
 ./mill fast-mcp-scala.publishLocal
@@ -179,32 +228,14 @@ Then in your project use version `0.2.4-SNAPSHOT`.
 ## Dependencies
 
 Key dependencies (versions in `build.mill`):
+- Scala 3.8.3
 - ZIO 2.1.20 - Effect system
-- ZIO HTTP 3.4.0 - Stateless HTTP transport
+- ZIO JSON 0.7.44 - JSON codecs (shared)
+- ZIO HTTP 3.4.0 - HTTP transport
+- Jackson 3.0.3 (`tools.jackson`) - Runtime conversion (JVM)
 - Tapir 1.11.42 - Schema derivation
-- Circe - JSON handling
-- Java MCP SDK 1.0.0 - Protocol implementation (`mcp-core` + `mcp-json-jackson2`)
+- Java MCP SDK 1.1.1 - Protocol implementation (`mcp-core` + `mcp-json-jackson3`)
+- mill-bun-plugin 0.2.0 - Scala.js + Bun build integration
+- `@modelcontextprotocol/sdk` 1.29.0 - TS MCP SDK (JS conformance tests)
+- WartRemover 3.5.6 - Code quality
 - ScalaTest 3.2.19 - Testing
-
-## Troubleshooting
-
-### Macro Compilation Errors
-
-If you see "Cannot prove that X <:< Y" or similar:
-1. Clean: `rm -rf out/fast-mcp-scala`
-2. Recompile: `./mill fast-mcp-scala.compile`
-
-### WartRemover Null Errors
-
-For Java SDK interop, add suppression annotation to the class/object:
-```scala
-@SuppressWarnings(Array("org.wartremover.warts.Null"))
-class MyJavaInteropClass { ... }
-```
-
-### Test Compilation Issues
-
-Macro tests may need a clean rebuild:
-```bash
-rm -rf out/fast-mcp-scala/test && ./mill fast-mcp-scala.test.compile
-```

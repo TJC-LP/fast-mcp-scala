@@ -63,6 +63,7 @@ class PromptManager extends Manager[PromptDefinition]:
     * @return
     *   ZIO effect that completes with the prompt messages or fails with Throwable
     */
+  @scala.annotation.nowarn("msg=unused explicit parameter")
   def getPrompt(
       name: String,
       arguments: Map[String, Any],

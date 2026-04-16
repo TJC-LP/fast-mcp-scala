@@ -12,7 +12,7 @@ import mill.scalajslib.bun._
 import mill.bun.bun
 import contrib.scoverage.ScoverageModule
 
-val scala3Version = "3.8.1"
+val scala3Version = "3.8.3"
 val organization = "com.tjclp"
 
 /** Version constants - centralized for maintenance */
@@ -49,7 +49,7 @@ trait FastMCPModuleBase extends ScalaModule with ScalafmtModule with ScoverageMo
 
   // WartRemover compiler plugin for enhanced code quality
   def scalacPluginMvnDeps = Seq(
-    mvn"org.wartremover:::wartremover:3.5.5"
+    mvn"org.wartremover:::wartremover:3.5.6"
   )
 
   override def scalacOptions = Seq(
