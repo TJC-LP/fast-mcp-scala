@@ -4,233 +4,104 @@ import scala.jdk.CollectionConverters.*
 
 import io.modelcontextprotocol.json.McpJsonDefaults
 import io.modelcontextprotocol.spec.McpSchema
-import io.modelcontextprotocol.spec.McpSchema.Tool
-import zio.json.* // For Java/Scala collection conversions
 
-// Define basic types mirroring MCP Schema
+private[fastmcp] object JvmToolInputSchemaSupport:
+  private val jsonMapper = McpJsonDefaults.getMapper()
 
-// --- Tool Annotations (MCP behavioral hints for clients) ---
+  def fromJavaSchema(schema: McpSchema.JsonSchema): ToolInputSchema =
+    ToolInputSchema.unsafeFromJsonString(jsonMapper.writeValueAsString(schema))
 
-/** Scala representation of MCP Tool Annotations.
-  *
-  * All hint fields are Option[Boolean] -- None means the hint is not specified, which maps to null
-  * in the Java SDK (nullable Boolean).
+  def fromEither(schema: Either[McpSchema.JsonSchema, String]): ToolInputSchema =
+    schema match
+      case Left(javaSchema) => fromJavaSchema(javaSchema)
+      case Right(json) => ToolInputSchema.unsafeFromJsonString(json)
+
+/** JVM-only toJava extension methods for shared MCP types. These are internal to fast-mcp-scala and
+  * not part of the user-facing DSL.
   */
-case class ToolAnnotations(
-    title: Option[String] = None,
-    readOnlyHint: Option[Boolean] = None,
-    destructiveHint: Option[Boolean] = None,
-    idempotentHint: Option[Boolean] = None,
-    openWorldHint: Option[Boolean] = None,
-    returnDirect: Option[Boolean] = None
-)
-
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
-object ToolAnnotations:
+private[fastmcp] object TypeConversions:
 
-  def toJava(ta: ToolAnnotations): McpSchema.ToolAnnotations =
-    new McpSchema.ToolAnnotations(
-      ta.title.orNull,
-      ta.readOnlyHint.map(Boolean.box).orNull,
-      ta.destructiveHint.map(Boolean.box).orNull,
-      ta.idempotentHint.map(Boolean.box).orNull,
-      ta.openWorldHint.map(Boolean.box).orNull,
-      ta.returnDirect.map(Boolean.box).orNull
-    )
+  extension (ta: ToolAnnotations)
 
-// --- Tool Related Types ---
-// For now we'll use a simpler ToolExample representation
-case class ToolExample(
-    name: Option[String],
-    description: Option[String]
-)
+    def toJava: McpSchema.ToolAnnotations =
+      new McpSchema.ToolAnnotations(
+        ta.title.orNull,
+        ta.readOnlyHint.map(Boolean.box).orNull,
+        ta.destructiveHint.map(Boolean.box).orNull,
+        ta.idempotentHint.map(Boolean.box).orNull,
+        ta.openWorldHint.map(Boolean.box).orNull,
+        ta.returnDirect.map(Boolean.box).orNull
+      )
 
-object ToolExample:
-  given JsonEncoder[ToolExample] = DeriveJsonEncoder.gen[ToolExample]
-  given JsonDecoder[ToolExample] = DeriveJsonDecoder.gen[ToolExample]
+  extension (td: ToolDefinition)
 
-// Enhanced tool definition with more metadata
-case class ToolDefinition(
-    name: String,
-    description: Option[String],
-    inputSchema: Either[
-      McpSchema.JsonSchema,
-      String
-    ], // Can be either MCP's JsonSchema or a string schema
-    version: Option[String] = None,
-    examples: List[ToolExample] = List.empty,
-    deprecated: Boolean = false,
-    deprecationMessage: Option[String] = None,
-    tags: List[String] = List.empty,
-    timeoutMillis: Option[Long] = None,
-    annotations: Option[ToolAnnotations] = None
-)
+    def toJava: McpSchema.Tool =
+      val baseToolBuilder =
+        McpSchema.Tool.Builder().name(td.name).description(td.description.orNull)
 
-@SuppressWarnings(Array("org.wartremover.warts.Null"))
-object ToolDefinition:
+      td.annotations.foreach { ta =>
+        ta.title.foreach(t => baseToolBuilder.title(t))
+        baseToolBuilder.annotations(ta.toJava)
+      }
 
-  // Helper to convert to Java SDK Tool
-  def toJava(td: ToolDefinition): McpSchema.Tool =
-    val baseToolBuilder = Tool.Builder().name(td.name).description(td.description.orNull)
+      val jsonMapper = McpJsonDefaults.getMapper()
+      val jsonSchema =
+        jsonMapper.readValue(td.inputSchema.toJsonString, classOf[McpSchema.JsonSchema])
+      baseToolBuilder.inputSchema(jsonSchema).build()
 
-    // Set title and annotations from ToolAnnotations if present
-    td.annotations.foreach { ta =>
-      ta.title.foreach(t => baseToolBuilder.title(t))
-      baseToolBuilder.annotations(ToolAnnotations.toJava(ta))
-    }
+  extension (pa: PromptArgument)
 
-    val toolBuilder = td.inputSchema match {
-      case Left(mcpSchema) =>
-        baseToolBuilder.inputSchema(mcpSchema)
-      case Right(stringSchema) =>
-        val jsonMapper = McpJsonDefaults.getMapper()
-        val jsonSchema = jsonMapper.readValue(stringSchema, classOf[McpSchema.JsonSchema])
-        baseToolBuilder.inputSchema(jsonSchema)
-    }
-    toolBuilder.build()
+    def toJava: McpSchema.PromptArgument =
+      new McpSchema.PromptArgument(pa.name, pa.description.orNull, pa.required)
 
-// --- Resource Related Types ---
-// REMOVED ResourceDefinition case class and companion object from here.
-// It now resides in server.manager.ResourceManager.scala
+  extension (pd: PromptDefinition)
 
-// --- Prompt Related Types ---
-case class PromptArgument(
-    name: String,
-    description: Option[String],
-    required: Boolean = false
-)
+    def toJava: McpSchema.Prompt =
+      val javaArgs = pd.arguments.map(_.map(_.toJava).asJava).orNull
+      new McpSchema.Prompt(pd.name, pd.description.orNull, javaArgs)
 
-@SuppressWarnings(Array("org.wartremover.warts.Null"))
-object PromptArgument:
-  given JsonCodec[PromptArgument] = DeriveJsonCodec.gen[PromptArgument]
+  extension (c: Content)
 
-  // Helper to convert to Java SDK PromptArgument
-  def toJava(pa: PromptArgument): McpSchema.PromptArgument =
-    new McpSchema.PromptArgument(pa.name, pa.description.orNull, pa.required)
+    def toJava: McpSchema.Content = c match
+      case tc: TextContent =>
+        val ann = new McpSchema.Annotations(
+          tc.audience.map(roles => roles.map(_.toJava).asJava).orNull,
+          tc.priority.map(Double.box).orNull
+        )
+        new McpSchema.TextContent(ann, tc.text)
+      case ic: ImageContent =>
+        val ann = new McpSchema.Annotations(
+          ic.audience.map(roles => roles.map(_.toJava).asJava).orNull,
+          ic.priority.map(Double.box).orNull
+        )
+        new McpSchema.ImageContent(ann, ic.data, ic.mimeType)
+      case er: EmbeddedResource =>
+        val ann = new McpSchema.Annotations(
+          er.audience.map(roles => roles.map(_.toJava).asJava).orNull,
+          er.priority.map(Double.box).orNull
+        )
+        new McpSchema.EmbeddedResource(ann, er.resource.toJava)
 
-case class PromptDefinition(
-    name: String,
-    description: Option[String],
-    arguments: Option[List[PromptArgument]]
-)
+  extension (erc: EmbeddedResourceContent)
 
-@SuppressWarnings(Array("org.wartremover.warts.Null"))
-object PromptDefinition:
+    def toJava: McpSchema.ResourceContents =
+      if erc.text.isDefined then
+        new McpSchema.TextResourceContents(erc.uri, erc.mimeType, erc.text.get)
+      else if erc.blob.isDefined then
+        new McpSchema.BlobResourceContents(erc.uri, erc.mimeType, erc.blob.get)
+      else
+        throw new IllegalArgumentException(
+          s"EmbeddedResourceContent for ${erc.uri} must have text or blob"
+        )
 
-  // Helper to convert to Java SDK Prompt
-  def toJava(pd: PromptDefinition): McpSchema.Prompt =
-    val javaArgs = pd.arguments.map(_.map(PromptArgument.toJava).asJava).orNull
-    new McpSchema.Prompt(pd.name, pd.description.orNull, javaArgs)
+  extension (r: Role)
 
-// --- Content Types ---
-// Use sealed trait for ADT pattern, enabling exhaustive matching
-@jsonDiscriminator("type")
-sealed trait Content(@scala.annotation.unused `type`: String):
-  def toJava: McpSchema.Content // Abstract method to convert to Java SDK type
+    def toJava: McpSchema.Role = r match
+      case Role.User => McpSchema.Role.USER
+      case Role.Assistant => McpSchema.Role.ASSISTANT
 
-object Content:
-  // Note: ZIO JSON provides built-in support for sealed traits with discriminator annotations
-  given JsonCodec[Content] = DeriveJsonCodec.gen[Content]
+  extension (m: Message)
 
-@SuppressWarnings(Array("org.wartremover.warts.Null"))
-case class TextContent(
-    text: String,
-    audience: Option[List[Role]] = None,
-    priority: Option[Double] = None
-) extends Content("text"):
-
-  override def toJava: McpSchema.TextContent =
-    val ann = new McpSchema.Annotations(
-      audience.map(roles => roles.map(Role.toJava).asJava).orNull,
-      priority.map(Double.box).orNull
-    )
-    new McpSchema.TextContent(ann, text)
-
-object TextContent:
-  given JsonCodec[TextContent] = DeriveJsonCodec.gen[TextContent]
-
-@SuppressWarnings(Array("org.wartremover.warts.Null"))
-case class ImageContent(
-    data: String, // Base64 encoded image data
-    mimeType: String,
-    audience: Option[List[Role]] = None,
-    priority: Option[Double] = None
-) extends Content("image"):
-
-  override def toJava: McpSchema.ImageContent =
-    val ann = new McpSchema.Annotations(
-      audience.map(roles => roles.map(Role.toJava).asJava).orNull,
-      priority.map(Double.box).orNull
-    )
-    new McpSchema.ImageContent(ann, data, mimeType)
-
-object ImageContent:
-  given JsonCodec[ImageContent] = DeriveJsonCodec.gen[ImageContent]
-
-// Represents resource content embedded within a message or tool result
-case class EmbeddedResourceContent(
-    uri: String,
-    mimeType: String,
-    text: Option[String] = None, // For text resources
-    blob: Option[String] = None // For binary resources (Base64 encoded)
-):
-
-  def toJava: McpSchema.ResourceContents =
-    if text.isDefined then new McpSchema.TextResourceContents(uri, mimeType, text.get)
-    else if blob.isDefined then new McpSchema.BlobResourceContents(uri, mimeType, blob.get)
-    else // Should ideally not happen if validated properly
-      throw new IllegalArgumentException(s"EmbeddedResourceContent for $uri must have text or blob")
-
-object EmbeddedResourceContent:
-  given JsonCodec[EmbeddedResourceContent] = DeriveJsonCodec.gen[EmbeddedResourceContent]
-
-@SuppressWarnings(Array("org.wartremover.warts.Null"))
-case class EmbeddedResource(
-    resource: EmbeddedResourceContent,
-    audience: Option[List[Role]] = None,
-    priority: Option[Double] = None
-) extends Content("resource"):
-
-  override def toJava: McpSchema.EmbeddedResource =
-    val ann = new McpSchema.Annotations(
-      audience.map(roles => roles.map(Role.toJava).asJava).orNull,
-      priority.map(Double.box).orNull
-    )
-    new McpSchema.EmbeddedResource(ann, resource.toJava)
-
-object EmbeddedResource:
-  given JsonCodec[EmbeddedResource] = DeriveJsonCodec.gen[EmbeddedResource]
-
-// --- Message Types ---
-// Represents the role in a conversation (user or assistant)
-enum Role:
-  case User, Assistant
-
-object Role:
-
-  given JsonCodec[Role] = JsonCodec.string.transformOrFail(
-    {
-      case s if s.equalsIgnoreCase("user") => Right(Role.User)
-      case s if s.equalsIgnoreCase("assistant") => Right(Role.Assistant)
-      case s => Left(s"Invalid role: $s")
-    },
-    _.toString.toLowerCase
-  )
-
-  // Helper to convert to Java SDK Role
-  def toJava(r: Role): McpSchema.Role = r match {
-    case Role.User => McpSchema.Role.USER
-    case Role.Assistant => McpSchema.Role.ASSISTANT
-  }
-
-case class Message(
-    role: Role,
-    content: Content
-)
-
-object Message:
-  given JsonCodec[Message] = DeriveJsonCodec.gen[Message]
-
-  // Helper to convert to Java SDK PromptMessage
-  def toJava(m: Message): McpSchema.PromptMessage =
-    new McpSchema.PromptMessage(Role.toJava(m.role), m.content.toJava)
+    def toJava: McpSchema.PromptMessage =
+      new McpSchema.PromptMessage(m.role.toJava, m.content.toJava)

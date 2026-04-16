@@ -7,6 +7,8 @@ import zio.*
 import zio.json.*
 
 import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.core.TypeConversions.*
+import com.tjclp.fastmcp.macros.JacksonConverter.given
 import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
 import com.tjclp.fastmcp.server.*
 
@@ -150,7 +152,7 @@ class ToolProcessorTest extends AnyFunSuite {
     )
 
     // Verify Java SDK Tool has annotations set
-    val javaTool = ToolDefinition.toJava(readOnlyTool.get)
+    val javaTool = readOnlyTool.get.toJava
     assert(javaTool.title() == "Read Only Tool")
     assert(javaTool.annotations() != null)
     assert(javaTool.annotations().readOnlyHint() == java.lang.Boolean.TRUE)
@@ -168,10 +170,7 @@ class ToolProcessorTest extends AnyFunSuite {
     assert(toolDef.isDefined, "Tool 'param-metadata-test' should be registered")
 
     // Parse the schema JSON
-    val schemaStr = toolDef.get.inputSchema match {
-      case Right(s) => s
-      case Left(js) => js.toString
-    }
+    val schemaStr = toolDef.get.inputSchema.toJsonString
     val schemaJson = io.circe.parser.parse(schemaStr).getOrElse(io.circe.Json.Null)
 
     // Check username has description and examples
@@ -202,10 +201,7 @@ class ToolProcessorTest extends AnyFunSuite {
     val toolDef = schemaTestServer.toolManager.getToolDefinition("custom-schema-test")
     assert(toolDef.isDefined, "Tool 'custom-schema-test' should be registered")
 
-    val schemaStr = toolDef.get.inputSchema match {
-      case Right(s) => s
-      case Left(js) => js.toString
-    }
+    val schemaStr = toolDef.get.inputSchema.toJsonString
     val schemaJson = io.circe.parser.parse(schemaStr).getOrElse(io.circe.Json.Null)
 
     // Check that status uses the custom enum schema

@@ -8,7 +8,7 @@ import io.modelcontextprotocol.spec.McpSchema
 import io.modelcontextprotocol.spec.McpSchema as Schema
 import reactor.core.publisher.Mono
 
-import com.tjclp.fastmcp.server.McpContext
+import com.tjclp.fastmcp.server.{JvmMcpContext, McpContext}
 
 /** Test fixtures and helpers for MCP tests.
   */
@@ -64,6 +64,6 @@ object TestFixtures {
   lazy val dummyContext: Option[McpContext] = {
     val mockExchange =
       new MockServerExchange(new McpSchema.Implementation("dummy", "0.0"))
-    Some(McpContext(javaExchange = Some(mockExchange)))
+    Some(new JvmMcpContext(javaExchange = Some(mockExchange)))
   }
 }

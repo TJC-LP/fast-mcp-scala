@@ -4,52 +4,48 @@ import io.modelcontextprotocol.spec.McpSchema
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** Separate test‑suite dedicated to the `ToolDefinition.toJava` helper.
+import com.tjclp.fastmcp.core.TypeConversions.*
+
+/** Separate test-suite dedicated to the ToolDefinition toJava conversion.
   */
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
 class ToolDefinitionConversionTest extends AnyFlatSpec with Matchers {
 
-  "ToolDefinition.toJava" should "convert the Left(JsonSchema) case" in {
-    // A minimal JSON schema – the Java SDK accepts the raw json string.
-    val jsonSchema = new McpSchema.JsonSchema("object", null, null, true, null, null)
-
-    val td = ToolDefinition(
-      name = "td‑left",
-      description = Some("desc"),
-      inputSchema = Left(jsonSchema),
-      version = Some("1.0.0"),
-      examples = List.empty
-    )
-
-    val j = ToolDefinition.toJava(td)
-
-    j.name() shouldBe "td‑left"
-    j.description() shouldBe "desc"
-    // The Java SDK represents the schema either as JsonSchema or String.
-    j.inputSchema() shouldBe jsonSchema
-  }
-
-  it should "convert the Right(String) case" in {
+  "ToolDefinition.toJava" should "convert a String schema" in {
     val schemaStr = """{ "type": "object" }"""
 
     val td = ToolDefinition(
-      name = "td‑right",
+      name = "td-string",
       description = None,
-      inputSchema = Right(schemaStr)
+      inputSchema = ToolInputSchema.unsafeFromJsonString(schemaStr)
     )
 
-    val j = ToolDefinition.toJava(td)
+    val j = td.toJava
 
-    j.name() shouldBe "td‑right"
-    j.description() shouldBe null // description was None
+    j.name() shouldBe "td-string"
+    j.description() shouldBe null
     j.inputSchema() shouldBe new McpSchema.JsonSchema("object", null, null, null, null, null)
+  }
+
+  it should "support converting JVM McpSchema.JsonSchema values into typed tool schemas" in {
+    val td = ToolDefinition(
+      name = "td-legacy",
+      description = Some("legacy"),
+      inputSchema =
+        JvmToolInputSchemaSupport.fromEither(
+          Left(new McpSchema.JsonSchema("object", null, null, true, null, null))
+        )
+    )
+
+    td.inputSchema.toJsonString should include(""""type":"object"""")
+    td.toJava.inputSchema() shouldBe new McpSchema.JsonSchema("object", null, null, true, null, null)
   }
 
   it should "set annotations on the Java Tool when present" in {
     val td = ToolDefinition(
       name = "annotated-tool",
       description = Some("A tool with annotations"),
-      inputSchema = Right("""{ "type": "object" }"""),
+      inputSchema = ToolInputSchema.unsafeFromJsonString("""{ "type": "object" }"""),
       annotations = Some(
         ToolAnnotations(
           title = Some("Annotated Tool"),
@@ -58,7 +54,7 @@ class ToolDefinitionConversionTest extends AnyFlatSpec with Matchers {
         )
       )
     )
-    val j = ToolDefinition.toJava(td)
+    val j = td.toJava
     j.name() shouldBe "annotated-tool"
     j.title() shouldBe "Annotated Tool"
     j.annotations() should not be null
@@ -72,9 +68,9 @@ class ToolDefinitionConversionTest extends AnyFlatSpec with Matchers {
     val td = ToolDefinition(
       name = "no-annot-tool",
       description = None,
-      inputSchema = Right("""{ "type": "object" }""")
+      inputSchema = ToolInputSchema.unsafeFromJsonString("""{ "type": "object" }""")
     )
-    val j = ToolDefinition.toJava(td)
+    val j = td.toJava
     j.annotations() shouldBe null
     j.title() shouldBe null
   }
@@ -88,7 +84,7 @@ class ToolDefinitionConversionTest extends AnyFlatSpec with Matchers {
       openWorldHint = Some(false),
       returnDirect = Some(true)
     )
-    val j = ToolAnnotations.toJava(ta)
+    val j = ta.toJava
     j.title() shouldBe "My Tool"
     j.readOnlyHint() shouldBe java.lang.Boolean.TRUE
     j.destructiveHint() shouldBe java.lang.Boolean.FALSE
@@ -99,7 +95,7 @@ class ToolDefinitionConversionTest extends AnyFlatSpec with Matchers {
 
   it should "convert None values to null" in {
     val ta = ToolAnnotations()
-    val j = ToolAnnotations.toJava(ta)
+    val j = ta.toJava
     j.title() shouldBe null
     j.readOnlyHint() shouldBe null
     j.destructiveHint() shouldBe null

@@ -7,6 +7,7 @@ import sttp.tapir.*
 import zio.*
 import zio.json.*
 
+import com.tjclp.fastmcp.core.ToolInputSchema
 import com.tjclp.fastmcp.macros.JsonSchemaMacro
 import com.tjclp.fastmcp.macros.MapToFunctionMacro
 import com.tjclp.fastmcp.server.*
@@ -41,7 +42,9 @@ object ManualServer extends ZIOAppDefault:
       )
 
       // Register CalculatorTools.add
-      addSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.add).spaces2)
+      addSchema = ToolInputSchema.unsafeFromJsonString(
+        JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.add).spaces2
+      )
       _ <- server.tool(
         name = "add",
         description = Some("Simple calculator that adds two numbers"),
@@ -50,7 +53,7 @@ object ManualServer extends ZIOAppDefault:
       )
 
       // Register CalculatorTools.addString
-      addStringSchema = Right(
+      addStringSchema = ToolInputSchema.unsafeFromJsonString(
         JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.addString).spaces2
       )
       _ <- server.tool(
@@ -62,7 +65,7 @@ object ManualServer extends ZIOAppDefault:
       )
 
       // Register CalculatorTools.multiply
-      multiplySchema = Right(
+      multiplySchema = ToolInputSchema.unsafeFromJsonString(
         JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.multiply).spaces2
       )
       _ <- server.tool(
@@ -74,7 +77,7 @@ object ManualServer extends ZIOAppDefault:
       )
 
       // Register CalculatorTools.calculate
-      calculateSchema = Right(
+      calculateSchema = ToolInputSchema.unsafeFromJsonString(
         JsonSchemaMacro.schemaForFunctionArgs(CalculatorTools.calculate).spaces2
       )
       _ <- server.tool(
@@ -91,7 +94,9 @@ object ManualServer extends ZIOAppDefault:
       )
 
       // Register StringTools.greet
-      greetSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(StringTools.greet).spaces2)
+      greetSchema = ToolInputSchema.unsafeFromJsonString(
+        JsonSchemaMacro.schemaForFunctionArgs(StringTools.greet).spaces2
+      )
       _ <- server.tool(
         name = "greet",
         description = Some("Generates a friendly greeting message"),
@@ -100,7 +105,7 @@ object ManualServer extends ZIOAppDefault:
       )
 
       // Register StringTools.transformText with enum parameter
-      transformSchema = Right(
+      transformSchema = ToolInputSchema.unsafeFromJsonString(
         JsonSchemaMacro.schemaForFunctionArgs(StringTools.transformText).spaces2
       )
       _ <- server.tool(
@@ -112,7 +117,7 @@ object ManualServer extends ZIOAppDefault:
       )
 
       // Register the complex formatting tool with multiple enum parameters
-      formatTextSchema = Right(
+      formatTextSchema = ToolInputSchema.unsafeFromJsonString(
         JsonSchemaMacro.schemaForFunctionArgs(TextFormatTools.formatText).spaces2
       )
       _ <- server.tool(
@@ -126,7 +131,9 @@ object ManualServer extends ZIOAppDefault:
       )
 
       // For demonstration purposes, also register a tool manually
-      addManualSchema = Right(JsonSchemaMacro.schemaForFunctionArgs(add).spaces2)
+      addManualSchema = ToolInputSchema.unsafeFromJsonString(
+        JsonSchemaMacro.schemaForFunctionArgs(add).spaces2
+      )
       _ <- server.tool(
         name = "add-manual",
         description = Some("Manual version of the add tool"),

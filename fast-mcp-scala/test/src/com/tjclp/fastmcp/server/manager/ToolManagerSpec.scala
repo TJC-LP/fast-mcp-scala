@@ -5,17 +5,19 @@ import org.scalatest.matchers.should.Matchers
 import zio.*
 
 import com.tjclp.fastmcp.TestFixtures.*
-import com.tjclp.fastmcp.core.ToolDefinition
+import com.tjclp.fastmcp.core.{ToolDefinition, ToolInputSchema}
 import com.tjclp.fastmcp.server.McpContext
 
 /** Tests for ToolManager registration, duplicate handling, and callTool behavior.
   */
 class ToolManagerSpec extends AnyFlatSpec with Matchers {
+  private val objectSchema = ToolInputSchema.unsafeFromJsonString("""{"type":"object"}""")
+  private val stringSchema = ToolInputSchema.unsafeFromJsonString("""{"type":"string"}""")
 
   "addTool" should "overwrite existing tool by default and update definition" in {
     val manager = new ToolManager
-    val def1 = ToolDefinition("t1", Some("first"), Right("schema1"))
-    val def2 = ToolDefinition("t1", Some("second"), Right("schema2"))
+    val def1 = ToolDefinition("t1", Some("first"), objectSchema)
+    val def2 = ToolDefinition("t1", Some("second"), stringSchema)
     // First registration
     Unsafe.unsafe { implicit u =>
       Runtime.default.unsafe
@@ -35,8 +37,8 @@ class ToolManagerSpec extends AnyFlatSpec with Matchers {
   it should "fail when duplicates are disallowed and warnOnDuplicates is false" in {
     val manager = new ToolManager
     val options = ToolRegistrationOptions(warnOnDuplicates = false)
-    val def1 = ToolDefinition("t2", None, Right("s1"))
-    val def2 = ToolDefinition("t2", None, Right("s2"))
+    val def1 = ToolDefinition("t2", None, objectSchema)
+    val def2 = ToolDefinition("t2", None, stringSchema)
     // First registration succeeds
     Unsafe.unsafe { implicit u =>
       Runtime.default.unsafe
@@ -68,7 +70,7 @@ class ToolManagerSpec extends AnyFlatSpec with Matchers {
 
   it should "execute handler and return result" in {
     val manager = new ToolManager
-    val defn = ToolDefinition("t3", None, Right("{}"))
+    val defn = ToolDefinition("t3", None, ToolInputSchema.unsafeFromJsonString("{}"))
     Unsafe.unsafe { implicit u =>
       Runtime.default.unsafe
         .run(manager.addTool("t3", (_, _) => ZIO.succeed(123), defn))
@@ -84,7 +86,7 @@ class ToolManagerSpec extends AnyFlatSpec with Matchers {
     val manager = new ToolManager
     val captured = new java.util.concurrent.atomic.AtomicReference[Option[McpContext]](None)
     val handler: ContextualToolHandler = (_, ctx) => ZIO.succeed { captured.set(ctx); "ctx-ok" }
-    val defn = ToolDefinition("t4", None, Right("{}"))
+    val defn = ToolDefinition("t4", None, ToolInputSchema.unsafeFromJsonString("{}"))
     // Register with context-aware handler
     Unsafe.unsafe { implicit u =>
       Runtime.default.unsafe.run(manager.addTool("t4", handler, defn)).getOrThrowFiberFailure()

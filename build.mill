@@ -1,10 +1,15 @@
-//| mvnDeps: ["com.lihaoyi::mill-contrib-scoverage:$MILL_VERSION"]
-// Mill 1.1.0-RC3 is used for improved Scala 3.8.x support and build performance.
+//| mvnDeps: ["com.lihaoyi::mill-contrib-scoverage:$MILL_VERSION", "com.tjclp::mill-bun_mill1:0.2.0"]
+// Mill 1.1.5 is used for Scala 3.8.x support and mill-bun-plugin compatibility.
 // Version is controlled via .mill-version file.
 import mill._
+import mill.api.BuildCtx
 import mill.scalalib._
 import mill.scalalib.publish._
 import mill.scalalib.scalafmt._
+import mill.scalajslib._
+import mill.scalajslib.api._
+import mill.scalajslib.bun._
+import mill.bun.bun
 import contrib.scoverage.ScoverageModule
 
 val scala3Version = "3.8.1"
@@ -19,7 +24,7 @@ object Versions {
   val tapir = "1.11.42"
   val jsonSchemaCirce = "0.11.10"
   val zioHttp = "3.4.0"
-  val mcpSdk = "1.0.0"
+  val mcpSdk = "1.1.1"
   val scalaTest = "3.2.19"
   val scalaCheck = "1.18.1"
 }
@@ -109,6 +114,9 @@ object `fast-mcp-scala` extends FastMCPModule {
 
   override def artifactName = "fast-mcp-scala"
 
+  // JVM module reads from both shared/ and src/ (its own JVM-specific code)
+  override def sources = Task.Sources(moduleDir / "src", moduleDir / "shared" / "src")
+
   override def mvnDeps = Seq(
     // ZIO Core
     mvn"dev.zio::zio:${Versions.zio}",
@@ -146,4 +154,51 @@ object `fast-mcp-scala` extends FastMCPModule {
       mvn"dev.zio::zio-test-magnolia:${Versions.zio}"
     )
   }
+
+  // Scala.js backend — TS MCP SDK facades running on Bun.
+  // Prototype for the cross-platform JS target; also used for conformance testing.
+  object js extends BunScalaJSModule {
+    def scalaVersion = scala3Version
+
+    override def moduleKind = Task { ModuleKind.ESModule }
+
+    // JS module reads from both shared/ and js/src/
+    override def sources = Task.Sources(moduleDir / "src", moduleDir / os.up / "shared" / "src")
+
+    // Shared deps needed by shared/ sources (ZIO + ZIO JSON are cross-published for Scala.js)
+    override def mvnDeps = Seq(
+      mvn"dev.zio::zio::${Versions.zio}",
+      mvn"dev.zio::zio-json::${Versions.zioJson}"
+    )
+
+    override def bunDeps = Task {
+      Seq(bun"@modelcontextprotocol/sdk@1.29.0", bun"zod@4.3.6", bun"zod-to-json-schema@3.25.1")
+    }
+
+    // bunJsEnv is what BunScalaJSTests uses for the Bun process env
+    override def bunJsEnv = Task {
+      // Use the same JVM that Mill resolves for fast-mcp-scala (respects javaHome/jvmVersion)
+      val serverJavaHome = `fast-mcp-scala`.javaHome().fold(os.Path(sys.props("java.home")))(_.path)
+      val serverJavaCmd = (serverJavaHome / "bin" / "java").toString
+      val serverClasspath =
+        `fast-mcp-scala`.runClasspath().map(_.path.toString).mkString(java.io.File.pathSeparator)
+      val serverJvmArgs =
+        ujson.write(`fast-mcp-scala`.forkArgs())
+
+      super.bunJsEnv() ++ Map(
+        "FAST_MCP_PROJECT_ROOT" -> BuildCtx.workspaceRoot.toString,
+        "FAST_MCP_SERVER_JAVA_CMD" -> serverJavaCmd,
+        "FAST_MCP_SERVER_CLASSPATH" -> serverClasspath,
+        "FAST_MCP_SERVER_JVM_ARGS_JSON" -> serverJvmArgs
+      )
+    }
+
+    object test extends BunScalaJSTests with TestModule.ScalaTest {
+      override def sources = Task.Sources(moduleDir / "src")
+      override def mvnDeps = Seq(
+        mvn"org.scalatest::scalatest::${Versions.scalaTest}"
+      )
+    }
+  }
 }
+// Run all tests: ./mill fast-mcp-scala.test + fast-mcp-scala.js.test.bunTest
