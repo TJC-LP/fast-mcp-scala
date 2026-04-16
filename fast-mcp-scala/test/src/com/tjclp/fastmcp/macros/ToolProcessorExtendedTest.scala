@@ -49,7 +49,7 @@ object ToolProcessorExtendedTest {
   /** A tool that uses the McpContext parameter */
   @Tool(name = Some("context-aware-tool"), description = Some("A tool that uses context"))
   def contextAwareTool(
-      @ToolParam("Message to echo") message: String,
+      @Param("Message to echo") message: String,
       ctx: McpContext
   ): String = {
     s"$message (This is a context-aware tool)"

@@ -231,9 +231,9 @@ object ToolProcessorTest {
     description = Some("Performs basic arithmetic operations")
   )
   def calculate(
-      @ToolParam("First number") a: Double,
-      @ToolParam("Second number") b: Double,
-      @ToolParam("Operation to perform", required = false) op: String = "ADD"
+      @Param("First number") a: Double,
+      @Param("Second number") b: Double,
+      @Param("Operation to perform", required = false) op: String = "ADD"
   ): CalculationResult = {
     // Parse string to enum
     val operation = op.toUpperCase match {
@@ -259,7 +259,7 @@ object ToolProcessorTest {
   /** Simple text transformation tool for testing
     */
   @Tool()
-  def uppercase(@ToolParam("Text to transform") text: String): String = text.toUpperCase
+  def uppercase(@Param("Text to transform") text: String): String = text.toUpperCase
 
   // Sample enum for testing
   enum Operation:

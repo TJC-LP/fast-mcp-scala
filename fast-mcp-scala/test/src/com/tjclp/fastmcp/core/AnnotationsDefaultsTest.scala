@@ -28,10 +28,11 @@ class AnnotationsDefaultsTest extends AnyFlatSpec with Matchers {
     ann.returnDirect shouldBe None
   }
 
-  "@ToolParam" should "default to required = true" in {
-    val ann = new ToolParam(description = "desc")
+  "@Param" should "default required = true with empty examples and no schema override" in {
+    val ann = new Param(description = "desc")
     ann.required shouldBe true
     ann.examples shouldBe Nil
+    ann.schema shouldBe None
   }
 
   "@Resource" should "default optional params to None" in {
@@ -41,19 +42,9 @@ class AnnotationsDefaultsTest extends AnyFlatSpec with Matchers {
     ann.mimeType shouldBe None
   }
 
-  "@ResourceParam" should "default required = true" in {
-    val ann = new ResourceParam(description = "param desc")
-    ann.required shouldBe true
-  }
-
   "@Prompt" should "default optional params to None" in {
     val ann = new Prompt()
     ann.name shouldBe None
     ann.description shouldBe None
-  }
-
-  "@PromptParam" should "default required = true" in {
-    val ann = new PromptParam(description = "prompt param")
-    ann.required shouldBe true
   }
 }

@@ -20,11 +20,9 @@ export core.{
   Prompt,
   PromptArgument,
   PromptDefinition,
-  PromptParam,
   Resource,
   ResourceArgument,
   ResourceDefinition,
-  ResourceParam,
   Role,
   TextContent,
   Tool,
@@ -32,7 +30,6 @@ export core.{
   ToolDefinition,
   ToolExample,
   ToolInputSchema,
-  ToolParam,
   ToolSchemaProvider
 }
 export core.McpEncoder.given

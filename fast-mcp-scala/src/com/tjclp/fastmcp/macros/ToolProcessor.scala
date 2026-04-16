@@ -118,7 +118,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
     val paramMetadata: List[(String, ParamMetadata)] =
       params.flatMap { pSym =>
         MacroUtils
-          .extractParamAnnotation(pSym, Some("Tool"))
+          .extractParamAnnotation(pSym)
           .map { annotTerm =>
             val (desc, examples, required, schema) = MacroUtils.parseToolParam(Some(annotTerm))
 
