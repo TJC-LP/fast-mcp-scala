@@ -1,83 +1,121 @@
 package com.tjclp.fastmcp.macros
 
+import scala.deriving.Mirror
 import scala.jdk.CollectionConverters.*
 import scala.reflect.ClassTag
-
-import com.fasterxml.jackson.databind.json.JsonMapper
-import com.fasterxml.jackson.databind.module.SimpleModule
-import com.fasterxml.jackson.module.scala.ClassTagExtensions
+import scala.util.NotGiven
 
 import com.tjclp.fastmcp.server.McpContext
 
-/** Typeclass that converts a raw `Any` value (from a Map) to `T` using Jackson. */
+/** Typeclass that converts a raw `Any` value (from a Map) to `T`.
+  *
+  * Low-level custom implementations receive a shared [[JacksonConversionContext]] backed by Jackson
+  * 3.
+  */
 trait JacksonConverter[T]:
-  def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): T
+  def convert(name: String, rawValue: Any, context: JacksonConversionContext): T
 
-  /** Optional custom module to register with Jackson for this converter */
-  def customModule: Option[SimpleModule] = None
-
-  /** Create a new converter by transforming the input before conversion */
+  /** Create a new converter by transforming the input before conversion. */
   def contramap[U](f: U => Any): JacksonConverter[T] =
     val self = this
     new JacksonConverter[T]:
-      def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): T =
+      def convert(name: String, rawValue: Any, context: JacksonConversionContext): T =
         val transformed =
           try f(rawValue.asInstanceOf[U])
           catch case _: ClassCastException => rawValue
-        self.convert(name, transformed, mapper)
-      override def customModule = self.customModule
+        self.convert(name, transformed, context)
 
-/** Low-priority fallback — anything Jackson can handle via convertValue. */
+/** Low-priority fallback for non-product values Jackson 3 can handle directly. */
+@SuppressWarnings(Array("org.wartremover.warts.Null"))
 trait JacksonConverterLowPriority:
 
-  // DRY potent conversion with error wrapping
+  protected def failNull(name: String, tpe: String): Nothing =
+    throw new RuntimeException(s"Null value provided for parameter '$name' of type $tpe")
+
   protected def doConvert[T: ClassTag](
       name: String,
       rawValue: Any,
-      tpe: String,
-      mapper: JsonMapper & ClassTagExtensions
+      context: JacksonConversionContext
   ): T =
-    try mapper.convertValue[T](rawValue)
-    catch
-      case e: Exception =>
-        throw new RuntimeException(
-          s"Failed to convert value for parameter '$name' to type $tpe. Value: $rawValue",
-          e
-        )
+    context.convertValue[T](name, rawValue)
 
-  protected def failNull(name: String, tpe: String): Unit =
-    throw new RuntimeException(s"Null value provided for parameter '$name' of type $tpe")
+  private def enumValues[T: ClassTag]: Option[IndexedSeq[T]] =
+    val runtimeClass = summon[ClassTag[T]].runtimeClass
+    try
+      val valuesMethod = runtimeClass.getMethod("values")
+      val rawValues = valuesMethod.invoke(null).asInstanceOf[Array[Any]]
+      Some(rawValues.iterator.map(_.asInstanceOf[T]).toIndexedSeq)
+    catch case _: ReflectiveOperationException => None
 
-  given [T: ClassTag]: JacksonConverter[T] with
+  protected def doConvertEnum[T: ClassTag](
+      name: String,
+      rawValue: Any,
+      context: JacksonConversionContext
+  ): T =
+    enumValues[T] match
+      case Some(values) =>
+        rawValue match
+          case s: String =>
+            values
+              .find(_.toString == s)
+              .getOrElse(
+                throw new RuntimeException(
+                  s"Cannot parse '$s' as ${summon[ClassTag[T]].runtimeClass.getSimpleName} for parameter '$name'"
+                )
+              )
+          case n: Number =>
+            values
+              .lift(n.intValue())
+              .getOrElse(
+                throw new RuntimeException(
+                  s"Cannot parse ordinal '${n.intValue()}' as ${summon[ClassTag[T]].runtimeClass.getSimpleName} for parameter '$name'"
+                )
+              )
+          case _ =>
+            doConvert[T](name, rawValue, context)
+      case None =>
+        doConvert[T](name, rawValue, context)
 
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): T =
+  given [T: ClassTag](using NotGiven[Mirror.ProductOf[T]]): JacksonConverter[T] with
+
+    def convert(name: String, rawValue: Any, context: JacksonConversionContext): T =
       if rawValue == null then failNull(name, summon[ClassTag[T]].runtimeClass.getSimpleName)
-      doConvert[T](name, rawValue, summon[ClassTag[T]].runtimeClass.getSimpleName, mapper)
+
+      val runtimeClass = summon[ClassTag[T]].runtimeClass
+      if runtimeClass.isInstance(rawValue) then rawValue.asInstanceOf[T]
+      else if runtimeClass.isEnum || enumValues[T].isDefined then
+        doConvertEnum[T](name, rawValue, context)
+      else doConvert[T](name, rawValue, context)
 
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
 object JacksonConverter extends JacksonConverterLowPriority:
 
+  inline given [T](using Mirror.ProductOf[T], ClassTag[T]): JacksonConverter[T] =
+    DeriveJacksonConverter.derived[T]
+
   // Basic instances
   given JacksonConverter[String] with
 
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): String =
+    def convert(name: String, rawValue: Any, context: JacksonConversionContext): String =
       if rawValue == null then failNull(name, "String")
-      doConvert[String](name, rawValue, "String", mapper)
+      rawValue match
+        case s: String => s
+        case _ => doConvert[String](name, rawValue, context)
 
   given JacksonConverter[Int] with
 
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): Int =
+    def convert(name: String, rawValue: Any, context: JacksonConversionContext): Int =
       if rawValue == null then failNull(name, "Int")
-      doConvert[Int](name, rawValue, "Int", mapper)
+      doConvert[Int](name, rawValue, context)
 
   // Option instance treats null or missing as None
   given [A: ClassTag](using JacksonConverter[A]): JacksonConverter[Option[A]] with
 
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): Option[A] =
+    def convert(name: String, rawValue: Any, context: JacksonConversionContext): Option[A] =
       rawValue match
         case null | None => None
-        case Some(v) => Some(summon[JacksonConverter[A]].convert(name, v, mapper))
-        case v => Some(summon[JacksonConverter[A]].convert(name, v, mapper))
+        case Some(v) => Some(summon[JacksonConverter[A]].convert(name, v, context))
+        case v => Some(summon[JacksonConverter[A]].convert(name, v, context))
 
   // Identity converter for McpContext as per Context Propagation Upgrade
   given JacksonConverter[McpContext] with
@@ -85,22 +123,19 @@ object JacksonConverter extends JacksonConverterLowPriority:
     def convert(
         key: String,
         raw: Any,
-        mapper: JsonMapper & ClassTagExtensions
+        context: JacksonConversionContext
     ): McpContext =
       raw.asInstanceOf[McpContext]
 
   // Enhanced List/Seq converter that handles various input formats
   given [A: ClassTag](using conv: JacksonConverter[A]): JacksonConverter[List[A]] with
 
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): List[A] =
+    def convert(name: String, rawValue: Any, context: JacksonConversionContext): List[A] =
       if rawValue == null then failNull(name, "List")
 
       val elements = rawValue match
         case str: String =>
-          // Try to parse as JSON array
-          try
-            val parsed = mapper.readValue(str, classOf[java.util.List[Any]])
-            parsed.asScala.toList
+          try context.parseJsonArray(name, str)
           catch case _: Exception => List(str) // Single string element
         case jList: java.util.List[?] => jList.asScala.toList
         case arr: Array[?] => arr.toList
@@ -108,13 +143,13 @@ object JacksonConverter extends JacksonConverterLowPriority:
         case single => List(single)
 
       elements.zipWithIndex.map { case (elem, idx) =>
-        conv.convert(s"$name[$idx]", elem, mapper)
+        conv.convert(s"$name[$idx]", elem, context)
       }
 
   given [A: ClassTag](using conv: JacksonConverter[A]): JacksonConverter[Seq[A]] with
 
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): Seq[A] =
-      summon[JacksonConverter[List[A]]].convert(name, rawValue, mapper).toSeq
+    def convert(name: String, rawValue: Any, context: JacksonConversionContext): Seq[A] =
+      summon[JacksonConverter[List[A]]].convert(name, rawValue, context).toSeq
 
   // Enhanced Map converter
   given [K: ClassTag, V: ClassTag](using
@@ -122,26 +157,25 @@ object JacksonConverter extends JacksonConverterLowPriority:
       vConv: JacksonConverter[V]
   ): JacksonConverter[Map[K, V]] with
 
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): Map[K, V] =
+    def convert(name: String, rawValue: Any, context: JacksonConversionContext): Map[K, V] =
       if rawValue == null then failNull(name, "Map")
 
       rawValue match
         case jMap: java.util.Map[?, ?] =>
           jMap.asScala.toMap.map { case (k, v) =>
-            val key = kConv.convert(s"$name.key", k, mapper)
-            val value = vConv.convert(s"$name[$k]", v, mapper)
+            val key = kConv.convert(s"$name.key", k, context)
+            val value = vConv.convert(s"$name[$k]", v, context)
             key -> value
           }
         case sMap: Map[?, ?] =>
           sMap.map { case (k, v) =>
-            val key = kConv.convert(s"$name.key", k, mapper)
-            val value = vConv.convert(s"$name[$k]", v, mapper)
+            val key = kConv.convert(s"$name.key", k, context)
+            val value = vConv.convert(s"$name[$k]", v, context)
             key -> value
           }
         case str: String =>
-          // Try to parse as JSON object
-          val parsed = mapper.readValue(str, classOf[java.util.Map[Any, Any]])
-          summon[JacksonConverter[Map[K, V]]].convert(name, parsed, mapper)
+          val parsed = context.parseJsonObject(name, str)
+          summon[JacksonConverter[Map[K, V]]].convert(name, parsed, context)
         case _ =>
           throw new RuntimeException(
             s"Cannot convert $rawValue to Map[${summon[ClassTag[K]].runtimeClass.getSimpleName}, ${summon[ClassTag[V]].runtimeClass.getSimpleName}]"
@@ -150,7 +184,7 @@ object JacksonConverter extends JacksonConverterLowPriority:
   // Boolean converter with flexible parsing
   given JacksonConverter[Boolean] with
 
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): Boolean =
+    def convert(name: String, rawValue: Any, context: JacksonConversionContext): Boolean =
       if rawValue == null then failNull(name, "Boolean")
       rawValue match
         case b: Boolean => b
@@ -161,48 +195,31 @@ object JacksonConverter extends JacksonConverterLowPriority:
             case _ =>
               throw new RuntimeException(s"Cannot parse '$s' as Boolean for parameter '$name'")
         case n: Number => n.intValue() != 0
-        case _ => doConvert[Boolean](name, rawValue, "Boolean", mapper)
+        case _ => doConvert[Boolean](name, rawValue, context)
 
-  // Long converter
   given JacksonConverter[Long] with
 
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): Long =
+    def convert(name: String, rawValue: Any, context: JacksonConversionContext): Long =
       if rawValue == null then failNull(name, "Long")
-      doConvert[Long](name, rawValue, "Long", mapper)
+      doConvert[Long](name, rawValue, context)
 
-  // Double converter
   given JacksonConverter[Double] with
 
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): Double =
+    def convert(name: String, rawValue: Any, context: JacksonConversionContext): Double =
       if rawValue == null then failNull(name, "Double")
-      doConvert[Double](name, rawValue, "Double", mapper)
+      doConvert[Double](name, rawValue, context)
 
-  // Float converter
   given JacksonConverter[Float] with
 
-    def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): Float =
+    def convert(name: String, rawValue: Any, context: JacksonConversionContext): Float =
       if rawValue == null then failNull(name, "Float")
-      doConvert[Float](name, rawValue, "Float", mapper)
+      doConvert[Float](name, rawValue, context)
 
-  // Helper methods for creating custom converters
   def fromPartialFunction[T: ClassTag](pf: PartialFunction[Any, T]): JacksonConverter[T] =
     new JacksonConverter[T]:
-
-      def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): T =
+      def convert(name: String, rawValue: Any, context: JacksonConversionContext): T =
         if rawValue == null then failNull(name, summon[ClassTag[T]].runtimeClass.getSimpleName)
         pf.lift(rawValue) match
           case Some(value) => value
           case None =>
-            doConvert[T](name, rawValue, summon[ClassTag[T]].runtimeClass.getSimpleName, mapper)
-
-  def withCustomModule[T: ClassTag](
-      module: SimpleModule
-  )(using base: JacksonConverter[T]): JacksonConverter[T] =
-    new JacksonConverter[T]:
-      override def customModule = Some(module)
-
-      def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): T =
-        val enhancedMapper = mapper.rebuild().addModule(module).build() :: ClassTagExtensions
-        base.convert(name, rawValue, enhancedMapper)
-
-  // Fallback given is inherited from JacksonConverterLowPriority
+            doConvert[T](name, rawValue, context)

@@ -20,7 +20,7 @@ object Versions {
   val zio = "2.1.20"
   val zioSchema = "1.7.4"
   val zioJson = "0.7.44"
-  val jackson = "2.20.0"
+  val jackson3 = "3.0.3"
   val tapir = "1.11.42"
   val jsonSchemaCirce = "0.11.10"
   val zioHttp = "3.4.0"
@@ -125,11 +125,8 @@ object `fast-mcp-scala` extends FastMCPModule {
     mvn"dev.zio::zio-schema:${Versions.zioSchema}",
     mvn"dev.zio::zio-schema-json:${Versions.zioSchema}",
     mvn"dev.zio::zio-schema-derivation:${Versions.zioSchema}",
-    // Jackson for JSON serialization/deserialization
-    mvn"com.fasterxml.jackson.core:jackson-databind:${Versions.jackson}",
-    mvn"com.fasterxml.jackson.module::jackson-module-scala:${Versions.jackson}",
-    mvn"com.fasterxml.jackson.datatype:jackson-datatype-jdk8:${Versions.jackson}",
-    mvn"com.fasterxml.jackson.datatype:jackson-datatype-jsr310:${Versions.jackson}",
+    // Jackson 3 for macro/runtime conversion internals
+    mvn"tools.jackson.core:jackson-databind:${Versions.jackson3}",
     // Tapir
     mvn"com.softwaremill.sttp.tapir::tapir-core:${Versions.tapir}",
     mvn"com.softwaremill.sttp.tapir::tapir-apispec-docs:${Versions.tapir}",
@@ -137,9 +134,9 @@ object `fast-mcp-scala` extends FastMCPModule {
     mvn"com.softwaremill.sttp.apispec::jsonschema-circe:${Versions.jsonSchemaCirce}",
     // ZIO HTTP for stateless HTTP transport
     mvn"dev.zio::zio-http:${Versions.zioHttp}",
-    // MCP SDK (Java library - split into core + jackson2 for Jackson 2.x compat)
+    // MCP SDK (Java library - split into core + jackson3 as the default runtime binding)
     mvn"io.modelcontextprotocol.sdk:mcp-core:${Versions.mcpSdk}",
-    mvn"io.modelcontextprotocol.sdk:mcp-json-jackson2:${Versions.mcpSdk}"
+    mvn"io.modelcontextprotocol.sdk:mcp-json-jackson3:${Versions.mcpSdk}"
   )
 
   override def mainClass = Some("fastmcp.FastMCPMain")

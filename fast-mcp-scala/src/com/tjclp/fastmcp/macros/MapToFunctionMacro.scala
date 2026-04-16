@@ -1,39 +1,18 @@
 package com.tjclp.fastmcp.macros
 
 import scala.annotation.tailrec
+import scala.deriving.Mirror
 import scala.quoted.*
 import scala.reflect.ClassTag
 
-import com.fasterxml.jackson.databind.DeserializationFeature
-import com.fasterxml.jackson.databind.json.JsonMapper
-import com.fasterxml.jackson.module.scala.ClassTagExtensions
-import com.fasterxml.jackson.module.scala.DefaultScalaModule
-
-/** Macro that converts a function f: (T1, T2, ..., TN) => R into a handler: Map[String, Any] => R
-  * by using JacksonConverter to convert each Map entry to the correct type.
+/** Macro that converts a function `f: (T1, T2, ..., TN) => R` into a handler `Map[String, Any] =>
+  * R` by using [[JacksonConverter]] to convert each map entry to the correct type.
   */
 object MapToFunctionMacro:
 
-  // Shared Jackson mapper
-  private val baseMapperBuilder = JsonMapper
-    .builder()
-    .addModule(DefaultScalaModule)
-    .enable(DeserializationFeature.FAIL_ON_NULL_CREATOR_PROPERTIES)
+  private val baseContext = JacksonConversionContext.default
 
-  private val baseMapper: JsonMapper & ClassTagExtensions =
-    baseMapperBuilder.build() :: ClassTagExtensions
-
-  // Create mapper with custom modules if needed
-  private def getMapperWithModules(converters: Seq[JacksonConverter[?]]): JsonMapper &
-    ClassTagExtensions =
-    val modules = converters.flatMap(_.customModule).distinct
-    if modules.isEmpty then baseMapper
-    else
-      val builder = baseMapper.rebuild()
-      modules.foreach(builder.addModule)
-      builder.build() :: ClassTagExtensions
-
-  /** Entry point: lifts f into a Map-based handler. */
+  /** Entry point: lifts `f` into a Map-based handler. */
   transparent inline def callByMap[F](inline f: F): Any =
     ${ callByMapImpl('f) }
 
@@ -60,15 +39,13 @@ object MapToFunctionMacro:
             s"Encountered PolyType ${pt.show}. Applying 'Any' which might lead to runtime issues if type parameters are needed for conversion."
           )
           val dummyAppliedTerm = term.appliedToTypes(pt.paramNames.map(_ => TypeRepr.of[Any]))
-          extractParamsAndReturnType(dummyAppliedTerm) // Recurse with applied types
+          extractParamsAndReturnType(dummyAppliedTerm)
 
-        case atpe @ AppliedType(base, args)
-            if base.typeSymbol.fullName.startsWith("scala.Function") =>
-          val paramTypes = args.init // Last type is return type
+        case AppliedType(base, args) if base.typeSymbol.fullName.startsWith("scala.Function") =>
+          val paramTypes = args.init
           val returnType = args.last
-          // Generate fallback names initially
-          val params = paramTypes.zipWithIndex.map { case (tpe, i) =>
-            ParamInfo(s"arg$i", tpe)
+          val params = paramTypes.zipWithIndex.map { case (paramTpe, i) =>
+            ParamInfo(s"arg$i", paramTpe)
           }.toList
           (params, returnType)
 
@@ -89,13 +66,10 @@ object MapToFunctionMacro:
         select.symbol.paramSymss.headOption.map(_.map(_.name))
       case closure @ Closure(meth @ Ident(_), _) if meth.symbol.isDefDef =>
         meth.symbol.paramSymss.headOption.map(_.map(_.name))
-      // This case intentionally removed as it's unreachable in our code structure
       case _ => None
 
     // Summon JacksonConverter[T] for a parameter type.
-    // Option[A] and List[A] are resolved in two steps to avoid ambiguity with the low-priority fallback.
     def summonJacksonConverter(tpe: TypeRepr)(using Quotes): Expr[JacksonConverter[?]] =
-      import quotes.reflect.report
       tpe.asType match
         case '[Option[a]] =>
           summonJacksonConverter(TypeRepr.of[a]) match
@@ -114,16 +88,57 @@ object MapToFunctionMacro:
               val ct = Expr
                 .summon[ClassTag[a]]
                 .getOrElse(
-                  report.errorAndAbort(s"No ClassTag for List element type: ${TypeRepr.of[a].show}")
+                  report.errorAndAbort(
+                    s"No ClassTag for List element type: ${TypeRepr.of[a].show}"
+                  )
                 )
               '{ DeriveJacksonConverter.containers.list[a](using $inner, $ct) }
+        case '[Seq[a]] =>
+          summonJacksonConverter(TypeRepr.of[a]) match
+            case '{ $inner: JacksonConverter[a] } =>
+              val ct = Expr
+                .summon[ClassTag[a]]
+                .getOrElse(
+                  report.errorAndAbort(
+                    s"No ClassTag for Seq element type: ${TypeRepr.of[a].show}"
+                  )
+                )
+              '{ DeriveJacksonConverter.containers.seq[a](using $inner, $ct) }
+        case '[Map[k, v]] =>
+          (summonJacksonConverter(TypeRepr.of[k]), summonJacksonConverter(TypeRepr.of[v])) match
+            case ('{ $kConv: JacksonConverter[k] }, '{ $vConv: JacksonConverter[v] }) =>
+              val kCt = Expr
+                .summon[ClassTag[k]]
+                .getOrElse(
+                  report.errorAndAbort(s"No ClassTag for Map key type: ${TypeRepr.of[k].show}")
+                )
+              val vCt = Expr
+                .summon[ClassTag[v]]
+                .getOrElse(
+                  report.errorAndAbort(
+                    s"No ClassTag for Map value type: ${TypeRepr.of[v].show}"
+                  )
+                )
+              '{ DeriveJacksonConverter.containers.map[k, v](using $kConv, $vConv, $kCt, $vCt) }
+            case _ =>
+              report.errorAndAbort(s"No JacksonConverter in scope for type: ${tpe.show}")
         case '[t] =>
           Expr.summon[JacksonConverter[t]] match
             case Some(conv) => conv
-            case None => report.errorAndAbort(s"No JacksonConverter in scope for type: ${tpe.show}")
-        case _ => report.errorAndAbort(s"Unsupported parameter type: ${tpe.show}")
+            case None =>
+              (Expr.summon[Mirror.ProductOf[t]], Expr.summon[ClassTag[t]]) match
+                case (Some(productMirror), Some(ct)) =>
+                  '{ DeriveJacksonConverter.derived[t](using $productMirror, $ct) }
+                case _ =>
+                  (Expr.summon[Mirror.SumOf[t]], Expr.summon[ClassTag[t]]) match
+                    case (Some(sumMirror), Some(ct)) =>
+                      '{ DeriveJacksonConverter.derived[t](using $sumMirror, $ct) }
+                    case _ =>
+                      report.errorAndAbort(s"No JacksonConverter in scope for type: ${tpe.show}")
+        case _ =>
+          report.errorAndAbort(s"Unsupported parameter type: ${tpe.show}")
 
-    // Build code that converts each map entry using its JacksonConverter
+    // Build code that converts each map entry using its JacksonConverter.
     def buildArgConversionExpr(params: List[ParamInfo], mapExpr: Expr[Map[String, Any]])(using
         Quotes
     ): Expr[List[Any]] =
@@ -133,12 +148,13 @@ object MapToFunctionMacro:
         val isOptionType = p.tpe match
           case AppliedType(base, _) if base.typeSymbol.fullName == "scala.Option" => true
           case _ => false
+
         if isOptionType then
           '{
             val key = $nameExpr
             val rawOpt: Option[Any] = $mapExpr.get(key)
             val raw: Any = rawOpt.getOrElse(None)
-            $convExpr.convert(key, raw, MapToFunctionMacro.baseMapper)
+            $convExpr.convert(key, raw, MapToFunctionMacro.baseContext)
           }.asExprOf[Any]
         else
           '{
@@ -147,16 +163,15 @@ object MapToFunctionMacro:
               key,
               throw new NoSuchElementException("Key not found in map: " + key)
             )
-            $convExpr.convert(key, raw, MapToFunctionMacro.baseMapper)
+            $convExpr.convert(key, raw, MapToFunctionMacro.baseContext)
           }.asExprOf[Any]
       })
 
-    // Main reflective logic
     val fnTerm = f.asTerm
     val (params, retTpe) = extractParamsAndReturnType(fnTerm)
     val namedParams = tryGetRealParamNames(fnTerm) match
       case Some(names) if names.length == params.length =>
-        params.zip(names).map((pi, n) => pi.copy(name = n))
+        params.zip(names).map((param, realName) => param.copy(name = realName))
       case _ => params
 
     retTpe.asType match
@@ -167,4 +182,5 @@ object MapToFunctionMacro:
           val result = MacroUtils.invokeFunctionWithArgs(fnValue, argsList)
           result.asInstanceOf[r]
         }.asExprOf[Map[String, Any] => r]
-      case _ => report.errorAndAbort(s"Unsupported return type: ${retTpe.show}")
+      case _ =>
+        report.errorAndAbort(s"Unsupported return type: ${retTpe.show}")

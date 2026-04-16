@@ -1,12 +1,7 @@
 package com.tjclp.fastmcp.macros.test
 
-import scala.reflect.ClassTag
-
-import com.fasterxml.jackson.databind.json.JsonMapper
-import com.fasterxml.jackson.module.scala.ClassTagExtensions
-import com.fasterxml.jackson.module.scala.DefaultScalaModule
-
 import com.tjclp.fastmcp.macros.DeriveJacksonConverter
+import com.tjclp.fastmcp.macros.JacksonConversionContext
 import com.tjclp.fastmcp.macros.JacksonConverter
 
 // Example: Complex filter class similar to the one in the external app
@@ -64,15 +59,12 @@ object User:
 // Example usage
 object JacksonConverterExample:
 
-  private val mapper = JsonMapper
-    .builder()
-    .addModule(DefaultScalaModule)
-    .build() :: ClassTagExtensions
+  private val context = JacksonConversionContext.default
 
   def main(args: Array[String]): Unit =
     // Test Filter conversion
     val filterMap = Map("column" -> "status", "op" -> "=", "value" -> "active")
-    val filter = summon[JacksonConverter[Filter]].convert("filter", filterMap, mapper)
+    val filter = summon[JacksonConverter[Filter]].convert("filter", filterMap, context)
     println(s"Converted filter: $filter")
 
     // Test Seq[Filter] conversion
@@ -80,20 +72,20 @@ object JacksonConverterExample:
       Map("column" -> "status", "op" -> "=", "value" -> "active"),
       Map("column" -> "count", "op" -> ">", "value" -> "10")
     )
-    val filters = summon[JacksonConverter[Seq[Filter]]].convert("filters", filtersList, mapper)
+    val filters = summon[JacksonConverter[Seq[Filter]]].convert("filters", filtersList, context)
     println(s"Converted filters: $filters")
 
     // Test QueryFilters
     val queryFiltersMap = Map("filters" -> filtersList)
     val queryFilters =
-      summon[JacksonConverter[QueryFilters]].convert("queryFilters", queryFiltersMap, mapper)
+      summon[JacksonConverter[QueryFilters]].convert("queryFilters", queryFiltersMap, context)
     println(s"Converted queryFilters: $queryFilters")
 
     // Test User with transform
     val userString = "John:30"
-    val user = summon[JacksonConverter[User]].convert("user", userString, mapper)
+    val user = summon[JacksonConverter[User]].convert("user", userString, context)
     println(s"Converted user from string: $user")
 
     val userMap = Map("name" -> "Jane", "age" -> 25)
-    val user2 = summon[JacksonConverter[User]].convert("user", userMap, mapper)
+    val user2 = summon[JacksonConverter[User]].convert("user", userMap, context)
     println(s"Converted user from map: $user2")
