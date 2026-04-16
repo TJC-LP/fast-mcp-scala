@@ -9,6 +9,7 @@ import io.modelcontextprotocol.spec.McpSchema
 private[fastmcp] object ResourceConversions:
 
   extension (rd: ResourceDefinition)
+
     def toJava: McpSchema.Resource | McpSchema.ResourceTemplate =
       if rd.isTemplate then
         val experimentalAnnotationsMap = new java.util.HashMap[String, Object]()

@@ -1,6 +1,6 @@
 package com.tjclp.fastmcp
 
-export macros.{JacksonConverter, DeriveJacksonConverter}
+export macros.{DeriveJacksonConverter, JacksonConverter}
 export macros.JacksonConverter.given
 export macros.RegistrationMacro.*
 export server.FastMcpServer

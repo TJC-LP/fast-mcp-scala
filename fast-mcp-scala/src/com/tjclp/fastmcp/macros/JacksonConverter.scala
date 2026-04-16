@@ -29,6 +29,7 @@ trait JacksonConverter[T]:
 
 /** Low-priority fallback — anything Jackson can handle via convertValue. */
 trait JacksonConverterLowPriority:
+
   // DRY potent conversion with error wrapping
   protected def doConvert[T: ClassTag](
       name: String,
@@ -48,6 +49,7 @@ trait JacksonConverterLowPriority:
     throw new RuntimeException(s"Null value provided for parameter '$name' of type $tpe")
 
   given [T: ClassTag]: JacksonConverter[T] with
+
     def convert(name: String, rawValue: Any, mapper: JsonMapper & ClassTagExtensions): T =
       if rawValue == null then failNull(name, summon[ClassTag[T]].runtimeClass.getSimpleName)
       doConvert[T](name, rawValue, summon[ClassTag[T]].runtimeClass.getSimpleName, mapper)

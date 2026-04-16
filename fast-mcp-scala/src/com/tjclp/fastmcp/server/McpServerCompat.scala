@@ -10,6 +10,7 @@ import com.tjclp.fastmcp.server.manager.*
 
 /** JVM-only compatibility overloads for the shared McpServer API. */
 extension (server: McpServer)
+
   def tool(
       name: String,
       handler: ContextualToolHandler,

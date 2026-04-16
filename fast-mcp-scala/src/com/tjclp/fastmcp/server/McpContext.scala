@@ -4,16 +4,16 @@ import io.modelcontextprotocol.common.McpTransportContext
 import io.modelcontextprotocol.server.McpAsyncServerExchange
 import io.modelcontextprotocol.spec.McpSchema
 
-/** JVM-specific MCP context carrying the Java SDK exchange and transport objects.
-  * Internal — users interact via the [[McpContext]] base class and its extension methods.
+/** JVM-specific MCP context carrying the Java SDK exchange and transport objects. Internal — users
+  * interact via the [[McpContext]] base class and its extension methods.
   */
 private[fastmcp] class JvmMcpContext(
     val javaExchange: Option[McpAsyncServerExchange] = None,
     val transportContext: Option[McpTransportContext] = None
 ) extends McpContext(javaExchange, transportContext)
 
-/** Extension methods on McpContext that provide JVM capabilities when available.
-  * These are safe to call on any McpContext — they return None on non-JVM platforms.
+/** Extension methods on McpContext that provide JVM capabilities when available. These are safe to
+  * call on any McpContext — they return None on non-JVM platforms.
   */
 extension (context: McpContext)
 

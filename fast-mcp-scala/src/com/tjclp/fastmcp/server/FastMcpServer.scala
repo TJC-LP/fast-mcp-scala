@@ -13,7 +13,7 @@ import io.modelcontextprotocol.common.McpTransportContext
 import io.modelcontextprotocol.json.McpJsonDefaults
 import io.modelcontextprotocol.server.McpAsyncServer
 import io.modelcontextprotocol.server.McpAsyncServerExchange
-import io.modelcontextprotocol.server.{McpServer as JavaMcpServer}
+import io.modelcontextprotocol.server.McpServer as JavaMcpServer
 import io.modelcontextprotocol.server.McpServerFeatures
 import io.modelcontextprotocol.server.McpStatelessAsyncServer
 import io.modelcontextprotocol.server.McpStatelessServerFeatures

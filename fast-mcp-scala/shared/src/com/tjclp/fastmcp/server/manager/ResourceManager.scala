@@ -37,7 +37,10 @@ type ResourceTemplateHandler = Map[String, String] => ZIO[Any, Throwable, String
   * anchored with `^` and `$` so only exact matches pass.
   */
 class ResourceManager extends Manager[ResourceDefinition]:
-  private val staticResources = new ConcurrentHashMap[String, (ResourceDefinition, ResourceHandler)]()
+
+  private val staticResources =
+    new ConcurrentHashMap[String, (ResourceDefinition, ResourceHandler)]()
+
   private val templateResources =
     new ConcurrentHashMap[String, (ResourceDefinition, ResourceTemplateHandler)]()
 
@@ -127,7 +130,8 @@ class ResourceManager extends Manager[ResourceDefinition]:
     Option(templateResources.get(uriPattern)).map(_._2)
 
   /** Alias used by FastMcpServer */
-  def getTemplateHandler(uriPattern: String): Option[ResourceTemplateHandler] = getTemplateResourceHandler(uriPattern)
+  def getTemplateHandler(uriPattern: String): Option[ResourceTemplateHandler] =
+    getTemplateResourceHandler(uriPattern)
 
   def getResourceDefinition(uri: String): Option[ResourceDefinition] =
     Option(staticResources.get(uri)).map(_._1)

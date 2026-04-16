@@ -14,15 +14,16 @@ private[fastmcp] object JvmToolInputSchemaSupport:
   def fromEither(schema: Either[McpSchema.JsonSchema, String]): ToolInputSchema =
     schema match
       case Left(javaSchema) => fromJavaSchema(javaSchema)
-      case Right(json)      => ToolInputSchema.unsafeFromJsonString(json)
+      case Right(json) => ToolInputSchema.unsafeFromJsonString(json)
 
-/** JVM-only toJava extension methods for shared MCP types.
-  * These are internal to fast-mcp-scala and not part of the user-facing DSL.
+/** JVM-only toJava extension methods for shared MCP types. These are internal to fast-mcp-scala and
+  * not part of the user-facing DSL.
   */
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
 private[fastmcp] object TypeConversions:
 
   extension (ta: ToolAnnotations)
+
     def toJava: McpSchema.ToolAnnotations =
       new McpSchema.ToolAnnotations(
         ta.title.orNull,
@@ -34,6 +35,7 @@ private[fastmcp] object TypeConversions:
       )
 
   extension (td: ToolDefinition)
+
     def toJava: McpSchema.Tool =
       val baseToolBuilder =
         McpSchema.Tool.Builder().name(td.name).description(td.description.orNull)
@@ -44,19 +46,23 @@ private[fastmcp] object TypeConversions:
       }
 
       val jsonMapper = McpJsonDefaults.getMapper()
-      val jsonSchema = jsonMapper.readValue(td.inputSchema.toJsonString, classOf[McpSchema.JsonSchema])
+      val jsonSchema =
+        jsonMapper.readValue(td.inputSchema.toJsonString, classOf[McpSchema.JsonSchema])
       baseToolBuilder.inputSchema(jsonSchema).build()
 
   extension (pa: PromptArgument)
+
     def toJava: McpSchema.PromptArgument =
       new McpSchema.PromptArgument(pa.name, pa.description.orNull, pa.required)
 
   extension (pd: PromptDefinition)
+
     def toJava: McpSchema.Prompt =
       val javaArgs = pd.arguments.map(_.map(_.toJava).asJava).orNull
       new McpSchema.Prompt(pd.name, pd.description.orNull, javaArgs)
 
   extension (c: Content)
+
     def toJava: McpSchema.Content = c match
       case tc: TextContent =>
         val ann = new McpSchema.Annotations(
@@ -78,16 +84,24 @@ private[fastmcp] object TypeConversions:
         new McpSchema.EmbeddedResource(ann, er.resource.toJava)
 
   extension (erc: EmbeddedResourceContent)
+
     def toJava: McpSchema.ResourceContents =
-      if erc.text.isDefined then new McpSchema.TextResourceContents(erc.uri, erc.mimeType, erc.text.get)
-      else if erc.blob.isDefined then new McpSchema.BlobResourceContents(erc.uri, erc.mimeType, erc.blob.get)
-      else throw new IllegalArgumentException(s"EmbeddedResourceContent for ${erc.uri} must have text or blob")
+      if erc.text.isDefined then
+        new McpSchema.TextResourceContents(erc.uri, erc.mimeType, erc.text.get)
+      else if erc.blob.isDefined then
+        new McpSchema.BlobResourceContents(erc.uri, erc.mimeType, erc.blob.get)
+      else
+        throw new IllegalArgumentException(
+          s"EmbeddedResourceContent for ${erc.uri} must have text or blob"
+        )
 
   extension (r: Role)
+
     def toJava: McpSchema.Role = r match
-      case Role.User      => McpSchema.Role.USER
+      case Role.User => McpSchema.Role.USER
       case Role.Assistant => McpSchema.Role.ASSISTANT
 
   extension (m: Message)
+
     def toJava: McpSchema.PromptMessage =
       new McpSchema.PromptMessage(m.role.toJava, m.content.toJava)

@@ -100,16 +100,22 @@ object MapToFunctionMacro:
         case '[Option[a]] =>
           summonJacksonConverter(TypeRepr.of[a]) match
             case '{ $inner: JacksonConverter[a] } =>
-              val ct = Expr.summon[ClassTag[a]].getOrElse(
-                report.errorAndAbort(s"No ClassTag for Option element type: ${TypeRepr.of[a].show}")
-              )
+              val ct = Expr
+                .summon[ClassTag[a]]
+                .getOrElse(
+                  report.errorAndAbort(
+                    s"No ClassTag for Option element type: ${TypeRepr.of[a].show}"
+                  )
+                )
               '{ DeriveJacksonConverter.containers.option[a](using $inner, $ct) }
         case '[List[a]] =>
           summonJacksonConverter(TypeRepr.of[a]) match
             case '{ $inner: JacksonConverter[a] } =>
-              val ct = Expr.summon[ClassTag[a]].getOrElse(
-                report.errorAndAbort(s"No ClassTag for List element type: ${TypeRepr.of[a].show}")
-              )
+              val ct = Expr
+                .summon[ClassTag[a]]
+                .getOrElse(
+                  report.errorAndAbort(s"No ClassTag for List element type: ${TypeRepr.of[a].show}")
+                )
               '{ DeriveJacksonConverter.containers.list[a](using $inner, $ct) }
         case '[t] =>
           Expr.summon[JacksonConverter[t]] match

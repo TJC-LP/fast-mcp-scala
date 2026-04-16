@@ -48,10 +48,13 @@ extension (schema: ToolInputSchema)
   def toJsonString: String = schema
 
   def toAst: Json =
-    schema.fromJson[Json].fold(
-      error => throw new IllegalStateException(s"Stored tool input schema is invalid JSON: $error"),
-      identity
-    )
+    schema
+      .fromJson[Json]
+      .fold(
+        error =>
+          throw new IllegalStateException(s"Stored tool input schema is invalid JSON: $error"),
+        identity
+      )
 
 case class ToolDefinition(
     name: String,
@@ -135,11 +138,12 @@ enum Role:
   case User, Assistant
 
 object Role:
+
   given JsonCodec[Role] = JsonCodec.string.transformOrFail(
     {
-      case s if s.equalsIgnoreCase("user")      => Right(Role.User)
+      case s if s.equalsIgnoreCase("user") => Right(Role.User)
       case s if s.equalsIgnoreCase("assistant") => Right(Role.Assistant)
-      case s                                    => Left(s"Invalid role: $s")
+      case s => Left(s"Invalid role: $s")
     },
     _.toString.toLowerCase
   )
