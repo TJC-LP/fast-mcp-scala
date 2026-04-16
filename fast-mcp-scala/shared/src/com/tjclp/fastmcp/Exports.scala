@@ -7,6 +7,14 @@ export core.{
   EmbeddedResource,
   EmbeddedResourceContent,
   ImageContent,
+  McpCodec,
+  McpDecodeContext,
+  McpDecoder,
+  McpEncoder,
+  McpPrompt,
+  McpStaticResource,
+  McpTemplateResource,
+  McpTool,
   Message,
   Param,
   Prompt,
@@ -14,6 +22,8 @@ export core.{
   PromptDefinition,
   PromptParam,
   Resource,
+  ResourceArgument,
+  ResourceDefinition,
   ResourceParam,
   Role,
   TextContent,
@@ -22,7 +32,8 @@ export core.{
   ToolDefinition,
   ToolExample,
   ToolInputSchema,
-  ToolParam
+  ToolParam,
+  ToolSchemaProvider
 }
+export core.McpEncoder.given
 export server.{FastMcpServerSettings, McpContext, McpServer}
-export server.manager.ResourceArgument

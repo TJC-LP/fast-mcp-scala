@@ -32,6 +32,9 @@ object ToolInputSchema:
 
   val default: ToolInputSchema = unsafeFromJsonString(DefaultJson)
 
+  def derived[A](using provider: ToolSchemaProvider[A]): ToolInputSchema =
+    provider.inputSchema
+
   def fromJsonString(schema: String): Either[String, ToolInputSchema] =
     schema.fromJson[Json].map(_ => schema)
 

@@ -7,23 +7,9 @@ import scala.util.matching.Regex
 
 import zio.*
 
+import com.tjclp.fastmcp.core.ResourceArgument
+import com.tjclp.fastmcp.core.ResourceDefinition
 import com.tjclp.fastmcp.server.McpContext
-
-/** Describes one argument for a resource template placeholder. */
-case class ResourceArgument(
-    name: String,
-    description: Option[String],
-    required: Boolean = true
-)
-
-case class ResourceDefinition(
-    uri: String,
-    name: Option[String],
-    description: Option[String],
-    mimeType: Option[String] = Some("text/plain"),
-    isTemplate: Boolean = false,
-    arguments: Option[List[ResourceArgument]] = None
-)
 
 /** Function type for resource handlers */
 type ResourceHandler = () => ZIO[Any, Throwable, String | Array[Byte]]

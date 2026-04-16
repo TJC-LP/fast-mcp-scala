@@ -48,7 +48,7 @@ object Example:
 object ExampleServer extends ZIOAppDefault:
     override def run =
       for
-        server <- ZIO.succeed(FastMcpServer("ExampleServer", "0.2.0"))
+        server <- ZIO.succeed(McpServer("ExampleServer", "0.2.0"))
         _ <- ZIO.attempt(server.scanAnnotations[Example.type])
         _ <- server.runStdio()
       yield ()
@@ -60,6 +60,53 @@ instances in scope explicitly, use `import com.tjclp.fastmcp.{given, *}`.
 Low-level custom `JacksonConverter` implementations now receive a `JacksonConversionContext`
 instead of direct Jackson mapper/module types. The common DSL stays under
 `import com.tjclp.fastmcp.*`.
+
+### Typed Contracts
+
+For reusable manual definitions across JVM and Scala.js, prefer typed contracts:
+
+```scala 3 raw
+//> using scala 3.7.2
+//> using dep com.tjclp::fast-mcp-scala:0.2.3
+//> using options "-Xcheck-macros" "-experimental"
+
+import sttp.tapir.generic.auto.*
+import zio.*
+import zio.json.*
+
+import com.tjclp.fastmcp.{given, *}
+
+case class AddArgs(
+  @Param(description = "The first number to add", examples = List("2"))
+  a: Int,
+  @Param(description = "The second number to add", examples = List("3"))
+  b: Int
+)
+case class AddResult(sum: Int)
+given JsonEncoder[AddResult] = DeriveJsonEncoder.gen[AddResult]
+
+val addTool = McpTool.derived[AddArgs, AddResult](
+  name = "typed-add",
+  description = Some("Add two numbers")
+) { args =>
+  ZIO.succeed(AddResult(args.a + args.b))
+}
+
+object ContractServer extends ZIOAppDefault:
+  override def run =
+    for
+      server <- ZIO.succeed(McpServer("ContractServer", "0.1.0"))
+      _ <- server.tool(addTool)
+      _ <- server.runStdio()
+    yield ()
+```
+
+The typed contract path is the recommended manual API. Annotation scanning remains a JVM
+convenience layer on top.
+
+On the JVM, `ToolInputSchema.derived[...]` and `McpTool.derived[...]` now also honor
+field-level `@Param` metadata on typed request case classes, including descriptions,
+examples, required flags, and custom schema overrides.
 
 ### Running Examples
 
@@ -100,7 +147,7 @@ object StreamableExample:
 
 object StreamableServer extends ZIOAppDefault:
   override def run =
-    val server = FastMcpServer(
+    val server = McpServer(
       name = "StreamableExample",
       version = "0.1.0",
       settings = FastMcpServerSettings(port = 8090)
@@ -150,7 +197,7 @@ object HttpExample:
 
 object HttpServer extends ZIOAppDefault:
   override def run =
-    val server = FastMcpServer(
+    val server = McpServer(
       name = "HttpExample",
       version = "0.1.0",
       settings = FastMcpServerSettings(port = 8090, stateless = true)
