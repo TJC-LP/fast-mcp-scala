@@ -29,7 +29,15 @@ import zio.http.Server as ZHttpServer
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.JvmToolInputSchemaSupport.*
 import com.tjclp.fastmcp.core.TypeConversions.*
-import com.tjclp.fastmcp.server.manager.*
+import com.tjclp.fastmcp.macros.JacksonConversionContext
+import com.tjclp.fastmcp.server.manager.ContextualToolHandler
+import com.tjclp.fastmcp.server.manager.PromptHandler
+import com.tjclp.fastmcp.server.manager.PromptManager
+import com.tjclp.fastmcp.server.manager.ResourceHandler
+import com.tjclp.fastmcp.server.manager.ResourceManager
+import com.tjclp.fastmcp.server.manager.ResourceTemplateHandler
+import com.tjclp.fastmcp.server.manager.ToolManager
+import com.tjclp.fastmcp.server.manager.ToolRegistrationOptions
 import com.tjclp.fastmcp.server.manager.ResourceConversions.*
 import com.tjclp.fastmcp.server.transport.ZioHttpStatelessTransport
 import com.tjclp.fastmcp.server.transport.ZioHttpStreamableTransportProvider
@@ -45,6 +53,7 @@ class FastMcpServer(
     settings: FastMcpServerSettings = FastMcpServerSettings()
 ) extends com.tjclp.fastmcp.server.McpServer:
   val dependencies: List[String] = settings.dependencies
+  protected val decodeContext: McpDecodeContext = JacksonConversionContext.default
   // Initialize managers
   val toolManager = new ToolManager()
   val resourceManager = new ResourceManager()
@@ -58,7 +67,20 @@ class FastMcpServer(
 
   /** Register a tool with the server
     */
-  def tool(
+  override def tool(
+      definition: ToolDefinition,
+      handler: ContextualToolHandler,
+      options: ToolRegistrationOptions
+  ): ZIO[Any, Throwable, FastMcpServer] =
+    toolManager.addTool(definition.name, handler, definition, options).as(this)
+
+  override def tool(
+      definition: ToolDefinition,
+      handler: ContextualToolHandler
+  ): ZIO[Any, Throwable, FastMcpServer] =
+    tool(definition, handler, ToolRegistrationOptions())
+
+  override def tool(
       name: String,
       handler: ContextualToolHandler,
       description: Option[String] = None,
@@ -66,13 +88,16 @@ class FastMcpServer(
       options: ToolRegistrationOptions = ToolRegistrationOptions(),
       annotations: Option[ToolAnnotations] = None
   ): ZIO[Any, Throwable, FastMcpServer] =
-    val definition = ToolDefinition(
-      name = name,
-      description = description,
-      inputSchema = inputSchema,
-      annotations = annotations
+    tool(
+      definition = ToolDefinition(
+        name = name,
+        description = description,
+        inputSchema = inputSchema,
+        annotations = annotations
+      ),
+      handler = handler,
+      options = options
     )
-    toolManager.addTool(name, handler, definition, options).as(this)
 
   def tool(
       name: String,
@@ -93,27 +118,41 @@ class FastMcpServer(
 
   /** Register a **static** resource with the server.
     */
-  def resource(
+  override def resource(
+      definition: ResourceDefinition,
+      handler: ResourceHandler
+  ): ZIO[Any, Throwable, FastMcpServer] =
+    resourceManager.addStaticResource(definition.uri, handler, definition).as(this)
+
+  override def resource(
       uri: String,
       handler: ResourceHandler, // () => ZIO[Any, Throwable, String | Array[Byte]]
       name: Option[String] = None,
       description: Option[String] = None,
       mimeType: Option[String] = Some("text/plain") // Default mimeType here
   ): ZIO[Any, Throwable, FastMcpServer] = {
-    val definition = ResourceDefinition(
-      uri = uri,
-      name = name,
-      description = description,
-      mimeType = mimeType,
-      isTemplate = false,
-      arguments = None
+    resource(
+      definition = ResourceDefinition(
+        uri = uri,
+        name = name,
+        description = description,
+        mimeType = mimeType,
+        isTemplate = false,
+        arguments = None
+      ),
+      handler = handler
     )
-    resourceManager.addStaticResource(uri, handler, definition).as(this)
   }
 
   /** Register a **templated** resource with the server.
     */
-  def resourceTemplate(
+  override def resourceTemplate(
+      definition: ResourceDefinition,
+      handler: ResourceTemplateHandler
+  ): ZIO[Any, Throwable, FastMcpServer] =
+    resourceManager.addTemplateResource(definition.uri, handler, definition).as(this)
+
+  override def resourceTemplate(
       uriPattern: String,
       handler: ResourceTemplateHandler, // Map[String, String] => ZIO[Any, Throwable, String | Array[Byte]]
       name: Option[String] = None,
@@ -121,27 +160,37 @@ class FastMcpServer(
       mimeType: Option[String] = Some("text/plain"), // Default mimeType here
       arguments: Option[List[ResourceArgument]] = None // Arguments might be passed by macro
   ): ZIO[Any, Throwable, FastMcpServer] = {
-    val definition = ResourceDefinition(
-      uri = uriPattern,
-      name = name,
-      description = description,
-      mimeType = mimeType,
-      isTemplate = true,
-      arguments = arguments
+    resourceTemplate(
+      definition = ResourceDefinition(
+        uri = uriPattern,
+        name = name,
+        description = description,
+        mimeType = mimeType,
+        isTemplate = true,
+        arguments = arguments
+      ),
+      handler = handler
     )
-    resourceManager.addTemplateResource(uriPattern, handler, definition).as(this)
   }
 
   /** Register a prompt with the server
     */
-  def prompt(
+  override def prompt(
+      definition: PromptDefinition,
+      handler: PromptHandler
+  ): ZIO[Any, Throwable, FastMcpServer] =
+    promptManager.addPrompt(definition.name, handler, definition).as(this)
+
+  override def prompt(
       name: String,
       handler: PromptHandler,
       description: Option[String] = None,
       arguments: Option[List[PromptArgument]] = None
   ): ZIO[Any, Throwable, FastMcpServer] =
-    val definition = PromptDefinition(name, description, arguments)
-    promptManager.addPrompt(name, handler, definition).as(this)
+    prompt(
+      definition = PromptDefinition(name, description, arguments),
+      handler = handler
+    )
 
   // --- Public Registration Methods ---
 
@@ -986,7 +1035,7 @@ object FastMcpServer:
       version: String = "0.1.0",
       settings: FastMcpServerSettings = FastMcpServerSettings()
   ): ZIO[Any, Throwable, Unit] =
-    ZIO.succeed(apply(name, version, settings)).flatMap(_.runHttp())
+    McpServer.http(name, version, settings)
 
   /** Create a new FastMCPScala instance and run it with stdio transport
     */
@@ -995,7 +1044,7 @@ object FastMcpServer:
       version: String = "0.1.0",
       settings: FastMcpServerSettings = FastMcpServerSettings()
   ): ZIO[Any, Throwable, Unit] =
-    ZIO.succeed(apply(name, version, settings)).flatMap(_.runStdio())
+    McpServer.stdio(name, version, settings)
 
   /** Create a new FastMCPScala instance with the given settings
     */
@@ -1004,6 +1053,6 @@ object FastMcpServer:
       version: String = "0.1.0",
       settings: FastMcpServerSettings = FastMcpServerSettings()
   ): FastMcpServer =
-    new FastMcpServer(name, version, settings) // comment
+    McpServer(name, version, settings)
 
 end FastMcpServer

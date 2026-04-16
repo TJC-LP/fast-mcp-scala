@@ -1,6 +1,9 @@
 package com.tjclp.fastmcp.surface
 
 import org.scalatest.funsuite.AnyFunSuite
+import sttp.tapir.generic.auto.*
+import zio.*
+import zio.json.*
 
 import com.tjclp.fastmcp.{given, *}
 
@@ -11,10 +14,14 @@ class RootImportSurfaceTest extends AnyFunSuite {
     def hello(@Param("Person to greet") name: String): String =
       s"Hello, $name!"
 
+  case class HelloArgs(name: String)
+  case class HelloResult(message: String)
   case class TaggedId(value: String)
 
-  given JacksonConverter[TaggedId] with
-    def convert(name: String, rawValue: Any, context: JacksonConversionContext): TaggedId =
+  given JsonEncoder[HelloResult] = DeriveJsonEncoder.gen[HelloResult]
+
+  given McpDecoder[TaggedId] with
+    def decode(name: String, rawValue: Any, context: McpDecodeContext): TaggedId =
       rawValue match
         case s: String if s.startsWith("{") =>
           TaggedId(context.parseJsonObject(name, s)("value").toString)
@@ -26,15 +33,46 @@ class RootImportSurfaceTest extends AnyFunSuite {
           TaggedId(context.convertValue[String](name, other))
 
   test("root import exposes the public JVM API surface") {
-    val server = FastMcpServer("RootImportServer")
+    val server = McpServer("RootImportServer")
     val _ = server.scanAnnotations[ExampleTools.type]
 
     val toolDef = server.toolManager.getToolDefinition("hello")
     assert(toolDef.isDefined)
 
-    val schema = ToolInputSchema.unsafeFromJsonString("""{"type":"object"}""")
+    val schema = ToolInputSchema.derived[HelloArgs]
     val typed = ToolDefinition("typed-tool", None, schema)
     assert(typed.inputSchema.toJsonString.contains("object"))
+
+    val typedTool = McpTool.derived[HelloArgs, HelloResult](
+      name = "typed-hello",
+      description = Some("Typed greeting")
+    ) { args =>
+      ZIO.succeed(HelloResult(s"Hello, ${args.name}!"))
+    }
+
+    val typedPrompt = McpPrompt[HelloArgs](
+      name = "typed-prompt",
+      arguments = List(PromptArgument("name", Some("The person to greet"), required = true))
+    ) { args =>
+      ZIO.succeed(List(Message(Role.User, TextContent(s"Prompt for ${args.name}"))))
+    }
+
+    val staticResource =
+      McpStaticResource("static://hello", description = Some("Greeting resource"))(
+        ZIO.succeed("hello")
+      )
+
+    val templateResource = McpTemplateResource[HelloArgs](
+      uriPattern = "users://{name}",
+      arguments = List(ResourceArgument("name", Some("The user name"), required = true))
+    ) { args =>
+      ZIO.succeed(s"user:${args.name}")
+    }
+
+    assert(typedTool.definition.name == "typed-hello")
+    assert(typedPrompt.definition.name == "typed-prompt")
+    assert(staticResource.definition.uri == "static://hello")
+    assert(templateResource.definition.isTemplate)
 
     val ctx = McpContext()
     assert(ctx.getClientInfo.isEmpty)
@@ -42,7 +80,7 @@ class RootImportSurfaceTest extends AnyFunSuite {
     val promptMessage: Message = Message(Role.User, TextContent("hi"))
     assert(promptMessage.role == Role.User)
 
-    val tagged = summon[JacksonConverter[TaggedId]].convert(
+    val tagged = summon[McpDecoder[TaggedId]].decode(
       "tagged",
       """{"value":"abc"}""",
       JacksonConversionContext.default

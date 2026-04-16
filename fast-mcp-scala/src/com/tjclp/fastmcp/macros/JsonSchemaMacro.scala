@@ -11,6 +11,7 @@ import sttp.tapir.SchemaType.SProductField
 import sttp.tapir.docs.apispec.schema.TapirSchemaToJsonSchema
 
 import com.tjclp.fastmcp.macros.schema.FunctionAnalyzer
+import com.tjclp.fastmcp.macros.schema.SchemaExtractor
 import com.tjclp.fastmcp.macros.schema.SchemaGenerator
 
 /** Macro that generates JSON Schema for function parameters. The implementation is split across
@@ -41,6 +42,10 @@ object JsonSchemaMacro:
     */
   inline def schemaForFunctionArgs[F](inline fn: F, inline exclude: List[String]): Json =
     ${ schemaForFunctionArgsImpl('fn, 'exclude) }
+
+  /** Produces a JSON schema describing a single request type `T`. */
+  inline def schemaForType[T]: Json =
+    ${ schemaForTypeImpl[T] }
 
   private def schemaForFunctionArgsImpl[F: Type](fn: Expr[F], exclude: Expr[List[String]])(using
       Quotes
@@ -81,4 +86,24 @@ object JsonSchemaMacro:
       // Post-process the JSON to resolve and inline references
       MacroUtils.resolveJsonRefs(initialJson)
     }
+
+  private def schemaForTypeImpl[T: Type](using Quotes): Expr[Json] =
+    import quotes.reflect.*
+
+    if TypeRepr.of[T] =:= TypeRepr.of[Unit] then
+      '{
+        Json.obj(
+          "type" -> Json.fromString("object"),
+          "properties" -> Json.obj(),
+          "additionalProperties" -> Json.fromBoolean(false)
+        )
+      }
+    else
+      val (_, schemaExpr) = SchemaExtractor.createSchemaFor[T](Type.show[T])
+      val metadataExpr = MacroUtils.schemaMetadataForType[T]
+      '{
+        val apispecSchema = TapirSchemaToJsonSchema($schemaExpr, markOptionsAsNullable = true)
+        val resolvedSchema = MacroUtils.resolveJsonRefs(apispecSchema.asJson)
+        MacroUtils.injectSchemaMetadata(resolvedSchema, $metadataExpr)
+      }
 end JsonSchemaMacro

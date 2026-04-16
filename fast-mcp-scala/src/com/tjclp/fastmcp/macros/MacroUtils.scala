@@ -16,6 +16,13 @@ case class ParamMetadata(
     schema: Option[String] = None
 )
 
+/** Recursive metadata tree used to inject `@Param` metadata into typed request schemas. */
+case class SchemaMetadataNode(
+    metadata: Option[ParamMetadata] = None,
+    properties: Map[String, SchemaMetadataNode] = Map.empty,
+    items: Option[SchemaMetadataNode] = None
+)
+
 /** Utility methods shared between the processor objects (Compressed)
   */
 private[macros] object MacroUtils:
@@ -269,6 +276,124 @@ private[macros] object MacroUtils:
         (paramDesc, paramExamples, paramRequired, paramSchema)
       case None => (None, Nil, true, None) // Defaults if no @Param
     }
+
+  def schemaMetadataForType[T: Type](using Quotes): Expr[SchemaMetadataNode] =
+    import quotes.reflect.*
+    schemaMetadataForTypeRepr(TypeRepr.of[T]).getOrElse('{ SchemaMetadataNode() })
+
+  private def schemaMetadataForTypeRepr(using Quotes)(
+      rawTpe: quotes.reflect.TypeRepr
+  ): Option[Expr[SchemaMetadataNode]] =
+    import quotes.reflect.*
+
+    val tpe = rawTpe.dealias.simplified
+
+    def hasDefaultValue(owner: Symbol, fieldIndex: Int): Boolean =
+      if owner == Symbol.noSymbol then false
+      else
+        val candidateNames = List(
+          s"$$lessinit$$greater$$default$$${fieldIndex + 1}",
+          s"apply$$default$$${fieldIndex + 1}"
+        )
+        candidateNames.exists(name => owner.methodMember(name).nonEmpty)
+
+    def fieldAnnotation(fieldSym: Symbol, ctorParams: List[Symbol]): Option[Term] =
+      extractAnnotation[com.tjclp.fastmcp.core.Param](fieldSym).orElse {
+        ctorParams
+          .find(_.name == fieldSym.name)
+          .flatMap(param => extractAnnotation[com.tjclp.fastmcp.core.Param](param))
+      }
+
+    tpe.asType match
+      case '[Option[a]] =>
+        schemaMetadataForTypeRepr(TypeRepr.of[a])
+      case '[List[a]] =>
+        schemaMetadataForTypeRepr(TypeRepr.of[a]).map { item =>
+          '{ SchemaMetadataNode(items = Some($item)) }
+        }
+      case '[Seq[a]] =>
+        schemaMetadataForTypeRepr(TypeRepr.of[a]).map { item =>
+          '{ SchemaMetadataNode(items = Some($item)) }
+        }
+      case '[Array[a]] =>
+        schemaMetadataForTypeRepr(TypeRepr.of[a]).map { item =>
+          '{ SchemaMetadataNode(items = Some($item)) }
+        }
+      case _ =>
+        val tpeSym = tpe.typeSymbol
+        val isProduct = tpeSym.isClassDef && tpeSym.caseFields.nonEmpty
+
+        if !isProduct then None
+        else
+          val ctorParams = tpeSym.primaryConstructor.paramSymss.flatten
+          val companion = tpeSym.companionModule
+
+          val entries = tpeSym.caseFields.zipWithIndex.flatMap { case (fieldSym, idx) =>
+            val fieldTpe = tpe.memberType(fieldSym)
+            val nested = schemaMetadataForTypeRepr(fieldTpe)
+            val parsedMeta = fieldAnnotation(fieldSym, ctorParams).map { annot =>
+              val (desc, examples, required, schema) = parseToolParam(Some(annot))
+              if !required then
+                val isOption = fieldTpe <:< TypeRepr.of[Option[?]]
+                val hasDefault = hasDefaultValue(companion, idx)
+                if !isOption && !hasDefault then
+                  report.errorAndAbort(
+                    s"Field '${fieldSym.name}' in typed request ${tpeSym.name} is marked as required=false " +
+                      s"but is not an Option type and has no default value."
+                  )
+              ParamMetadata(desc, examples, required, schema)
+            }
+
+            if parsedMeta.isDefined || nested.isDefined then
+              val fieldNameExpr = Expr(fieldSym.name)
+              val isCollectionType = fieldTpe.asType match
+                case '[List[?]] | '[Seq[?]] | '[Array[?]] => true
+                case _ => false
+              val metaExpr = parsedMeta match
+                case Some(meta) =>
+                  '{
+                    Some(
+                      ParamMetadata(
+                        description = ${ Expr(meta.description) },
+                        examples = ${ Expr(meta.examples) },
+                        required = ${ Expr(meta.required) },
+                        schema = ${ Expr(meta.schema) }
+                      )
+                    )
+                  }
+                case None => '{ None }
+
+              val nestedExpr = nested match
+                case Some(node) => '{ $node.properties }
+                case None => '{ Map.empty[String, SchemaMetadataNode] }
+
+              val itemsExpr = nested match
+                case Some(node) if isCollectionType =>
+                  '{ Some($node) }
+                case _ => '{ None }
+
+              val propertiesExpr =
+                if isCollectionType then '{ Map.empty[String, SchemaMetadataNode] }
+                else
+                  nested match
+                    case Some(node) => '{ $node.properties }
+                    case None => '{ Map.empty[String, SchemaMetadataNode] }
+
+              Some(
+                '{
+                  $fieldNameExpr -> SchemaMetadataNode(
+                    metadata = $metaExpr,
+                    properties = $propertiesExpr,
+                    items = $itemsExpr
+                  )
+                }
+              )
+            else None
+          }
+
+          if entries.nonEmpty then
+            Some('{ SchemaMetadataNode(properties = Map(${ Varargs(entries) }*)) })
+          else None
 
   // Helper to parse @Resource annotation arguments
   def parseResourceParams(using quotes: Quotes)(
@@ -547,6 +672,90 @@ private[macros] object MacroUtils:
         withProps.add("required", Json.fromValues(newRequired.toSeq.sorted.map(Json.fromString)))
       else
         withProps.remove("required")
+    }
+  }
+
+  /** Recursively injects `@Param` metadata collected from typed request fields into an already
+    * generated JSON schema.
+    */
+  def injectSchemaMetadata(schemaJson: Json, metadataNode: SchemaMetadataNode): Json = {
+    import io.circe.parser.parse
+
+    def applyOwnMetadata(currentJson: Json, metadata: Option[ParamMetadata]): Json =
+      metadata match {
+        case Some(meta) if meta.schema.isDefined =>
+          parse(meta.schema.get).getOrElse(currentJson)
+        case Some(meta) =>
+          val baseObj = currentJson.asObject.getOrElse(JsonObject.empty)
+          val withDesc =
+            meta.description.fold(baseObj)(d => baseObj.add("description", Json.fromString(d)))
+          val withExamples =
+            if (meta.examples.nonEmpty) then
+              withDesc.add("examples", Json.fromValues(meta.examples.map(Json.fromString)))
+            else withDesc
+          Json.fromJsonObject(withExamples)
+        case None =>
+          currentJson
+      }
+
+    val withOwnMetadata = applyOwnMetadata(schemaJson, metadataNode.metadata)
+
+    // Custom schema replaces the field entirely.
+    if metadataNode.metadata.exists(_.schema.isDefined) then withOwnMetadata
+    else {
+      val withItems =
+        metadataNode.items match {
+          case Some(itemNode) =>
+            withOwnMetadata.hcursor.downField("items").focus match {
+              case Some(itemsJson) =>
+                withOwnMetadata.mapObject(
+                  _.add("items", injectSchemaMetadata(itemsJson, itemNode))
+                )
+              case None =>
+                withOwnMetadata
+            }
+          case None =>
+            withOwnMetadata
+        }
+
+      withItems.hcursor.downField("properties").focus.flatMap(_.asObject) match {
+        case Some(propsObj) if metadataNode.properties.nonEmpty =>
+          val currentRequired =
+            withItems.hcursor.downField("required").as[List[String]].getOrElse(Nil).toSet
+
+          val updatedRequired = metadataNode.properties.foldLeft(currentRequired) {
+            case (acc, (fieldName, childNode)) =>
+              childNode.metadata match {
+                case Some(meta) =>
+                  if meta.required then acc + fieldName else acc - fieldName
+                case None =>
+                  acc
+              }
+          }
+
+          val updatedProps = propsObj.toMap.map { case (fieldName, fieldJson) =>
+            metadataNode.properties.get(fieldName) match {
+              case Some(childNode) =>
+                fieldName -> injectSchemaMetadata(fieldJson, childNode)
+              case None =>
+                fieldName -> fieldJson
+            }
+          }
+
+          withItems.mapObject { obj =>
+            val withProps =
+              obj.add("properties", Json.fromJsonObject(JsonObject.fromMap(updatedProps)))
+            if updatedRequired.nonEmpty then
+              withProps.add(
+                "required",
+                Json.fromValues(updatedRequired.toSeq.sorted.map(Json.fromString))
+              )
+            else withProps.remove("required")
+          }
+
+        case _ =>
+          withItems
+      }
     }
   }
 end MacroUtils

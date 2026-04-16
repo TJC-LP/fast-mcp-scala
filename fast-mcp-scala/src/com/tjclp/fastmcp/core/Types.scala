@@ -1,9 +1,13 @@
 package com.tjclp.fastmcp.core
 
+import java.util.Base64
+
 import scala.jdk.CollectionConverters.*
 
 import io.modelcontextprotocol.json.McpJsonDefaults
 import io.modelcontextprotocol.spec.McpSchema
+
+import com.tjclp.fastmcp.macros.JsonSchemaMacro
 
 private[fastmcp] object JvmToolInputSchemaSupport:
   private val jsonMapper = McpJsonDefaults.getMapper()
@@ -15,6 +19,32 @@ private[fastmcp] object JvmToolInputSchemaSupport:
     schema match
       case Left(javaSchema) => fromJavaSchema(javaSchema)
       case Right(json) => ToolInputSchema.unsafeFromJsonString(json)
+
+object JvmToolSchemaProviders:
+
+  given ToolSchemaProvider[Unit] with
+
+    val inputSchema: ToolInputSchema =
+      ToolInputSchema.unsafeFromJsonString(
+        """{"type":"object","properties":{},"additionalProperties":false}"""
+      )
+
+  inline given [A]: ToolSchemaProvider[A] =
+    ToolSchemaProvider.instance(
+      ToolInputSchema.unsafeFromJsonString(JsonSchemaMacro.schemaForType[A].spaces2)
+    )
+
+object McpEncoders:
+
+  given McpEncoder[Array[Byte]] with
+
+    def encode(value: Array[Byte]): List[Content] =
+      List(
+        ImageContent(
+          data = Base64.getEncoder.encodeToString(value),
+          mimeType = "application/octet-stream"
+        )
+      )
 
 /** JVM-only toJava extension methods for shared MCP types. These are internal to fast-mcp-scala and
   * not part of the user-facing DSL.

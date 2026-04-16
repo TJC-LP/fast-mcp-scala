@@ -5,6 +5,8 @@ import scala.jdk.CollectionConverters.*
 import scala.reflect.ClassTag
 import scala.util.NotGiven
 
+import com.tjclp.fastmcp.core.McpDecodeContext
+import com.tjclp.fastmcp.core.McpDecoder
 import com.tjclp.fastmcp.server.McpContext
 
 /** Typeclass that converts a raw `Any` value (from a Map) to `T`.
@@ -12,11 +14,20 @@ import com.tjclp.fastmcp.server.McpContext
   * Low-level custom implementations receive a shared [[JacksonConversionContext]] backed by Jackson
   * 3.
   */
-trait JacksonConverter[T]:
+trait JacksonConverter[T] extends McpDecoder[T]:
   def convert(name: String, rawValue: Any, context: JacksonConversionContext): T
 
+  final override def decode(name: String, rawValue: Any, context: McpDecodeContext): T =
+    context match
+      case jackson: JacksonConversionContext =>
+        convert(name, rawValue, jackson)
+      case _ =>
+        throw new IllegalArgumentException(
+          s"Unsupported decode context ${context.getClass.getName} for JacksonConverter"
+        )
+
   /** Create a new converter by transforming the input before conversion. */
-  def contramap[U](f: U => Any): JacksonConverter[T] =
+  override def contramap[U](f: U => Any): JacksonConverter[T] =
     val self = this
     new JacksonConverter[T]:
       def convert(name: String, rawValue: Any, context: JacksonConversionContext): T =
@@ -107,6 +118,18 @@ object JacksonConverter extends JacksonConverterLowPriority:
     def convert(name: String, rawValue: Any, context: JacksonConversionContext): Int =
       if rawValue == null then failNull(name, "Int")
       doConvert[Int](name, rawValue, context)
+
+  given JacksonConverter[Unit] with
+
+    def convert(name: String, rawValue: Any, context: JacksonConversionContext): Unit =
+      rawValue match
+        case null | None => ()
+        case m: Map[?, ?] if m.isEmpty => ()
+        case jMap: java.util.Map[?, ?] if jMap.isEmpty => ()
+        case _ =>
+          throw new RuntimeException(
+            s"Cannot convert non-empty value for parameter '$name' to Unit. Value: $rawValue"
+          )
 
   // Option instance treats null or missing as None
   given [A: ClassTag](using JacksonConverter[A]): JacksonConverter[Option[A]] with
