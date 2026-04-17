@@ -82,8 +82,14 @@ trait FastMCPModuleBase extends ScalaModule with ScalafmtModule with ScoverageMo
   override def scoverageVersion = "2.3.1"
 }
 
-/** Publishable module trait - for Maven Central publishing via Sonatype */
-trait FastMCPModule extends FastMCPModuleBase with PublishModule {
+/** Shared POM / publish config. Both `jvm` and `js` mix this in so they publish under the same
+  * `com.tjclp:fast-mcp-scala` artifact family. Scala auto-appends the platform suffix, giving:
+  *   - `com.tjclp:fast-mcp-scala_3:<version>`       (JVM)
+  *   - `com.tjclp:fast-mcp-scala_sjs1_3:<version>`  (Scala.js)
+  */
+trait FastMCPPublishingBase extends PublishModule {
+
+  override def artifactName: T[String] = "fast-mcp-scala"
 
   /** Version derived from PUBLISH_VERSION env var (set by CI), or SNAPSHOT for local dev */
   override def publishVersion: T[String] =
@@ -100,9 +106,12 @@ trait FastMCPModule extends FastMCPModuleBase with PublishModule {
     )
   )
 
-  /** Override in each module to provide module-specific description */
-  def artifactDescription: String = "Fast MCP Scala - High-performance Model Context Protocol SDK for Scala 3"
+  def artifactDescription: String =
+    "Fast MCP Scala - High-performance Model Context Protocol SDK for Scala 3"
 }
+
+/** Publishable JVM module trait */
+trait FastMCPModule extends FastMCPModuleBase with FastMCPPublishingBase
 
 /** Test module trait */
 trait FastMCPTestModule extends TestModule.ScalaTest {
@@ -144,8 +153,6 @@ object `fast-mcp-scala` extends Module {
 
   object jvm extends FastMCPModule {
 
-    override def artifactName = "fast-mcp-scala"
-
     // JVM module reads from both shared/ and jvm/src/ (its own JVM-specific code)
     override def sources = Task.Sources(moduleDir / "src", moduleDir / os.up / "shared" / "src")
 
@@ -185,9 +192,9 @@ object `fast-mcp-scala` extends Module {
     }
   }
 
-  // Scala.js backend — TS MCP SDK facades running on Bun.
-  // Prototype for the cross-platform JS target; also used for conformance testing.
-  object js extends BunScalaJSModule with ScalafmtModule {
+  // Scala.js backend — wraps the TS MCP SDK server on Bun to provide a real cross-platform
+  // MCP server runtime. Cross-published to Maven Central as `com.tjclp:fast-mcp-scala_sjs1_3`.
+  object js extends BunScalaJSModule with ScalafmtModule with FastMCPPublishingBase {
     def scalaVersion = scala3Version
 
     override def moduleKind = Task { ModuleKind.ESModule }

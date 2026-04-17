@@ -90,5 +90,8 @@ jobs:
         with:
           generate_release_notes: true
           draft: false
+          # Any tag with a qualifier (v0.3.0-rc1, v0.3.0-beta2) is flagged as a prerelease;
+          # final tags like v0.3.0 are treated as regular releases.
+          prerelease: ${{ contains(github.ref_name, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

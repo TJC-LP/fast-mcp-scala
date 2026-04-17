@@ -24,6 +24,11 @@ jobs:
         with:
           jvm: temurin:${{ matrix.java }}
 
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - name: Cache Coursier
         uses: actions/cache@v4
         with:
@@ -51,3 +56,6 @@ jobs:
 
       - name: Test (JVM)
         run: ./mill -i fast-mcp-scala.jvm.test
+
+      - name: Test (Scala.js on Bun)
+        run: ./mill -i fast-mcp-scala.js.test.bunTest
