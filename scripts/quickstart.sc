@@ -1,5 +1,5 @@
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala:0.3.0
+//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc1
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.*

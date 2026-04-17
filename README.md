@@ -1,8 +1,8 @@
-# FastMCP-Scala
+# fast-mcp-scala
 
 **Scala 3 for MCP: annotation-driven and typed-contract APIs on both JVM and Scala.js/Bun.**
 
-FastMCP-Scala is a developer-friendly library for building [Model Context Protocol](https://modelcontextprotocol.io/) servers. It gives you two complementary paths to the same server:
+fast-mcp-scala is a developer-friendly library for building [Model Context Protocol](https://modelcontextprotocol.io/) servers. It gives you two complementary paths to the same server:
 
 - `@Tool`/`@Resource`/`@Prompt` annotations + `scanAnnotations[T]` for a zero-boilerplate, macro-driven experience (JVM + Scala.js/Bun)
 - `McpTool.derived[...]`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource` for first-class, testable, cross-platform contract values (JVM + Scala.js)
@@ -31,21 +31,21 @@ Built on **ZIO 2**, **Tapir**-derived schemas, **Jackson 3**, and the official *
 
 ```scala 3 ignore
 // JVM — Java SDK-backed runtime with annotations, derived schemas, HTTP + stdio transports.
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.3.0"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.3.0-rc1"
 
 // Scala.js — TS SDK-backed runtime on Bun/Node + the same annotation and typed-contract APIs.
-libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "0.3.0"
+libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "0.3.0-rc1"
 ```
 
 Built against Scala 3.8.3. JVM requires JDK 17+. Scala.js artifact is published for `sjs1_3` (Scala.js 1.x); runs on Bun (first-class) and Node 18+.
 
 ## Quickstart
 
-A single-file server with one tool — the same code lives in [`HelloWorld.scala`](fast-mcp-scala/src/com/tjclp/fastmcp/examples/HelloWorld.scala):
+A single-file server with one tool — the same code lives in [`HelloWorld.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/HelloWorld.scala):
 
 ```scala 3 raw
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala:0.3.0
+//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc1
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.*
@@ -81,7 +81,7 @@ npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc
 | Composability | Whatever methods the object exposes | Collect into lists, generate from config |
 | Best for | Quick servers, prototypes, single-module apps | Libraries, cross-module sharing, production codebases |
 
-See [`AnnotatedServer.scala`](fast-mcp-scala/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts. Both can coexist on the same server.
+See [`AnnotatedServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts. Both can coexist on the same server.
 
 ## Tools and `@Param` metadata
 
@@ -107,7 +107,7 @@ def search(
 - `required = false` — combined with `Option[...]` or a default value, marks the field optional
 - `schema` — raw JSON Schema fragment that overrides the derived schema entirely (useful for enum constraints, patterns, or numeric bounds Scala types can't express)
 
-Full demo in [`AnnotatedServer.scala`](fast-mcp-scala/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala).
+Full demo in [`AnnotatedServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala).
 
 ## Tool hints
 
@@ -133,7 +133,7 @@ MCP Tool Annotations (a.k.a. behavioral hints) tell the client how your tool beh
 def listTasks(filter: TaskFilter): List[Task] = ...
 ```
 
-See [`TaskManagerServer.scala`](fast-mcp-scala/src/com/tjclp/fastmcp/examples/TaskManagerServer.scala) for hints across a realistic tool set.
+See [`TaskManagerServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/TaskManagerServer.scala) for hints across a realistic tool set.
 
 ## Resources (static and templated)
 
@@ -157,7 +157,7 @@ def userProfile(@Param("The user id") userId: String): String = ...
 
 ## Prompts
 
-Return a `List[Message]` — FastMCP-Scala handles the MCP framing:
+Return a `List[Message]` — fast-mcp-scala handles the MCP framing:
 
 ```scala 3 raw
 @Prompt(name = Some("greeting"), description = Some("Personalized greeting"))
@@ -180,7 +180,7 @@ def echo(args: Map[String, Any], ctx: Option[McpContext]): String =
   s"Hello from $clientName"
 ```
 
-Runnable demo: [`ContextEchoServer.scala`](fast-mcp-scala/src/com/tjclp/fastmcp/examples/ContextEchoServer.scala).
+Runnable demo: [`ContextEchoServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/ContextEchoServer.scala).
 
 ## Transports
 
@@ -214,11 +214,11 @@ Toggle `stateless = true` on `FastMcpServerSettings` for request/response-only m
 | `httpEndpoint` | `/mcp` | JSON-RPC endpoint path |
 | `stateless` | `false` | Disable sessions and SSE |
 
-Curl recipes for both modes are in [`HttpServer.scala`](fast-mcp-scala/src/com/tjclp/fastmcp/examples/HttpServer.scala).
+Curl recipes for both modes are in [`HttpServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/HttpServer.scala).
 
 ## Customizing decoding (Jackson 3)
 
-FastMCP-Scala uses Jackson 3 to turn raw JSON-RPC arguments into Scala values. Primitives, Scala enums, case classes, `Option`, `List`, `Map`, and `java.time` types work out of the box — no configuration required.
+fast-mcp-scala uses Jackson 3 to turn raw JSON-RPC arguments into Scala values. Primitives, Scala enums, case classes, `Option`, `List`, `Map`, and `java.time` types work out of the box — no configuration required.
 
 For custom wire formats, supply a `given JacksonConverter[T]`:
 
@@ -236,7 +236,7 @@ The handler receives a `JacksonConversionContext` (not a raw Jackson mapper) —
 
 ## Two backends, one API
 
-FastMCP-Scala is a single library with two real runtime backends — JVM and Scala.js/Bun — behind the same shared abstract API:
+fast-mcp-scala is a single library with two real runtime backends — JVM and Scala.js/Bun — behind the same shared abstract API:
 
 ```
          shared/src/                (platform-neutral Scala 3)
@@ -301,7 +301,7 @@ Link with `./mill fast-mcp-scala.js.fastLinkJS`, then `bun run out/fast-mcp-scal
 
 ## Spec coverage
 
-FastMCP-Scala implements a focused subset of the [MCP specification](https://modelcontextprotocol.io/specification/):
+fast-mcp-scala implements a focused subset of the [MCP specification](https://modelcontextprotocol.io/specification/):
 
 | Capability | Status |
 |---|---|
@@ -363,7 +363,7 @@ Add to `claude_desktop_config.json`:
       "command": "scala-cli",
       "args": [
         "-e",
-        "//> using dep com.tjclp::fast-mcp-scala:0.3.0",
+        "//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc1",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]
@@ -372,7 +372,7 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-> FastMCP-Scala example servers are for demo purposes only — they don't do anything useful, but they make it easy to see MCP in action.
+> fast-mcp-scala example servers are for demo purposes only — they don't do anything useful, but they make it easy to see MCP in action.
 
 For architectural detail, see [`docs/architecture.md`](docs/architecture.md).
 

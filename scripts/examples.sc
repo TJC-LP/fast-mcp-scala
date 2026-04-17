@@ -1,8 +1,8 @@
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala:0.3.0
+//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc1
 //> using options "-Xcheck-macros" "-experimental"
 
-// Launcher for FastMCP-Scala example servers. Point `scala-cli` at this file and
+// Launcher for fast-mcp-scala example servers. Point `scala-cli` at this file and
 // pick a main class:
 //
 // scala-cli examples.sc --main-class com.tjclp.fastmcp.examples.HelloWorld
