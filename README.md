@@ -30,10 +30,16 @@ Built on **ZIO 2**, **Tapir**-derived schemas, **Jackson 3**, and the official *
 ## Installation
 
 ```scala 3 ignore
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.3.0"
+// JVM — the full library: annotations, macros, HTTP + stdio transports.
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.3.0-rc1"
+
+// Scala.js — shared typed contracts, types, and `@Param` metadata only.
+// Server runtime is JVM-only; use this to share tool/prompt definitions with
+// Scala.js clients, tests, or browser code.
+libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "0.3.0-rc1"
 ```
 
-Built against Scala 3.8.3. Requires JDK 17+.
+Built against Scala 3.8.3. JVM requires JDK 17+. Scala.js artifact is published for `sjs1_3` (Scala.js 1.x).
 
 ## Quickstart
 
@@ -41,7 +47,7 @@ A single-file server with one tool — the same code lives in [`HelloWorld.scala
 
 ```scala 3 raw
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala:0.3.0
+//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc1
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.*
@@ -232,13 +238,18 @@ The handler receives a `JacksonConversionContext` (not a raw Jackson mapper) —
 
 ## Cross-platform (Scala.js)
 
-The `shared/src/` tree — annotations, types, managers, typed contracts — compiles to both JVM and Scala.js. That means `McpTool.derived[...]` values, `PromptArgument` / `ResourceArgument` metadata, and even custom `McpDecoder[T]` / `McpEncoder[A]` instances can live in a module that's cross-published.
+FastMCP-Scala publishes two artifacts:
 
-**What this buys you**: share tool/prompt/resource *definitions* across your JVM server and any Scala.js code (clients, test harnesses, browser UIs) without duplication or type drift.
+| Coordinate | Contents |
+|---|---|
+| `com.tjclp:fast-mcp-scala_3` | **JVM** — full library: `@Tool`/`@Resource`/`@Prompt` annotations, `scanAnnotations[T]` macro, `McpContext`, stdio + HTTP transports, Jackson 3 decoding, Java MCP SDK integration. |
+| `com.tjclp:fast-mcp-scala_sjs1_3` | **Scala.js** — the shared contract layer: `McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`, `McpDecoder` / `McpEncoder`, `ToolDefinition`/`PromptDefinition`/`ResourceDefinition`, `@Param` metadata, core `Content`/`Message`/`Role` types. |
 
-**What it doesn't buy you**: the server *runtime* is JVM-only. The Scala.js module in this project is a test harness — it uses the TypeScript MCP SDK (via Scala.js facades) as a client to exercise a JVM-side server over stdio. There is no Bun/Node-based MCP server transport.
+**What the Scala.js artifact buys you**: share tool/prompt/resource *definitions* across your JVM server and any Scala.js code (clients, tests, browser UIs) without duplication or type drift. `McpTool.derived[...]` values compile unchanged on both platforms.
 
-Conformance proof: [`SharedContractSurfaceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/contracts/SharedContractSurfaceTest.scala) asserts the typed contracts compile and mount under Scala.js; [`ConformanceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/ConformanceTest.scala) runs 17 MCP operations against a JVM server from a Scala.js client.
+**What it doesn't buy you**: the server *runtime* is JVM-only. There is no Bun/Node-based MCP server transport. The TypeScript MCP SDK facades (`McpClient`, `McpTestClient`) that this project uses for conformance testing live in `fast-mcp-scala/js/test/src/` and are **not** part of the published artifact — bring your own MCP client on the JS side.
+
+Conformance proof: [`SharedContractSurfaceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/contracts/SharedContractSurfaceTest.scala) asserts the typed contracts compile and mount under Scala.js; [`ConformanceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/ConformanceTest.scala) runs 17 MCP operations against a JVM server from a Scala.js client over stdio.
 
 ## Spec coverage
 
@@ -298,7 +309,7 @@ Add to `claude_desktop_config.json`:
       "command": "scala-cli",
       "args": [
         "-e",
-        "//> using dep com.tjclp::fast-mcp-scala:0.3.0",
+        "//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc1",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]
