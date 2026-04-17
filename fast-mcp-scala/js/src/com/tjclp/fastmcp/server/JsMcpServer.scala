@@ -79,16 +79,21 @@ final class JsMcpServer(
 
   // --- Lifecycle -------------------------------------------------------------------------------
 
-  /** Build a TS-SDK `Server`, register all MCP method handlers, and connect a
-    * `StdioServerTransport`. Suspends until the Node/Bun runtime exits (stdin EOF, SIGINT, etc.).
+  /** Build a TS-SDK `Server`, register all MCP method handlers, and attach the given transport.
+    * Returns the underlying TS `Server` for callers that want to close it (tests, custom runtimes).
+    * Does **not** block — use [[runStdio]] or [[runHttp]] for the long-running case.
     */
-  override def runStdio(): ZIO[Any, Throwable, Unit] =
+  def connect(transport: tsdk.Transport): ZIO[Any, Throwable, tsdk.Server] =
     for
       tsServer <- ZIO.attempt(buildTsServer())
-      transport = new tsdk.StdioServerTransport()
       _ <- ZioJsPromise.fromJsPromise(tsServer.connect(transport))
-      _ <- ZIO.never
-    yield ()
+    yield tsServer
+
+  /** Connect to `StdioServerTransport` and suspend until the Node/Bun runtime exits (stdin EOF,
+    * SIGINT, etc.).
+    */
+  override def runStdio(): ZIO[Any, Throwable, Unit] =
+    connect(new tsdk.StdioServerTransport()) *> ZIO.never
 
   /** Stubbed until Commit 5 wires `WebStandardStreamableHTTPServerTransport`. */
   override def runHttp(): ZIO[Any, Throwable, Unit] =
@@ -287,7 +292,8 @@ object JsMcpServer:
   private[server] def resourceDefinitionToJs(defn: ResourceDefinition): js.Any =
     val raw = js.Dictionary.empty[js.Any]
     raw("uri") = defn.uri
-    defn.name.foreach(n => raw("name") = n)
+    // MCP spec requires `name` — default to the URI if the user didn't supply one.
+    raw("name") = defn.name.getOrElse(defn.uri)
     defn.description.foreach(d => raw("description") = d)
     defn.mimeType.foreach(m => raw("mimeType") = m)
     raw.asInstanceOf[js.Any]
@@ -295,7 +301,7 @@ object JsMcpServer:
   private[server] def resourceTemplateToJs(defn: ResourceDefinition): js.Any =
     val raw = js.Dictionary.empty[js.Any]
     raw("uriTemplate") = defn.uri
-    defn.name.foreach(n => raw("name") = n)
+    raw("name") = defn.name.getOrElse(defn.uri)
     defn.description.foreach(d => raw("description") = d)
     defn.mimeType.foreach(m => raw("mimeType") = m)
     raw.asInstanceOf[js.Any]
