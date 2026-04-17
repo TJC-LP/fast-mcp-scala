@@ -29,7 +29,13 @@ object ZioJsPromise:
     new js.Promise[A]((resolve, reject) =>
       future.onComplete {
         case Success(a) => val _ = resolve(a)
-        case Failure(t) => val _ = reject(t)
+        case Failure(t) =>
+          // Unwrap JavaScriptException so the JS caller sees the underlying error (e.g. an
+          // `McpError` thrown from a handler). Other Throwables reject as-is.
+          val rejectValue: scala.Any = t match
+            case JavaScriptException(inner) => inner
+            case other => other
+          val _ = reject(rejectValue)
       }
     )
 
