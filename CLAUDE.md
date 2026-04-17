@@ -4,7 +4,7 @@
 
 FastMCP-Scala is a high-level Scala 3 library for building Model Context Protocol (MCP) servers. It provides two registration paths:
 
-1. **Annotation-driven** (`@Tool`, `@Resource`, `@Prompt` + `scanAnnotations`) — zero-boilerplate, JVM-only
+1. **Annotation-driven** (`@Tool`, `@Resource`, `@Prompt` + `scanAnnotations`) — zero-boilerplate on JVM and Scala.js/Bun
 2. **Typed contracts** (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) — explicit, cross-platform (JVM + Scala.js)
 
 Both paths converge on the same `McpServer` trait and support `@Param` metadata on parameters/fields.
@@ -31,6 +31,8 @@ Both paths converge on the same `McpServer` trait and support `@Param` metadata 
 
 # Publish
 ./mill fast-mcp-scala.jvm.publishLocal              # Publish JVM artifact to ~/.ivy2/local
+./mill fast-mcp-scala.js.publishLocal               # Publish Scala.js artifact to ~/.ivy2/local
+./mill -i __.publishLocal                           # Publish both artifacts
 ```
 
 ## Project Structure
@@ -56,7 +58,7 @@ fast-mcp-scala/
 │   │   ├── src/               # JVM-specific code
 │   │   │   └── com/tjclp/fastmcp/
 │   │   │       ├── core/Types.scala         # TypeConversions (toJava extensions, private[fastmcp])
-│   │   │       ├── macros/                  # Scala 3 macro implementations (JVM-only)
+│   │   │       ├── macros/                  # JVM-side macro/runtime support
 │   │   │       │   ├── ToolProcessor.scala
 │   │   │       │   ├── ResourceProcessor.scala
 │   │   │       │   ├── PromptProcessor.scala
@@ -71,14 +73,14 @@ fast-mcp-scala/
 │   │   │       │   └── transport/
 │   │   │       └── examples/
 │   │   └── test/src/          # JVM test sources
-│   └── js/                    # Scala.js code (Bun runtime)
-│       ├── src/               # MCP TS SDK facades + McpTestClient
-│       └── test/src/          # Conformance tests + contract surface tests
+│   └── js/                    # Scala.js code (Bun-first runtime)
+│       ├── src/               # JsMcpServer, TS SDK facades, Bun runtime, examples
+│       └── test/src/          # Conformance, HTTP, codec, contract surface tests
 ```
 
 ## Key Concepts
 
-### Annotation Path (JVM-only)
+### Annotation Path (JVM + Scala.js/Bun)
 
 ```scala
 object MyServer extends ZIOAppDefault:
@@ -113,7 +115,7 @@ server.tool(addTool)
 |---|---|---|
 | Platform | JVM only | JVM + Scala.js |
 | Boilerplate | Zero (macro-driven) | Minimal (case class + builder) |
-| Schema | Auto from method signature | Auto from case class via `ToolSchemaProvider` |
+| Schema | Auto from method signature | Auto from case class via `ToolSchemaProvider` on JVM and JS |
 | `@Param` | On method parameters | On case class fields |
 | Composability | Methods on an object | First-class values |
 | Best for | Quick servers, prototyping | Libraries, cross-platform, production |
@@ -137,7 +139,7 @@ server.tool(addTool)
 - `McpStaticResource` - Typed static resource
 - `McpTemplateResource[In]` - Typed resource template
 - `McpDecoder[T]` / `McpEncoder[A]` - Platform-neutral codecs
-- `ToolSchemaProvider[A]` - Auto-derives `inputSchema` from `@Param`-annotated case classes
+- `ToolSchemaProvider[A]` - Auto-derives `inputSchema` from `@Param`-annotated case classes on both JVM and JS
 - `McpEncoder` falls back to `JsonEncoder[A]` → `TextContent(a.toJson)` via ZIO JSON
 
 ### Transports
@@ -150,7 +152,7 @@ server.tool(addTool)
 The codebase is split into three sibling trees under `fast-mcp-scala/`:
 - `shared/` — annotations, types, managers, `McpServerPlatform` trait, typed contracts
 - `jvm/` — Java SDK interop (`TypeConversions`, `JvmMcpContext`), macros, transports, examples
-- `js/` — Scala.js facades for `@modelcontextprotocol/sdk`, conformance tests
+- `js/` — Bun-first Scala.js runtime (`JsMcpServer`), TS SDK facades, examples, tests
 
 JVM module reads from `shared/src/ + jvm/src/`. JS module reads from `shared/src/ + js/src/`.
 
@@ -185,6 +187,8 @@ Key test classes:
 - `ZioHttpStatelessTransportTest` - HTTP transport integration tests
 - `ZioHttpStreamableTransportProviderTest` - SSE transport tests
 - `ConformanceTest` (JS) - 17 cross-platform conformance tests against AnnotatedServer
+- `JsServerConformanceTest` (JS) - pure-JS in-memory conformance against `JsMcpServer`
+- `JsServerHttpTest` (JS) - Bun HTTP routing coverage for `runHttp()`
 
 ## CI/CD
 
@@ -212,6 +216,8 @@ rm -rf out/fast-mcp-scala && ./mill fast-mcp-scala.compile
 
 ```bash
 ./mill fast-mcp-scala.jvm.publishLocal
+./mill fast-mcp-scala.js.publishLocal
+./mill -i __.publishLocal
 ```
 
 Then in your project use version `0.3.0-SNAPSHOT`.
@@ -227,6 +233,6 @@ Key dependencies (versions in `build.mill`):
 - Tapir 1.11.42 - Schema derivation
 - Java MCP SDK 1.1.1 - Protocol implementation (`mcp-core` + `mcp-json-jackson3`)
 - mill-bun-plugin 0.2.0 - Scala.js + Bun build integration
-- `@modelcontextprotocol/sdk` 1.29.0 - TS MCP SDK (JS conformance tests)
+- `@modelcontextprotocol/sdk` 1.29.0 - TS MCP SDK (JS runtime + conformance tests)
 - WartRemover 3.5.6 - Code quality
 - ScalaTest 3.2.19 - Testing

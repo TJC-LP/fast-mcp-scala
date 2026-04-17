@@ -2,14 +2,14 @@
 
 A short tour of how the library is put together. For a user-facing overview see the [README](../README.md); this document is for people who want to understand what happens between "I wrote a `@Tool`" and "an MCP client can call it."
 
-## Two registration paths, one server
+## Two registration paths, two backends
 
-`FastMcpServer` is the only server class. Both paths end up calling the same `ToolManager.addTool` / `PromptManager.addPrompt` / `ResourceManager.addResource` entry points — they just differ in how you *describe* your tool.
+The shared abstract `McpServer` trait is the single user-facing API. Users pick a registration path (annotations vs typed contracts) and `McpServer("name", version)` returns the backend appropriate for their platform — `FastMcpServer` (JVM, wraps Java MCP SDK) or `JsMcpServer` (Scala.js, wraps TS MCP SDK). Both backends hand registration off to the same platform-neutral `Tool/Prompt/Resource` managers and then wire manager callbacks to their respective runtime's request handlers.
 
 ```
                         ┌───────────────────────────────────────┐
   @Tool / @Resource     │           RegistrationMacro           │
-  @Prompt methods  ─────►  (scanAnnotations[T] – JVM only)      ├──┐
+  @Prompt methods  ─────►   (scanAnnotations[T] — JVM + JS)     ├──┐
                         └───────────────────────────────────────┘  │
                                                                    ▼
                         ┌───────────────────────────────────────┐ ┌───────────────┐
@@ -18,14 +18,23 @@ A short tour of how the library is put together. For a user-facing overview see 
   McpStaticResource     │     (typed contract path)             │ │  ResourceManager │
   McpTemplateResource   └───────────────────────────────────────┘ └───────┬───────┘
                                                                           │
-                                                                          ▼
-                                                                  ┌───────────────┐
-                                                                  │ Java MCP SDK  │
-                                                                  │  (mcp-core)   │
-                                                                  └───────┬───────┘
-                                                                          │
-                                                                          ▼
-                                                              stdio │ Streamable HTTP │ Stateless HTTP
+                              ┌───────────────────────────────────────────┴─┐
+                              ▼                                             ▼
+                       ┌───────────────┐                            ┌───────────────┐
+                       │ FastMcpServer │                            │  JsMcpServer  │
+                       │   (JVM)       │                            │  (Scala.js)   │
+                       └───────┬───────┘                            └───────┬───────┘
+                               │                                            │
+                               ▼                                            ▼
+                       ┌───────────────┐                            ┌───────────────┐
+                       │ Java MCP SDK  │                            │  TS MCP SDK   │
+                       │  (mcp-core)   │                            │  (@modelcontext│
+                       │               │                            │   protocol/sdk)│
+                       └───────┬───────┘                            └───────┬───────┘
+                               │                                            │
+                               ▼                                            ▼
+                 stdio │ Streamable HTTP │ Stateless HTTP    stdio │ Streamable HTTP │ Stateless HTTP
+                       (ZIO HTTP transport)                        (Bun.serve on Bun; Node/Deno follow-up)
 ```
 
 ## Module layout
@@ -64,10 +73,12 @@ fast-mcp-scala/
 │   │   └── transport/                    # stdio + zio-http transports
 │   └── examples/                         # runnable example servers
 │
-└── js/src/com/tjclp/fastmcp/            # Scala.js (conformance harness)
-    └── conformance/
-        ├── McpTestClient.scala           # helper for tests
-        └── facades/McpClient.scala       # facades for @modelcontextprotocol/sdk
+└── js/src/com/tjclp/fastmcp/            # Scala.js backend (Bun-first)
+    ├── codec/                            # JS McpDecoder / decode-context support
+    ├── facades/                          # TS SDK + Bun runtime facades
+    ├── macros/                           # JS annotation + schema-derivation macros
+    ├── server/                           # JsMcpServer + JsMcpContext
+    └── examples/                         # runnable Bun examples
 ```
 
 **JVM module sources** = `shared/src/` + `src/`. **Scala.js module sources** = `shared/src/` + `js/src/`. Mill's `Task.Sources` wires this in `build.mill`.
@@ -91,7 +102,7 @@ server.scanAnnotations[MyServer.type]
 
 2. **Schema generation** — for `@Tool` methods, `JsonSchemaMacro.schemaForFunctionArgs` walks the parameter list and emits a `ToolInputSchema` value. It uses Tapir's `Schema` derivation under the hood, which supports case classes, Scala 3 enums, `Option`, collections, and a handful of primitives. `@Param` metadata is folded in (descriptions, examples, required flags, custom schema fragments).
 
-3. **Handler generation** — `MapToFunctionMacro` generates a function `(Map[String, Any], Option[McpContext]) => ZIO[Any, Throwable, Any]` that: (a) extracts each parameter from the `Map` by name, (b) decodes it via `JacksonConverter[T]` into the expected Scala type, (c) optionally passes an `McpContext` if the method signature asks for one, and (d) calls the original method. The method handle is resolved at runtime via `RefResolver` (no runtime reflection in the hot path).
+3. **Handler generation** — `MapToFunctionMacro` generates a function `(Map[String, Any], Option[McpContext]) => ZIO[Any, Throwable, Any]` that: (a) extracts each parameter from the `Map` by name, (b) decodes it into the expected Scala type using the target platform's decoder path (`JacksonConverter` on the JVM, `McpDecoder`/`zio-json` on JS), (c) optionally passes an `McpContext` if the method signature asks for one, and (d) calls the original method. The method handle is resolved at runtime via `RefResolver` (no runtime reflection in the hot path).
 
 4. **Registration** — for each discovered method, the macro emits a `server.tool(definition, handler, options)` (or `.prompt`, `.resource`) call, inlined at the call site of `scanAnnotations[T]`.
 
@@ -99,7 +110,7 @@ Everything after stage 4 is identical to the typed-contract path.
 
 ## The typed-contract path
 
-No macros. You build `McpTool`/`McpPrompt`/`McpStaticResource`/`McpTemplateResource` values explicitly — or with `McpTool.derived[In, Out]`, which picks up a given `ToolSchemaProvider[In]` (macro-provided on the JVM, hand-provided on Scala.js) and an `McpEncoder[Out]` (auto-derivable from any `zio-json` `JsonEncoder`).
+No runtime reflection. You build `McpTool`/`McpPrompt`/`McpStaticResource`/`McpTemplateResource` values explicitly — or with `McpTool.derived[In, Out]`, which picks up a given `ToolSchemaProvider[In]` (macro-provided on both JVM and Scala.js) and an `McpEncoder[Out]` (auto-derivable from any `zio-json` `JsonEncoder`).
 
 The `server.tool(McpTool)` extension method bridges the shared contract to the same internal `ToolManager.addTool` call the annotation path uses, supplying `JacksonConverter`-derived decoding on the JVM.
 
@@ -127,11 +138,25 @@ HTTP transports are implemented on **ZIO HTTP 3.4.0**, not on Java HTTP primitiv
 
 ## Scala.js surface
 
-The Scala.js module compiles the `shared/src/` tree plus `js/src/`. `shared/src/` does not reference any Java-only APIs — `JvmToolInputSchemaSupport`, `JacksonConverter`, `FastMcpServer`, and `TypeConversions` are kept out of `shared/` precisely so this constraint holds.
+The Scala.js module compiles the `shared/src/` tree plus `js/src/`. `shared/src/` still avoids Java-only APIs — `JvmToolInputSchemaSupport`, `JacksonConverter`, `FastMcpServer`, and `TypeConversions` remain outside `shared/` so the same public contracts compile on both backends.
 
-The `js/src/` tree contains a Scala.js-facing MCP *client* (facades over `@modelcontextprotocol/sdk` plus an `McpTestClient` helper). It exists for conformance testing — spin up a JVM server over stdio, connect to it with a Scala.js client running on Bun, walk the protocol. No server transport exists on the JS side.
+The `js/src/` tree now contains a real Scala.js MCP *server* runtime:
 
-This means the shared typed contracts (`McpTool.derived[In, Out]`, `McpPrompt[In]`, etc.) compile under Scala.js and can be consumed by JS-targeted code, but the runtime that actually services MCP requests is always the JVM.
+- **`JsMcpServer`** — Scala.js implementation of the shared `McpServerPlatform`, wrapping the TS SDK's low-level `Server`.
+- **`JsMcpContext`** — JS-side context extensions for client info, capabilities, and session id.
+- **TS SDK facades** — server, transports, schemas, AJV validation, Bun runtime integration.
+- **Examples + tests** — standalone Bun stdio / HTTP examples plus pure-JS conformance coverage.
+
+Design choice: the JS backend keeps the shared Scala `ToolManager` / `PromptManager` / `ResourceManager` as the canonical registry, then binds MCP method handlers onto the TS SDK server. This preserves the existing raw JSON-schema-first Scala API while still using the official TS SDK for transport, framing, and protocol negotiation.
+
+Runtime support today is **Bun-first**:
+
+- `runStdio()` uses the TS SDK `StdioServerTransport`
+- `runHttp()` uses Bun's `Bun.serve(...)` plus the TS SDK `WebStandardStreamableHTTPServerTransport`
+- `stateless = true` creates a fresh server+transport per POST in JSON-response mode
+- `stateless = false` creates one server+transport per MCP session, keyed by `mcp-session-id`
+
+Node/Deno HTTP listeners are a follow-up; the underlying TS SDK web-standard transport already supports those runtimes, but this repo currently ships only the Bun listener.
 
 ## Error handling
 

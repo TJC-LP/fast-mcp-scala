@@ -10,8 +10,8 @@ import com.tjclp.fastmcp.{*, given}
   *
   * Instead of reflecting methods at compile time, this style defines tools, prompts, and resources
   * as first-class values using `McpTool.derived`, `McpPrompt`, `McpStaticResource`, and
-  * `McpTemplateResource`. The same values work unchanged on Scala.js — the JVM server still runs on
-  * the Java MCP SDK, but the *definitions* (names, schemas, handlers) are cross-platform.
+  * `McpTemplateResource`. The same values work unchanged on Scala.js — on the JVM they mount onto
+  * the Java MCP SDK backend, and on Scala.js they mount onto the Bun-first TS SDK backend.
   *
   * Why you might prefer this path:
   *
@@ -19,12 +19,10 @@ import com.tjclp.fastmcp.{*, given}
   *   - **Composability**: store them in a `List`, derive them from configuration, or mix across
   *     modules.
   *   - **Cross-platform sharing**: put your `McpTool.derived[...]` definitions in a module that
-  *     cross-compiles to Scala.js, and a client (or test harness) can reuse the same schema and
-  *     request types. See `fast-mcp-scala/js/test/.../SharedContractSurfaceTest.scala` for proof
-  *     that these exact types compile under Scala.js.
-  *
-  * What Scala.js buys you: typed definitions shared across JVM and JS. The server *runtime* is
-  * JVM-only — there is no Bun/Node MCP server transport in this project.
+  *     cross-compiles to Scala.js, and both runtimes can reuse the same schema and request types.
+  *     See `fast-mcp-scala/js/test/.../SharedContractSurfaceTest.scala` for proof that these exact
+  *     types compile under Scala.js, and `JsServerConformanceTest.scala` for end-to-end runtime
+  *     coverage on Bun.
   */
 object ContractServer extends ZIOAppDefault:
 

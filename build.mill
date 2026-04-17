@@ -1,4 +1,4 @@
-//| mvnDeps: ["com.lihaoyi::mill-contrib-scoverage:$MILL_VERSION", "com.tjclp::mill-bun_mill1:0.2.0"]
+//| mvnDeps: ["com.lihaoyi::mill-contrib-scoverage:$MILL_VERSION", "com.tjclp::mill-bun_mill1:0.2.1"]
 // Mill 1.1.5 is used for Scala 3.8.x support and mill-bun-plugin compatibility.
 // Version is controlled via .mill-version file.
 import mill._
@@ -82,8 +82,14 @@ trait FastMCPModuleBase extends ScalaModule with ScalafmtModule with ScoverageMo
   override def scoverageVersion = "2.3.1"
 }
 
-/** Publishable module trait - for Maven Central publishing via Sonatype */
-trait FastMCPModule extends FastMCPModuleBase with PublishModule {
+/** Shared POM / publish config. Both `jvm` and `js` mix this in so they publish under the same
+  * `com.tjclp:fast-mcp-scala` artifact family. Scala auto-appends the platform suffix, giving:
+  *   - `com.tjclp:fast-mcp-scala_3:<version>`       (JVM)
+  *   - `com.tjclp:fast-mcp-scala_sjs1_3:<version>`  (Scala.js)
+  */
+trait FastMCPPublishingBase extends PublishModule {
+
+  override def artifactName: T[String] = "fast-mcp-scala"
 
   /** Version derived from PUBLISH_VERSION env var (set by CI), or SNAPSHOT for local dev */
   override def publishVersion: T[String] =
@@ -100,9 +106,12 @@ trait FastMCPModule extends FastMCPModuleBase with PublishModule {
     )
   )
 
-  /** Override in each module to provide module-specific description */
-  def artifactDescription: String = "Fast MCP Scala - High-performance Model Context Protocol SDK for Scala 3"
+  def artifactDescription: String =
+    "Fast MCP Scala - High-performance Model Context Protocol SDK for Scala 3"
 }
+
+/** Publishable JVM module trait */
+trait FastMCPModule extends FastMCPModuleBase with FastMCPPublishingBase
 
 /** Test module trait */
 trait FastMCPTestModule extends TestModule.ScalaTest {
@@ -144,8 +153,6 @@ object `fast-mcp-scala` extends Module {
 
   object jvm extends FastMCPModule {
 
-    override def artifactName = "fast-mcp-scala"
-
     // JVM module reads from both shared/ and jvm/src/ (its own JVM-specific code)
     override def sources = Task.Sources(moduleDir / "src", moduleDir / os.up / "shared" / "src")
 
@@ -185,20 +192,44 @@ object `fast-mcp-scala` extends Module {
     }
   }
 
-  // Scala.js backend — TS MCP SDK facades running on Bun.
-  // Prototype for the cross-platform JS target; also used for conformance testing.
-  object js extends BunScalaJSModule with ScalafmtModule {
+  // Scala.js backend — wraps the TS MCP SDK server on Bun to provide a real cross-platform
+  // MCP server runtime. Cross-published to Maven Central as `com.tjclp:fast-mcp-scala_sjs1_3`.
+  object js extends BunScalaJSModule with ScalafmtModule with FastMCPPublishingBase {
     def scalaVersion = scala3Version
 
     override def moduleKind = Task { ModuleKind.ESModule }
 
-    // JS module reads from both shared/ and js/src/
-    override def sources = Task.Sources(moduleDir / "src", moduleDir / os.up / "shared" / "src")
+    // JS module reads from shared/, js/src/, plus the macro/schema helpers in jvm/src/ that are
+    // compile-time only and portable across targets.
+    override def sources = Task.Sources(
+      moduleDir / "src",
+      moduleDir / os.up / "shared" / "src",
+      moduleDir / os.up / "jvm" / "src" / "com" / "tjclp" / "fastmcp" / "macros" / "JsonSchemaMacro.scala",
+      moduleDir / os.up / "jvm" / "src" / "com" / "tjclp" / "fastmcp" / "macros" / "MacroUtils.scala",
+      moduleDir / os.up / "jvm" / "src" / "com" / "tjclp" / "fastmcp" / "macros" / "schema"
+    )
 
-    // Shared deps needed by shared/ sources (ZIO + ZIO JSON are cross-published for Scala.js)
+    // Shared deps needed by shared/ sources and the JS macro/schema derivation path.
     override def mvnDeps = Seq(
       mvn"dev.zio::zio::${Versions.zio}",
-      mvn"dev.zio::zio-json::${Versions.zioJson}"
+      mvn"dev.zio::zio-json::${Versions.zioJson}",
+      mvn"com.softwaremill.sttp.tapir::tapir-core::${Versions.tapir}",
+      mvn"com.softwaremill.sttp.tapir::tapir-apispec-docs::${Versions.tapir}",
+      mvn"com.softwaremill.sttp.apispec::jsonschema-circe::${Versions.jsonSchemaCirce}"
+    )
+
+    override def scalacOptions = Seq(
+      "-encoding", "utf-8",
+      "-feature",
+      "-unchecked",
+      "-deprecation",
+      "-Wunused:all",
+      "-Wvalue-discard",
+      "-Wsafe-init",
+      "-Wnonunit-statement",
+      "-Xcheck-macros",
+      "-experimental",
+      "-Xmax-inlines:128"
     )
 
     override def bunDeps = Task {
@@ -227,6 +258,15 @@ object `fast-mcp-scala` extends Module {
       override def mvnDeps = Seq(
         mvn"org.scalatest::scalatest::${Versions.scalaTest}"
       )
+
+      // Force NODE_ENV=production inside the Bun test process so in-process
+      // `Bun.serve({...})` calls default `development: false`. Without this the
+      // dev-mode error overlay rewrites fetch-handler Promise rejections into a
+      // ~100 KB HTML `BunError` Response, which hides the real error from tests
+      // (see JsServerHttpTest's POST-initialize case).
+      override def bunTestJsEnv = Task {
+        super.bunTestJsEnv() + ("NODE_ENV" -> "production")
+      }
     }
   }
 }
