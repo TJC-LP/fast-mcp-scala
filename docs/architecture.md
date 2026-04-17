@@ -142,7 +142,7 @@ The Scala.js module compiles the `shared/src/` tree plus `js/src/`. `shared/src/
 
 The `js/src/` tree now contains a real Scala.js MCP *server* runtime:
 
-- **`JsMcpServer`** — Scala.js implementation of the shared `McpServerPlatform`, wrapping the TS SDK's low-level `Server`.
+- **`JsMcpServer`** — Scala.js implementation of the shared `McpServerCore`, wrapping the TS SDK's low-level `Server`.
 - **`JsMcpContext`** — JS-side context extensions for client info, capabilities, and session id.
 - **TS SDK facades** — server, transports, schemas, AJV validation, Bun runtime integration.
 - **Examples + tests** — standalone Bun stdio / HTTP examples plus pure-JS conformance coverage.

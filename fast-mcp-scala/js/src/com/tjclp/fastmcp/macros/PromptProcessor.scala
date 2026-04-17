@@ -7,7 +7,7 @@ import zio.*
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.JsMcpServer
-import com.tjclp.fastmcp.server.McpServerPlatform
+import com.tjclp.fastmcp.server.McpServerCore
 
 /** JS-target prompt annotation processor. */
 private[macros] object PromptProcessor extends AnnotationProcessorBase:
@@ -41,7 +41,7 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
 
     val methodRefExpr = methodRef(ownerSym, methodSym)
 
-    val registration: Expr[ZIO[Any, Throwable, McpServerPlatform]] = '{
+    val registration: Expr[ZIO[Any, Throwable, McpServerCore]] = '{
       $server.prompt(
         name = ${ Expr(finalName) },
         description = ${ Expr(finalDesc) },

@@ -33,4 +33,4 @@ export core.{
   ToolSchemaProvider
 }
 export core.McpEncoder.given
-export server.{FastMcpServerSettings, McpContext, McpServer}
+export server.{FastMcpServerSettings, McpContext, McpServerCore}

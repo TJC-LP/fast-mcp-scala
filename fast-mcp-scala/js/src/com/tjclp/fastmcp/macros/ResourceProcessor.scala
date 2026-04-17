@@ -7,7 +7,7 @@ import zio.*
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.JsMcpServer
-import com.tjclp.fastmcp.server.McpServerPlatform
+import com.tjclp.fastmcp.server.McpServerCore
 
 /** JS-target resource annotation processor. */
 private[macros] object ResourceProcessor extends AnnotationProcessorBase:
@@ -74,7 +74,7 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
 
     val methodRefExpr = methodRef(ownerSym, methodSym)
 
-    val registration: Expr[ZIO[Any, Throwable, McpServerPlatform]] =
+    val registration: Expr[ZIO[Any, Throwable, McpServerCore]] =
       if isTemplate then
         '{
           $server.resourceTemplate(

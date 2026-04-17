@@ -16,7 +16,7 @@ import com.tjclp.fastmcp.facades.server as tsdk
 import com.tjclp.fastmcp.interop.ZioJsPromise
 import com.tjclp.fastmcp.server.manager.*
 
-/** Scala.js implementation of [[McpServer]]. Wraps the TS MCP SDK's low-level `Server` (from
+/** Scala.js implementation of [[McpServerCore]]. Wraps the TS MCP SDK's low-level `Server` (from
   * `@modelcontextprotocol/sdk/server/index.js`), keeping the Scala-side tool/prompt/resource
   * manager layer as the canonical registry.
   *
@@ -28,7 +28,7 @@ final class JsMcpServer(
     val name: String,
     val version: String,
     val settings: FastMcpServerSettings = FastMcpServerSettings()
-) extends McpServerPlatform:
+) extends McpServerCore:
 
   override protected val decodeContext: McpDecodeContext = JsMcpDecodeContext.default
 
@@ -49,7 +49,7 @@ final class JsMcpServer(
       definition: ToolDefinition,
       handler: ContextualToolHandler,
       options: ToolRegistrationOptions
-  ): ZIO[Any, Throwable, McpServerPlatform] =
+  ): ZIO[Any, Throwable, McpServerCore] =
     toolManager.addTool(definition.name, handler, definition, options).as(this)
 
   // --- Resource registration -------------------------------------------------------------------
@@ -57,13 +57,13 @@ final class JsMcpServer(
   override def resource(
       definition: ResourceDefinition,
       handler: ResourceHandler
-  ): ZIO[Any, Throwable, McpServerPlatform] =
+  ): ZIO[Any, Throwable, McpServerCore] =
     resourceManager.addStaticResource(definition.uri, handler, definition).as(this)
 
   override def resourceTemplate(
       definition: ResourceDefinition,
       handler: ResourceTemplateHandler
-  ): ZIO[Any, Throwable, McpServerPlatform] =
+  ): ZIO[Any, Throwable, McpServerCore] =
     resourceManager.addTemplateResource(definition.uri, handler, definition).as(this)
 
   // --- Prompt registration ---------------------------------------------------------------------
@@ -71,7 +71,7 @@ final class JsMcpServer(
   override def prompt(
       definition: PromptDefinition,
       handler: PromptHandler
-  ): ZIO[Any, Throwable, McpServerPlatform] =
+  ): ZIO[Any, Throwable, McpServerCore] =
     promptManager.addPrompt(definition.name, handler, definition).as(this)
 
   // --- Lifecycle -------------------------------------------------------------------------------

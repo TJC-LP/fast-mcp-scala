@@ -42,7 +42,7 @@ import com.tjclp.fastmcp.server.manager.ResourceConversions.*
 import com.tjclp.fastmcp.server.transport.ZioHttpStatelessTransport
 import com.tjclp.fastmcp.server.transport.ZioHttpStreamableTransportProvider
 
-/** JVM implementation of the shared `McpServer` trait — the thing you actually run.
+/** JVM implementation of the shared `McpServerCore` trait — the thing you actually run.
   *
   * `FastMcpServer` wraps the Java MCP SDK (`mcp-core` 1.1.1) and exposes the high-level API users
   * interact with: `.tool(...)`, `.prompt(...)`, `.resource(...)`, plus the annotation macro entry
@@ -58,7 +58,7 @@ class FastMcpServer(
     val name: String = "FastMCPScala",
     version: String = "0.1.0",
     settings: FastMcpServerSettings = FastMcpServerSettings()
-) extends com.tjclp.fastmcp.server.McpServer:
+) extends com.tjclp.fastmcp.server.McpServerCore:
   val dependencies: List[String] = settings.dependencies
   protected val decodeContext: McpDecodeContext = JacksonConversionContext.default
   // Initialize managers

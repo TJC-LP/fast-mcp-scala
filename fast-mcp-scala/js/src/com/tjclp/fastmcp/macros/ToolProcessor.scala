@@ -145,7 +145,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
         }
         '{ MacroUtils.injectParamMetadata($rawSchema, $metadataMapExpr) }
 
-    val registration: Expr[ZIO[Any, Throwable, McpServerPlatform]] = '{
+    val registration: Expr[ZIO[Any, Throwable, McpServerCore]] = '{
       java.lang.System.err.println("[ToolProcessor] registering tool: " + ${ Expr(finalName) })
       $server.tool(
         name = ${ Expr(finalName) },
