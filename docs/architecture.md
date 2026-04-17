@@ -2,14 +2,14 @@
 
 A short tour of how the library is put together. For a user-facing overview see the [README](../README.md); this document is for people who want to understand what happens between "I wrote a `@Tool`" and "an MCP client can call it."
 
-## Two registration paths, one server
+## Two registration paths, two backends
 
-`FastMcpServer` is the only server class. Both paths end up calling the same `ToolManager.addTool` / `PromptManager.addPrompt` / `ResourceManager.addResource` entry points — they just differ in how you *describe* your tool.
+The shared abstract `McpServer` trait is the single user-facing API. Users pick a registration path (annotations vs typed contracts) and `McpServer("name", version)` returns the backend appropriate for their platform — `FastMcpServer` (JVM, wraps Java MCP SDK) or `JsMcpServer` (Scala.js, wraps TS MCP SDK). Both backends hand registration off to the same platform-neutral `Tool/Prompt/Resource` managers and then wire manager callbacks to their respective runtime's request handlers.
 
 ```
                         ┌───────────────────────────────────────┐
   @Tool / @Resource     │           RegistrationMacro           │
-  @Prompt methods  ─────►  (scanAnnotations[T] – JVM only)      ├──┐
+  @Prompt methods  ─────►  (scanAnnotations[T] — JVM only)      ├──┐
                         └───────────────────────────────────────┘  │
                                                                    ▼
                         ┌───────────────────────────────────────┐ ┌───────────────┐
@@ -18,14 +18,23 @@ A short tour of how the library is put together. For a user-facing overview see 
   McpStaticResource     │     (typed contract path)             │ │  ResourceManager │
   McpTemplateResource   └───────────────────────────────────────┘ └───────┬───────┘
                                                                           │
-                                                                          ▼
-                                                                  ┌───────────────┐
-                                                                  │ Java MCP SDK  │
-                                                                  │  (mcp-core)   │
-                                                                  └───────┬───────┘
-                                                                          │
-                                                                          ▼
-                                                              stdio │ Streamable HTTP │ Stateless HTTP
+                              ┌───────────────────────────────────────────┴─┐
+                              ▼                                             ▼
+                       ┌───────────────┐                            ┌───────────────┐
+                       │ FastMcpServer │                            │  JsMcpServer  │
+                       │   (JVM)       │                            │  (Scala.js)   │
+                       └───────┬───────┘                            └───────┬───────┘
+                               │                                            │
+                               ▼                                            ▼
+                       ┌───────────────┐                            ┌───────────────┐
+                       │ Java MCP SDK  │                            │  TS MCP SDK   │
+                       │  (mcp-core)   │                            │  (@modelcontext│
+                       │               │                            │   protocol/sdk)│
+                       └───────┬───────┘                            └───────┬───────┘
+                               │                                            │
+                               ▼                                            ▼
+                 stdio │ Streamable HTTP │ Stateless HTTP    stdio │ Streamable HTTP │ Stateless HTTP
+                       (ZIO HTTP transport)                        (Bun.serve on Bun; Node/Deno follow-up)
 ```
 
 ## Module layout

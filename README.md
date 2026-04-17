@@ -21,7 +21,7 @@ Built on **ZIO 2**, **Tapir**-derived schemas, **Jackson 3**, and the official *
 - [Context (`McpContext`)](#context-mcpcontext)
 - [Transports](#transports)
 - [Customizing decoding (Jackson 3)](#customizing-decoding-jackson-3)
-- [Cross-platform (Scala.js)](#cross-platform-scalajs)
+- [Two backends, one API](#two-backends-one-api)
 - [Spec coverage](#spec-coverage)
 - [Running examples](#running-examples)
 - [Claude Desktop integration](#claude-desktop-integration)
@@ -30,10 +30,14 @@ Built on **ZIO 2**, **Tapir**-derived schemas, **Jackson 3**, and the official *
 ## Installation
 
 ```scala 3 ignore
+// JVM — the full library: annotations, macros, HTTP + stdio transports.
 libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.3.0"
+
+// Scala.js — real MCP server runtime on Node/Bun + shared typed contracts.
+libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "0.3.0"
 ```
 
-Built against Scala 3.8.3. Requires JDK 17+.
+Built against Scala 3.8.3. JVM requires JDK 17+. Scala.js artifact is published for `sjs1_3` (Scala.js 1.x); runs on Bun (first-class) and Node 18+.
 
 ## Quickstart
 
@@ -230,15 +234,78 @@ given JacksonConverter[Task] = DeriveJacksonConverter.derived[Task]
 
 The handler receives a `JacksonConversionContext` (not a raw Jackson mapper) — see [`docs/jackson-converter-enhancements.md`](docs/jackson-converter-enhancements.md) for the detailed API.
 
-## Cross-platform (Scala.js)
+## Two backends, one API
 
-The `shared/src/` tree — annotations, types, managers, typed contracts — compiles to both JVM and Scala.js. That means `McpTool.derived[...]` values, `PromptArgument` / `ResourceArgument` metadata, and even custom `McpDecoder[T]` / `McpEncoder[A]` instances can live in a module that's cross-published.
+FastMCP-Scala is a single library with two real runtime backends — JVM and Scala.js/Bun — behind the same shared abstract API:
 
-**What this buys you**: share tool/prompt/resource *definitions* across your JVM server and any Scala.js code (clients, test harnesses, browser UIs) without duplication or type drift.
+```
+         shared/src/                (platform-neutral Scala 3)
+  ┌──────────────────────────────────────────────────────────┐
+  │  annotations  │  typed contracts  │  Tool/Prompt/Resource │
+  │  (@Tool, ...)│ (McpTool.derived)│  managers + McpContext │
+  └──────────┬─────────────────────────────┬─────────────────┘
+             │                             │
+       jvm/src/ (FastMcpServer)      js/src/ (JsMcpServer)
+       wraps Java MCP SDK            wraps TS MCP SDK via
+       (mcp-core 1.1.1)              Scala.js facades, runs on Bun
+```
 
-**What it doesn't buy you**: the server *runtime* is JVM-only. The Scala.js module in this project is a test harness — it uses the TypeScript MCP SDK (via Scala.js facades) as a client to exercise a JVM-side server over stdio. There is no Bun/Node-based MCP server transport.
+`McpServer("name", "0.1.0")` returns the platform-appropriate server on each target. Typed contracts (`McpTool.derived`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) compile and mount unchanged on both.
 
-Conformance proof: [`SharedContractSurfaceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/contracts/SharedContractSurfaceTest.scala) asserts the typed contracts compile and mount under Scala.js; [`ConformanceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/ConformanceTest.scala) runs 17 MCP operations against a JVM server from a Scala.js client.
+**What the Scala.js backend gives you**:
+
+- A real MCP **server runtime** on Node / Bun, wrapping the official `@modelcontextprotocol/sdk` — stdio (`runStdio`) and Streamable HTTP (`runHttp`) transports, with stateful (session + SSE) and stateless (JSON-response-only) modes.
+- AJV-based schema validation of tool arguments, matching the JVM server's behaviour.
+- `JsMcpContext` extension methods (`getClientInfo`, `getClientCapabilities`, `getSessionId`) for handlers that need client-session details.
+
+**Current platform parity**:
+
+| Capability | JVM | Scala.js (Bun-first) |
+|---|---|---|
+| `@Tool` / `@Resource` / `@Prompt` + `scanAnnotations[T]` | ✅ | ❌ (JVM-only macros) |
+| Typed contracts (`McpTool.derived`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) | ✅ | ✅ |
+| `ToolSchemaProvider[A]` auto-derivation from `@Param` | ✅ via Tapir | ❌ (pass `inputSchema` manually for now) |
+| Stdio transport | ✅ (Java SDK) | ✅ (TS SDK) |
+| Streamable HTTP — stateful (sessions + SSE) | ✅ (ZIO HTTP) | ✅ (Bun.serve + Web-Standard transport) |
+| Streamable HTTP — stateless | ✅ | ✅ |
+| Custom decoders | ✅ `JacksonConverter` | ✅ `given JsonDecoder[T] → McpDecoder[T]` via zio-json |
+
+Node / Deno parity for the HTTP listener is a follow-up; the same `WebStandardStreamableHTTPServerTransport` works across runtimes, only the `Bun.serve(...)` entry point is Bun-specific today.
+
+Proof: the conformance suite at [`JsServerConformanceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/JsServerConformanceTest.scala) stands up a `JsMcpServer` in-process and drives every MCP operation through the official TS SDK client via `InMemoryTransport`; [`JsServerHttpTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/JsServerHttpTest.scala) verifies the Bun HTTP routing; [`ConformanceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/ConformanceTest.scala) runs a JS client against the JVM server for cross-backend parity.
+
+### Running on Bun
+
+```scala 3 raw
+//> using scala 3.8.3
+//> using dep com.tjclp::fast-mcp-scala_sjs1:0.3.0
+
+import com.tjclp.fastmcp.*
+import zio.*
+import zio.json.*
+
+object HelloBun extends ZIOAppDefault:
+  case class AddArgs(a: Int, b: Int)
+  case class AddResult(sum: Int)
+  given JsonDecoder[AddArgs] = DeriveJsonDecoder.gen[AddArgs]
+  given JsonEncoder[AddResult] = DeriveJsonEncoder.gen[AddResult]
+
+  private val addSchema = ToolInputSchema.unsafeFromJsonString(
+    """{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}}}"""
+  )
+
+  override def run =
+    val server = McpServer("HelloBun", "0.1.0")
+    for
+      _ <- server.tool(McpTool[AddArgs, AddResult](
+             name = "add",
+             inputSchema = addSchema
+           )(args => ZIO.succeed(AddResult(args.a + args.b))))
+      _ <- server.runStdio()
+    yield ()
+```
+
+Link with `./mill fast-mcp-scala.js.fastLinkJS`, then `bun run out/fast-mcp-scala/js/fastLinkJS.dest/main.js`. See [`HelloWorldJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HelloWorldJs.scala) and [`HttpServerJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HttpServerJs.scala) for runnable references.
 
 ## Spec coverage
 
@@ -264,7 +331,7 @@ See the [CHANGELOG](CHANGELOG.md) for release-by-release changes.
 
 ## Running examples
 
-All examples live under [`fast-mcp-scala/src/com/tjclp/fastmcp/examples/`](fast-mcp-scala/src/com/tjclp/fastmcp/examples/):
+**JVM** — [`fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/):
 
 | Example | Demonstrates |
 |---|---|
@@ -275,16 +342,22 @@ All examples live under [`fast-mcp-scala/src/com/tjclp/fastmcp/examples/`](fast-
 | `ContextEchoServer.scala` | `McpContext` introspection inside a tool handler |
 | `HttpServer.scala` | HTTP transport (Streamable default, Stateless via a flag) with curl recipes |
 
-Run any of them via Mill (the examples are JVM-only, so use the `jvm` submodule):
-
 ```bash
 ./mill fast-mcp-scala.jvm.runMain com.tjclp.fastmcp.examples.HelloWorld
+# or, via scala-cli:
+scala-cli scripts/quickstart.sc
 ```
 
-Or through `scala-cli` directly from the quickstart script:
+**Scala.js / Bun** — [`fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/):
+
+| Example | Demonstrates |
+|---|---|
+| `HelloWorldJs.scala` | Minimum viable server on Bun — one tool, stdio |
+| `HttpServerJs.scala` | Streamable HTTP transport on Bun — stateful sessions or stateless |
 
 ```bash
-scala-cli scripts/quickstart.sc
+./mill fast-mcp-scala.js.fastLinkJS
+bun run out/fast-mcp-scala/js/fastLinkJS.dest/main.js
 ```
 
 ## Claude Desktop integration
