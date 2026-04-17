@@ -244,34 +244,44 @@ final class JsMcpServer(
     tsServer
 
   private def registerHandlers(tsServer: tsdk.Server): Unit =
-    tsServer.setRequestHandler(
-      tsdk.ListToolsRequestSchema,
-      (_, _) => ZioJsPromise.zioToPromise(ZIO.attempt(handleListTools()))
-    )
-    tsServer.setRequestHandler(
-      tsdk.CallToolRequestSchema,
-      (req, extra) => ZioJsPromise.zioToPromise(handleCallTool(tsServer, req, extra))
-    )
-    tsServer.setRequestHandler(
-      tsdk.ListResourcesRequestSchema,
-      (_, _) => ZioJsPromise.zioToPromise(ZIO.attempt(handleListResources()))
-    )
-    tsServer.setRequestHandler(
-      tsdk.ListResourceTemplatesRequestSchema,
-      (_, _) => ZioJsPromise.zioToPromise(ZIO.attempt(handleListResourceTemplates()))
-    )
-    tsServer.setRequestHandler(
-      tsdk.ReadResourceRequestSchema,
-      (req, extra) => ZioJsPromise.zioToPromise(handleReadResource(tsServer, req, extra))
-    )
-    tsServer.setRequestHandler(
-      tsdk.ListPromptsRequestSchema,
-      (_, _) => ZioJsPromise.zioToPromise(ZIO.attempt(handleListPrompts()))
-    )
-    tsServer.setRequestHandler(
-      tsdk.GetPromptRequestSchema,
-      (req, extra) => ZioJsPromise.zioToPromise(handleGetPrompt(tsServer, req, extra))
-    )
+    // The TS SDK asserts that a handler's capability was declared on the Server before
+    // `setRequestHandler` can register it, and throws otherwise. Only register handlers for
+    // feature categories that actually have something registered on our manager side.
+    val hasTools = !toolManager.listDefinitions().isEmpty
+    val hasResources = !resourceManager.listDefinitions().isEmpty
+    val hasPrompts = !promptManager.listDefinitions().isEmpty
+
+    if hasTools then
+      tsServer.setRequestHandler(
+        tsdk.ListToolsRequestSchema,
+        (_, _) => ZioJsPromise.zioToPromise(ZIO.attempt(handleListTools()))
+      )
+      tsServer.setRequestHandler(
+        tsdk.CallToolRequestSchema,
+        (req, extra) => ZioJsPromise.zioToPromise(handleCallTool(tsServer, req, extra))
+      )
+    if hasResources then
+      tsServer.setRequestHandler(
+        tsdk.ListResourcesRequestSchema,
+        (_, _) => ZioJsPromise.zioToPromise(ZIO.attempt(handleListResources()))
+      )
+      tsServer.setRequestHandler(
+        tsdk.ListResourceTemplatesRequestSchema,
+        (_, _) => ZioJsPromise.zioToPromise(ZIO.attempt(handleListResourceTemplates()))
+      )
+      tsServer.setRequestHandler(
+        tsdk.ReadResourceRequestSchema,
+        (req, extra) => ZioJsPromise.zioToPromise(handleReadResource(tsServer, req, extra))
+      )
+    if hasPrompts then
+      tsServer.setRequestHandler(
+        tsdk.ListPromptsRequestSchema,
+        (_, _) => ZioJsPromise.zioToPromise(ZIO.attempt(handleListPrompts()))
+      )
+      tsServer.setRequestHandler(
+        tsdk.GetPromptRequestSchema,
+        (req, extra) => ZioJsPromise.zioToPromise(handleGetPrompt(tsServer, req, extra))
+      )
 
   // --- Handlers --------------------------------------------------------------------------------
 

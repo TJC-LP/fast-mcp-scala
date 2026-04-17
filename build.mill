@@ -1,4 +1,4 @@
-//| mvnDeps: ["com.lihaoyi::mill-contrib-scoverage:$MILL_VERSION", "com.tjclp::mill-bun_mill1:0.2.0"]
+//| mvnDeps: ["com.lihaoyi::mill-contrib-scoverage:$MILL_VERSION", "com.tjclp::mill-bun_mill1:0.2.1"]
 // Mill 1.1.5 is used for Scala 3.8.x support and mill-bun-plugin compatibility.
 // Version is controlled via .mill-version file.
 import mill._
@@ -258,6 +258,15 @@ object `fast-mcp-scala` extends Module {
       override def mvnDeps = Seq(
         mvn"org.scalatest::scalatest::${Versions.scalaTest}"
       )
+
+      // Force NODE_ENV=production inside the Bun test process so in-process
+      // `Bun.serve({...})` calls default `development: false`. Without this the
+      // dev-mode error overlay rewrites fetch-handler Promise rejections into a
+      // ~100 KB HTML `BunError` Response, which hides the real error from tests
+      // (see JsServerHttpTest's POST-initialize case).
+      override def bunTestJsEnv = Task {
+        super.bunTestJsEnv() + ("NODE_ENV" -> "production")
+      }
     }
   }
 }

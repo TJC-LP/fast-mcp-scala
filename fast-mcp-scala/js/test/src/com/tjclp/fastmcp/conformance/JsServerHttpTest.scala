@@ -103,14 +103,25 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     if bunServer != null then Future.successful(())
     else setupStatelessServer()
 
-  // NOTE: The full POST-initialize round-trip against Bun.serve is covered by the in-memory
-  // conformance suite (JsServerConformanceTest). Wiring Bun.serve's fetch handler into the TS
-  // SDK transport adds an extra promise-layer that surfaces a Bun dev-overlay rendering quirk
-  // under the Mill+Bun test runner; rather than block this commit on that, we rely on the 405/
-  // 404 routing tests below to prove the Bun.serve entry point is wired, and the in-memory suite
-  // to prove the TS SDK transport serves correctly.
+  "runHttp (stateless)" should "accept an initialize POST and return JSON carrying the server name" in {
+    serverReady.flatMap { _ =>
+      val init = js.Dynamic.literal(
+        method = "POST",
+        headers = js.Dictionary(
+          "content-type" -> "application/json",
+          "accept" -> "application/json, text/event-stream"
+        ),
+        body =
+          """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"http-test","version":"0.1.0"}}}"""
+      )
+      for
+        resp <- httpFetch("/mcp", init)
+        body <- fromJsPromise(resp.text().asInstanceOf[js.Promise[String]])
+      yield body should include("JsHttpStatelessServer")
+    }
+  }
 
-  "runHttp (stateless)" should "reject GET with 405" in {
+  it should "reject GET with 405" in {
     serverReady.flatMap { _ =>
       httpFetch("/mcp", js.Dynamic.literal(method = "GET"))
         .map(resp => resp.status.asInstanceOf[Int] shouldBe 405)
