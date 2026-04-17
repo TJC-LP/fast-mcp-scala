@@ -11,6 +11,7 @@ import zio.*
 
 import com.tjclp.fastmcp.codec.JsMcpDecodeContext
 import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.facades.runtime as runtime
 import com.tjclp.fastmcp.facades.server as tsdk
 import com.tjclp.fastmcp.interop.ZioJsPromise
 import com.tjclp.fastmcp.server.manager.*
@@ -95,13 +96,136 @@ final class JsMcpServer(
   override def runStdio(): ZIO[Any, Throwable, Unit] =
     connect(new tsdk.StdioServerTransport()) *> ZIO.never
 
-  /** Stubbed until Commit 5 wires `WebStandardStreamableHTTPServerTransport`. */
+  /** Bun-first Streamable HTTP transport.
+    *
+    *   - `settings.stateless = true` — fresh TS Server + transport per POST (JSON-response mode, no
+    *     SSE); GET/DELETE → 405.
+    *   - `settings.stateless = false` (default) — one TS Server + transport per initialized
+    *     session, keyed by `mcp-session-id`, reused across GET/POST/DELETE until the session closes
+    *     or the client sends DELETE.
+    *
+    * Honors `host`, `port`, `httpEndpoint`, and `disallowDelete`. `keepAliveInterval` is a
+    * documented JS no-op — the transport handles stream keep-alive internally on Bun.
+    */
   override def runHttp(): ZIO[Any, Throwable, Unit] =
-    ZIO.fail(
-      new UnsupportedOperationException(
-        "JsMcpServer.runHttp is not yet implemented — follow-up commit adds the Streamable HTTP transport."
+    for
+      _ <- ZIO.attempt {
+        if settings.stateless then startStatelessHttp()
+        else startStatefulHttp()
+      }
+      _ <- ZIO.never
+    yield ()
+
+  // Session table for stateful HTTP. Bun is single-threaded, so a js.Dictionary is sufficient —
+  // no concurrent access concerns.
+  private val sessions =
+    js.Dictionary.empty[(tsdk.Server, tsdk.WebStandardStreamableHttpServerTransport)]
+
+  private[fastmcp] def startStatelessHttp(): runtime.BunServer =
+    runtime.Bun.serve(
+      runtime.BunServeOptions(
+        port = settings.port,
+        hostname = settings.host,
+        fetch = js.Any.fromFunction1((req: js.Dynamic) => handleStateless(req))
       )
     )
+
+  private[fastmcp] def startStatefulHttp(): runtime.BunServer =
+    runtime.Bun.serve(
+      runtime.BunServeOptions(
+        port = settings.port,
+        hostname = settings.host,
+        fetch = js.Any.fromFunction1((req: js.Dynamic) => handleStateful(req))
+      )
+    )
+
+  private def requestMethod(req: js.Dynamic): String = req.method.asInstanceOf[String]
+
+  private def requestPath(req: js.Dynamic): String =
+    // `new URL(req.url).pathname` is the Web-Standard way to pull the path from a Request.
+    val url = js.Dynamic.newInstance(js.Dynamic.global.URL)(req.url)
+    url.pathname.asInstanceOf[String]
+
+  private def sessionIdHeader(req: js.Dynamic): Option[String] =
+    val header = req.headers.get("mcp-session-id")
+    Option(header.asInstanceOf[String | Null]).flatMap {
+      case null => None
+      case s: String if s.nonEmpty => Some(s)
+      case _ => None
+    }
+
+  private def webResponse(
+      status: Int,
+      body: String = "",
+      contentType: String = "text/plain"
+  ): js.Dynamic =
+    new runtime.WebResponse(
+      body,
+      runtime.WebResponseInit(status, Map("content-type" -> contentType))
+    ).asInstanceOf[js.Dynamic]
+
+  private def handleStateless(req: js.Dynamic): js.Promise[js.Dynamic] =
+    if requestPath(req) != settings.httpEndpoint then
+      return js.Promise.resolve[js.Dynamic](webResponse(404, "Not Found"))
+    if requestMethod(req) != "POST" then
+      return js.Promise.resolve[js.Dynamic](webResponse(405, "Stateless mode only accepts POST"))
+
+    ZioJsPromise.zioToPromise(
+      for
+        tsServer <- ZIO.attempt(buildTsServer())
+        transport = new tsdk.WebStandardStreamableHttpServerTransport(
+          tsdk.WebStreamableHttpOptions.stateless
+        )
+        _ <- ZioJsPromise.fromJsPromise(tsServer.connect(transport))
+        resp <- ZioJsPromise.fromJsPromise(transport.handleRequest(req))
+      yield resp
+    )
+
+  private def handleStateful(req: js.Dynamic): js.Promise[js.Dynamic] =
+    if requestPath(req) != settings.httpEndpoint then
+      return js.Promise.resolve[js.Dynamic](webResponse(404, "Not Found"))
+
+    val method = requestMethod(req)
+    if method == "DELETE" && settings.disallowDelete then
+      return js.Promise.resolve[js.Dynamic](webResponse(405, "DELETE disabled"))
+
+    sessionIdHeader(req) match
+      case Some(sid) =>
+        sessions.get(sid) match
+          case Some((_, transport)) =>
+            transport.handleRequest(req)
+          case None =>
+            js.Promise.resolve[js.Dynamic](webResponse(404, s"Unknown session: $sid"))
+
+      case None if method == "POST" =>
+        // Fresh session — the transport will call back on `onsessioninitialized` with the new id.
+        lazy val transport: tsdk.WebStandardStreamableHttpServerTransport =
+          new tsdk.WebStandardStreamableHttpServerTransport(
+            js.Dynamic
+              .literal(
+                sessionIdGenerator = js.Any.fromFunction0(() => runtime.WebCrypto.randomUUID()),
+                onsessioninitialized = js.Any.fromFunction1((newSid: String) => {
+                  sessions(newSid) = (tsServer, transport)
+                  ()
+                }),
+                onsessionclosed = js.Any.fromFunction1((sid: String) => {
+                  sessions -= sid
+                  ()
+                })
+              )
+              .asInstanceOf[tsdk.WebStreamableHttpOptions]
+          )
+        lazy val tsServer: tsdk.Server = buildTsServer()
+
+        ZioJsPromise.zioToPromise(
+          for
+            _ <- ZioJsPromise.fromJsPromise(tsServer.connect(transport))
+            resp <- ZioJsPromise.fromJsPromise(transport.handleRequest(req))
+          yield resp
+        )
+
+      case None =>
+        js.Promise.resolve[js.Dynamic](webResponse(400, "Missing mcp-session-id header"))
 
   // --- TS SDK wiring ---------------------------------------------------------------------------
 
