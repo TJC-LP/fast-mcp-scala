@@ -75,6 +75,7 @@ object JsMcpDecodeContext:
       case f: Float => f.toDouble
       case d: Double => d
       case bytes: Array[Byte] => java.util.Base64.getEncoder.encodeToString(bytes)
+      case opt: Option[?] => opt.map(toJs).getOrElse(null)
       case m: scala.collection.Map[?, ?] =>
         val dict = js.Dictionary.empty[js.Any]
         m.foreach { case (k, v) => dict.update(k.toString, toJs(v)) }

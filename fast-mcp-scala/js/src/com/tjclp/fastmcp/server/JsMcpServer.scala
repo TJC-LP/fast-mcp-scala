@@ -23,10 +23,6 @@ import com.tjclp.fastmcp.server.manager.*
   * Typed-contract registration flows through the shared trait's `tool`/`prompt`/`resource`
   * overloads, which pipe arguments through a given `McpDecoder[In]` and encode results via
   * `McpEncoder[Out]`. See [[com.tjclp.fastmcp.codec.JsMcpDecoders]] for the default givens.
-  *
-  * `runStdio()` and `runHttp()` share a common server-build pipeline; `runHttp()` is a stub in this
-  * commit and will be implemented against `WebStandardStreamableHTTPServerTransport` in the next
-  * commit.
   */
 final class JsMcpServer(
     val name: String,
@@ -94,7 +90,10 @@ final class JsMcpServer(
     * SIGINT, etc.).
     */
   override def runStdio(): ZIO[Any, Throwable, Unit] =
-    connect(new tsdk.StdioServerTransport()) *> ZIO.never
+    val transport = new tsdk.StdioServerTransport()
+    ZIO.acquireReleaseWith(connect(transport))(tsServer =>
+      ZioJsPromise.fromJsPromise(tsServer.close()).ignore
+    )(_ => ZIO.never)
 
   /** Bun-first Streamable HTTP transport.
     *
@@ -108,13 +107,12 @@ final class JsMcpServer(
     * documented JS no-op — the transport handles stream keep-alive internally on Bun.
     */
   override def runHttp(): ZIO[Any, Throwable, Unit] =
-    for
-      _ <- ZIO.attempt {
+    ZIO.acquireReleaseWith(
+      ZIO.attempt {
         if settings.stateless then startStatelessHttp()
         else startStatefulHttp()
       }
-      _ <- ZIO.never
-    yield ()
+    )(bunServer => shutdownHttp(bunServer).ignore)(_ => ZIO.never)
 
   // Session table for stateful HTTP. Bun is single-threaded, so a js.Dictionary is sufficient —
   // no concurrent access concerns.
@@ -170,16 +168,19 @@ final class JsMcpServer(
     if requestMethod(req) != "POST" then
       return js.Promise.resolve[js.Dynamic](webResponse(405, "Stateless mode only accepts POST"))
 
-    ZioJsPromise.zioToPromise(
-      for
-        tsServer <- ZIO.attempt(buildTsServer())
-        transport = new tsdk.WebStandardStreamableHttpServerTransport(
-          tsdk.WebStreamableHttpOptions.stateless
-        )
-        _ <- ZioJsPromise.fromJsPromise(tsServer.connect(transport))
-        resp <- ZioJsPromise.fromJsPromise(transport.handleRequest(req))
-      yield resp
-    )
+    val transport =
+      new tsdk.WebStandardStreamableHttpServerTransport(tsdk.WebStreamableHttpOptions.stateless)
+
+    ZioJsPromise.zioToPromise {
+      ZIO.acquireReleaseWith(
+        for
+          tsServer <- ZIO.attempt(buildTsServer())
+          _ <- ZioJsPromise.fromJsPromise(tsServer.connect(transport))
+        yield tsServer
+      )(tsServer => ZioJsPromise.fromJsPromise(tsServer.close()).ignore)(_ =>
+        ZioJsPromise.fromJsPromise(transport.handleRequest(req))
+      )
+    }
 
   private def handleStateful(req: js.Dynamic): js.Promise[js.Dynamic] =
     if requestPath(req) != settings.httpEndpoint then
@@ -329,7 +330,7 @@ final class JsMcpServer(
   ): ZIO[Any, Throwable, js.Any] =
     val uri = req.params.uri.asInstanceOf[String]
     val ctx = Some(JsMcpContext(tsServer, extra): McpContext)
-    val mimeType = resourceManager.getResourceDefinition(uri).flatMap(_.mimeType)
+    val mimeType = resourceMimeType(uri)
     resourceManager
       .readResource(uri, ctx)
       .map(body => JsMcpServer.readResourceResult(uri, mimeType, body))
@@ -388,6 +389,24 @@ final class JsMcpServer(
     )
     val result = validate(input.getOrElse(js.Dictionary.empty[js.Any]))
     if result.valid then None else Some(result.errorMessage.getOrElse("Input validation failed"))
+
+  private def resourceMimeType(uri: String): Option[String] =
+    resourceManager
+      .getResourceDefinition(uri)
+      .flatMap(_.mimeType)
+      .orElse(resourceManager.findMatchingTemplate(uri).flatMap { case (_, definition, _, _) =>
+        definition.mimeType
+      })
+
+  private def shutdownHttp(bunServer: runtime.BunServer): ZIO[Any, Throwable, Unit] =
+    for
+      activeServers <- ZIO.succeed(sessions.values.map(_._1).toList)
+      _ <- ZIO.foreachDiscard(activeServers)(tsServer =>
+        ZioJsPromise.fromJsPromise(tsServer.close()).ignore
+      )
+      _ <- ZIO.succeed(sessions.clear())
+      _ <- ZIO.attempt(bunServer.stop())
+    yield ()
 
 end JsMcpServer
 
@@ -517,7 +536,14 @@ object JsMcpServer:
   ): js.Any =
     val inner = js.Dictionary.empty[js.Any]
     inner("uri") = uri
-    mimeType.foreach(m => inner("mimeType") = m)
+    val finalMimeType = mimeType.getOrElse(body match
+      case s: String
+          if (s.startsWith("{") && s.endsWith("}")) || (s.startsWith("[") && s.endsWith("]")) =>
+        "application/json"
+      case _: String => "text/plain"
+      case _: Array[Byte] => "application/octet-stream"
+    )
+    inner("mimeType") = finalMimeType
     body match
       case s: String => inner("text") = s
       case bytes: Array[Byte] => inner("blob") = base64Enc.encodeToString(bytes)

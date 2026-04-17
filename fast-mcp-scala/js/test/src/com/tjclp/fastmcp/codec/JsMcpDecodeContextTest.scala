@@ -4,7 +4,7 @@ package codec
 import org.scalatest.funsuite.AnyFunSuite
 import zio.json.*
 
-import com.tjclp.fastmcp.core.{Content, McpDecoder, McpEncoder, TextContent}
+import com.tjclp.fastmcp.core.{Content, ImageContent, McpDecoder, McpEncoder}
 
 class JsMcpDecodeContextTest extends AnyFunSuite:
 
@@ -44,11 +44,13 @@ class JsMcpDecodeContextTest extends AnyFunSuite:
     assert(ex.getMessage.contains("Failed to decode parameter 'add'"))
   }
 
-  test("McpEncoder[Array[Byte]] emits a single base64 TextContent") {
+  test("McpEncoder[Array[Byte]] emits a single application/octet-stream ImageContent") {
     val payload: Array[Byte] = "Hello".getBytes("UTF-8")
     val encoded: List[Content] = McpEncoder[Array[Byte]].encode(payload)
     assert(encoded.size == 1)
     encoded.head match
-      case tc: TextContent => assert(tc.text == "SGVsbG8=")
+      case ic: ImageContent =>
+        assert(ic.data == "SGVsbG8=")
+        assert(ic.mimeType == "application/octet-stream")
       case other => fail(s"Unexpected content: $other")
   }

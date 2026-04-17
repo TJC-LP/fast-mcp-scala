@@ -10,6 +10,7 @@ import scala.scalajs.js.JSConverters.*
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AsyncFlatSpec
 import org.scalatest.matchers.should.Matchers
+import sttp.tapir.generic.auto.*
 import zio.*
 import zio.json.*
 
@@ -29,31 +30,28 @@ class JsServerConformanceTest extends AsyncFlatSpec with Matchers with BeforeAnd
 
   // --- Typed contracts registered on the server ---
 
-  case class AddArgs(a: Int, b: Int)
+  case class AddArgs(
+      @Param(description = "left operand")
+      a: Int,
+      @Param(description = "right operand")
+      b: Int
+  )
   case class AddResult(sum: Int)
   case class UserArgs(userId: String)
   case class GreetArgs(name: String)
 
-  given JsonDecoder[AddArgs] = DeriveJsonDecoder.gen[AddArgs]
   given JsonEncoder[AddResult] = DeriveJsonEncoder.gen[AddResult]
   given JsonDecoder[UserArgs] = DeriveJsonDecoder.gen[UserArgs]
   given JsonDecoder[GreetArgs] = DeriveJsonDecoder.gen[GreetArgs]
 
-  // Manual input-schemas since Tapir's Schema derivation isn't available on JS.
-  private val addSchema: ToolInputSchema = ToolInputSchema.unsafeFromJsonString(
-    """{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"]}"""
-  )
-
-  private val addTool = McpTool[AddArgs, AddResult](
+  private val addTool = McpTool.derived[AddArgs, AddResult](
     name = "typed-add",
-    description = Some("Add two ints"),
-    inputSchema = addSchema
+    description = Some("Add two ints")
   )(args => ZIO.succeed(AddResult(args.a + args.b)))
 
-  private val brokenTool = McpTool[AddArgs, AddResult](
+  private val brokenTool = McpTool.derived[AddArgs, AddResult](
     name = "broken",
-    description = Some("Always fails"),
-    inputSchema = addSchema
+    description = Some("Always fails")
   )(_ => ZIO.fail(new RuntimeException("kaboom")))
 
   private val welcomeResource = McpStaticResource(
@@ -64,8 +62,9 @@ class JsServerConformanceTest extends AsyncFlatSpec with Matchers with BeforeAnd
   private val userResource = McpTemplateResource[UserArgs](
     uriPattern = "users://{userId}/profile",
     description = Some("User profile"),
+    mimeType = Some("application/json"),
     arguments = List(ResourceArgument("userId", Some("user id"), required = true))
-  )(args => ZIO.succeed(s"Profile: ${args.userId}"))
+  )(args => ZIO.succeed(s"""{"userId":"${args.userId}"}"""))
 
   private val greetingPrompt = McpPrompt[GreetArgs](
     name = "greeting",
@@ -217,8 +216,10 @@ class JsServerConformanceTest extends AsyncFlatSpec with Matchers with BeforeAnd
     ensureConnected()
       .flatMap(c => fromJsPromise(c.readResource(clientFacade.ReadResourceParams("static://welcome"))))
       .map { result =>
-        val text = result.contents.headOption.flatMap(_.text.toOption).getOrElse("")
+        val first = result.contents.headOption.getOrElse(fail("missing resource content"))
+        val text = first.text.toOption.getOrElse("")
         text should include("Welcome to JsMcpServer")
+        first.mimeType.toOption shouldBe Some("text/plain")
       }
   }
 
@@ -227,6 +228,16 @@ class JsServerConformanceTest extends AsyncFlatSpec with Matchers with BeforeAnd
       val templates = result.resourceTemplates.map(_.uriTemplate).toSeq
       templates should contain("users://{userId}/profile")
     }
+  }
+
+  "resources/read" should "preserve template mimeType metadata" in {
+    ensureConnected()
+      .flatMap(c => fromJsPromise(c.readResource(clientFacade.ReadResourceParams("users://ada/profile"))))
+      .map { result =>
+        val first = result.contents.headOption.getOrElse(fail("missing template content"))
+        first.mimeType.toOption shouldBe Some("application/json")
+        first.text.toOption.getOrElse("") should include("ada")
+      }
   }
 
   // --- Prompts ---

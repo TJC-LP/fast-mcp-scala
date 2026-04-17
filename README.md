@@ -1,10 +1,10 @@
 # FastMCP-Scala
 
-**Scala 3 for MCP: annotation-driven on the JVM, typed contracts everywhere they fit.**
+**Scala 3 for MCP: annotation-driven and typed-contract APIs on both JVM and Scala.js/Bun.**
 
 FastMCP-Scala is a developer-friendly library for building [Model Context Protocol](https://modelcontextprotocol.io/) servers. It gives you two complementary paths to the same server:
 
-- `@Tool`/`@Resource`/`@Prompt` annotations + `scanAnnotations[T]` for a zero-boilerplate, macro-driven experience (JVM)
+- `@Tool`/`@Resource`/`@Prompt` annotations + `scanAnnotations[T]` for a zero-boilerplate, macro-driven experience (JVM + Scala.js/Bun)
 - `McpTool.derived[...]`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource` for first-class, testable, cross-platform contract values (JVM + Scala.js)
 
 Built on **ZIO 2**, **Tapir**-derived schemas, **Jackson 3**, and the official **Java MCP SDK 1.1.1**. Runs under **stdio** or the full **Streamable HTTP** spec with a single flag.
@@ -30,10 +30,10 @@ Built on **ZIO 2**, **Tapir**-derived schemas, **Jackson 3**, and the official *
 ## Installation
 
 ```scala 3 ignore
-// JVM — the full library: annotations, macros, HTTP + stdio transports.
+// JVM — Java SDK-backed runtime with annotations, derived schemas, HTTP + stdio transports.
 libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.3.0"
 
-// Scala.js — real MCP server runtime on Node/Bun + shared typed contracts.
+// Scala.js — TS SDK-backed runtime on Bun/Node + the same annotation and typed-contract APIs.
 libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "0.3.0"
 ```
 
@@ -74,7 +74,7 @@ npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc
 
 | | Annotations (`@Tool` + `scanAnnotations`) | Typed contracts (`McpTool.derived`) |
 |---|---|---|
-| Platform | JVM only | JVM + Scala.js |
+| Platform | JVM + Scala.js/Bun | JVM + Scala.js/Bun |
 | Style | Methods on an object, discovered by macro | First-class `val`s |
 | Schema | Derived from method signature & `@Param` | Derived from case-class fields & `@Param` |
 | Testing | Call the method directly | Invoke `.handler` on the value |
@@ -254,7 +254,7 @@ FastMCP-Scala is a single library with two real runtime backends — JVM and Sca
 
 **What the Scala.js backend gives you**:
 
-- A real MCP **server runtime** on Node / Bun, wrapping the official `@modelcontextprotocol/sdk` — stdio (`runStdio`) and Streamable HTTP (`runHttp`) transports, with stateful (session + SSE) and stateless (JSON-response-only) modes.
+- A real MCP **server runtime** on Bun, wrapping the official `@modelcontextprotocol/sdk` — stdio (`runStdio`) and Streamable HTTP (`runHttp`) transports, with stateful (session + SSE) and stateless (JSON-response-only) modes.
 - AJV-based schema validation of tool arguments, matching the JVM server's behaviour.
 - `JsMcpContext` extension methods (`getClientInfo`, `getClientCapabilities`, `getSessionId`) for handlers that need client-session details.
 
@@ -262,9 +262,9 @@ FastMCP-Scala is a single library with two real runtime backends — JVM and Sca
 
 | Capability | JVM | Scala.js (Bun-first) |
 |---|---|---|
-| `@Tool` / `@Resource` / `@Prompt` + `scanAnnotations[T]` | ✅ | ❌ (JVM-only macros) |
+| `@Tool` / `@Resource` / `@Prompt` + `scanAnnotations[T]` | ✅ | ✅ |
 | Typed contracts (`McpTool.derived`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) | ✅ | ✅ |
-| `ToolSchemaProvider[A]` auto-derivation from `@Param` | ✅ via Tapir | ❌ (pass `inputSchema` manually for now) |
+| `ToolSchemaProvider[A]` auto-derivation from `@Param` | ✅ via Tapir | ✅ via Tapir |
 | Stdio transport | ✅ (Java SDK) | ✅ (TS SDK) |
 | Streamable HTTP — stateful (sessions + SSE) | ✅ (ZIO HTTP) | ✅ (Bun.serve + Web-Standard transport) |
 | Streamable HTTP — stateless | ✅ | ✅ |
@@ -282,28 +282,20 @@ Proof: the conformance suite at [`JsServerConformanceTest.scala`](fast-mcp-scala
 
 import com.tjclp.fastmcp.*
 import zio.*
-import zio.json.*
 
 object HelloBun extends ZIOAppDefault:
-  case class AddArgs(a: Int, b: Int)
-  case class AddResult(sum: Int)
-  given JsonDecoder[AddArgs] = DeriveJsonDecoder.gen[AddArgs]
-  given JsonEncoder[AddResult] = DeriveJsonEncoder.gen[AddResult]
-
-  private val addSchema = ToolInputSchema.unsafeFromJsonString(
-    """{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}}}"""
-  )
+  @Tool(name = Some("add"), description = Some("Add two numbers"), readOnlyHint = Some(true))
+  def add(@Param("First operand") a: Int, @Param("Second operand") b: Int): Int = a + b
 
   override def run =
-    val server = McpServer("HelloBun", "0.1.0")
     for
-      _ <- server.tool(McpTool[AddArgs, AddResult](
-             name = "add",
-             inputSchema = addSchema
-           )(args => ZIO.succeed(AddResult(args.a + args.b))))
+      server <- ZIO.succeed(McpServer("HelloBun", "0.1.0"))
+      _ <- ZIO.attempt(server.scanAnnotations[HelloBun.type])
       _ <- server.runStdio()
     yield ()
 ```
+
+For typed contracts on Scala.js, `McpTool.derived[...]` now auto-generates the input schema as well; import `sttp.tapir.generic.auto.*` at the call site the same way you do on the JVM.
 
 Link with `./mill fast-mcp-scala.js.fastLinkJS`, then `bun run out/fast-mcp-scala/js/fastLinkJS.dest/main.js`. See [`HelloWorldJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HelloWorldJs.scala) and [`HttpServerJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HttpServerJs.scala) for runnable references.
 

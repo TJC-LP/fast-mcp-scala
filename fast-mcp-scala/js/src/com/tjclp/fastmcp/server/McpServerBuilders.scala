@@ -23,8 +23,10 @@ object McpServer:
   ): ZIO[Any, Throwable, Unit] =
     ZIO.succeed(apply(name, version, settings)).flatMap(_.runStdio())
 
-  /** Create a server and run it on HTTP in one step. Currently stubbed on JS; see
-    * [[JsMcpServer.runHttp]] for the tracked limitation.
+  /** Create a server and run it on HTTP in one step.
+    *
+    * Uses the Bun-first Streamable HTTP backend. Set `settings.stateless = true` for stateless
+    * request/response mode.
     */
   def http(
       name: String = "FastMCPScala",

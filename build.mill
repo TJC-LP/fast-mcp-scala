@@ -199,13 +199,37 @@ object `fast-mcp-scala` extends Module {
 
     override def moduleKind = Task { ModuleKind.ESModule }
 
-    // JS module reads from both shared/ and js/src/
-    override def sources = Task.Sources(moduleDir / "src", moduleDir / os.up / "shared" / "src")
+    // JS module reads from shared/, js/src/, plus the macro/schema helpers in jvm/src/ that are
+    // compile-time only and portable across targets.
+    override def sources = Task.Sources(
+      moduleDir / "src",
+      moduleDir / os.up / "shared" / "src",
+      moduleDir / os.up / "jvm" / "src" / "com" / "tjclp" / "fastmcp" / "macros" / "JsonSchemaMacro.scala",
+      moduleDir / os.up / "jvm" / "src" / "com" / "tjclp" / "fastmcp" / "macros" / "MacroUtils.scala",
+      moduleDir / os.up / "jvm" / "src" / "com" / "tjclp" / "fastmcp" / "macros" / "schema"
+    )
 
-    // Shared deps needed by shared/ sources (ZIO + ZIO JSON are cross-published for Scala.js)
+    // Shared deps needed by shared/ sources and the JS macro/schema derivation path.
     override def mvnDeps = Seq(
       mvn"dev.zio::zio::${Versions.zio}",
-      mvn"dev.zio::zio-json::${Versions.zioJson}"
+      mvn"dev.zio::zio-json::${Versions.zioJson}",
+      mvn"com.softwaremill.sttp.tapir::tapir-core::${Versions.tapir}",
+      mvn"com.softwaremill.sttp.tapir::tapir-apispec-docs::${Versions.tapir}",
+      mvn"com.softwaremill.sttp.apispec::jsonschema-circe::${Versions.jsonSchemaCirce}"
+    )
+
+    override def scalacOptions = Seq(
+      "-encoding", "utf-8",
+      "-feature",
+      "-unchecked",
+      "-deprecation",
+      "-Wunused:all",
+      "-Wvalue-discard",
+      "-Wsafe-init",
+      "-Wnonunit-statement",
+      "-Xcheck-macros",
+      "-experimental",
+      "-Xmax-inlines:128"
     )
 
     override def bunDeps = Task {

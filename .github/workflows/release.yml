@@ -32,6 +32,11 @@ jobs:
         with:
           jvm: temurin:21
 
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - name: Cache Coursier
         uses: actions/cache@v4
         with:
@@ -67,12 +72,12 @@ jobs:
           echo "version=$TAG_VERSION" >> $GITHUB_OUTPUT
 
       - name: Run Tests
-        run: ./mill -i fast-mcp-scala.jvm.test
+        run: ./mill -i fast-mcp-scala.test
 
       - name: Verify Publishing Setup
         run: |
           echo "Version: $PUBLISH_VERSION"
-          ./mill show fast-mcp-scala.jvm.publishVersion
+          ./mill show fast-mcp-scala.jvm.publishVersion fast-mcp-scala.js.publishVersion
         env:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
 
