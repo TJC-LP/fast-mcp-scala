@@ -1,16 +1,13 @@
-//> using scala 3.7.2
-//> using dep com.tjclp::fast-mcp-scala:0.2.3
+//> using scala 3.8.3
+//> using dep com.tjclp::fast-mcp-scala:0.3.0
 //> using options "-Xcheck-macros" "-experimental"
 
-import com.tjclp.fastmcp.core.{Param, Prompt, Resource, Tool}
-import com.tjclp.fastmcp.server.FastMcpServer
-import com.tjclp.fastmcp.macros.RegistrationMacro.*
+import com.tjclp.fastmcp.*
 import zio.*
 
-// Define annotated tools, prompts, and resources
 object Example:
 
-  @Tool(name = Some("add"), description = Some("Add two numbers"))
+  @Tool(name = Some("add"), description = Some("Add two numbers"), readOnlyHint = Some(true))
   def add(
       @Param("First operand") a: Double,
       @Param("Second operand") b: Double
@@ -30,9 +27,9 @@ object ExampleServer extends ZIOAppDefault:
 
   override def run =
     for
-      server <- ZIO.succeed(FastMcpServer("ExampleServer", "0.2.3"))
-      _ <- ZIO.attempt(server.scanAnnotations[Example.type])
-      _ <- server.runStdio()
+      server <- ZIO.succeed(McpServer("ExampleServer", "0.3.0"))
+      _      <- ZIO.attempt(server.scanAnnotations[Example.type])
+      _      <- server.runStdio()
     yield ()
 
 ExampleServer.main(args)

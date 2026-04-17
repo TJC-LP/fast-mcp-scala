@@ -14,8 +14,16 @@ import com.tjclp.fastmcp.macros.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import com.tjclp.fastmcp.server.*
 
-/** Example MCP server demonstrating complex task management with nested case classes and
-  * collections - showcasing the enhanced JacksonConverter capabilities.
+/** Domain-shaped MCP server — a task tracker with nested case classes, Scala 3 enums, Java
+  * `LocalDateTime`, and mutable in-memory state.
+  *
+  * This example is the most realistic one in the set. It shows:
+  *   - **Custom Jackson converters** — `JacksonConverter.fromPartialFunction` for `LocalDateTime`,
+  *     `DeriveJacksonConverter.derived` for the domain case classes. Everything Jackson-3 natively
+  *     supports (primitives, enums, collections, `Option`) needs no custom converter.
+  *   - **MCP tool hints** — read-only tools (`listTasks`, `searchTasks`, `getTaskStats`) are marked
+  *     so clients can call them without confirmation; `updateTask` advertises idempotency; all
+  *     tools declare whether they touch an open world (none do — state is in-memory).
   */
 object TaskManagerServer extends ZIOAppDefault:
 
@@ -116,7 +124,9 @@ object TaskManagerServer extends ZIOAppDefault:
 
   @Tool(
     name = Some("createTask"),
-    description = Some("Create a new task with the specified details")
+    description = Some("Create a new task with the specified details"),
+    idempotentHint = Some(false),
+    openWorldHint = Some(false)
   )
   def createTask(
       @Param("Task title") title: String,
@@ -142,7 +152,9 @@ object TaskManagerServer extends ZIOAppDefault:
 
   @Tool(
     name = Some("updateTask"),
-    description = Some("Update an existing task with new values")
+    description = Some("Update an existing task with new values"),
+    idempotentHint = Some(true),
+    openWorldHint = Some(false)
   )
   def updateTask(
       @Param("Task ID") taskId: String,
@@ -165,7 +177,10 @@ object TaskManagerServer extends ZIOAppDefault:
 
   @Tool(
     name = Some("listTasks"),
-    description = Some("List tasks with optional filtering")
+    description = Some("List tasks with optional filtering"),
+    readOnlyHint = Some(true),
+    idempotentHint = Some(true),
+    openWorldHint = Some(false)
   )
   def listTasks(
       @Param("Filter criteria") filter: TaskFilter
@@ -183,7 +198,10 @@ object TaskManagerServer extends ZIOAppDefault:
 
   @Tool(
     name = Some("getTaskStats"),
-    description = Some("Get statistics about all tasks")
+    description = Some("Get statistics about all tasks"),
+    readOnlyHint = Some(true),
+    idempotentHint = Some(true),
+    openWorldHint = Some(false)
   )
   def getTaskStats(): TaskStats =
     val allTasks = tasks.values.toList
@@ -201,7 +219,10 @@ object TaskManagerServer extends ZIOAppDefault:
 
   @Tool(
     name = Some("searchTasks"),
-    description = Some("Search tasks by text in title or description")
+    description = Some("Search tasks by text in title or description"),
+    readOnlyHint = Some(true),
+    idempotentHint = Some(true),
+    openWorldHint = Some(false)
   )
   def searchTasks(
       @Param("Search query") query: String

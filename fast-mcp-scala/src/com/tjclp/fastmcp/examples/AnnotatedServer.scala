@@ -13,13 +13,22 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import com.tjclp.fastmcp.server.*
 
-/** Enhanced server example demonstrating the zero-boilerplate experience with @Tool annotations.
+/** Flagship annotation-driven server.
   *
-  * This example shows:
-  *   1. Tools defined with @Tool annotations are automatically registered at compile-time 2. Schema
-  *      generation happens automatically using JsonSchemaMacro 3. Handler mapping is done using
-  *      MapToFunctionMacro 4. We just call server.scanAnnotations[AnnotatedServer.type] to register
-  *      everything
+  * `@Tool`, `@Resource`, `@Prompt` methods are discovered by `scanAnnotations[...]` and registered
+  * with zero boilerplate — parameter schemas, handler wiring, and MCP metadata are all derived at
+  * compile time from the method signatures and `@Param` annotations.
+  *
+  * The tools below show the spectrum:
+  *   - `add` — primitives with behavioral hints (`readOnlyHint`, `idempotentHint`)
+  *   - `calculator` — optional parameters with defaults, hints, and a domain-specific failure mode
+  *   - `transform` — Scala 3 enums as parameters (schema derivation picks up the cases)
+  *   - `description` — nested case classes as parameters
+  *   - `search` — the full `@Param` feature set: examples, required-override, and custom JSON
+  *     Schema fragments
+  *
+  * Run with `./mill fast-mcp-scala.runMain com.tjclp.fastmcp.examples.AnnotatedServer` or attach an
+  * MCP Inspector: `npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc`.
   */
 object AnnotatedServer extends ZIOAppDefault:
 
@@ -34,31 +43,38 @@ object AnnotatedServer extends ZIOAppDefault:
       @description("Whether to set the text to uppercase") isUpper: Boolean = false
   )
 
-  @Tool(name = Some("description"))
+  /** Nested-case-class argument: FastMCP-Scala derives the JSON schema from the `Description`
+    * fields, including the `@description` annotations from Tapir.
+    */
+  @Tool(name = Some("description"), readOnlyHint = Some(true), idempotentHint = Some(true))
   def generateDescription(
       @Param("A description to generate") description: Description
   ): String =
     if description.isUpper then description.text.toUpperCase else description.text
 
-  /** Simple tool that adds two numbers. The @Tool annotation will:
-    *   1. Be scanned by scanAnnotations[AnnotatedServer.type] 2. Generate a JSON schema for the
-    *      parameters 3. Create a handler using MapToFunctionMacro
+  /** Pure arithmetic — the hints tell the client this tool never mutates state and is safe to
+    * retry.
     */
   @Tool(
-    name = Some("add")
-    // description = Some("Add two numbers together")
+    name = Some("add"),
+    description = Some("Add two numbers"),
+    readOnlyHint = Some(true),
+    idempotentHint = Some(true)
   )
   def add(
       @Param("First number") a: Int,
       @Param("Second number") b: Int
   ): Int = a + b
 
-  /** More complex calculator tool that handles different operations.
+  /** Richer calculator showing optional parameters (`operation` defaults to `"add"`) and the
+    * library's support for throwing — exceptions are surfaced to the client as tool errors.
     */
   @Tool(
     name = Some("calculator"),
     description = Some("Perform a calculation with two numbers"),
-    tags = List("math", "calculation")
+    tags = List("math", "calculation"),
+    readOnlyHint = Some(true),
+    idempotentHint = Some(true)
   )
   def calculate(
       @Param("First number") a: Double,
@@ -79,11 +95,14 @@ object AnnotatedServer extends ZIOAppDefault:
 
     CalculatorResult(operation, List(a, b), result).toJsonPretty
 
-  /** String transformation tool.
+  /** Enum parameters — the Scala 3 enum is reflected into the JSON schema as a `string` with an
+    * `enum` constraint.
     */
   @Tool(
     name = Some("transform"),
-    description = Some("Transform text using various operations")
+    description = Some("Transform text using various operations"),
+    readOnlyHint = Some(true),
+    idempotentHint = Some(true)
   )
   def transformText(
       text: String,
@@ -95,8 +114,44 @@ object AnnotatedServer extends ZIOAppDefault:
       case TransformationType.capitalize => text.split(" ").map(_.capitalize).mkString(" ")
       case TransformationType.reverse => text.reverse
 
-  /** A static resource returning plain text. Annotated with @Resource.
+  /** Full `@Param` feature set:
+    *   - `examples` — populates the schema's `examples` array so clients can show suggestions
+    *   - `required = false` + `Option[...]` — makes parameters optional with explicit `None`
+    *   - `schema` — pastes a raw JSON Schema fragment, overriding the derived schema (useful for
+    *     enum constraints, regex patterns, or numeric bounds that Scala types can't express)
     */
+  @Tool(
+    name = Some("search"),
+    description = Some("Search with examples, optional filters, and a custom sort schema"),
+    readOnlyHint = Some(true),
+    idempotentHint = Some(true)
+  )
+  def search(
+      @Param(
+        description = "Search query",
+        examples = List("scala functional programming", "mcp protocol spec")
+      )
+      query: String,
+      @Param(
+        description = "Maximum number of results",
+        examples = List("10", "25", "50"),
+        required = false
+      )
+      limit: Option[Int],
+      @Param(
+        description = "Sort order for results",
+        schema = Some(
+          """{"type": "string", "enum": ["relevance", "date", "popularity"], "default": "relevance"}"""
+        ),
+        required = false
+      )
+      sortBy: Option[String]
+  ): String =
+    val limitStr = limit.map(l => s"limit=$l").getOrElse("no limit")
+    val sortStr = sortBy.getOrElse("relevance")
+    s"Searching for '$query' with $limitStr, sorted by $sortStr"
+
+  /** Static resource — no URI placeholders, no parameters. */
   @Resource(
     uri = "static://welcome",
     name = Some("WelcomeMessage"),
@@ -105,8 +160,8 @@ object AnnotatedServer extends ZIOAppDefault:
   def welcomeResource(): String =
     "Welcome to the FastMCP-Scala Annotated Server!"
 
-  /** A template resource that takes a user ID from the URI. The URI pattern {userId} matches the
-    * parameter name.
+  /** Templated resource — the URI contains `{userId}` and the method parameter of the same name is
+    * bound to it.
     */
   @Resource(
     uri = "users://{userId}/profile",
@@ -117,7 +172,6 @@ object AnnotatedServer extends ZIOAppDefault:
   def userProfileResource(
       @Param("The unique identifier of the user") userId: String
   ): String =
-    // In a real app, fetch user data based on userId
     Map(
       "userId" -> userId,
       "name" -> s"User $userId",
@@ -125,56 +179,12 @@ object AnnotatedServer extends ZIOAppDefault:
       "joined" -> "2024-01-15"
     ).toJsonPretty
 
-  /** A template resource demonstrating multiple path parameters.
-    */
-  @Resource(
-    uri = "repos://{owner}/{repo}/issues/{id}",
-    name = Some("RepoIssue"),
-    description = Some("Get a specific issue from a repository."),
-    mimeType = Some("application/json")
-  )
-  def getRepositoryIssue(
-      @Param("Repository owner") owner: String,
-      @Param("Repository name") repo: String,
-      @Param("Issue ID") id: String
-  ): String =
-    Map(
-      "owner" -> owner,
-      "repo" -> repo,
-      "id" -> id,
-      "title" -> s"Issue #$id in $owner/$repo",
-      "status" -> "open",
-      "created" -> "2024-06-01"
-    ).toJsonPretty
-
-  /** A template resource for file access with custom MIME type detection.
-    */
-  @Resource(
-    uri = "files://{path}",
-    name = Some("FileContent"),
-    description = Some("Read file content from a specific path.")
-  )
-  def readFileResource(
-      @Param("File path relative to the server root") path: String
-  ): String =
-    // In a real implementation, you would read the actual file
-    // For demo purposes, we'll return mock content
-    s"Content of file: $path\n\nThis is a demo file content."
-
-  /** A simple prompt with no arguments. Annotated with @Prompt.
-    */
-  @Prompt(
-    name = Some("hello_prompt"),
-    description = Some("A simple hello world prompt.")
-  )
+  /** Prompt with no arguments. */
+  @Prompt(name = Some("hello_prompt"), description = Some("A simple hello world prompt."))
   def helloPrompt(): List[Message] =
-    List(
-      Message(role = Role.User, content = TextContent("Say hello to the world."))
-    )
+    List(Message(role = Role.User, content = TextContent("Say hello to the world.")))
 
-  /** A prompt with required and optional arguments. Uses @Param for documentation. Annotated with
-    * \@Prompt.
-    */
+  /** Prompt with a required argument and an optional one. */
   @Prompt(
     name = Some("greeting_prompt"),
     description = Some("Generates a personalized greeting.")
@@ -191,31 +201,16 @@ object AnnotatedServer extends ZIOAppDefault:
       )
     )
 
-  // --- Prompt Examples ---
-
   override def run: ZIO[Any, Throwable, Unit] =
     for
-      // Create server instance
-      server <- ZIO.succeed(
-        FastMcpServer(
-          name = "MacroAnnotatedServer",
-          version = "0.1.0"
-        )
-      )
-
-      // Process tools using the scanAnnotations macro extension method
+      server <- ZIO.succeed(FastMcpServer(name = "MacroAnnotatedServer", version = "0.1.0"))
       _ <- ZIO.attempt {
-        JSystem.err.println("[Server] Scanning for annotated tools...")
-        // This macro finds all methods with @Tool annotations in AnnotatedServer
-        // and registers them with the server
+        JSystem.err.println("[AnnotatedServer] Scanning for annotated tools...")
         server.scanAnnotations[AnnotatedServer.type]
       }
-
-      // Run the server
       _ <- server.runStdio()
     yield ()
 
-  // Define a result type for our calculator
   case class CalculatorResult(
       operation: String,
       numbers: List[Double],

@@ -3,7 +3,22 @@ package server
 
 import zio.*
 
-/** Public JVM builder namespace for the MCP server surface. */
+/** Factory namespace for the public `McpServer` API on the JVM.
+  *
+  * `McpServer(...)` returns a `FastMcpServer` — the annotation-scanning, tool-mounting, transport-
+  * capable server. The `.http(...)` and `.stdio(...)` helpers short-circuit the common "create and
+  * immediately run" pattern when you don't need to mount anything manually.
+  *
+  * Typical usage:
+  * {{{
+  *   val server = McpServer("MyServer", "0.1.0")
+  *   for
+  *     _ <- ZIO.attempt(server.scanAnnotations[MyServer.type])   // annotation path
+  *     _ <- server.tool(addTool)                                 // typed contract path
+  *     _ <- server.runStdio()
+  *   yield ()
+  * }}}
+  */
 object McpServer:
 
   def apply(
