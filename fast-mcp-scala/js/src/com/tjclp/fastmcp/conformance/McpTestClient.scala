@@ -100,7 +100,7 @@ object McpTestClient:
       case _ =>
         StdioClientParams(
           command = s"$projectRoot/mill",
-          args = js.Array("--no-server", "fast-mcp-scala.runMain", serverClass),
+          args = js.Array("--no-server", "fast-mcp-scala.jvm.runMain", serverClass),
           cwd = projectRoot,
           stderr = "inherit"
         )

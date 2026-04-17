@@ -13,7 +13,7 @@ import com.tjclp.fastmcp.server.*
   * tracking via the `mcp-session-id` header, and SSE streams for long-running calls. Switch to
   * stateless mode with a single flag when sessions aren't needed.
   *
-  * Start with: `./mill fast-mcp-scala.runMain com.tjclp.fastmcp.examples.HttpServer`
+  * Start with: `./mill fast-mcp-scala.jvm.runMain com.tjclp.fastmcp.examples.HttpServer`
   *
   * Then exercise via curl:
   * {{{

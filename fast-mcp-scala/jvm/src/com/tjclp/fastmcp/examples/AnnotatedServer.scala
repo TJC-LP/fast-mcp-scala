@@ -27,8 +27,8 @@ import com.tjclp.fastmcp.server.*
   *   - `search` — the full `@Param` feature set: examples, required-override, and custom JSON
   *     Schema fragments
   *
-  * Run with `./mill fast-mcp-scala.runMain com.tjclp.fastmcp.examples.AnnotatedServer` or attach an
-  * MCP Inspector: `npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc`.
+  * Run with `./mill fast-mcp-scala.jvm.runMain com.tjclp.fastmcp.examples.AnnotatedServer` or
+  * attach an MCP Inspector: `npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc`.
   */
 object AnnotatedServer extends ZIOAppDefault:
 

@@ -49,5 +49,5 @@ jobs:
       - name: Compile
         run: ./mill fast-mcp-scala.compile
 
-      - name: Test
-        run: ./mill -i fast-mcp-scala.test
+      - name: Test (JVM)
+        run: ./mill -i fast-mcp-scala.jvm.test

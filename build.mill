@@ -109,52 +109,85 @@ trait FastMCPTestModule extends TestModule.ScalaTest {
   override def forkArgs: T[Seq[String]] = BuildConfig.lazyValsJvmArgs
 }
 
-// Main module
-object `fast-mcp-scala` extends FastMCPModule {
+// Namespace module. Aggregate tasks at this level fan out to both JVM and JS
+// children so `./mill fast-mcp-scala.compile` and `./mill fast-mcp-scala.test`
+// cover the whole project without having to spell out each platform.
+object `fast-mcp-scala` extends Module {
 
-  override def artifactName = "fast-mcp-scala"
+  /** Compile both JVM and Scala.js sources. */
+  def compile: T[Unit] = Task {
+    jvm.compile()
+    js.compile()
+    ()
+  }
 
-  // JVM module reads from both shared/ and src/ (its own JVM-specific code)
-  override def sources = Task.Sources(moduleDir / "src", moduleDir / "shared" / "src")
+  /** Run both the JVM test suite and the Scala.js/Bun conformance tests. */
+  def test: T[Unit] = Task {
+    jvm.test.testForked()()
+    js.test.bunTest(mill.api.Args())()
+    ()
+  }
 
-  override def mvnDeps = Seq(
-    // ZIO Core
-    mvn"dev.zio::zio:${Versions.zio}",
-    mvn"dev.zio::zio-json:${Versions.zioJson}",
-    // ZIO Schema for schema generation
-    mvn"dev.zio::zio-schema:${Versions.zioSchema}",
-    mvn"dev.zio::zio-schema-json:${Versions.zioSchema}",
-    mvn"dev.zio::zio-schema-derivation:${Versions.zioSchema}",
-    // Jackson 3 for macro/runtime conversion internals
-    mvn"tools.jackson.core:jackson-databind:${Versions.jackson3}",
-    // Tapir
-    mvn"com.softwaremill.sttp.tapir::tapir-core:${Versions.tapir}",
-    mvn"com.softwaremill.sttp.tapir::tapir-apispec-docs:${Versions.tapir}",
-    mvn"com.softwaremill.sttp.tapir::tapir-json-circe:${Versions.tapir}",
-    mvn"com.softwaremill.sttp.apispec::jsonschema-circe:${Versions.jsonSchemaCirce}",
-    // ZIO HTTP for stateless HTTP transport
-    mvn"dev.zio::zio-http:${Versions.zioHttp}",
-    // MCP SDK (Java library - split into core + jackson3 as the default runtime binding)
-    mvn"io.modelcontextprotocol.sdk:mcp-core:${Versions.mcpSdk}",
-    mvn"io.modelcontextprotocol.sdk:mcp-json-jackson3:${Versions.mcpSdk}"
-  )
+  /** Scalafmt check on every Scala source (shared/, jvm/, js/). */
+  def checkFormat: T[Unit] = Task {
+    jvm.checkFormat()()
+    js.checkFormat()()
+    ()
+  }
 
-  override def mainClass = Some("fastmcp.FastMCPMain")
+  /** Auto-format every Scala source (shared/, jvm/, js/). */
+  def reformat: T[Unit] = Task {
+    jvm.reformat()()
+    js.reformat()()
+    ()
+  }
 
-  object test extends ScalaTests with FastMCPTestModule {
+  object jvm extends FastMCPModule {
+
+    override def artifactName = "fast-mcp-scala"
+
+    // JVM module reads from both shared/ and jvm/src/ (its own JVM-specific code)
+    override def sources = Task.Sources(moduleDir / "src", moduleDir / os.up / "shared" / "src")
+
     override def mvnDeps = Seq(
-      mvn"org.scalatest::scalatest:${Versions.scalaTest}",
-      mvn"org.scalacheck::scalacheck:${Versions.scalaCheck}",
-      mvn"org.scalatestplus::mockito-5-12:3.2.19.0",
-      mvn"dev.zio::zio-test:${Versions.zio}",
-      mvn"dev.zio::zio-test-sbt:${Versions.zio}",
-      mvn"dev.zio::zio-test-magnolia:${Versions.zio}"
+      // ZIO Core
+      mvn"dev.zio::zio:${Versions.zio}",
+      mvn"dev.zio::zio-json:${Versions.zioJson}",
+      // ZIO Schema for schema generation
+      mvn"dev.zio::zio-schema:${Versions.zioSchema}",
+      mvn"dev.zio::zio-schema-json:${Versions.zioSchema}",
+      mvn"dev.zio::zio-schema-derivation:${Versions.zioSchema}",
+      // Jackson 3 for macro/runtime conversion internals
+      mvn"tools.jackson.core:jackson-databind:${Versions.jackson3}",
+      // Tapir
+      mvn"com.softwaremill.sttp.tapir::tapir-core:${Versions.tapir}",
+      mvn"com.softwaremill.sttp.tapir::tapir-apispec-docs:${Versions.tapir}",
+      mvn"com.softwaremill.sttp.tapir::tapir-json-circe:${Versions.tapir}",
+      mvn"com.softwaremill.sttp.apispec::jsonschema-circe:${Versions.jsonSchemaCirce}",
+      // ZIO HTTP for stateless HTTP transport
+      mvn"dev.zio::zio-http:${Versions.zioHttp}",
+      // MCP SDK (Java library - split into core + jackson3 as the default runtime binding)
+      mvn"io.modelcontextprotocol.sdk:mcp-core:${Versions.mcpSdk}",
+      mvn"io.modelcontextprotocol.sdk:mcp-json-jackson3:${Versions.mcpSdk}"
     )
+
+    override def mainClass = Some("fastmcp.FastMCPMain")
+
+    object test extends ScalaTests with FastMCPTestModule {
+      override def mvnDeps = Seq(
+        mvn"org.scalatest::scalatest:${Versions.scalaTest}",
+        mvn"org.scalacheck::scalacheck:${Versions.scalaCheck}",
+        mvn"org.scalatestplus::mockito-5-12:3.2.19.0",
+        mvn"dev.zio::zio-test:${Versions.zio}",
+        mvn"dev.zio::zio-test-sbt:${Versions.zio}",
+        mvn"dev.zio::zio-test-magnolia:${Versions.zio}"
+      )
+    }
   }
 
   // Scala.js backend — TS MCP SDK facades running on Bun.
   // Prototype for the cross-platform JS target; also used for conformance testing.
-  object js extends BunScalaJSModule {
+  object js extends BunScalaJSModule with ScalafmtModule {
     def scalaVersion = scala3Version
 
     override def moduleKind = Task { ModuleKind.ESModule }
@@ -174,13 +207,13 @@ object `fast-mcp-scala` extends FastMCPModule {
 
     // bunJsEnv is what BunScalaJSTests uses for the Bun process env
     override def bunJsEnv = Task {
-      // Use the same JVM that Mill resolves for fast-mcp-scala (respects javaHome/jvmVersion)
-      val serverJavaHome = `fast-mcp-scala`.javaHome().fold(os.Path(sys.props("java.home")))(_.path)
+      // Use the same JVM that Mill resolves for fast-mcp-scala.jvm (respects javaHome/jvmVersion)
+      val serverJavaHome = jvm.javaHome().fold(os.Path(sys.props("java.home")))(_.path)
       val serverJavaCmd = (serverJavaHome / "bin" / "java").toString
       val serverClasspath =
-        `fast-mcp-scala`.runClasspath().map(_.path.toString).mkString(java.io.File.pathSeparator)
+        jvm.runClasspath().map(_.path.toString).mkString(java.io.File.pathSeparator)
       val serverJvmArgs =
-        ujson.write(`fast-mcp-scala`.forkArgs())
+        ujson.write(jvm.forkArgs())
 
       super.bunJsEnv() ++ Map(
         "FAST_MCP_PROJECT_ROOT" -> BuildCtx.workspaceRoot.toString,
@@ -191,11 +224,10 @@ object `fast-mcp-scala` extends FastMCPModule {
     }
 
     object test extends BunScalaJSTests with TestModule.ScalaTest {
-      override def sources = Task.Sources(moduleDir / "src")
       override def mvnDeps = Seq(
         mvn"org.scalatest::scalatest::${Versions.scalaTest}"
       )
     }
   }
 }
-// Run all tests: ./mill fast-mcp-scala.test + fast-mcp-scala.js.test.bunTest
+// Run all tests: ./mill fast-mcp-scala.jvm.test + fast-mcp-scala.js.test.bunTest
