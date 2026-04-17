@@ -1,4 +1,4 @@
-# FastMCP-Scala Architecture
+# fast-mcp-scala Architecture
 
 A short tour of how the library is put together. For a user-facing overview see the [README](../README.md); this document is for people who want to understand what happens between "I wrote a `@Tool`" and "an MCP client can call it."
 

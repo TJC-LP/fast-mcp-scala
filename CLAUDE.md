@@ -1,8 +1,8 @@
-# CLAUDE.md - FastMCP-Scala Development Guide
+# CLAUDE.md - fast-mcp-scala Development Guide
 
 ## Project Overview
 
-FastMCP-Scala is a high-level Scala 3 library for building Model Context Protocol (MCP) servers. It provides two registration paths:
+fast-mcp-scala is a high-level Scala 3 library for building Model Context Protocol (MCP) servers. It provides two registration paths:
 
 1. **Annotation-driven** (`@Tool`, `@Resource`, `@Prompt` + `scanAnnotations`) — zero-boilerplate on JVM and Scala.js/Bun
 2. **Typed contracts** (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) — explicit, cross-platform (JVM + Scala.js)
@@ -158,7 +158,7 @@ JVM module reads from `shared/src/ + jvm/src/`. JS module reads from `shared/src
 
 ### Java SDK Interop
 
-FastMCP-Scala wraps the Java MCP SDK 1.1.1 (`mcp-core` + `mcp-json-jackson3`). Interop is internal:
+fast-mcp-scala wraps the Java MCP SDK 1.1.1 (`mcp-core` + `mcp-json-jackson3`). Interop is internal:
 - `TypeConversions` — `private[fastmcp]` extension methods (`.toJava`)
 - `JvmMcpContext` — `private[fastmcp]`, extends `McpContext`
 - `JacksonConverter extends McpDecoder` — bridges JVM converters to shared codec layer
