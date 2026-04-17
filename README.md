@@ -275,10 +275,10 @@ All examples live under [`fast-mcp-scala/src/com/tjclp/fastmcp/examples/`](fast-
 | `ContextEchoServer.scala` | `McpContext` introspection inside a tool handler |
 | `HttpServer.scala` | HTTP transport (Streamable default, Stateless via a flag) with curl recipes |
 
-Run any of them via Mill:
+Run any of them via Mill (the examples are JVM-only, so use the `jvm` submodule):
 
 ```bash
-./mill fast-mcp-scala.runMain com.tjclp.fastmcp.examples.HelloWorld
+./mill fast-mcp-scala.jvm.runMain com.tjclp.fastmcp.examples.HelloWorld
 ```
 
 Or through `scala-cli` directly from the quickstart script:
@@ -322,13 +322,13 @@ For architectural detail, see [`docs/architecture.md`](docs/architecture.md).
 ### Build commands (Mill)
 
 ```bash
-./mill fast-mcp-scala.compile                                   # Compile
-./mill fast-mcp-scala.test                                      # JVM tests
-./mill fast-mcp-scala.js.test.bunTest                           # Scala.js conformance tests
-./mill fast-mcp-scala.test + fast-mcp-scala.js.test.bunTest     # Both
-./mill fast-mcp-scala.checkFormat                               # CI format check
-./mill fast-mcp-scala.reformat                                  # Auto-format
-./mill fast-mcp-scala.publishLocal                              # Publish to ~/.ivy2/local
+./mill fast-mcp-scala.compile                                   # Compile JVM + Scala.js
+./mill fast-mcp-scala.test                                      # All tests (JVM + Bun conformance)
+./mill fast-mcp-scala.checkFormat                               # Scalafmt check (all sources)
+./mill fast-mcp-scala.reformat                                  # Auto-format (all sources)
+./mill fast-mcp-scala.jvm.test                                  # JVM tests only
+./mill fast-mcp-scala.js.test.bunTest                           # Scala.js conformance tests only
+./mill fast-mcp-scala.jvm.publishLocal                          # Publish JVM artifact to ~/.ivy2/local
 ```
 
 ### Consuming a local build
@@ -351,6 +351,6 @@ Or point `scala-cli` at a built JAR directly:
 
 ```scala 3 ignore
 //> using scala 3.8.3
-//> using jar "/absolute/path/to/out/fast-mcp-scala/jar.dest/out.jar"
+//> using jar "/absolute/path/to/out/fast-mcp-scala/jvm/jar.dest/out.jar"
 //> using options "-Xcheck-macros" "-experimental"
 ```

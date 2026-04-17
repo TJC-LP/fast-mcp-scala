@@ -67,12 +67,12 @@ jobs:
           echo "version=$TAG_VERSION" >> $GITHUB_OUTPUT
 
       - name: Run Tests
-        run: ./mill -i fast-mcp-scala.test
+        run: ./mill -i fast-mcp-scala.jvm.test
 
       - name: Verify Publishing Setup
         run: |
           echo "Version: $PUBLISH_VERSION"
-          ./mill show fast-mcp-scala.publishVersion
+          ./mill show fast-mcp-scala.jvm.publishVersion
         env:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
 

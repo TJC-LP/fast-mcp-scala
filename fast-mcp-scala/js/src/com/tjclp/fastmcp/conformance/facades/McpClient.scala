@@ -19,6 +19,7 @@ trait StdioClientParams extends js.Object:
   val stderr: js.UndefOr[String]
 
 object StdioClientParams:
+
   def apply(
       command: String,
       args: js.Array[String],
@@ -36,6 +37,7 @@ trait ClientInfo extends js.Object:
   val version: String
 
 object ClientInfo:
+
   def apply(name: String, version: String): ClientInfo =
     js.Dynamic.literal(name = name, version = version).asInstanceOf[ClientInfo]
 
@@ -43,6 +45,7 @@ trait ClientOptions extends js.Object:
   val capabilities: js.UndefOr[js.Object]
 
 object ClientOptions:
+
   def apply(capabilities: js.Object = js.Dynamic.literal().asInstanceOf[js.Object]): ClientOptions =
     js.Dynamic.literal(capabilities = capabilities).asInstanceOf[ClientOptions]
 
@@ -101,6 +104,7 @@ trait CallToolParams extends js.Object:
   val arguments: js.UndefOr[js.Dictionary[js.Any]]
 
 object CallToolParams:
+
   def apply(name: String, arguments: js.Dictionary[js.Any]): CallToolParams =
     js.Dynamic.literal(name = name, arguments = arguments).asInstanceOf[CallToolParams]
 
@@ -141,6 +145,7 @@ trait ReadResourceParams extends js.Object:
   val uri: String
 
 object ReadResourceParams:
+
   def apply(uri: String): ReadResourceParams =
     js.Dynamic.literal(uri = uri).asInstanceOf[ReadResourceParams]
 
@@ -178,6 +183,7 @@ trait GetPromptParams extends js.Object:
   val arguments: js.UndefOr[js.Dictionary[String]]
 
 object GetPromptParams:
+
   def apply(name: String, arguments: js.Dictionary[String] = js.Dictionary.empty): GetPromptParams =
     js.Dynamic.literal(name = name, arguments = arguments).asInstanceOf[GetPromptParams]
 

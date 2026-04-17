@@ -15,7 +15,7 @@ import com.tjclp.fastmcp.server.*
   *     --main-class com.tjclp.fastmcp.examples.HelloWorld
   * }}}
   *
-  * Or via Mill: `./mill fast-mcp-scala.runMain com.tjclp.fastmcp.examples.HelloWorld`.
+  * Or via Mill: `./mill fast-mcp-scala.jvm.runMain com.tjclp.fastmcp.examples.HelloWorld`.
   */
 object HelloWorld extends ZIOAppDefault:
 

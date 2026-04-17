@@ -18,29 +18,19 @@ Both paths converge on the same `McpServer` trait and support `@Param` metadata 
 ### Common Commands
 
 ```bash
-# Compile
-./mill fast-mcp-scala.compile
+# Aggregates (run across JVM + Scala.js)
+./mill fast-mcp-scala.compile                       # Compile all platforms
+./mill fast-mcp-scala.test                          # All tests (JVM + Bun conformance)
+./mill fast-mcp-scala.reformat                      # Auto-format every Scala source
+./mill fast-mcp-scala.checkFormat                   # Scalafmt check (CI uses this)
 
-# Run all tests (JVM + Scala.js conformance)
-./mill fast-mcp-scala.test + fast-mcp-scala.js.test.bunTest
+# Single-platform
+./mill fast-mcp-scala.jvm.test                      # JVM tests only
+./mill fast-mcp-scala.js.test.bunTest               # Scala.js conformance tests only
+./mill fast-mcp-scala.jvm.test com.tjclp.fastmcp.macros.ToolProcessorTest
 
-# Run JVM tests only
-./mill fast-mcp-scala.test
-
-# Run Scala.js conformance tests only
-./mill fast-mcp-scala.js.test.bunTest
-
-# Run specific test class
-./mill fast-mcp-scala.test com.tjclp.fastmcp.macros.ToolProcessorTest
-
-# Format code
-./mill fast-mcp-scala.reformat
-
-# Check formatting (CI uses this)
-./mill fast-mcp-scala.checkFormat
-
-# Publish locally for testing
-./mill fast-mcp-scala.publishLocal
+# Publish
+./mill fast-mcp-scala.jvm.publishLocal              # Publish JVM artifact to ~/.ivy2/local
 ```
 
 ## Project Structure
@@ -62,27 +52,28 @@ fast-mcp-scala/
 │   │           ├── McpContext.scala     # Platform-independent context base
 │   │           ├── FastMcpServerSettings.scala
 │   │           └── manager/            # ToolManager, PromptManager, ResourceManager
-│   ├── src/                   # JVM-specific code
-│   │   └── com/tjclp/fastmcp/
-│   │       ├── core/Types.scala         # TypeConversions (toJava extensions, private[fastmcp])
-│   │       ├── macros/                  # Scala 3 macro implementations (JVM-only)
-│   │       │   ├── ToolProcessor.scala
-│   │       │   ├── ResourceProcessor.scala
-│   │       │   ├── PromptProcessor.scala
-│   │       │   ├── RegistrationMacro.scala  # scanAnnotations entry point
-│   │       │   ├── JsonSchemaMacro.scala
-│   │       │   ├── JacksonConverter.scala   # extends McpDecoder (bridges to shared)
-│   │       │   └── JacksonConversionContext.scala  # extends McpDecodeContext
-│   │       ├── server/
-│   │       │   ├── FastMcpServer.scala      # JVM implementation (extends McpServerPlatform)
-│   │       │   ├── McpContext.scala         # JvmMcpContext (private[fastmcp])
-│   │       │   ├── McpServerBuilders.scala  # McpServer companion (factory methods)
-│   │       │   └── transport/
-│   │       └── examples/
-│   ├── js/                    # Scala.js code (Bun runtime)
-│   │   ├── src/               # MCP TS SDK facades + McpTestClient
-│   │   └── test/src/          # Conformance tests + contract surface tests
-│   └── test/src/              # JVM test sources
+│   ├── jvm/
+│   │   ├── src/               # JVM-specific code
+│   │   │   └── com/tjclp/fastmcp/
+│   │   │       ├── core/Types.scala         # TypeConversions (toJava extensions, private[fastmcp])
+│   │   │       ├── macros/                  # Scala 3 macro implementations (JVM-only)
+│   │   │       │   ├── ToolProcessor.scala
+│   │   │       │   ├── ResourceProcessor.scala
+│   │   │       │   ├── PromptProcessor.scala
+│   │   │       │   ├── RegistrationMacro.scala  # scanAnnotations entry point
+│   │   │       │   ├── JsonSchemaMacro.scala
+│   │   │       │   ├── JacksonConverter.scala   # extends McpDecoder (bridges to shared)
+│   │   │       │   └── JacksonConversionContext.scala  # extends McpDecodeContext
+│   │   │       ├── server/
+│   │   │       │   ├── FastMcpServer.scala      # JVM implementation (extends McpServerPlatform)
+│   │   │       │   ├── McpContext.scala         # JvmMcpContext (private[fastmcp])
+│   │   │       │   ├── McpServerBuilders.scala  # McpServer companion (factory methods)
+│   │   │       │   └── transport/
+│   │   │       └── examples/
+│   │   └── test/src/          # JVM test sources
+│   └── js/                    # Scala.js code (Bun runtime)
+│       ├── src/               # MCP TS SDK facades + McpTestClient
+│       └── test/src/          # Conformance tests + contract surface tests
 ```
 
 ## Key Concepts
@@ -156,12 +147,12 @@ server.tool(addTool)
 
 ### Cross-Platform Architecture
 
-The codebase is split into `shared/`, `src/` (JVM), and `js/` (Scala.js):
+The codebase is split into three sibling trees under `fast-mcp-scala/`:
 - `shared/` — annotations, types, managers, `McpServerPlatform` trait, typed contracts
-- `src/` — Java SDK interop (`TypeConversions`, `JvmMcpContext`), macros, transports, examples
+- `jvm/` — Java SDK interop (`TypeConversions`, `JvmMcpContext`), macros, transports, examples
 - `js/` — Scala.js facades for `@modelcontextprotocol/sdk`, conformance tests
 
-JVM module reads from `shared/src/ + src/`. JS module reads from `shared/src/ + js/src/`.
+JVM module reads from `shared/src/ + jvm/src/`. JS module reads from `shared/src/ + js/src/`.
 
 ### Java SDK Interop
 
@@ -185,7 +176,7 @@ Uses Scalafmt with config in `.scalafmt.conf`. Always run `./mill fast-mcp-scala
 
 ## Testing
 
-JVM tests in `fast-mcp-scala/test/src/`. Scala.js tests in `fast-mcp-scala/js/test/src/`.
+JVM tests in `fast-mcp-scala/jvm/test/src/`. Scala.js tests in `fast-mcp-scala/js/test/src/`.
 
 Key test classes:
 - `ToolProcessorTest` - Integration tests for @Tool processing
@@ -205,14 +196,14 @@ Key test classes:
 ### Adding a New Feature
 
 1. Platform-independent code goes in `shared/src/`
-2. JVM-specific code stays in `src/`
-3. Add tests in `test/src/` (JVM) or `js/test/src/` (Scala.js)
-4. Run `./mill fast-mcp-scala.test + fast-mcp-scala.js.test.bunTest`
+2. JVM-specific code stays in `jvm/src/`
+3. Add tests in `jvm/test/src/` or `js/test/src/`
+4. Run `./mill fast-mcp-scala.test` (runs both JVM and JS aggregates)
 5. Run `./mill fast-mcp-scala.checkFormat` (or `reformat`)
 
 ### Modifying Macros
 
-Macros are in `fast-mcp-scala/src/com/tjclp/fastmcp/macros/`. After changes:
+Macros are in `fast-mcp-scala/jvm/src/com/tjclp/fastmcp/macros/`. After changes:
 ```bash
 rm -rf out/fast-mcp-scala && ./mill fast-mcp-scala.compile
 ```
@@ -220,10 +211,10 @@ rm -rf out/fast-mcp-scala && ./mill fast-mcp-scala.compile
 ### Testing Locally
 
 ```bash
-./mill fast-mcp-scala.publishLocal
+./mill fast-mcp-scala.jvm.publishLocal
 ```
 
-Then in your project use version `0.2.4-SNAPSHOT`.
+Then in your project use version `0.3.0-SNAPSHOT`.
 
 ## Dependencies
 
