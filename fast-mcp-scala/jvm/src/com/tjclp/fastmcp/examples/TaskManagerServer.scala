@@ -1,4 +1,5 @@
-package com.tjclp.fastmcp.examples
+package com.tjclp.fastmcp
+package examples
 
 import java.time.LocalDateTime
 import java.util.UUID
@@ -7,12 +8,10 @@ import scala.collection.mutable
 
 import sttp.tapir.*
 import sttp.tapir.generic.auto.*
-import zio.*
 
-import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.*
 import com.tjclp.fastmcp.macros.*
-import com.tjclp.fastmcp.macros.RegistrationMacro.*
-import com.tjclp.fastmcp.server.*
+import com.tjclp.fastmcp.macros.JacksonConverter.given
 
 /** Domain-shaped MCP server — a task tracker with nested case classes, Scala 3 enums, Java
   * `LocalDateTime`, and mutable in-memory state.
@@ -25,7 +24,7 @@ import com.tjclp.fastmcp.server.*
   *     so clients can call them without confirmation; `updateTask` advertises idempotency; all
   *     tools declare whether they touch an open world (none do — state is in-memory).
   */
-object TaskManagerServer extends ZIOAppDefault:
+object TaskManagerServer extends McpServerApp[Stdio, TaskManagerServer.type]:
 
   // Domain models
   case class Task(
@@ -237,10 +236,4 @@ object TaskManagerServer extends ZIOAppDefault:
       .sortBy(_.createdAt)
       .reverse
 
-  override def run =
-    for
-      _ <- Console.printLine("Starting Task Manager MCP Server...")
-      server <- ZIO.succeed(FastMcpServer("TaskManagerServer"))
-      _ <- ZIO.attempt(server.scanAnnotations[TaskManagerServer.type])
-      _ <- server.runStdio()
-    yield ()
+  override def name: String = "TaskManagerServer"

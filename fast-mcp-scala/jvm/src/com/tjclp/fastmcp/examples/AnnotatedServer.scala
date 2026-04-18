@@ -1,17 +1,12 @@
 package com.tjclp.fastmcp
 package examples
 
-import java.lang.System as JSystem
-
 import sttp.tapir.*
 import sttp.tapir.Schema.annotations.*
 import sttp.tapir.generic.auto.*
-import zio.*
 import zio.json.*
 
-import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.macros.RegistrationMacro.*
-import com.tjclp.fastmcp.server.*
+import com.tjclp.fastmcp.*
 
 /** Flagship annotation-driven server.
   *
@@ -30,7 +25,9 @@ import com.tjclp.fastmcp.server.*
   * Run with `./mill fast-mcp-scala.jvm.runMain com.tjclp.fastmcp.examples.AnnotatedServer` or
   * attach an MCP Inspector: `npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc`.
   */
-object AnnotatedServer extends ZIOAppDefault:
+object AnnotatedServer extends McpServerApp[Stdio, AnnotatedServer.type]:
+
+  override def name: String = "MacroAnnotatedServer"
 
   // JSON codec for the result
   given JsonEncoder[CalculatorResult] = DeriveJsonEncoder.gen[CalculatorResult]
@@ -200,16 +197,6 @@ object AnnotatedServer extends ZIOAppDefault:
         content = TextContent(s"Generate a warm greeting for $fullGreeting.")
       )
     )
-
-  override def run: ZIO[Any, Throwable, Unit] =
-    for
-      server <- ZIO.succeed(FastMcpServer(name = "MacroAnnotatedServer", version = "0.1.0"))
-      _ <- ZIO.attempt {
-        JSystem.err.println("[AnnotatedServer] Scanning for annotated tools...")
-        server.scanAnnotations[AnnotatedServer.type]
-      }
-      _ <- server.runStdio()
-    yield ()
 
   case class CalculatorResult(
       operation: String,
