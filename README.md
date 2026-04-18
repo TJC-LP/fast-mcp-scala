@@ -56,7 +56,7 @@ A single-file server with one tool — the same code lives in [`HelloWorld.scala
 //> using dep com.tjclp::fast-mcp-scala:0.3.0-rc3
 //> using options "-Xcheck-macros" "-experimental"
 
-import com.tjclp.fastmcp.*
+import com.tjclp.fastmcp.{*, given}
 
 object HelloWorld extends McpServerApp[Stdio, HelloWorld.type]:
 
@@ -302,7 +302,7 @@ Proof: the conformance suite at [`JsServerConformanceTest.scala`](fast-mcp-scala
 //> using scala 3.8.3
 //> using dep com.tjclp::fast-mcp-scala_sjs1:0.3.0-rc3
 
-import com.tjclp.fastmcp.*
+import com.tjclp.fastmcp.{*, given}
 
 object HelloBun extends McpServerApp[Stdio, HelloBun.type]:
   @Tool(name = Some("add"), description = Some("Add two numbers"), readOnlyHint = Some(true))
