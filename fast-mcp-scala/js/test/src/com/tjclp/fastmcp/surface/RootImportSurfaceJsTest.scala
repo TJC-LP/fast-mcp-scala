@@ -47,11 +47,11 @@ class RootImportSurfaceJsTest extends AnyFunSuite:
     assert(schema.toJsonString.contains("name"))
     assert(schema.toJsonString.contains("Person to greet"))
 
-    val typedTool = McpTool.derived[HelloArgs, HelloResult](
+    val typedTool = McpTool[HelloArgs, HelloResult](
       name = "typed-hello",
       description = Some("Typed greeting")
     ) { args =>
-      ZIO.succeed(HelloResult(s"Hello, ${args.name}!"))
+      HelloResult(s"Hello, ${args.name}!")
     }
     assert(typedTool.definition.inputSchema.toJsonString.contains("name"))
 

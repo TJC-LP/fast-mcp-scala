@@ -31,11 +31,11 @@ object HttpServerJs extends ZIOAppDefault:
     """{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"""
   )
 
-  private val greetTool = McpTool[GreetArgs, GreetResult](
+  private val greetTool = McpTool.withSchema[GreetArgs, GreetResult](
     name = "greet",
     description = Some("Say hello"),
     inputSchema = greetSchema
-  )(args => ZIO.succeed(GreetResult(s"Hello, ${args.name}!")))
+  )(args => GreetResult(s"Hello, ${args.name}!"))
 
   override def run: ZIO[Any, Throwable, Unit] =
     val server = McpServer(

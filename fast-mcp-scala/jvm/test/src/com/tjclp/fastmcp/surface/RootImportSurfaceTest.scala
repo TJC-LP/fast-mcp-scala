@@ -43,30 +43,28 @@ class RootImportSurfaceTest extends AnyFunSuite {
     val typed = ToolDefinition("typed-tool", None, schema)
     assert(typed.inputSchema.toJsonString.contains("object"))
 
-    val typedTool = McpTool.derived[HelloArgs, HelloResult](
+    val typedTool = McpTool[HelloArgs, HelloResult](
       name = "typed-hello",
       description = Some("Typed greeting")
     ) { args =>
-      ZIO.succeed(HelloResult(s"Hello, ${args.name}!"))
+      HelloResult(s"Hello, ${args.name}!")
     }
 
     val typedPrompt = McpPrompt[HelloArgs](
       name = "typed-prompt",
       arguments = List(PromptArgument("name", Some("The person to greet"), required = true))
     ) { args =>
-      ZIO.succeed(List(Message(Role.User, TextContent(s"Prompt for ${args.name}"))))
+      List(Message(Role.User, TextContent(s"Prompt for ${args.name}")))
     }
 
     val staticResource =
-      McpStaticResource("static://hello", description = Some("Greeting resource"))(
-        ZIO.succeed("hello")
-      )
+      McpStaticResource("static://hello", description = Some("Greeting resource"))("hello")
 
     val templateResource = McpTemplateResource[HelloArgs](
       uriPattern = "users://{name}",
       arguments = List(ResourceArgument("name", Some("The user name"), required = true))
     ) { args =>
-      ZIO.succeed(s"user:${args.name}")
+      s"user:${args.name}"
     }
 
     assert(typedTool.definition.name == "typed-hello")

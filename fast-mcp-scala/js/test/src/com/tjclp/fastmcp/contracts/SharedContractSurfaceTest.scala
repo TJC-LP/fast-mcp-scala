@@ -20,31 +20,29 @@ class SharedContractSurfaceTest extends AnyFunSuite:
       """{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}}}"""
     )
 
-    val tool = McpTool[AddArgs, AddResult](
+    val tool = McpTool.withSchema[AddArgs, AddResult](
       name = "typed-add",
       description = Some("Add two numbers"),
       inputSchema = schema
     ) { args =>
-      ZIO.succeed(AddResult((args.a + args.b).toString))
+      AddResult((args.a + args.b).toString)
     }
 
     val prompt = McpPrompt[GreetingArgs](
       name = "typed-prompt",
       arguments = List(PromptArgument("name", Some("The name"), required = true))
     ) { args =>
-      ZIO.succeed(List(Message(Role.User, TextContent(s"Hello ${args.name}!"))))
+      List(Message(Role.User, TextContent(s"Hello ${args.name}!")))
     }
 
     val staticResource =
-      McpStaticResource("static://welcome", description = Some("Welcome message"))(
-        ZIO.succeed("welcome")
-      )
+      McpStaticResource("static://welcome", description = Some("Welcome message"))("welcome")
 
     val templateResource = McpTemplateResource[UserProfileArgs](
       uriPattern = "users://{userId}/profile",
       arguments = List(ResourceArgument("userId", Some("The user id"), required = true))
     ) { args =>
-      ZIO.succeed(s"profile:${args.userId}")
+      s"profile:${args.userId}"
     }
 
     assert(tool.definition.name == "typed-add")

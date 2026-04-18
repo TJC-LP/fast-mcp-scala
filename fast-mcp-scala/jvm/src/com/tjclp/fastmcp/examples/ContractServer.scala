@@ -9,7 +9,7 @@ import com.tjclp.fastmcp.{*, given}
 /** Typed-contract server — the explicit, macro-free counterpart to [[AnnotatedServer]].
   *
   * Instead of reflecting methods at compile time, this style defines tools, prompts, and resources
-  * as first-class values using `McpTool.derived`, `McpPrompt`, `McpStaticResource`, and
+  * as first-class values using `McpTool`, `McpPrompt`, `McpStaticResource`, and
   * `McpTemplateResource`. The same values work unchanged on Scala.js — on the JVM they mount onto
   * the Java MCP SDK backend, and on Scala.js they mount onto the Bun-first TS SDK backend.
   *
@@ -18,7 +18,7 @@ import com.tjclp.fastmcp.{*, given}
   *   - **Testability**: contracts are plain values, easy to unit-test without standing up a server.
   *   - **Composability**: store them in a `List`, derive them from configuration, or mix across
   *     modules.
-  *   - **Cross-platform sharing**: put your `McpTool.derived[...]` definitions in a module that
+  *   - **Cross-platform sharing**: put your `McpTool[...]` definitions in a module that
   *     cross-compiles to Scala.js, and both runtimes can reuse the same schema and request types.
   *     See `fast-mcp-scala/js/test/.../SharedContractSurfaceTest.scala` for proof that these exact
   *     types compile under Scala.js, and `JsServerConformanceTest.scala` for end-to-end runtime
@@ -49,12 +49,13 @@ object ContractServer extends ZIOAppDefault:
   //     FastMCP-Scala will serialize the result as `TextContent` automatically.
   given JsonEncoder[AddResult] = DeriveJsonEncoder.gen[AddResult]
 
-  // 3️⃣  Contracts as values.
-  private val addTool = McpTool.derived[AddArgs, AddResult](
+  // 3️⃣  Contracts as values. Handlers return plain values, ZIO, Either[Throwable, _], or Try —
+  //     the `ToHandlerEffect` typeclass lifts whichever shape you pick.
+  private val addTool = McpTool[AddArgs, AddResult](
     name = "typed-add",
     description = Some("Add two numbers using a typed request/response contract")
   ) { args =>
-    ZIO.succeed(AddResult(args.a + args.b))
+    AddResult(args.a + args.b)
   }
 
   private val greetingPrompt = McpPrompt[GreetingArgs](
@@ -62,14 +63,14 @@ object ContractServer extends ZIOAppDefault:
     description = Some("Render a greeting prompt from a typed request"),
     arguments = List(PromptArgument("name", Some("The name to greet"), required = true))
   ) { args =>
-    ZIO.succeed(List(Message(Role.User, TextContent(s"Hello ${args.name}!"))))
+    List(Message(Role.User, TextContent(s"Hello ${args.name}!")))
   }
 
   private val welcomeResource = McpStaticResource(
     uri = "static://welcome",
     description = Some("A static welcome message")
   ) {
-    ZIO.succeed("Welcome to typed FastMCP-Scala")
+    "Welcome to typed fast-mcp-scala"
   }
 
   private val userProfileResource = McpTemplateResource[UserProfileArgs](
@@ -77,7 +78,7 @@ object ContractServer extends ZIOAppDefault:
     description = Some("A typed resource template"),
     arguments = List(ResourceArgument("userId", Some("The user id"), required = true))
   ) { args =>
-    ZIO.succeed(s"Profile for ${args.userId}")
+    s"Profile for ${args.userId}"
   }
 
   // 4️⃣  Mount them on a server — `server.tool(...)`, `server.prompt(...)`, `server.resource(...)`
