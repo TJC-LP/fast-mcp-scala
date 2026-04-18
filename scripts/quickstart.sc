@@ -2,7 +2,7 @@
 //> using dep com.tjclp::fast-mcp-scala:0.3.0-rc3
 //> using options "-Xcheck-macros" "-experimental"
 
-import com.tjclp.fastmcp.*
+import com.tjclp.fastmcp.{*, given}
 
 object Example extends McpServerApp[Stdio, Example.type]:
 
