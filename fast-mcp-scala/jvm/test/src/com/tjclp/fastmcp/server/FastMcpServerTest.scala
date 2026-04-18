@@ -16,7 +16,7 @@ class FastMcpServerTest extends AnyFunSuite with Matchers {
   }
 
   test("Server instantiation with custom settings") {
-    val settings = FastMcpServerSettings(
+    val settings = McpServerSettings(
       port = 8080,
       host = "localhost"
     )

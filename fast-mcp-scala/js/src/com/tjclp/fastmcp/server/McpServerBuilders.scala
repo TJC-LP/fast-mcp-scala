@@ -11,7 +11,7 @@ object McpServer:
   def apply(
       name: String = "FastMCPScala",
       version: String = "0.1.0",
-      settings: FastMcpServerSettings = FastMcpServerSettings()
+      settings: McpServerSettings = McpServerSettings()
   ): JsMcpServer =
     new JsMcpServer(name, version, settings)
 
@@ -19,7 +19,7 @@ object McpServer:
   def stdio(
       name: String = "FastMCPScala",
       version: String = "0.1.0",
-      settings: FastMcpServerSettings = FastMcpServerSettings()
+      settings: McpServerSettings = McpServerSettings()
   ): ZIO[Any, Throwable, Unit] =
     ZIO.succeed(apply(name, version, settings)).flatMap(_.runStdio())
 
@@ -31,6 +31,6 @@ object McpServer:
   def http(
       name: String = "FastMCPScala",
       version: String = "0.1.0",
-      settings: FastMcpServerSettings = FastMcpServerSettings()
+      settings: McpServerSettings = McpServerSettings()
   ): ZIO[Any, Throwable, Unit] =
     ZIO.succeed(apply(name, version, settings)).flatMap(_.runHttp())

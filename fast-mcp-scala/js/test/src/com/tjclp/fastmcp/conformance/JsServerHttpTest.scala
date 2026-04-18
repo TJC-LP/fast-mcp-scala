@@ -77,7 +77,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     val server = com.tjclp.fastmcp.server.McpServer(
       "JsHttpStatelessServer",
       "0.1.0",
-      FastMcpServerSettings(
+      McpServerSettings(
         host = "127.0.0.1",
         port = port,
         httpEndpoint = "/mcp",

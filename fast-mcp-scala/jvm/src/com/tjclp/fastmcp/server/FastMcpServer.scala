@@ -57,7 +57,7 @@ import com.tjclp.fastmcp.server.transport.ZioHttpStreamableTransportProvider
 class FastMcpServer(
     val name: String = "FastMCPScala",
     version: String = "0.1.0",
-    settings: FastMcpServerSettings = FastMcpServerSettings()
+    settings: McpServerSettings = McpServerSettings()
 ) extends com.tjclp.fastmcp.server.McpServerCore:
   val dependencies: List[String] = settings.dependencies
   protected val decodeContext: McpDecodeContext = JacksonConversionContext.default
@@ -1040,7 +1040,7 @@ object FastMcpServer:
   def http(
       name: String = "FastMCPScala",
       version: String = "0.1.0",
-      settings: FastMcpServerSettings = FastMcpServerSettings()
+      settings: McpServerSettings = McpServerSettings()
   ): ZIO[Any, Throwable, Unit] =
     McpServer.http(name, version, settings)
 
@@ -1049,7 +1049,7 @@ object FastMcpServer:
   def stdio(
       name: String = "FastMCPScala",
       version: String = "0.1.0",
-      settings: FastMcpServerSettings = FastMcpServerSettings()
+      settings: McpServerSettings = McpServerSettings()
   ): ZIO[Any, Throwable, Unit] =
     McpServer.stdio(name, version, settings)
 
@@ -1058,7 +1058,7 @@ object FastMcpServer:
   def apply(
       name: String = "FastMCPScala",
       version: String = "0.1.0",
-      settings: FastMcpServerSettings = FastMcpServerSettings()
+      settings: McpServerSettings = McpServerSettings()
   ): FastMcpServer =
     McpServer(name, version, settings)
 

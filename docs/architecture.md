@@ -50,7 +50,7 @@ fast-mcp-scala/
 │   └── server/
 │       ├── McpServer.scala               # trait implemented by FastMcpServer
 │       ├── McpContext.scala              # base class extended by JvmMcpContext
-│       ├── FastMcpServerSettings.scala
+│       ├── McpServerSettings.scala
 │       └── manager/                      # ToolManager, PromptManager, ResourceManager
 │
 ├── src/com/tjclp/fastmcp/               # JVM-specific

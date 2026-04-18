@@ -1,8 +1,9 @@
 package com.tjclp.fastmcp.server
 
-/** Settings for the FastMCPScala server
+/** Settings for an MCP server. HTTP-specific fields (`stateless`, `keepAliveInterval`,
+  * `disallowDelete`, `httpEndpoint`) are ignored under stdio transports.
   */
-case class FastMcpServerSettings(
+case class McpServerSettings(
     debug: Boolean = false,
     logLevel: String = "INFO",
     host: String = "0.0.0.0",
@@ -22,3 +23,10 @@ case class FastMcpServerSettings(
     keepAliveInterval: Option[java.time.Duration] = None,
     disallowDelete: Boolean = false
 )
+
+/** Deprecated alias for [[McpServerSettings]]. Kept for one release cycle to ease the rename. */
+@deprecated("Use McpServerSettings", since = "0.3.0-rc2")
+type FastMcpServerSettings = McpServerSettings
+
+@deprecated("Use McpServerSettings", since = "0.3.0-rc2")
+val FastMcpServerSettings = McpServerSettings

@@ -52,7 +52,7 @@ fast-mcp-scala/
 │   │       └── server/
 │   │           ├── McpServerCore.scala  # McpServerCore trait (abstract API)
 │   │           ├── McpContext.scala     # Platform-independent context base
-│   │           ├── FastMcpServerSettings.scala
+│   │           ├── McpServerSettings.scala
 │   │           └── manager/            # ToolManager, PromptManager, ResourceManager
 │   ├── jvm/
 │   │   ├── src/               # JVM-specific code

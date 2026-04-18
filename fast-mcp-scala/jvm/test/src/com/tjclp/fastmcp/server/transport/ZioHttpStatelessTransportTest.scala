@@ -41,7 +41,7 @@ class ZioHttpStatelessTransportTest extends AnyFlatSpec with Matchers {
     val server = FastMcpServer(
       name = "TestHTTP",
       version = "0.1.0",
-      settings = FastMcpServerSettings()
+      settings = McpServerSettings()
     )
     val _ = server.scanAnnotations[TestServer.type]
     val jsonMapper = McpJsonDefaults.getMapper()

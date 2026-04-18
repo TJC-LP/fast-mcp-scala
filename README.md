@@ -200,12 +200,12 @@ server.runStdio()
 val server = McpServer(
   "HttpServer",
   "0.1.0",
-  settings = FastMcpServerSettings(port = 8090)
+  settings = McpServerSettings(port = 8090)
 )
 server.runHttp()
 ```
 
-Toggle `stateless = true` on `FastMcpServerSettings` for request/response-only mode (no sessions, no SSE), useful behind load balancers.
+Toggle `stateless = true` on `McpServerSettings` for request/response-only mode (no sessions, no SSE), useful behind load balancers.
 
 | Setting | Default | Description |
 |---|---|---|

@@ -27,7 +27,7 @@ import com.tjclp.fastmcp.server.manager.*
 final class JsMcpServer(
     val name: String,
     val version: String,
-    val settings: FastMcpServerSettings = FastMcpServerSettings()
+    val settings: McpServerSettings = McpServerSettings()
 ) extends McpServerCore:
 
   override protected val decodeContext: McpDecodeContext = JsMcpDecodeContext.default

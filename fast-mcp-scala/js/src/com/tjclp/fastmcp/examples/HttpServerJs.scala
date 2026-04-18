@@ -9,7 +9,7 @@ import com.tjclp.fastmcp.server.*
 
 /** Scala.js Streamable-HTTP MCP server on Bun — mirror of the JVM [[HttpServer]].
   *
-  * `stateless = true` in `FastMcpServerSettings` flips the transport into JSON-response mode (no
+  * `stateless = true` in `McpServerSettings` flips the transport into JSON-response mode (no
   * SSE, fresh Server + transport per POST). Leaving it `false` (default) uses the full session-
   * based Streamable HTTP transport keyed by `mcp-session-id`.
   *
@@ -41,7 +41,7 @@ object HttpServerJs extends ZIOAppDefault:
     val server = McpServer(
       "HttpServerJs",
       "0.1.0",
-      FastMcpServerSettings(
+      McpServerSettings(
         host = "0.0.0.0",
         port = 8090,
         httpEndpoint = "/mcp",
