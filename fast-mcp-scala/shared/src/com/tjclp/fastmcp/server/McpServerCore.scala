@@ -56,26 +56,20 @@ trait McpServerCore:
 
   def tool[In, Out](
       contract: McpTool[In, Out]
-  )(using
-      decoder: McpDecoder[In],
-      encoder: McpEncoder[Out]
   ): ZIO[Any, Throwable, McpServerCore] =
     tool(contract, ToolRegistrationOptions())
 
   def tool[In, Out](
       contract: McpTool[In, Out],
       options: ToolRegistrationOptions
-  )(using
-      decoder: McpDecoder[In],
-      encoder: McpEncoder[Out]
   ): ZIO[Any, Throwable, McpServerCore] =
     tool(
       definition = contract.definition,
       handler = (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
         ZIO
-          .attempt(decoder.decode(contract.definition.name, args, decodeContext))
+          .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
           .flatMap(input => contract.handler(input, ctxOpt))
-          .map(encoder.encode),
+          .map(contract.encoder.encode),
       options = options
     )
 
@@ -112,8 +106,6 @@ trait McpServerCore:
 
   def resource[In](
       contract: McpTemplateResource[In]
-  )(using
-      decoder: McpDecoder[In]
   ): ZIO[Any, Throwable, McpServerCore] =
     resourceTemplate(contract)
 
@@ -146,14 +138,12 @@ trait McpServerCore:
 
   def resourceTemplate[In](
       contract: McpTemplateResource[In]
-  )(using
-      decoder: McpDecoder[In]
   ): ZIO[Any, Throwable, McpServerCore] =
     resourceTemplate(
       definition = contract.definition,
       handler = params =>
         ZIO
-          .attempt(decoder.decode(contract.definition.uri, params, decodeContext))
+          .attempt(contract.decoder.decode(contract.definition.uri, params, decodeContext))
           .flatMap(contract.handler)
     )
 
@@ -177,14 +167,12 @@ trait McpServerCore:
 
   def prompt[In](
       contract: McpPrompt[In]
-  )(using
-      decoder: McpDecoder[In]
   ): ZIO[Any, Throwable, McpServerCore] =
     prompt(
       definition = contract.definition,
       handler = args =>
         ZIO
-          .attempt(decoder.decode(contract.definition.name, args, decodeContext))
+          .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
           .flatMap(contract.handler)
     )
 

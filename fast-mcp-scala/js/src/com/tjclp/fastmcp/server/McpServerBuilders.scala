@@ -8,6 +8,13 @@ import zio.*
   */
 object McpServer:
 
+  /** JS-side given so the shared sugar trait can build an `McpServerCore` without linking
+    * against JS-specific types.
+    */
+  given McpServerCoreFactory with
+    def build(name: String, version: String, settings: McpServerSettings): McpServerCore =
+      new JsMcpServer(name, version, settings)
+
   def apply(
       name: String = "FastMCPScala",
       version: String = "0.1.0",

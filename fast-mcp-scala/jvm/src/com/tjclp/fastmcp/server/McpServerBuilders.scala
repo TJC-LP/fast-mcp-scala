@@ -21,6 +21,13 @@ import zio.*
   */
 object McpServer:
 
+  /** JVM-side given so the shared sugar trait can build an `McpServerCore` without linking
+    * against JVM-specific types.
+    */
+  given McpServerCoreFactory with
+    def build(name: String, version: String, settings: McpServerSettings): McpServerCore =
+      new FastMcpServer(name, version, settings)
+
   def apply(
       name: String = "FastMCPScala",
       version: String = "0.1.0",

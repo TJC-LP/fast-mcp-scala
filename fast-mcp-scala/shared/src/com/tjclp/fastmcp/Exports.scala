@@ -26,11 +26,25 @@ export core.{
   Role,
   TextContent,
   Tool,
+  ToHandlerEffect,
   ToolAnnotations,
   ToolDefinition,
   ToolExample,
   ToolInputSchema,
-  ToolSchemaProvider
+  ToolSchemaProvider,
+  AsResourceBody
 }
 export core.McpEncoder.given
-export server.{McpServerSettings, FastMcpServerSettings, McpContext, McpServerCore}
+export core.ToHandlerEffect.given
+export server.{
+  McpServerSettings,
+  FastMcpServerSettings,
+  McpContext,
+  McpServerCore,
+  McpServerApp,
+  McpServerCoreFactory,
+  Transport,
+  TransportRunner,
+  Stdio,
+  Http
+}

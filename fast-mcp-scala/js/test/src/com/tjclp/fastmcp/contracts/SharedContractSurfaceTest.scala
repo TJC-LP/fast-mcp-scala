@@ -4,7 +4,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import zio.*
 import zio.json.*
 
-import com.tjclp.fastmcp.*
+import com.tjclp.fastmcp.{given, *}
 
 class SharedContractSurfaceTest extends AnyFunSuite:
 
@@ -13,7 +13,10 @@ class SharedContractSurfaceTest extends AnyFunSuite:
   case class GreetingArgs(name: String)
   case class UserProfileArgs(userId: String)
 
+  given JsonDecoder[AddArgs] = DeriveJsonDecoder.gen[AddArgs]
   given JsonEncoder[AddResult] = DeriveJsonEncoder.gen[AddResult]
+  given JsonDecoder[GreetingArgs] = DeriveJsonDecoder.gen[GreetingArgs]
+  given JsonDecoder[UserProfileArgs] = DeriveJsonDecoder.gen[UserProfileArgs]
 
   test("shared typed contracts compile on Scala.js") {
     val schema = ToolInputSchema.unsafeFromJsonString(
