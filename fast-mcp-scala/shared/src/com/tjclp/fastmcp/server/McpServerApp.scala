@@ -24,8 +24,8 @@ import com.tjclp.fastmcp.macros.RegistrationMacro.*
   * @tparam T
   *   transport marker ([[Transport.Stdio]] or [[Transport.Http]])
   * @tparam Self
-  *   singleton type of the enclosing object; the annotation-scan macro targets this type so
-  *   `@Tool` / `@Prompt` / `@Resource` methods declared alongside get registered
+  *   singleton type of the enclosing object; the annotation-scan macro targets this type so `@Tool`
+  *   / `@Prompt` / `@Resource` methods declared alongside get registered
   */
 trait McpServerApp[T <: Transport, Self <: Singleton](using
     runner: TransportRunner[T],

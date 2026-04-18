@@ -7,8 +7,9 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.McpServerCore
 
 /** Cross-platform entry point for annotation scanning. Works against the shared `McpServerCore`
-  * trait so JVM and Scala.js share a single implementation — platform-specific code resolves through
-  * the usual given / implicit instances (`JacksonConverter` on JVM, `ZioJsonMcpDecoder` on JS).
+  * trait so JVM and Scala.js share a single implementation — platform-specific code resolves
+  * through the usual given / implicit instances (`JacksonConverter` on JVM, `ZioJsonMcpDecoder` on
+  * JS).
   */
 object RegistrationMacro:
 
@@ -21,8 +22,8 @@ object RegistrationMacro:
       ${ scanAnnotationsImpl[T]('server, warnOnEmpty = '{ true }) }
 
     /** Like [[scanAnnotations]] but does not warn when the target type has no annotations. Used by
-      * the sugar trait [[com.tjclp.fastmcp.server.McpServer]] which may be extended by contract-only
-      * servers that legitimately have no annotations on the object itself.
+      * the sugar trait [[com.tjclp.fastmcp.server.McpServer]] which may be extended by
+      * contract-only servers that legitimately have no annotations on the object itself.
       */
     inline def scanAnnotationsQuiet[T]: McpServerCore =
       ${ scanAnnotationsImpl[T]('server, warnOnEmpty = '{ false }) }

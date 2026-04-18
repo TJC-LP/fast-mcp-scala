@@ -9,9 +9,9 @@ import com.tjclp.fastmcp.server.*
 
 /** Scala.js Streamable-HTTP MCP server on Bun — mirror of the JVM [[HttpServer]].
   *
-  * `stateless = true` in `McpServerSettings` flips the transport into JSON-response mode (no
-  * SSE, fresh Server + transport per POST). Leaving it `false` (default) uses the full session-
-  * based Streamable HTTP transport keyed by `mcp-session-id`.
+  * `stateless = true` in `McpServerSettings` flips the transport into JSON-response mode (no SSE,
+  * fresh Server + transport per POST). Leaving it `false` (default) uses the full session- based
+  * Streamable HTTP transport keyed by `mcp-session-id`.
   *
   * Bundle and run:
   * {{{

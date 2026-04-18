@@ -165,19 +165,22 @@ trait AsResourceBody[-A]:
   def coerce(a: A): String | Array[Byte]
 
 object AsResourceBody:
+
   given AsResourceBody[String] with
     def coerce(a: String): String | Array[Byte] = a
+
   given AsResourceBody[Array[Byte]] with
     def coerce(a: Array[Byte]): String | Array[Byte] = a
+
   given AsResourceBody[String | Array[Byte]] with
     def coerce(a: String | Array[Byte]): String | Array[Byte] = a
 
 /** Typeclass that lifts an effect-shaped `F[A]` into `ZIO[Any, Throwable, A]`.
   *
-  * Used by the typed-contract factories so a handler lambda can return a `ZIO`,
-  * `Either[Throwable, _]`, or `Try` without the caller wrapping it. Pure-value handlers bypass
-  * this typeclass via a dedicated overload — they don't need an effect witness. Users wanting
-  * another effect system (e.g. `cats.effect.IO`) supply their own given.
+  * Used by the typed-contract factories so a handler lambda can return a `ZIO`, `Either[Throwable,
+  * _]`, or `Try` without the caller wrapping it. Pure-value handlers bypass this typeclass via a
+  * dedicated overload — they don't need an effect witness. Users wanting another effect system
+  * (e.g. `cats.effect.IO`) supply their own given.
   */
 trait ToHandlerEffect[F[_]]:
   def lift[A](fa: => F[A]): ZIO[Any, Throwable, A]
@@ -217,9 +220,9 @@ case class ResourceDefinition(
   * cross-platform module.
   *
   * Construct via the companion's `apply` / `contextual` factories — both accept any effect shape
-  * with a given [[ToHandlerEffect]] (plain value, ZIO, Either[Throwable, _], Try, or a user-supplied
-  * one). The input schema is derived automatically from a [[ToolSchemaProvider]] unless the caller
-  * passes `inputSchema = Some(...)` to override.
+  * with a given [[ToHandlerEffect]] (plain value, ZIO, Either[Throwable, _], Try, or a
+  * user-supplied one). The input schema is derived automatically from a [[ToolSchemaProvider]]
+  * unless the caller passes `inputSchema = Some(...)` to override.
   *
   * @tparam In
   *   the typed request argument (decoded from the JSON-RPC `arguments` object)
