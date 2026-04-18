@@ -5,7 +5,15 @@ All notable changes to fast-mcp-scala will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 0.3.0-rc2: McpServerApp sugar + unified macros
+## [Unreleased] - 0.3.0-rc3: McpServerApp sugar + unified macros
+
+### Fixed
+
+- **`McpServerApp[T, Self]` annotation scan.** The rc2 tag shipped with a silent bug: the inline `scanAnnotationsQuiet[Self]` call expanded with `Self` still abstract at the trait compile site, so every `@Tool` / `@Prompt` / `@Resource` method on a subclass was invisible to MCP clients. rc3 introduces a `SelfScan[Self]` typeclass whose `inline given` expands at the subclass's instantiation site — where `Self` is concrete — so the macro sees the real singleton and registrations fire. No subclass code changes required.
+
+### Deprecated
+
+- **`0.3.0-rc2` is broken.** The artifact exists on Maven Central but the `McpServerApp` sugar trait does not register annotated methods. Do not use it — skip straight to rc3.
 
 ### Added
 - **`McpServerApp[T, Self]` sugar trait** — declarative entry point for building MCP servers. Extend on a top-level object; transport is a phantom type parameter (`Stdio` / `Http`); no `override def run`, no `import zio.*`, no ZIO ceremony in user code. Eight-line Hello World.
@@ -37,7 +45,7 @@ object HelloWorld extends ZIOAppDefault:
       _      <- server.runStdio()
     yield ()
 
-// After (0.3.0-rc2)
+// After (0.3.0-rc3)
 object HelloWorld extends McpServerApp[Stdio, HelloWorld.type]:
   @Tool(name = Some("add"))
   def add(a: Int, b: Int): Int = a + b
