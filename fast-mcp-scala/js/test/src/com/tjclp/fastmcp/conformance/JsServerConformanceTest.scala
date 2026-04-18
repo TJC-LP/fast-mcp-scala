@@ -44,12 +44,12 @@ class JsServerConformanceTest extends AsyncFlatSpec with Matchers with BeforeAnd
   given JsonDecoder[UserArgs] = DeriveJsonDecoder.gen[UserArgs]
   given JsonDecoder[GreetArgs] = DeriveJsonDecoder.gen[GreetArgs]
 
-  private val addTool = McpTool.derived[AddArgs, AddResult](
+  private val addTool = McpTool[AddArgs, AddResult](
     name = "typed-add",
     description = Some("Add two ints")
-  )(args => ZIO.succeed(AddResult(args.a + args.b)))
+  )(args => AddResult(args.a + args.b))
 
-  private val brokenTool = McpTool.derived[AddArgs, AddResult](
+  private val brokenTool = McpTool[AddArgs, AddResult](
     name = "broken",
     description = Some("Always fails")
   )(_ => ZIO.fail(new RuntimeException("kaboom")))
@@ -57,20 +57,20 @@ class JsServerConformanceTest extends AsyncFlatSpec with Matchers with BeforeAnd
   private val welcomeResource = McpStaticResource(
     uri = "static://welcome",
     description = Some("Welcome")
-  )(ZIO.succeed("Welcome to JsMcpServer!"))
+  )("Welcome to JsMcpServer!")
 
   private val userResource = McpTemplateResource[UserArgs](
     uriPattern = "users://{userId}/profile",
     description = Some("User profile"),
     mimeType = Some("application/json"),
     arguments = List(ResourceArgument("userId", Some("user id"), required = true))
-  )(args => ZIO.succeed(s"""{"userId":"${args.userId}"}"""))
+  )(args => s"""{"userId":"${args.userId}"}""")
 
   private val greetingPrompt = McpPrompt[GreetArgs](
     name = "greeting",
     description = Some("Greet someone"),
     arguments = List(PromptArgument("name", Some("the name"), required = true))
-  )(args => ZIO.succeed(List(Message(Role.User, TextContent(s"Hello ${args.name}!")))))
+  )(args => List(Message(Role.User, TextContent(s"Hello ${args.name}!"))))
 
   // --- Fixtures ---
 

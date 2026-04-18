@@ -38,7 +38,7 @@ class ZioHttpStreamableTransportProviderTest extends AnyFlatSpec with Matchers {
     val server = FastMcpServer(
       name = "TestStreamable",
       version = "0.1.0",
-      settings = FastMcpServerSettings()
+      settings = McpServerSettings()
     )
     val _ = server.scanAnnotations[TestServer.type]
     val jsonMapper = McpJsonDefaults.getMapper()

@@ -32,11 +32,11 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     """{"type":"object","properties":{"msg":{"type":"string"}},"required":["msg"]}"""
   )
 
-  private val pingTool = McpTool[PingArgs, PingResult](
+  private val pingTool = McpTool.withSchema[PingArgs, PingResult](
     name = "ping",
     description = Some("echo"),
     inputSchema = pingSchema
-  )(args => ZIO.succeed(PingResult(args.msg)))
+  )(args => PingResult(args.msg))
 
   private val port = 38917
 
@@ -77,7 +77,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     val server = com.tjclp.fastmcp.server.McpServer(
       "JsHttpStatelessServer",
       "0.1.0",
-      FastMcpServerSettings(
+      McpServerSettings(
         host = "127.0.0.1",
         port = port,
         httpEndpoint = "/mcp",

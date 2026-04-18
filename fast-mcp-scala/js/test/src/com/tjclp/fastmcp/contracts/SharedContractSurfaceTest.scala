@@ -4,7 +4,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import zio.*
 import zio.json.*
 
-import com.tjclp.fastmcp.*
+import com.tjclp.fastmcp.{given, *}
 
 class SharedContractSurfaceTest extends AnyFunSuite:
 
@@ -13,38 +13,39 @@ class SharedContractSurfaceTest extends AnyFunSuite:
   case class GreetingArgs(name: String)
   case class UserProfileArgs(userId: String)
 
+  given JsonDecoder[AddArgs] = DeriveJsonDecoder.gen[AddArgs]
   given JsonEncoder[AddResult] = DeriveJsonEncoder.gen[AddResult]
+  given JsonDecoder[GreetingArgs] = DeriveJsonDecoder.gen[GreetingArgs]
+  given JsonDecoder[UserProfileArgs] = DeriveJsonDecoder.gen[UserProfileArgs]
 
   test("shared typed contracts compile on Scala.js") {
     val schema = ToolInputSchema.unsafeFromJsonString(
       """{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}}}"""
     )
 
-    val tool = McpTool[AddArgs, AddResult](
+    val tool = McpTool.withSchema[AddArgs, AddResult](
       name = "typed-add",
       description = Some("Add two numbers"),
       inputSchema = schema
     ) { args =>
-      ZIO.succeed(AddResult((args.a + args.b).toString))
+      AddResult((args.a + args.b).toString)
     }
 
     val prompt = McpPrompt[GreetingArgs](
       name = "typed-prompt",
       arguments = List(PromptArgument("name", Some("The name"), required = true))
     ) { args =>
-      ZIO.succeed(List(Message(Role.User, TextContent(s"Hello ${args.name}!"))))
+      List(Message(Role.User, TextContent(s"Hello ${args.name}!")))
     }
 
     val staticResource =
-      McpStaticResource("static://welcome", description = Some("Welcome message"))(
-        ZIO.succeed("welcome")
-      )
+      McpStaticResource("static://welcome", description = Some("Welcome message"))("welcome")
 
     val templateResource = McpTemplateResource[UserProfileArgs](
       uriPattern = "users://{userId}/profile",
       arguments = List(ResourceArgument("userId", Some("The user id"), required = true))
     ) { args =>
-      ZIO.succeed(s"profile:${args.userId}")
+      s"profile:${args.userId}"
     }
 
     assert(tool.definition.name == "typed-add")

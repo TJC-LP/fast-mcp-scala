@@ -2,12 +2,20 @@
 
 **Scala 3 for MCP: annotation-driven and typed-contract APIs on both JVM and Scala.js/Bun.**
 
-fast-mcp-scala is a developer-friendly library for building [Model Context Protocol](https://modelcontextprotocol.io/) servers. It gives you two complementary paths to the same server:
+fast-mcp-scala is a developer-friendly library for building [Model Context Protocol](https://modelcontextprotocol.io/) servers. Extend one trait, declare your tools, done:
 
-- `@Tool`/`@Resource`/`@Prompt` annotations + `scanAnnotations[T]` for a zero-boilerplate, macro-driven experience (JVM + Scala.js/Bun)
-- `McpTool.derived[...]`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource` for first-class, testable, cross-platform contract values (JVM + Scala.js)
+```scala 3 raw
+object HelloWorld extends McpServerApp[Stdio, HelloWorld.type]:
+  @Tool(name = Some("add"))
+  def add(@Param("a") a: Int, @Param("b") b: Int): Int = a + b
+```
 
-Built on **ZIO 2**, **Tapir**-derived schemas, **Jackson 3**, and the official **Java MCP SDK 1.1.1**. Runs under **stdio** or the full **Streamable HTTP** spec with a single flag.
+No `override def run`, no `import zio.*`, no ceremony. Two complementary registration paths converge on the same backend:
+
+- `@Tool` / `@Resource` / `@Prompt` annotations + `scanAnnotations[T]` for a zero-boilerplate, macro-driven experience (JVM + Scala.js/Bun)
+- `McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource` for first-class, testable, cross-platform contract values — handlers return plain values, `ZIO`, `Either[Throwable, _]`, or `Try` via the `ToHandlerEffect` typeclass
+
+Built on **ZIO 2**, **Tapir**-derived schemas, **Jackson 3** (JVM) / **zio-json** (JS), the official **Java MCP SDK 1.1.1**, and the official **TS MCP SDK 1.29.0**. Transport is a phantom type parameter — `McpServerApp[Stdio, Self.type]` or `McpServerApp[Http, Self.type]` — with compile-time runner dispatch.
 
 ## Contents
 
@@ -31,10 +39,10 @@ Built on **ZIO 2**, **Tapir**-derived schemas, **Jackson 3**, and the official *
 
 ```scala 3 ignore
 // JVM — Java SDK-backed runtime with annotations, derived schemas, HTTP + stdio transports.
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.3.0-rc1"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.3.0-rc2"
 
 // Scala.js — TS SDK-backed runtime on Bun/Node + the same annotation and typed-contract APIs.
-libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "0.3.0-rc1"
+libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "0.3.0-rc2"
 ```
 
 Built against Scala 3.8.3. JVM requires JDK 17+. Scala.js artifact is published for `sjs1_3` (Scala.js 1.x); runs on Bun (first-class) and Node 18+.
@@ -45,24 +53,18 @@ A single-file server with one tool — the same code lives in [`HelloWorld.scala
 
 ```scala 3 raw
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc1
+//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc2
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.*
-import zio.*
 
-object HelloWorld extends ZIOAppDefault:
+object HelloWorld extends McpServerApp[Stdio, HelloWorld.type]:
 
   @Tool(name = Some("add"), description = Some("Add two numbers"), readOnlyHint = Some(true))
   def add(@Param("First operand") a: Int, @Param("Second operand") b: Int): Int = a + b
-
-  override def run =
-    for
-      server <- ZIO.succeed(McpServer("HelloWorld", "0.1.0"))
-      _      <- ZIO.attempt(server.scanAnnotations[HelloWorld.type])
-      _      <- server.runStdio()
-    yield ()
 ```
+
+That's it — no `import zio.*`, no `override def run`, no `ZIO.succeed(...)`. The `McpServerApp[T, Self]` trait handles server construction, annotation scanning, and transport lifecycle. Transport is a phantom type parameter (`Stdio` / `Http`) that compile-time-selects the runner.
 
 Exercise it through the MCP Inspector:
 
@@ -72,7 +74,7 @@ npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc
 
 ## Choosing a registration path
 
-| | Annotations (`@Tool` + `scanAnnotations`) | Typed contracts (`McpTool.derived`) |
+| | Annotations (`@Tool` + `scanAnnotations`) | Typed contracts (`McpTool`) |
 |---|---|---|
 | Platform | JVM + Scala.js/Bun | JVM + Scala.js/Bun |
 | Style | Methods on an object, discovered by macro | First-class `val`s |
@@ -81,7 +83,22 @@ npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc
 | Composability | Whatever methods the object exposes | Collect into lists, generate from config |
 | Best for | Quick servers, prototypes, single-module apps | Libraries, cross-module sharing, production codebases |
 
-See [`AnnotatedServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts. Both can coexist on the same server.
+Both coexist on the same server — override `tools` / `prompts` / `staticResources` / `templateResources` on your `McpServerApp` to mount typed contracts alongside annotated methods:
+
+```scala 3 raw
+object MyServer extends McpServerApp[Stdio, MyServer.type]:
+  @Tool(name = Some("ping")) def ping(): String = "pong"
+
+  override val tools = List(
+    McpTool[AddArgs, AddResult](name = "add") { args =>
+      AddResult(args.a + args.b)            // plain value — auto-lifted
+    }
+  )
+```
+
+Handler lambdas return plain values, `ZIO`, `Either[Throwable, _]`, or `scala.util.Try` — the `ToHandlerEffect[F[_]]` typeclass picks the right lift. Bring your own given for other effect systems (`cats.effect.IO`, Monix, ...).
+
+See [`AnnotatedServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts.
 
 ## Tools and `@Param` metadata
 
@@ -184,28 +201,29 @@ Runnable demo: [`ContextEchoServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fast
 
 ## Transports
 
-Pick your transport at run time — the tool/resource/prompt surface is identical.
+Transport is a phantom type parameter on `McpServerApp[T, Self]` — `Stdio` or `Http`. The matching `TransportRunner[T]` given resolves at compile time, so there's no run-time transport plumbing in user code.
 
 ### stdio (for Claude Desktop, MCP Inspector)
 
 ```scala 3 raw
-server.runStdio()
+object MyServer extends McpServerApp[Stdio, MyServer.type]:
+  @Tool(...) def hello(name: String): String = s"Hello, $name!"
 ```
 
 ### HTTP (for remote clients, load balancers, test harnesses)
 
-`runHttp()` serves the full MCP Streamable HTTP spec: `POST /mcp` for JSON-RPC, the `mcp-session-id` header for session tracking, and SSE streams for long-running calls.
+Flip to `Http` and override `settings` to tune the listener. `runHttp()` serves the full MCP Streamable HTTP spec: `POST /mcp` for JSON-RPC, the `mcp-session-id` header for session tracking, and SSE streams for long-running calls.
 
 ```scala 3 raw
-val server = McpServer(
-  "HttpServer",
-  "0.1.0",
-  settings = FastMcpServerSettings(port = 8090)
-)
-server.runHttp()
+object MyHttpServer extends McpServerApp[Http, MyHttpServer.type]:
+  override def settings = McpServerSettings(port = 8090)
+
+  @Tool(...) def hello(name: String): String = s"Hello, $name!"
 ```
 
-Toggle `stateless = true` on `FastMcpServerSettings` for request/response-only mode (no sessions, no SSE), useful behind load balancers.
+Toggle `stateless = true` on `McpServerSettings` for request/response-only mode (no sessions, no SSE), useful behind load balancers.
+
+Need lower-level control? Skip the sugar trait and construct directly — `val server = McpServer("name", "0.1.0")` returns the platform-appropriate server, and you can call `.tool(...)` / `.runHttp()` yourself inside your own `ZIOAppDefault`.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -242,7 +260,9 @@ fast-mcp-scala is a single library with two real runtime backends — JVM and Sc
          shared/src/                (platform-neutral Scala 3)
   ┌──────────────────────────────────────────────────────────┐
   │  annotations  │  typed contracts  │  Tool/Prompt/Resource │
-  │  (@Tool, ...)│ (McpTool.derived)│  managers + McpContext │
+  │  (@Tool, ...)│ (McpTool, McpPrompt)│  managers + McpContext│
+  │  McpServerApp │  scanAnnotations  │  TransportRunner      │
+  │  (sugar trait)│  (shared macros)  │  ToHandlerEffect      │
   └──────────┬─────────────────────────────┬─────────────────┘
              │                             │
        jvm/src/ (FastMcpServer)      js/src/ (JsMcpServer)
@@ -250,7 +270,7 @@ fast-mcp-scala is a single library with two real runtime backends — JVM and Sc
        (mcp-core 1.1.1)              Scala.js facades, runs on Bun
 ```
 
-`McpServer("name", "0.1.0")` returns the platform-appropriate server on each target. Typed contracts (`McpTool.derived`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) compile and mount unchanged on both.
+`McpServerApp[T, Self]` is the declarative entry point on both targets; the concrete backend resolves via the `McpServerCoreFactory` given (`FastMcpServer` on JVM, `JsMcpServer` on JS). Typed contracts (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) compile and mount unchanged on both.
 
 **What the Scala.js backend gives you**:
 
@@ -262,9 +282,11 @@ fast-mcp-scala is a single library with two real runtime backends — JVM and Sc
 
 | Capability | JVM | Scala.js (Bun-first) |
 |---|---|---|
+| `McpServerApp[T, Self]` sugar trait | ✅ | ✅ |
 | `@Tool` / `@Resource` / `@Prompt` + `scanAnnotations[T]` | ✅ | ✅ |
-| Typed contracts (`McpTool.derived`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) | ✅ | ✅ |
+| Typed contracts (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) | ✅ | ✅ |
 | `ToolSchemaProvider[A]` auto-derivation from `@Param` | ✅ via Tapir | ✅ via Tapir |
+| `ToHandlerEffect[F]` — plain values / ZIO / Either / Try | ✅ | ✅ |
 | Stdio transport | ✅ (Java SDK) | ✅ (TS SDK) |
 | Streamable HTTP — stateful (sessions + SSE) | ✅ (ZIO HTTP) | ✅ (Bun.serve + Web-Standard transport) |
 | Streamable HTTP — stateless | ✅ | ✅ |
@@ -278,24 +300,16 @@ Proof: the conformance suite at [`JsServerConformanceTest.scala`](fast-mcp-scala
 
 ```scala 3 raw
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala_sjs1:0.3.0
+//> using dep com.tjclp::fast-mcp-scala_sjs1:0.3.0-rc2
 
 import com.tjclp.fastmcp.*
-import zio.*
 
-object HelloBun extends ZIOAppDefault:
+object HelloBun extends McpServerApp[Stdio, HelloBun.type]:
   @Tool(name = Some("add"), description = Some("Add two numbers"), readOnlyHint = Some(true))
   def add(@Param("First operand") a: Int, @Param("Second operand") b: Int): Int = a + b
-
-  override def run =
-    for
-      server <- ZIO.succeed(McpServer("HelloBun", "0.1.0"))
-      _ <- ZIO.attempt(server.scanAnnotations[HelloBun.type])
-      _ <- server.runStdio()
-    yield ()
 ```
 
-For typed contracts on Scala.js, `McpTool.derived[...]` now auto-generates the input schema as well; import `sttp.tapir.generic.auto.*` at the call site the same way you do on the JVM.
+Same shape as the JVM — the `McpServerApp` trait picks up the Scala.js `McpServerCoreFactory` given and builds a `JsMcpServer` under the hood. For typed contracts on Scala.js, `McpTool[...]` now auto-generates the input schema as well; import `sttp.tapir.generic.auto.*` at the call site the same way you do on the JVM.
 
 Link with `./mill fast-mcp-scala.js.fastLinkJS`, then `bun run out/fast-mcp-scala/js/fastLinkJS.dest/main.js`. See [`HelloWorldJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HelloWorldJs.scala) and [`HttpServerJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HttpServerJs.scala) for runnable references.
 
@@ -363,7 +377,7 @@ Add to `claude_desktop_config.json`:
       "command": "scala-cli",
       "args": [
         "-e",
-        "//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc1",
+        "//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc2",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]

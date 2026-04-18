@@ -50,9 +50,9 @@ fast-mcp-scala/
 │   │       │   └── Contracts.scala      # McpTool, McpPrompt, McpDecoder, McpEncoder
 │   │       ├── runtime/                 # RefResolver
 │   │       └── server/
-│   │           ├── McpServer.scala      # McpServerPlatform trait (abstract API)
+│   │           ├── McpServerCore.scala  # McpServerCore trait (abstract API)
 │   │           ├── McpContext.scala     # Platform-independent context base
-│   │           ├── FastMcpServerSettings.scala
+│   │           ├── McpServerSettings.scala
 │   │           └── manager/            # ToolManager, PromptManager, ResourceManager
 │   ├── jvm/
 │   │   ├── src/               # JVM-specific code
@@ -67,7 +67,7 @@ fast-mcp-scala/
 │   │   │       │   ├── JacksonConverter.scala   # extends McpDecoder (bridges to shared)
 │   │   │       │   └── JacksonConversionContext.scala  # extends McpDecodeContext
 │   │   │       ├── server/
-│   │   │       │   ├── FastMcpServer.scala      # JVM implementation (extends McpServerPlatform)
+│   │   │       │   ├── FastMcpServer.scala      # JVM implementation (extends McpServerCore)
 │   │   │       │   ├── McpContext.scala         # JvmMcpContext (private[fastmcp])
 │   │   │       │   ├── McpServerBuilders.scala  # McpServer companion (factory methods)
 │   │   │       │   └── transport/
@@ -150,7 +150,7 @@ server.tool(addTool)
 ### Cross-Platform Architecture
 
 The codebase is split into three sibling trees under `fast-mcp-scala/`:
-- `shared/` — annotations, types, managers, `McpServerPlatform` trait, typed contracts
+- `shared/` — annotations, types, managers, `McpServerCore` trait, typed contracts
 - `jvm/` — Java SDK interop (`TypeConversions`, `JvmMcpContext`), macros, transports, examples
 - `js/` — Bun-first Scala.js runtime (`JsMcpServer`), TS SDK facades, examples, tests
 

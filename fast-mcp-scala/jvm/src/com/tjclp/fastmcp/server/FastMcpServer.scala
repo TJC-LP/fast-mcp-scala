@@ -42,7 +42,7 @@ import com.tjclp.fastmcp.server.manager.ResourceConversions.*
 import com.tjclp.fastmcp.server.transport.ZioHttpStatelessTransport
 import com.tjclp.fastmcp.server.transport.ZioHttpStreamableTransportProvider
 
-/** JVM implementation of the shared `McpServer` trait — the thing you actually run.
+/** JVM implementation of the shared `McpServerCore` trait — the thing you actually run.
   *
   * `FastMcpServer` wraps the Java MCP SDK (`mcp-core` 1.1.1) and exposes the high-level API users
   * interact with: `.tool(...)`, `.prompt(...)`, `.resource(...)`, plus the annotation macro entry
@@ -57,8 +57,8 @@ import com.tjclp.fastmcp.server.transport.ZioHttpStreamableTransportProvider
 class FastMcpServer(
     val name: String = "FastMCPScala",
     version: String = "0.1.0",
-    settings: FastMcpServerSettings = FastMcpServerSettings()
-) extends com.tjclp.fastmcp.server.McpServer:
+    settings: McpServerSettings = McpServerSettings()
+) extends com.tjclp.fastmcp.server.McpServerCore:
   val dependencies: List[String] = settings.dependencies
   protected val decodeContext: McpDecodeContext = JacksonConversionContext.default
   // Initialize managers
@@ -1040,7 +1040,7 @@ object FastMcpServer:
   def http(
       name: String = "FastMCPScala",
       version: String = "0.1.0",
-      settings: FastMcpServerSettings = FastMcpServerSettings()
+      settings: McpServerSettings = McpServerSettings()
   ): ZIO[Any, Throwable, Unit] =
     McpServer.http(name, version, settings)
 
@@ -1049,7 +1049,7 @@ object FastMcpServer:
   def stdio(
       name: String = "FastMCPScala",
       version: String = "0.1.0",
-      settings: FastMcpServerSettings = FastMcpServerSettings()
+      settings: McpServerSettings = McpServerSettings()
   ): ZIO[Any, Throwable, Unit] =
     McpServer.stdio(name, version, settings)
 
@@ -1058,7 +1058,7 @@ object FastMcpServer:
   def apply(
       name: String = "FastMCPScala",
       version: String = "0.1.0",
-      settings: FastMcpServerSettings = FastMcpServerSettings()
+      settings: McpServerSettings = McpServerSettings()
   ): FastMcpServer =
     McpServer(name, version, settings)
 

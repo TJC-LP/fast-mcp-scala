@@ -6,4 +6,5 @@ export codec.JsMcpDecoders.given
 export macros.RegistrationMacro.*
 export server.JsMcpContext
 export server.JsMcpContext.{getClientCapabilities, getClientInfo, getSessionId}
-export server.JsMcpServer
+export server.{JsMcpServer, McpServer}
+export server.McpServer.given

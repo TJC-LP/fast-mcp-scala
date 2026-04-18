@@ -34,7 +34,7 @@ import com.tjclp.fastmcp.server.*
   *   curl -X DELETE http://localhost:8090/mcp -H "mcp-session-id: <id>"
   * }}}
   *
-  * Flip `stateless = true` on `FastMcpServerSettings` to disable session tracking and SSE — useful
+  * Flip `stateless = true` on `McpServerSettings` to disable session tracking and SSE — useful
   * for request/response-style deployments behind a load balancer.
   */
 object HttpServer extends ZIOAppDefault:
@@ -75,7 +75,7 @@ object HttpServer extends ZIOAppDefault:
     val server = FastMcpServer(
       name = "HttpServer",
       version = "0.1.0",
-      settings = FastMcpServerSettings(port = 8090)
+      settings = McpServerSettings(port = 8090)
     )
     for
       _ <- ZIO.attempt(server.scanAnnotations[HttpServer.type])

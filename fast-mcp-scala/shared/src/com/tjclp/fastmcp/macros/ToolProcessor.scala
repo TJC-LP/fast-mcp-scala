@@ -9,29 +9,28 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.manager.*
 
-/** Refactored implementation that relies on [[AnnotationProcessorBase]] for the repetitive work so
-  * this file only has to deal with Tool‑specific details (context injection & JSON‑schema tweaks).
+/** Cross-platform `@Tool` annotation processor. Emits a registration expression targeting the
+  * shared [[McpServerCore]] trait — platform-specific codec / schema details are resolved through
+  * given instances (`JacksonConverter` on JVM, `ZioJsonMcpDecoder` on JS, both satisfying
+  * [[com.tjclp.fastmcp.core.McpDecoder]]).
   */
 private[macros] object ToolProcessor extends AnnotationProcessorBase:
 
   def processToolAnnotation(using Quotes)(
-      server: Expr[FastMcpServer],
+      server: Expr[McpServerCore],
       ownerSym: quotes.reflect.Symbol,
       methodSym: quotes.reflect.Symbol
-  ): Expr[FastMcpServer] =
+  ): Expr[McpServerCore] =
     import quotes.reflect.*
 
     val methodName = methodSym.name
 
-    // 1️⃣  Locate the @Tool annotation ---------------------------------------------------------
     val toolAnnot = findAnnotation[Tool](methodSym).getOrElse {
       report.errorAndAbort(s"No @Tool annotation found on method '$methodName'")
     }
 
-    // 2️⃣  Extract name / description (with Scaladoc fallback) --------------------------------
     val (finalName, finalDesc) = nameAndDescription(toolAnnot, methodSym)
 
-    // 2.5  Extract MCP Tool Annotations (behavioral hints) ------------------------------------
     val (
       hintTitle,
       hintReadOnly,
@@ -52,7 +51,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
     ).exists(_.isDefined)
 
     val annotationsExpr: Expr[Option[com.tjclp.fastmcp.core.ToolAnnotations]] =
-      if (!hasAnyAnnotation) '{ None }
+      if !hasAnyAnnotation then '{ None }
       else
         '{
           Some(
@@ -67,15 +66,12 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
           )
         }
 
-    // 3️⃣  Stable method reference -------------------------------------------------------------
     val methodRefExpr = methodRef(ownerSym, methodSym)
 
-    // 4️⃣  Detect an optional ctx: McpContext parameter ----------------------------------------
     val ctxParamPresent = methodSym.paramSymss.headOption.exists(_.exists { p =>
       p.name == "ctx" && p.info <:< TypeRepr.of[McpContext]
     })
 
-    // 5️⃣  Build the contextual handler -------------------------------------------------------
     val handler: Expr[ContextualToolHandler] = '{
       (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
         ZIO.attempt {
@@ -89,7 +85,6 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
         }
     }
 
-    // 6️⃣  Auto‑generate JSON schema & inject @Param descriptions --------------------------
     val rawSchema: Expr[io.circe.Json] = '{
       JsonSchemaMacro.schemaForFunctionArgs(
         $methodRefExpr,
@@ -97,13 +92,8 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       )
     }
 
-    // Collect all @Param/@Param metadata (description, examples, required, schema)
-    // Also validate that required=false is only used with Option types or default values
     val params = methodSym.paramSymss.headOption.getOrElse(Nil)
 
-    // Find which parameters have default values
-    // For objects (modules), default methods are on the object itself
-    // For classes, they're on the companion module
     val defaultMethodOwner =
       if ownerSym.flags.is(Flags.Module) then ownerSym
       else ownerSym.companionModule
@@ -122,28 +112,24 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
           .map { annotTerm =>
             val (desc, examples, required, schema) = MacroUtils.parseToolParam(Some(annotTerm))
 
-            // Validate: required=false must have Option type or default value
-            if (!required) {
+            if !required then
               val isOptionType = pSym.info <:< TypeRepr.of[Option[?]]
               val hasDefault = paramsWithDefaults.contains(pSym.name)
 
-              if (!isOptionType && !hasDefault) {
+              if !isOptionType && !hasDefault then
                 report.errorAndAbort(
                   s"Parameter '${pSym.name}' in method '$methodName' is marked as required=false " +
                     s"but is not an Option type and has no default value. " +
                     s"Use Option[${pSym.info.show}] or provide a default value."
                 )
-              }
-            }
 
             pSym.name -> ParamMetadata(desc, examples, required, schema)
           }
       }
 
-    // Convert compile-time metadata to runtime expression
-    val schemaWithMetadata: Expr[io.circe.Json] = {
+    val schemaWithMetadata: Expr[io.circe.Json] =
       if paramMetadata.isEmpty then rawSchema
-      else {
+      else
         val metadataEntries: List[Expr[(String, ParamMetadata)]] = paramMetadata.map {
           case (name, meta) =>
             val examplesExprs = meta.examples.map(Expr(_))
@@ -163,12 +149,8 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
           Map(${ Varargs(metadataEntries) }*)
         }
         '{ MacroUtils.injectParamMetadata($rawSchema, $metadataMapExpr) }
-      }
-    }
 
-    // 7️⃣  Compose registration effect --------------------------------------------------------
-    val registration: Expr[ZIO[Any, Throwable, FastMcpServer]] = '{
-      java.lang.System.err.println("[ToolProcessor] registering tool: " + ${ Expr(finalName) })
+    val registration: Expr[ZIO[Any, Throwable, McpServerCore]] = '{
       $server.tool(
         name = ${ Expr(finalName) },
         description = ${ Expr(finalDesc) },
@@ -178,7 +160,6 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       )
     }
 
-    // 8️⃣  Run effect & return server ---------------------------------------------------------
     runAndReturnServer(server)(registration)
 
   private def optionStringExpr(using Quotes)(opt: Option[String]): Expr[Option[String]] =

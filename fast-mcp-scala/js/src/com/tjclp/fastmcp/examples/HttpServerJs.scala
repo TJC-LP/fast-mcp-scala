@@ -9,9 +9,9 @@ import com.tjclp.fastmcp.server.*
 
 /** Scala.js Streamable-HTTP MCP server on Bun — mirror of the JVM [[HttpServer]].
   *
-  * `stateless = true` in `FastMcpServerSettings` flips the transport into JSON-response mode (no
-  * SSE, fresh Server + transport per POST). Leaving it `false` (default) uses the full session-
-  * based Streamable HTTP transport keyed by `mcp-session-id`.
+  * `stateless = true` in `McpServerSettings` flips the transport into JSON-response mode (no SSE,
+  * fresh Server + transport per POST). Leaving it `false` (default) uses the full session- based
+  * Streamable HTTP transport keyed by `mcp-session-id`.
   *
   * Bundle and run:
   * {{{
@@ -31,17 +31,17 @@ object HttpServerJs extends ZIOAppDefault:
     """{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"""
   )
 
-  private val greetTool = McpTool[GreetArgs, GreetResult](
+  private val greetTool = McpTool.withSchema[GreetArgs, GreetResult](
     name = "greet",
     description = Some("Say hello"),
     inputSchema = greetSchema
-  )(args => ZIO.succeed(GreetResult(s"Hello, ${args.name}!")))
+  )(args => GreetResult(s"Hello, ${args.name}!"))
 
   override def run: ZIO[Any, Throwable, Unit] =
     val server = McpServer(
       "HttpServerJs",
       "0.1.0",
-      FastMcpServerSettings(
+      McpServerSettings(
         host = "0.0.0.0",
         port = 8090,
         httpEndpoint = "/mcp",

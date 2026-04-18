@@ -144,7 +144,7 @@ object McpCodec:
   *
   * The JVM supplies a given instance via macro (`JsonSchemaMacro.schemaForCaseClass`) for any case
   * class that Tapir's `Schema` derivation can handle, honoring `@Param` metadata on fields.
-  * `McpTool.derived` picks it up implicitly.
+  * `McpTool.apply` picks it up implicitly.
   */
 trait ToolSchemaProvider[A]:
   def inputSchema: ToolInputSchema
@@ -155,6 +155,46 @@ object ToolSchemaProvider:
   def instance[A](schema: ToolInputSchema): ToolSchemaProvider[A] =
     new ToolSchemaProvider[A]:
       val inputSchema: ToolInputSchema = schema
+
+/** Witness that a handler result type coerces into `String | Array[Byte]` — the MCP resource body
+  * shape. Users rarely see this: built-in givens cover `String` and `Array[Byte]`. Useful for the
+  * resource factories to accept a pure `String`-returning lambda without forcing a union-type
+  * annotation.
+  */
+trait AsResourceBody[-A]:
+  def coerce(a: A): String | Array[Byte]
+
+object AsResourceBody:
+
+  given AsResourceBody[String] with
+    def coerce(a: String): String | Array[Byte] = a
+
+  given AsResourceBody[Array[Byte]] with
+    def coerce(a: Array[Byte]): String | Array[Byte] = a
+
+  given AsResourceBody[String | Array[Byte]] with
+    def coerce(a: String | Array[Byte]): String | Array[Byte] = a
+
+/** Typeclass that lifts an effect-shaped `F[A]` into `ZIO[Any, Throwable, A]`.
+  *
+  * Used by the typed-contract factories so a handler lambda can return a `ZIO`, `Either[Throwable,
+  * _]`, or `Try` without the caller wrapping it. Pure-value handlers bypass this typeclass via a
+  * dedicated overload — they don't need an effect witness. Users wanting another effect system
+  * (e.g. `cats.effect.IO`) supply their own given.
+  */
+trait ToHandlerEffect[F[_]]:
+  def lift[A](fa: => F[A]): ZIO[Any, Throwable, A]
+
+object ToHandlerEffect:
+
+  given [E <: Throwable]: ToHandlerEffect[[A] =>> ZIO[Any, E, A]] with
+    def lift[A](fa: => ZIO[Any, E, A]): ZIO[Any, Throwable, A] = fa
+
+  given ToHandlerEffect[[A] =>> Either[Throwable, A]] with
+    def lift[A](fa: => Either[Throwable, A]): ZIO[Any, Throwable, A] = ZIO.fromEither(fa)
+
+  given ToHandlerEffect[scala.util.Try] with
+    def lift[A](fa: => scala.util.Try[A]): ZIO[Any, Throwable, A] = ZIO.fromTry(fa)
 
 /** Public resource template argument metadata. */
 case class ResourceArgument(
@@ -176,12 +216,13 @@ case class ResourceDefinition(
 /** Shared typed contract for an MCP tool.
   *
   * A first-class, macro-free value pairing an MCP `ToolDefinition` (name, schema, annotations) with
-  * a typed `ZIO` handler. Prefer the `McpTool.derived` factory when the input is a case class — it
-  * pulls the `ToolInputSchema` from the implicit `ToolSchemaProvider` so you never hand-write JSON
-  * schemas.
+  * a typed handler. Compiles on JVM and Scala.js so definitions can be shared across a
+  * cross-platform module.
   *
-  * Compiles under Scala.js, so definitions can be shared with a cross-platform module. The server
-  * runtime itself is JVM-only.
+  * Construct via the companion's `apply` / `contextual` factories — both accept any effect shape
+  * with a given [[ToHandlerEffect]] (plain value, ZIO, Either[Throwable, _], Try, or a
+  * user-supplied one). The input schema is derived automatically from a [[ToolSchemaProvider]]
+  * unless the caller passes `inputSchema = Some(...)` to override.
   *
   * @tparam In
   *   the typed request argument (decoded from the JSON-RPC `arguments` object)
@@ -190,99 +231,111 @@ case class ResourceDefinition(
   */
 final case class McpTool[In, Out] private (
     definition: ToolDefinition,
-    handler: (In, Option[McpContext]) => ZIO[Any, Throwable, Out]
+    handler: (In, Option[McpContext]) => ZIO[Any, Throwable, Out],
+    private[fastmcp] val decoder: McpDecoder[In],
+    private[fastmcp] val encoder: McpEncoder[Out]
 )
 
 object McpTool:
 
-  def withDefinition[In, Out](
+  /** Builder produced by [[apply]] — holds the `ToolDefinition` and captures `In`/`Out` so the
+    * handler call site can infer the effect type `F` from the lambda's return.
+    */
+  final class Builder[In, Out] private[McpTool] (
       definition: ToolDefinition
-  )(handler: In => ZIO[Any, Throwable, Out]): McpTool[In, Out] =
-    contextualWithDefinition(definition)((input, _) => handler(input))
+  )(using decoder: McpDecoder[In], encoder: McpEncoder[Out]):
 
-  def contextualWithDefinition[In, Out](
-      definition: ToolDefinition
-  )(handler: (In, Option[McpContext]) => ZIO[Any, Throwable, Out]): McpTool[In, Out] =
-    new McpTool(definition, handler)
+    /** Attach a pure handler `In => Out`. */
+    def apply(handler: In => Out): McpTool[In, Out] =
+      new McpTool(definition, (in, _) => ZIO.attempt(handler(in)), decoder, encoder)
 
+    /** Attach an effectful handler `In => F[Out]` for any `F` with a given [[ToHandlerEffect]]. */
+    def apply[F[_]](handler: In => F[Out])(using effect: ToHandlerEffect[F]): McpTool[In, Out] =
+      new McpTool(definition, (in, _) => effect.lift(handler(in)), decoder, encoder)
+
+    /** Attach a pure contextual handler that sees the optional [[McpContext]]. */
+    def contextual(handler: (In, Option[McpContext]) => Out): McpTool[In, Out] =
+      new McpTool(definition, (in, ctx) => ZIO.attempt(handler(in, ctx)), decoder, encoder)
+
+    /** Attach an effectful contextual handler. */
+    def contextual[F[_]](
+        handler: (In, Option[McpContext]) => F[Out]
+    )(using effect: ToHandlerEffect[F]): McpTool[In, Out] =
+      new McpTool(definition, (in, ctx) => effect.lift(handler(in, ctx)), decoder, encoder)
+
+  /** Primary factory. Returns a [[Builder]]; apply it with your handler lambda:
+    *
+    * {{{
+    *   McpTool[AddArgs, Int](name = "add") { args =>
+    *     args.a + args.b       // plain value
+    *   }
+    *
+    *   McpTool[AddArgs, Int](name = "add") { args =>
+    *     ZIO.succeed(args.a + args.b)   // ZIO
+    *   }
+    * }}}
+    *
+    * The input schema is derived from a summoned [[ToolSchemaProvider]]. Use the [[withSchema]]
+    * sibling to supply a hand-written `ToolInputSchema` instead.
+    */
   def apply[In, Out](
       name: String,
       description: Option[String] = None,
-      inputSchema: ToolInputSchema = ToolInputSchema.default,
       annotations: Option[ToolAnnotations] = None
-  )(handler: In => ZIO[Any, Throwable, Out]): McpTool[In, Out] =
-    withDefinition(
+  )(using
+      schemaProvider: ToolSchemaProvider[In],
+      decoder: McpDecoder[In],
+      encoder: McpEncoder[Out]
+  ): Builder[In, Out] =
+    new Builder(
       ToolDefinition(
         name = name,
         description = description,
-        inputSchema = inputSchema,
+        inputSchema = schemaProvider.inputSchema,
         annotations = annotations
       )
-    )(handler)
+    )
 
-  def contextual[In, Out](
+  /** Factory that skips the `ToolSchemaProvider` summoning and uses a hand-written JSON schema. */
+  def withSchema[In, Out](
       name: String,
+      inputSchema: ToolInputSchema,
       description: Option[String] = None,
-      inputSchema: ToolInputSchema = ToolInputSchema.default,
       annotations: Option[ToolAnnotations] = None
-  )(handler: (In, Option[McpContext]) => ZIO[Any, Throwable, Out]): McpTool[In, Out] =
-    contextualWithDefinition(
+  )(using decoder: McpDecoder[In], encoder: McpEncoder[Out]): Builder[In, Out] =
+    new Builder(
       ToolDefinition(
         name = name,
         description = description,
         inputSchema = inputSchema,
         annotations = annotations
       )
-    )(handler)
+    )
 
-  /** Build an `McpTool` with the input schema derived automatically from a `ToolSchemaProvider[In]`
-    * (the JVM summons one via macro for any Tapir-derivable case class, honoring `@Param` metadata
-    * on fields).
-    *
-    * @param name
-    *   tool name exposed to the MCP client
-    * @param description
-    *   optional human-readable description
-    * @param annotations
-    *   optional MCP Tool Annotations (hints like `readOnlyHint`, `destructiveHint`)
-    * @param handler
-    *   effectful function producing the typed `Out` from an `In`
-    * @tparam In
-    *   typed request shape — must have an implicit `ToolSchemaProvider[In]`
-    * @tparam Out
-    *   typed result shape — must have an implicit `McpEncoder[Out]` at mount time
+  /** Internal constructor used by the annotation macros — skips schema provider summoning since the
+    * macro builds the schema directly from the method signature.
     */
-  def derived[In, Out](
-      name: String,
-      description: Option[String] = None,
-      annotations: Option[ToolAnnotations] = None
-  )(handler: In => ZIO[Any, Throwable, Out])(using
-      schemaProvider: ToolSchemaProvider[In]
-  ): McpTool[In, Out] =
-    apply(name, description, schemaProvider.inputSchema, annotations)(handler)
-
-  def derivedContextual[In, Out](
-      name: String,
-      description: Option[String] = None,
-      annotations: Option[ToolAnnotations] = None
+  private[fastmcp] def unsafeFromDefinition[In, Out](
+      definition: ToolDefinition
   )(handler: (In, Option[McpContext]) => ZIO[Any, Throwable, Out])(using
-      schemaProvider: ToolSchemaProvider[In]
+      decoder: McpDecoder[In],
+      encoder: McpEncoder[Out]
   ): McpTool[In, Out] =
-    contextual(name, description, schemaProvider.inputSchema, annotations)(handler)
+    new McpTool(definition, handler, decoder, encoder)
 
 /** Shared typed contract for an MCP prompt.
   *
   * Pairs a `PromptDefinition` with a handler that turns the typed argument into the list of
-  * `Message`s the prompt should emit. Unlike `McpTool`, prompts do not carry a `ToolInputSchema` —
-  * MCP prompts use a simple `arguments` list (name + description + required) that you supply
-  * explicitly.
+  * `Message`s the prompt should emit. Prompts do not carry a `ToolInputSchema` — MCP prompts use a
+  * simple `arguments` list (name + description + required) that you supply explicitly.
   *
   * @tparam In
   *   typed argument shape — must have an implicit `McpDecoder[In]` at mount time
   */
 final case class McpPrompt[In] private (
     definition: PromptDefinition,
-    handler: In => ZIO[Any, Throwable, List[Message]]
+    handler: In => ZIO[Any, Throwable, List[Message]],
+    private[fastmcp] val decoder: McpDecoder[In]
 )
 
 object McpPrompt:
@@ -290,23 +343,30 @@ object McpPrompt:
   private def normalizeArguments(arguments: List[PromptArgument]): Option[List[PromptArgument]] =
     Option.when(arguments.nonEmpty)(arguments)
 
-  def withDefinition[In](
+  /** Builder produced by [[apply]] — carries the `PromptDefinition` so the handler call site can
+    * infer the effect type `F` from the lambda's return.
+    */
+  final class Builder[In] private[McpPrompt] (
       definition: PromptDefinition
-  )(handler: In => ZIO[Any, Throwable, List[Message]]): McpPrompt[In] =
-    new McpPrompt(definition, handler)
+  )(using decoder: McpDecoder[In]):
 
+    /** Attach a pure handler `In => List[Message]`. */
+    def apply(handler: In => List[Message]): McpPrompt[In] =
+      new McpPrompt(definition, in => ZIO.attempt(handler(in)), decoder)
+
+    /** Attach an effectful handler `In => F[List[Message]]`. */
+    def apply[F[_]](
+        handler: In => F[List[Message]]
+    )(using effect: ToHandlerEffect[F]): McpPrompt[In] =
+      new McpPrompt(definition, in => effect.lift(handler(in)), decoder)
+
+  /** Primary factory. Apply the returned [[Builder]] with your handler lambda. */
   def apply[In](
       name: String,
       description: Option[String] = None,
       arguments: List[PromptArgument] = Nil
-  )(handler: In => ZIO[Any, Throwable, List[Message]]): McpPrompt[In] =
-    withDefinition(
-      PromptDefinition(
-        name = name,
-        description = description,
-        arguments = normalizeArguments(arguments)
-      )
-    )(handler)
+  )(using decoder: McpDecoder[In]): Builder[In] =
+    new Builder(PromptDefinition(name, description, normalizeArguments(arguments)))
 
 /** Shared typed contract for a static (non-templated) MCP resource.
   *
@@ -320,18 +380,31 @@ final case class McpStaticResource private (
 
 object McpStaticResource:
 
-  def withDefinition(
-      definition: ResourceDefinition
-  )(handler: => ZIO[Any, Throwable, String | Array[Byte]]): McpStaticResource =
-    new McpStaticResource(definition.copy(isTemplate = false, arguments = None), () => handler)
+  /** Builder produced by [[apply]] — carries the `ResourceDefinition`; apply it with your body. */
+  final class Builder private[McpStaticResource] (definition: ResourceDefinition):
 
+    /** Attach a pure handler returning text or binary. The [[AsResourceBody]] typeclass witnesses
+      * the body shape so the same `apply(...)` call works for both `String` and `Array[Byte]`.
+      */
+    def apply[A](handler: => A)(using body: AsResourceBody[A]): McpStaticResource =
+      new McpStaticResource(definition, () => ZIO.attempt(body.coerce(handler)))
+
+    /** Attach an effectful handler returning any `F[A]` (ZIO, Either, Try, ...) whose `A` coerces
+      * into a resource body.
+      */
+    def effect[F[_], A](
+        handler: => F[A]
+    )(using effect: ToHandlerEffect[F], body: AsResourceBody[A]): McpStaticResource =
+      new McpStaticResource(definition, () => effect.lift(handler).map(body.coerce))
+
+  /** Primary factory. Apply the returned [[Builder]] with your handler block. */
   def apply(
       uri: String,
       name: Option[String] = None,
       description: Option[String] = None,
       mimeType: Option[String] = Some("text/plain")
-  )(handler: => ZIO[Any, Throwable, String | Array[Byte]]): McpStaticResource =
-    withDefinition(
+  ): Builder =
+    new Builder(
       ResourceDefinition(
         uri = uri,
         name = name,
@@ -340,7 +413,7 @@ object McpStaticResource:
         isTemplate = false,
         arguments = None
       )
-    )(handler)
+    )
 
 /** Shared typed contract for a templated MCP resource (URI with `{placeholders}`).
   *
@@ -352,7 +425,8 @@ object McpStaticResource:
   */
 final case class McpTemplateResource[In] private (
     definition: ResourceDefinition,
-    handler: In => ZIO[Any, Throwable, String | Array[Byte]]
+    handler: In => ZIO[Any, Throwable, String | Array[Byte]],
+    private[fastmcp] val decoder: McpDecoder[In]
 )
 
 object McpTemplateResource:
@@ -362,19 +436,34 @@ object McpTemplateResource:
   ): Option[List[ResourceArgument]] =
     Option.when(arguments.nonEmpty)(arguments)
 
-  def withDefinition[In](
+  /** Builder produced by [[apply]] — carries the `ResourceDefinition`; apply it with your body. */
+  final class Builder[In] private[McpTemplateResource] (
       definition: ResourceDefinition
-  )(handler: In => ZIO[Any, Throwable, String | Array[Byte]]): McpTemplateResource[In] =
-    new McpTemplateResource(definition.copy(isTemplate = true), handler)
+  )(using decoder: McpDecoder[In]):
 
+    /** Attach a pure handler `In => A` (text or binary). */
+    def apply[A](handler: In => A)(using body: AsResourceBody[A]): McpTemplateResource[In] =
+      new McpTemplateResource(definition, in => ZIO.attempt(body.coerce(handler(in))), decoder)
+
+    /** Attach an effectful handler `In => F[A]` (ZIO, Either, Try, ...). */
+    def effect[F[_], A](
+        handler: In => F[A]
+    )(using effect: ToHandlerEffect[F], body: AsResourceBody[A]): McpTemplateResource[In] =
+      new McpTemplateResource(
+        definition,
+        in => effect.lift(handler(in)).map(body.coerce),
+        decoder
+      )
+
+  /** Primary factory. Apply the returned [[Builder]] with your handler lambda. */
   def apply[In](
       uriPattern: String,
       name: Option[String] = None,
       description: Option[String] = None,
       mimeType: Option[String] = Some("text/plain"),
       arguments: List[ResourceArgument] = Nil
-  )(handler: In => ZIO[Any, Throwable, String | Array[Byte]]): McpTemplateResource[In] =
-    withDefinition(
+  )(using decoder: McpDecoder[In]): Builder[In] =
+    new Builder(
       ResourceDefinition(
         uri = uriPattern,
         name = name,
@@ -383,4 +472,4 @@ object McpTemplateResource:
         isTemplate = true,
         arguments = normalizeArguments(arguments)
       )
-    )(handler)
+    )

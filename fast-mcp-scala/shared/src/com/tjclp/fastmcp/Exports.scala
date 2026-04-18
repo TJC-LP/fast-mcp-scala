@@ -3,6 +3,7 @@ package com.tjclp.fastmcp
 export core.{
   toAst,
   toJsonString,
+  AsResourceBody,
   Content,
   EmbeddedResource,
   EmbeddedResourceContent,
@@ -25,6 +26,7 @@ export core.{
   ResourceDefinition,
   Role,
   TextContent,
+  ToHandlerEffect,
   Tool,
   ToolAnnotations,
   ToolDefinition,
@@ -33,4 +35,16 @@ export core.{
   ToolSchemaProvider
 }
 export core.McpEncoder.given
-export server.{FastMcpServerSettings, McpContext, McpServer}
+export core.ToHandlerEffect.given
+export server.{
+  FastMcpServerSettings,
+  Http,
+  McpContext,
+  McpServerApp,
+  McpServerCore,
+  McpServerCoreFactory,
+  McpServerSettings,
+  Stdio,
+  Transport,
+  TransportRunner
+}

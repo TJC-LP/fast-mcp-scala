@@ -8,8 +8,8 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.JvmToolInputSchemaSupport.*
 import com.tjclp.fastmcp.server.manager.*
 
-/** JVM-only compatibility overloads for the shared McpServer API. */
-extension (server: McpServer)
+/** JVM-only compatibility overloads for the shared McpServerCore API. */
+extension (server: McpServerCore)
 
   def tool(
       name: String,
@@ -18,7 +18,7 @@ extension (server: McpServer)
       inputSchema: Either[McpSchema.JsonSchema, String],
       options: ToolRegistrationOptions = ToolRegistrationOptions(),
       annotations: Option[ToolAnnotations] = None
-  ): ZIO[Any, Throwable, McpServer] =
+  ): ZIO[Any, Throwable, McpServerCore] =
     server.tool(
       name = name,
       handler = handler,

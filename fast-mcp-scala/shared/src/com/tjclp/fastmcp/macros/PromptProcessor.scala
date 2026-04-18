@@ -6,29 +6,26 @@ import scala.quoted.*
 import zio.*
 
 import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.server.*
+import com.tjclp.fastmcp.server.McpServerCore
 
-/** Lightweight implementation thanks to [[AnnotationProcessorBase]]. */
+/** Cross-platform `@Prompt` annotation processor. Emits registration against [[McpServerCore]]. */
 private[macros] object PromptProcessor extends AnnotationProcessorBase:
 
   def processPromptAnnotation(using Quotes)(
-      server: Expr[FastMcpServer],
+      server: Expr[McpServerCore],
       ownerSym: quotes.reflect.Symbol,
       methodSym: quotes.reflect.Symbol
-  ): Expr[FastMcpServer] =
+  ): Expr[McpServerCore] =
     import quotes.reflect.*
 
     val methodName = methodSym.name
 
-    // 1️⃣  Find @Prompt annotation -------------------------------------------------------------
     val promptAnnot = findAnnotation[Prompt](methodSym).getOrElse {
       report.errorAndAbort(s"No @Prompt annotation found on method '$methodName'")
     }
 
-    // 2️⃣  name / description with Scaladoc fallback ------------------------------------------
     val (finalName, finalDesc) = nameAndDescription(promptAnnot, methodSym)
 
-    // 3️⃣  Collect @Param metadata -------------------------------------------------------------------
     val argExprs: List[Expr[PromptArgument]] =
       methodSym.paramSymss.headOption.getOrElse(Nil).map { pSym =>
         val (descOpt, required) = MacroUtils.parsePromptParamArgs(
@@ -41,11 +38,9 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
       if argExprs.isEmpty then '{ None }
       else '{ Some(${ Expr.ofList(argExprs) }) }
 
-    // 4️⃣  Method reference -------------------------------------------------------------------
     val methodRefExpr = methodRef(ownerSym, methodSym)
 
-    // 5️⃣  Compose registration effect --------------------------------------------------------
-    val registration: Expr[ZIO[Any, Throwable, FastMcpServer]] = '{
+    val registration: Expr[ZIO[Any, Throwable, McpServerCore]] = '{
       $server.prompt(
         name = ${ Expr(finalName) },
         description = ${ Expr(finalDesc) },
@@ -56,17 +51,15 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
               .callByMap($methodRefExpr)
               .asInstanceOf[Map[String, Any] => Any](args)
 
-            result match {
+            result match
               case msgs: List[?] if msgs.nonEmpty && msgs.head.isInstanceOf[Message] =>
                 msgs.asInstanceOf[List[Message]]
               case s: String =>
                 List(Message(role = Role.User, content = TextContent(s)))
               case other =>
                 List(Message(role = Role.User, content = TextContent(other.toString)))
-            }
           }
       )
     }
 
-    // 6️⃣  Execute & return server ------------------------------------------------------------
     runAndReturnServer(server)(registration)

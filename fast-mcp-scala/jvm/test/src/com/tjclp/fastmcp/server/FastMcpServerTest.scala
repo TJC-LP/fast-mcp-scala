@@ -16,7 +16,7 @@ class FastMcpServerTest extends AnyFunSuite with Matchers {
   }
 
   test("Server instantiation with custom settings") {
-    val settings = FastMcpServerSettings(
+    val settings = McpServerSettings(
       port = 8080,
       host = "localhost"
     )
@@ -25,7 +25,7 @@ class FastMcpServerTest extends AnyFunSuite with Matchers {
     assert(server.name == "TestServer")
   }
 
-  test("legacy Either schema overload should work for FastMcpServer and McpServer") {
+  test("legacy Either schema overload should work for FastMcpServer and McpServerCore") {
     val concrete = new FastMcpServer(name = "CompatServer")
     val schema = Left(
       McpJsonDefaults
@@ -50,7 +50,7 @@ class FastMcpServerTest extends AnyFunSuite with Matchers {
 
     concrete.toolManager.getToolDefinition("legacy-concrete") should not be empty
 
-    val asApi: McpServer = concrete
+    val asApi: McpServerCore = concrete
     Unsafe.unsafe { implicit unsafe =>
       Runtime.default.unsafe
         .run(

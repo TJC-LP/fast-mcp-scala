@@ -45,11 +45,11 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
 
     runUnsafe(
       server.tool(
-        McpTool.derived[AddArgs, AddResult](
+        McpTool[AddArgs, AddResult](
           name = "typed-add",
           description = Some("Add two numbers")
         ) { args =>
-          ZIO.succeed(AddResult(args.a + args.b))
+          AddResult(args.a + args.b)
         }
       )
     )
@@ -74,12 +74,12 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
 
     runUnsafe(
       server.tool(
-        McpTool.derivedContextual[AddArgs, String](
+        McpTool[AddArgs, String](
           name = "typed-context",
           description = Some("Context-aware typed tool")
-        ) { (args, ctxOpt) =>
+        ).contextual { (args, ctxOpt) =>
           val suffix = if ctxOpt.isDefined then "ctx" else "missing"
-          ZIO.succeed(s"${args.a + args.b}:$suffix")
+          s"${args.a + args.b}:$suffix"
         }
       )
     )
@@ -104,7 +104,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
           name = "typed-prompt",
           arguments = List(PromptArgument("name", Some("The name to greet"), required = true))
         ) { args =>
-          ZIO.succeed(List(Message(Role.User, TextContent(s"Hello ${args.name}!"))))
+          List(Message(Role.User, TextContent(s"Hello ${args.name}!")))
         }
       )
     )
@@ -114,7 +114,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
         McpStaticResource(
           uri = "static://welcome",
           description = Some("Welcome message")
-        )(ZIO.succeed("welcome"))
+        )("welcome")
       )
     )
 
@@ -125,7 +125,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
           description = Some("User profile"),
           arguments = List(ResourceArgument("userId", Some("The user id"), required = true))
         ) { args =>
-          ZIO.succeed(s"profile:${args.userId}")
+          s"profile:${args.userId}"
         }
       )
     )
