@@ -1,17 +1,14 @@
 package com.tjclp.fastmcp
 package examples
 
-import zio.*
+import com.tjclp.fastmcp.*
 
-import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.macros.RegistrationMacro.*
-import com.tjclp.fastmcp.server.*
-
-/** MCP server over HTTP.
+/** MCP server over HTTP — transport is a phantom type parameter on `McpServerApp`.
   *
-  * `runHttp()` serves the full MCP Streamable HTTP spec — `POST /mcp` for JSON-RPC, session
-  * tracking via the `mcp-session-id` header, and SSE streams for long-running calls. Switch to
-  * stateless mode with a single flag when sessions aren't needed.
+  * `runHttp()` (dispatched by `McpServerApp[Http, ...]`) serves the full MCP Streamable HTTP spec —
+  * `POST /mcp` for JSON-RPC, session tracking via the `mcp-session-id` header, and SSE streams for
+  * long-running calls. Flip `stateless = true` on the settings for a sessionless, SSE-free
+  * transport.
   *
   * Start with: `./mill fast-mcp-scala.jvm.runMain com.tjclp.fastmcp.examples.HttpServer`
   *
@@ -33,11 +30,10 @@ import com.tjclp.fastmcp.server.*
   *   # 3. Close the session (streamable mode only)
   *   curl -X DELETE http://localhost:8090/mcp -H "mcp-session-id: <id>"
   * }}}
-  *
-  * Flip `stateless = true` on `McpServerSettings` to disable session tracking and SSE — useful
-  * for request/response-style deployments behind a load balancer.
   */
-object HttpServer extends ZIOAppDefault:
+object HttpServer extends McpServerApp[Http, HttpServer.type]:
+
+  override def settings: McpServerSettings = McpServerSettings(port = 8090)
 
   @Tool(
     name = Some("greet"),
@@ -69,15 +65,3 @@ object HttpServer extends ZIOAppDefault:
   @Prompt(name = Some("summarize"), description = Some("Summarize a topic"))
   def summarize(@Param("Topic to summarize") topic: String): List[Message] =
     List(Message(Role.User, TextContent(s"Please summarize: $topic")))
-
-  override def run: ZIO[Any, Throwable, Unit] =
-    // Flip `stateless = true` for a sessionless, SSE-free transport.
-    val server = FastMcpServer(
-      name = "HttpServer",
-      version = "0.1.0",
-      settings = McpServerSettings(port = 8090)
-    )
-    for
-      _ <- ZIO.attempt(server.scanAnnotations[HttpServer.type])
-      _ <- server.runHttp()
-    yield ()

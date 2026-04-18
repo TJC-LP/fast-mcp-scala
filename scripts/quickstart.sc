@@ -1,11 +1,10 @@
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc1
+//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc2
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.*
-import zio.*
 
-object Example:
+object Example extends McpServerApp[Stdio, Example.type]:
 
   @Tool(name = Some("add"), description = Some("Add two numbers"), readOnlyHint = Some(true))
   def add(
@@ -23,13 +22,4 @@ object Example:
   @Resource(uri = "user://{userId}", description = Some("Test resource"))
   def getUser(@Param("The user id") userId: String): String = s"User ID: $userId"
 
-object ExampleServer extends ZIOAppDefault:
-
-  override def run =
-    for
-      server <- ZIO.succeed(McpServer("ExampleServer", "0.3.0"))
-      _      <- ZIO.attempt(server.scanAnnotations[Example.type])
-      _      <- server.runStdio()
-    yield ()
-
-ExampleServer.main(args)
+Example.main(args)

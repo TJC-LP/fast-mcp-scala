@@ -6,6 +6,20 @@ import zio.*
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
 
+/** Runtime-scan capture of annotated methods on a specific singleton type. The `inline given` in
+  * the companion expands at the subclass's *instantiation* site — where `Self` is concrete — so the
+  * embedded `scanAnnotationsQuiet[Self]` macro sees the real singleton and emits registrations for
+  * every `@Tool` / `@Prompt` / `@Resource` method on it.
+  */
+trait SelfScan[Self]:
+  def apply(core: McpServerCore): McpServerCore
+
+object SelfScan:
+
+  inline given [Self <: Singleton]: SelfScan[Self] = new SelfScan[Self]:
+    def apply(core: McpServerCore): McpServerCore =
+      core.scanAnnotationsQuiet[Self]
+
 /** Declarative entry point for building an MCP server.
   *
   * Extend this trait on a top-level `object` to mount annotated tools/prompts/resources and/or
@@ -29,7 +43,8 @@ import com.tjclp.fastmcp.macros.RegistrationMacro.*
   */
 trait McpServerApp[T <: Transport, Self <: Singleton](using
     runner: TransportRunner[T],
-    factory: McpServerCoreFactory
+    factory: McpServerCoreFactory,
+    selfScan: SelfScan[Self]
 ) extends zio.ZIOAppDefault:
 
   def name: String = getClass.getSimpleName.stripSuffix("$")
@@ -41,15 +56,9 @@ trait McpServerApp[T <: Transport, Self <: Singleton](using
   def staticResources: List[McpStaticResource] = Nil
   def templateResources: List[McpTemplateResource[?]] = Nil
 
-  /** Inlined so `Self` specializes at the subclass compilation site — the quiet variant suppresses
-    * the "no annotations found" warning for contract-only servers that still declare Self.
-    */
-  protected inline final def scanSelf(core: McpServerCore): McpServerCore =
-    core.scanAnnotationsQuiet[Self]
-
   final def buildCore: ZIO[Any, Throwable, McpServerCore] =
     val core = factory.build(name, version, settings)
-    val _ = scanSelf(core)
+    val _ = selfScan(core)
     for
       _ <- ZIO.foreachDiscard(tools)(core.tool(_))
       _ <- ZIO.foreachDiscard(prompts)(core.prompt(_))
