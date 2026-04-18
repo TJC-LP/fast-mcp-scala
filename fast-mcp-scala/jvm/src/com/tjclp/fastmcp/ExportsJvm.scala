@@ -6,4 +6,5 @@ export macros.{DeriveJacksonConverter, JacksonConversionContext, JacksonConverte
 export macros.JacksonConverter.given
 export macros.RegistrationMacro.*
 export server.{FastMcpServer, McpServer}
+export server.McpServer.given
 export server.{getClientCapabilities, getClientInfo, javaExchange, transportContext}

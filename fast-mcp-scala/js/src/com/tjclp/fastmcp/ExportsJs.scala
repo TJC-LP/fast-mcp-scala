@@ -7,3 +7,4 @@ export macros.RegistrationMacro.*
 export server.JsMcpContext
 export server.JsMcpContext.{getClientCapabilities, getClientInfo, getSessionId}
 export server.{JsMcpServer, McpServer}
+export server.McpServer.given
