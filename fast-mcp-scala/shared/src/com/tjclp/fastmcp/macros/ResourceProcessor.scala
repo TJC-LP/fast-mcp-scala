@@ -6,17 +6,18 @@ import scala.quoted.*
 import zio.*
 
 import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.server.JsMcpServer
 import com.tjclp.fastmcp.server.McpServerCore
 
-/** JS-target resource annotation processor. */
+/** Cross-platform `@Resource` annotation processor. Handles both static and templated (URI with
+  * `{placeholders}`) resources. Emits registration against [[McpServerCore]].
+  */
 private[macros] object ResourceProcessor extends AnnotationProcessorBase:
 
   def processResourceAnnotation(using Quotes)(
-      server: Expr[JsMcpServer],
+      server: Expr[McpServerCore],
       ownerSym: quotes.reflect.Symbol,
       methodSym: quotes.reflect.Symbol
-  ): Expr[JsMcpServer] =
+  ): Expr[McpServerCore] =
     import quotes.reflect.*
 
     val methodName = methodSym.name
