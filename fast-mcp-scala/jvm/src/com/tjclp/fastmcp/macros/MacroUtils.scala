@@ -545,8 +545,10 @@ private[macros] object MacroUtils:
       )
     }
 
-    // Remove top-level $defs before starting resolution
-    val rootJsonWithoutDefs = inputJson.mapObject(_.remove("$defs"))
+    // Remove top-level $defs and $schema before starting resolution.
+    // $schema (Tapir emits the draft-2020-12 meta-schema URL) violates Anthropic's
+    // tool input_schema key pattern ^[a-zA-Z0-9_.-]{1,64}$ and breaks managed agents. See issue #44.
+    val rootJsonWithoutDefs = inputJson.mapObject(_.remove("$defs").remove("$schema"))
     resolve(rootJsonWithoutDefs, definitions)
   }
 
