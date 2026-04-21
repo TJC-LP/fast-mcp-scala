@@ -113,6 +113,23 @@ class MacroUtilsTest extends AnyFunSuite { // Ensure this matches the import
     assert(actualJson == expectedJson) // Use ScalaTest's assert
   }
 
+  test("resolveJsonRefs should strip top-level $schema key (issue #44)") {
+    val inputJsonString = """{
+      "$schema": "http://json-schema.org/draft/2020-12/schema#",
+      "type": "object",
+      "properties": { "name": { "type": "string" } }
+    }"""
+    val inputJson = unsafeParse(inputJsonString)
+    val expectedJsonString = """{
+      "type": "object",
+      "properties": { "name": { "type": "string" } }
+    }"""
+    val expectedJson = unsafeParse(expectedJsonString)
+
+    val actualJson = MacroUtils.resolveJsonRefs(inputJson)
+    assert(actualJson == expectedJson)
+  }
+
   // --- injectParamDescriptions Tests ---
 
   test("injectParamDescriptions should add descriptions to properties") {
