@@ -1,5 +1,5 @@
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc3
+//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc4
 //> using options "-Xcheck-macros" "-experimental"
 
 // Launcher for fast-mcp-scala example servers. Point `scala-cli` at this file and
