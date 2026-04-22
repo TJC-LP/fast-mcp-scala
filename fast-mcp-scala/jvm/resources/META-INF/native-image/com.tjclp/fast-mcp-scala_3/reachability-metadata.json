@@ -1,0 +1,1570 @@
+{
+  "reflection": [
+    {
+      "type": "cats.Later",
+      "fields": [
+        {
+          "name": "value$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "com.ethlo.time.ITU"
+    },
+    {
+      "type": "com.tjclp.fastmcp.macros.JacksonConversionContext$",
+      "fields": [
+        {
+          "name": "default$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "io.circe.Decoder$",
+      "fields": [
+        {
+          "name": "currencyDecoder$lzy1"
+        },
+        {
+          "name": "decodeDuration$lzy1"
+        },
+        {
+          "name": "decodeInstant$lzy1"
+        },
+        {
+          "name": "decodeJavaBigDecimal$lzy1"
+        },
+        {
+          "name": "decodeJavaBigInteger$lzy1"
+        },
+        {
+          "name": "decodeJavaBoolean$lzy1"
+        },
+        {
+          "name": "decodeJavaByte$lzy1"
+        },
+        {
+          "name": "decodeJavaCharacter$lzy1"
+        },
+        {
+          "name": "decodeJavaDouble$lzy1"
+        },
+        {
+          "name": "decodeJavaFloat$lzy1"
+        },
+        {
+          "name": "decodeJavaInteger$lzy1"
+        },
+        {
+          "name": "decodeJavaLong$lzy1"
+        },
+        {
+          "name": "decodeJavaShort$lzy1"
+        },
+        {
+          "name": "decodeLocalDate$lzy1"
+        },
+        {
+          "name": "decodeLocalDateTime$lzy1"
+        },
+        {
+          "name": "decodeLocalTime$lzy1"
+        },
+        {
+          "name": "decodeMonthDay$lzy1"
+        },
+        {
+          "name": "decodeOffsetDateTime$lzy1"
+        },
+        {
+          "name": "decodeOffsetTime$lzy1"
+        },
+        {
+          "name": "decodePeriod$lzy1"
+        },
+        {
+          "name": "decodeURI$lzy1"
+        },
+        {
+          "name": "decodeUUID$lzy1"
+        },
+        {
+          "name": "decodeYear$lzy1"
+        },
+        {
+          "name": "decodeYearMonth$lzy1"
+        },
+        {
+          "name": "decodeZoneId$lzy1"
+        },
+        {
+          "name": "decodeZoneOffset$lzy1"
+        },
+        {
+          "name": "decodeZonedDateTime$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "io.circe.Encoder$",
+      "fields": [
+        {
+          "name": "currencyEncoder$lzy1"
+        },
+        {
+          "name": "encodeDuration$lzy1"
+        },
+        {
+          "name": "encodeInstant$lzy1"
+        },
+        {
+          "name": "encodeJavaBigDecimal$lzy1"
+        },
+        {
+          "name": "encodeJavaBigInteger$lzy1"
+        },
+        {
+          "name": "encodeJavaBoolean$lzy1"
+        },
+        {
+          "name": "encodeJavaByte$lzy1"
+        },
+        {
+          "name": "encodeJavaCharacter$lzy1"
+        },
+        {
+          "name": "encodeJavaDouble$lzy1"
+        },
+        {
+          "name": "encodeJavaFloat$lzy1"
+        },
+        {
+          "name": "encodeJavaInteger$lzy1"
+        },
+        {
+          "name": "encodeJavaLong$lzy1"
+        },
+        {
+          "name": "encodeJavaShort$lzy1"
+        },
+        {
+          "name": "encodeLocalDate$lzy1"
+        },
+        {
+          "name": "encodeLocalDateTime$lzy1"
+        },
+        {
+          "name": "encodeLocalTime$lzy1"
+        },
+        {
+          "name": "encodeMonthDay$lzy1"
+        },
+        {
+          "name": "encodeOffsetDateTime$lzy1"
+        },
+        {
+          "name": "encodeOffsetTime$lzy1"
+        },
+        {
+          "name": "encodePeriod$lzy1"
+        },
+        {
+          "name": "encodeURI$lzy1"
+        },
+        {
+          "name": "encodeUUID$lzy1"
+        },
+        {
+          "name": "encodeYear$lzy1"
+        },
+        {
+          "name": "encodeYearMonth$lzy1"
+        },
+        {
+          "name": "encodeZoneId$lzy1"
+        },
+        {
+          "name": "encodeZoneOffset$lzy1"
+        },
+        {
+          "name": "encodeZonedDateTime$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "io.circe.derivation.ConfiguredDecoder$$anon$3",
+      "fields": [
+        {
+          "name": "constructorNames$lzy3"
+        },
+        {
+          "name": "elemDecoders$lzy3"
+        },
+        {
+          "name": "elemDefaults$lzy3"
+        },
+        {
+          "name": "elemLabels$lzy3"
+        },
+        {
+          "name": "fp$lzy1"
+        },
+        {
+          "name": "io$circe$derivation$ConfiguredDecoder$$decodersDict$lzy3"
+        }
+      ]
+    },
+    {
+      "type": "io.circe.derivation.ConfiguredEncoder$$anon$3",
+      "fields": [
+        {
+          "name": "elemEncoders$lzy3"
+        },
+        {
+          "name": "elemLabels$lzy3"
+        }
+      ]
+    },
+    {
+      "type": "io.circe.derivation.Default$$anon$1",
+      "fields": [
+        {
+          "name": "defaults$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "io.micrometer.context.ContextRegistry"
+    },
+    {
+      "type": "io.modelcontextprotocol.json.jackson3.JacksonMcpJsonMapperSupplier"
+    },
+    {
+      "type": "io.modelcontextprotocol.json.schema.jackson3.JacksonJsonSchemaValidatorSupplier"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$Annotated"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$Annotations",
+      "methods": [
+        {
+          "name": "audience",
+          "parameterTypes": []
+        },
+        {
+          "name": "lastModified",
+          "parameterTypes": []
+        },
+        {
+          "name": "priority",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$CallToolRequest",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "java.lang.String",
+            "java.util.Map",
+            "java.util.Map"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$CallToolResult",
+      "methods": [
+        {
+          "name": "content",
+          "parameterTypes": []
+        },
+        {
+          "name": "isError",
+          "parameterTypes": []
+        },
+        {
+          "name": "meta",
+          "parameterTypes": []
+        },
+        {
+          "name": "structuredContent",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$ClientCapabilities",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "java.util.Map",
+            "io.modelcontextprotocol.spec.McpSchema$ClientCapabilities$RootCapabilities",
+            "io.modelcontextprotocol.spec.McpSchema$ClientCapabilities$Sampling",
+            "io.modelcontextprotocol.spec.McpSchema$ClientCapabilities$Elicitation"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$ClientCapabilities$Elicitation",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "io.modelcontextprotocol.spec.McpSchema$ClientCapabilities$Elicitation$Form",
+            "io.modelcontextprotocol.spec.McpSchema$ClientCapabilities$Elicitation$Url"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$ClientCapabilities$Elicitation$Form"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$ClientCapabilities$Elicitation$Url"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$ClientCapabilities$RootCapabilities",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "java.lang.Boolean"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$ClientCapabilities$Sampling"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$Content"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$Identifier"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$Implementation",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "java.lang.String",
+            "java.lang.String",
+            "java.lang.String"
+          ]
+        },
+        {
+          "name": "name",
+          "parameterTypes": []
+        },
+        {
+          "name": "title",
+          "parameterTypes": []
+        },
+        {
+          "name": "version",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$InitializeRequest",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "java.lang.String",
+            "io.modelcontextprotocol.spec.McpSchema$ClientCapabilities",
+            "io.modelcontextprotocol.spec.McpSchema$Implementation",
+            "java.util.Map"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$InitializeResult",
+      "methods": [
+        {
+          "name": "capabilities",
+          "parameterTypes": []
+        },
+        {
+          "name": "instructions",
+          "parameterTypes": []
+        },
+        {
+          "name": "meta",
+          "parameterTypes": []
+        },
+        {
+          "name": "protocolVersion",
+          "parameterTypes": []
+        },
+        {
+          "name": "serverInfo",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$JSONRPCMessage"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$JSONRPCNotification",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "java.lang.String",
+            "java.lang.String",
+            "java.lang.Object"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$JSONRPCRequest",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "java.lang.String",
+            "java.lang.String",
+            "java.lang.Object",
+            "java.lang.Object"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$JSONRPCResponse",
+      "methods": [
+        {
+          "name": "error",
+          "parameterTypes": []
+        },
+        {
+          "name": "id",
+          "parameterTypes": []
+        },
+        {
+          "name": "jsonrpc",
+          "parameterTypes": []
+        },
+        {
+          "name": "result",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$JSONRPCResponse$JSONRPCError",
+      "methods": [
+        {
+          "name": "code",
+          "parameterTypes": []
+        },
+        {
+          "name": "data",
+          "parameterTypes": []
+        },
+        {
+          "name": "message",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$JsonSchema",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "java.lang.String",
+            "java.util.Map",
+            "java.util.List",
+            "java.lang.Boolean",
+            "java.util.Map",
+            "java.util.Map"
+          ]
+        },
+        {
+          "name": "additionalProperties",
+          "parameterTypes": []
+        },
+        {
+          "name": "definitions",
+          "parameterTypes": []
+        },
+        {
+          "name": "defs",
+          "parameterTypes": []
+        },
+        {
+          "name": "properties",
+          "parameterTypes": []
+        },
+        {
+          "name": "required",
+          "parameterTypes": []
+        },
+        {
+          "name": "type",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$ListToolsResult",
+      "methods": [
+        {
+          "name": "meta",
+          "parameterTypes": []
+        },
+        {
+          "name": "nextCursor",
+          "parameterTypes": []
+        },
+        {
+          "name": "tools",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$Meta"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$Request"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$Result"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$ServerCapabilities",
+      "methods": [
+        {
+          "name": "completions",
+          "parameterTypes": []
+        },
+        {
+          "name": "experimental",
+          "parameterTypes": []
+        },
+        {
+          "name": "logging",
+          "parameterTypes": []
+        },
+        {
+          "name": "prompts",
+          "parameterTypes": []
+        },
+        {
+          "name": "resources",
+          "parameterTypes": []
+        },
+        {
+          "name": "tools",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$ServerCapabilities$CompletionCapabilities"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$ServerCapabilities$LoggingCapabilities"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$ServerCapabilities$PromptCapabilities"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$ServerCapabilities$ResourceCapabilities"
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$ServerCapabilities$ToolCapabilities",
+      "methods": [
+        {
+          "name": "listChanged",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$TextContent",
+      "methods": [
+        {
+          "name": "annotations",
+          "parameterTypes": []
+        },
+        {
+          "name": "meta",
+          "parameterTypes": []
+        },
+        {
+          "name": "text",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$Tool",
+      "methods": [
+        {
+          "name": "annotations",
+          "parameterTypes": []
+        },
+        {
+          "name": "description",
+          "parameterTypes": []
+        },
+        {
+          "name": "inputSchema",
+          "parameterTypes": []
+        },
+        {
+          "name": "meta",
+          "parameterTypes": []
+        },
+        {
+          "name": "name",
+          "parameterTypes": []
+        },
+        {
+          "name": "outputSchema",
+          "parameterTypes": []
+        },
+        {
+          "name": "title",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$ToolAnnotations",
+      "methods": [
+        {
+          "name": "destructiveHint",
+          "parameterTypes": []
+        },
+        {
+          "name": "idempotentHint",
+          "parameterTypes": []
+        },
+        {
+          "name": "openWorldHint",
+          "parameterTypes": []
+        },
+        {
+          "name": "readOnlyHint",
+          "parameterTypes": []
+        },
+        {
+          "name": "returnDirect",
+          "parameterTypes": []
+        },
+        {
+          "name": "title",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "io.modelcontextprotocol.spec.McpSchema$Tool[]"
+    },
+    {
+      "type": "izumi.reflect.macrortti.LightTypeTag",
+      "fields": [
+        {
+          "name": "basesdb$lzy1"
+        },
+        {
+          "name": "hashcode$lzy1"
+        },
+        {
+          "name": "idb$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "izumi.reflect.macrortti.LightTypeTag$ParsedLightTypeTag230Plus",
+      "fields": [
+        {
+          "name": "ref$lzy2"
+        }
+      ]
+    },
+    {
+      "type": "java.io.Serializable"
+    },
+    {
+      "type": "java.lang.Boolean",
+      "jniAccessible": true,
+      "methods": [
+        {
+          "name": "getBoolean",
+          "parameterTypes": [
+            "java.lang.String"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "java.lang.ClassValue"
+    },
+    {
+      "type": "java.lang.Iterable"
+    },
+    {
+      "type": "java.lang.Object[]"
+    },
+    {
+      "type": "java.lang.Record"
+    },
+    {
+      "type": "java.lang.String[]"
+    },
+    {
+      "type": "java.util.AbstractCollection"
+    },
+    {
+      "type": "java.util.AbstractMap"
+    },
+    {
+      "type": "java.util.Collection"
+    },
+    {
+      "type": "java.util.ImmutableCollections$AbstractImmutableCollection"
+    },
+    {
+      "type": "java.util.ImmutableCollections$AbstractImmutableList"
+    },
+    {
+      "type": "java.util.ImmutableCollections$AbstractImmutableMap"
+    },
+    {
+      "type": "java.util.ImmutableCollections$ListN"
+    },
+    {
+      "type": "java.util.ImmutableCollections$MapN"
+    },
+    {
+      "type": "java.util.List"
+    },
+    {
+      "type": "java.util.Map"
+    },
+    {
+      "type": "java.util.RandomAccess"
+    },
+    {
+      "type": "java.util.concurrent.ConcurrentLinkedQueue[]"
+    },
+    {
+      "type": "reactor.core.publisher.FlatMapTracker"
+    },
+    {
+      "type": "reactor.core.publisher.FluxFlatMap$FlatMapInner"
+    },
+    {
+      "type": "reactor.core.publisher.FluxFlatMap$FlatMapMain"
+    },
+    {
+      "type": "reactor.core.publisher.FluxOnErrorReturn$ReturnSubscriber"
+    },
+    {
+      "type": "reactor.core.publisher.FluxPublishOn$PublishOnConditionalSubscriber"
+    },
+    {
+      "type": "reactor.core.publisher.FluxReplay"
+    },
+    {
+      "type": "reactor.core.publisher.LambdaMonoSubscriber"
+    },
+    {
+      "type": "reactor.core.publisher.LambdaSubscriber"
+    },
+    {
+      "type": "reactor.core.publisher.MonoCreate$DefaultMonoSink"
+    },
+    {
+      "type": "reactor.core.publisher.MonoFlatMap$FlatMapMain"
+    },
+    {
+      "type": "reactor.core.publisher.MonoIgnoreThen$ThenIgnoreMain"
+    },
+    {
+      "type": "reactor.core.publisher.MonoZip$ZipCoordinator"
+    },
+    {
+      "type": "reactor.core.publisher.MonoZip$ZipInner"
+    },
+    {
+      "type": "reactor.core.publisher.Operators$MonoInnerProducerBase"
+    },
+    {
+      "type": "reactor.core.publisher.Operators$MultiSubscriptionSubscriber"
+    },
+    {
+      "type": "reactor.core.publisher.Operators$ScalarSubscription"
+    },
+    {
+      "type": "reactor.core.publisher.SinkEmptyMulticast"
+    },
+    {
+      "type": "reactor.core.publisher.SinkManyUnicast"
+    },
+    {
+      "type": "reactor.core.publisher.SinksSpecs$AbstractSerializedSink"
+    },
+    {
+      "type": "reactor.core.scheduler.DelegateServiceScheduler"
+    },
+    {
+      "type": "reactor.core.scheduler.SchedulerTask"
+    },
+    {
+      "type": "reactor.core.scheduler.WorkerTask"
+    },
+    {
+      "type": "reactor.util.concurrent.SpscArrayQueueConsumer"
+    },
+    {
+      "type": "reactor.util.concurrent.SpscArrayQueueProducer"
+    },
+    {
+      "type": "reactor.util.concurrent.SpscLinkedArrayQueue"
+    },
+    {
+      "type": "scala.Tuple2[]"
+    },
+    {
+      "type": "scala.collection.immutable.ArraySeq$",
+      "fields": [
+        {
+          "name": "emptyImpl$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "scala.concurrent.ExecutionContext$",
+      "fields": [
+        {
+          "name": "global$lzy1"
+        },
+        {
+          "name": "opportunistic$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "scala.math.BigDecimal$",
+      "fields": [
+        {
+          "name": "cache$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "scala.util.matching.Regex$Match",
+      "fields": [
+        {
+          "name": "ends$lzy1"
+        },
+        {
+          "name": "scala$util$matching$Regex$MatchData$$nameToIndex$lzy1"
+        },
+        {
+          "name": "starts$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "sttp.apispec.circe$",
+      "fields": [
+        {
+          "name": "encoderSchema$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "sttp.tapir.Schema$",
+      "fields": [
+        {
+          "name": "schemaForDate$lzy1"
+        },
+        {
+          "name": "schemaForInstant$lzy1"
+        },
+        {
+          "name": "schemaForJavaDuration$lzy1"
+        },
+        {
+          "name": "schemaForLocalDate$lzy1"
+        },
+        {
+          "name": "schemaForLocalDateTime$lzy1"
+        },
+        {
+          "name": "schemaForLocalTime$lzy1"
+        },
+        {
+          "name": "schemaForOffsetDateTime$lzy1"
+        },
+        {
+          "name": "schemaForOffsetTime$lzy1"
+        },
+        {
+          "name": "schemaForZoneId$lzy1"
+        },
+        {
+          "name": "schemaForZoneOffset$lzy1"
+        },
+        {
+          "name": "schemaForZonedDateTime$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "sttp.tapir.docs.apispec.schema.MetaSchemaDraft202012$",
+      "fields": [
+        {
+          "name": "schemaId$lzy2"
+        }
+      ]
+    },
+    {
+      "type": "sun.misc.Signal",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "java.lang.String"
+          ]
+        },
+        {
+          "name": "handle",
+          "parameterTypes": [
+            "sun.misc.Signal",
+            "sun.misc.SignalHandler"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "sun.misc.SignalHandler"
+    },
+    {
+      "type": "sun.misc.Unsafe",
+      "fields": [
+        {
+          "name": "theUnsafe"
+        }
+      ]
+    },
+    {
+      "type": "sun.security.provider.NativePRNG",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "java.security.SecureRandomParameters"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "sun.security.provider.SHA",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "sun.text.resources.cldr.FormatData"
+    },
+    {
+      "type": "sun.text.resources.cldr.FormatData_en"
+    },
+    {
+      "type": "sun.text.resources.cldr.FormatData_en_US"
+    },
+    {
+      "type": "sun.util.resources.cldr.CalendarData"
+    },
+    {
+      "type": "tools.jackson.databind.deser.Deserializers[]"
+    },
+    {
+      "type": "tools.jackson.databind.deser.KeyDeserializers[]"
+    },
+    {
+      "type": "tools.jackson.databind.deser.ValueInstantiators[]"
+    },
+    {
+      "type": "tools.jackson.databind.ser.Serializers[]"
+    },
+    {
+      "type": "zio.Chunk$",
+      "fields": [
+        {
+          "name": "Tags$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "zio.Executor",
+      "fields": [
+        {
+          "name": "asExecutionContext$lzy1"
+        },
+        {
+          "name": "asExecutionContextExecutorService$lzy1"
+        },
+        {
+          "name": "asJava$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "zio.Runtime$",
+      "fields": [
+        {
+          "name": "zio$RuntimePlatformSpecific$$sharedLoomExecutor$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "zio.System$",
+      "fields": [
+        {
+          "name": "os$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "zio.ZEnvironment",
+      "fields": [
+        {
+          "name": "hashCode$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "zio.internal.FiberRuntime",
+      "fields": [
+        {
+          "name": "scope$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "zio.internal.HeadPadding"
+    },
+    {
+      "type": "zio.internal.RingBuffer[]"
+    },
+    {
+      "type": "zio.internal.TailPadding"
+    },
+    {
+      "type": "zio.internal.UpdateOrderLinkedMap",
+      "fields": [
+        {
+          "name": "iteratorLz$lzy1"
+        },
+        {
+          "name": "reverseIteratorLz$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "zio.internal.UpdateOrderLinkedMap$LzList$Cons",
+      "fields": [
+        {
+          "name": "head$lzy1"
+        },
+        {
+          "name": "tail$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$26",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy25"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy25"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$27",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy26"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy26"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$28",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy27"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy27"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$29",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy28"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy28"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$30",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy29"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy29"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$31",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy30"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy30"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$32",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy31"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy31"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$33",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy32"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy32"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$34",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy33"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy33"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$35",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy34"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy34"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$36",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy35"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy35"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$37",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy36"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy36"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$38",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy37"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy37"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$39",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy38"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy38"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$40",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy39"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy39"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$41",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy40"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy40"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$42",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy41"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy41"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.EncoderLowPriority3$$anon$43",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy42"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy42"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.JsonEncoder$$anon$1",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy1"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.JsonEncoder$$anon$10",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy12"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy12"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.JsonEncoder$$anon$11",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy13"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy13"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.JsonEncoder$$anon$12",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy14"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy14"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.JsonEncoder$$anon$13",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy15"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy15"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.JsonEncoder$$anon$14",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy16"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy16"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.JsonEncoder$$anon$15",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy17"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy17"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.JsonEncoder$$anon$3",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy2"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy2"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.JsonEncoder$$anon$4",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy3"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy3"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.JsonEncoder$$anon$5",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy7"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy7"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.JsonEncoder$$anon$6",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy8"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy8"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.JsonEncoder$$anon$7",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy9"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy9"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.JsonEncoder$$anon$8",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy10"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy10"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.JsonEncoder$$anon$9",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy11"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy11"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.ast.Json$$anon$3",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy7"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy7"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.ast.Json$Arr$",
+      "fields": [
+        {
+          "name": "arrd$lzy1"
+        },
+        {
+          "name": "arre$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.ast.Json$Arr$$anon$7",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy2"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy2"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.ast.Json$Bool$$anon$9",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy3"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy3"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.ast.Json$Obj",
+      "fields": [
+        {
+          "name": "keys$lzy1"
+        },
+        {
+          "name": "values$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.ast.Json$Obj$",
+      "fields": [
+        {
+          "name": "objd$lzy1"
+        },
+        {
+          "name": "obje$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.ast.Json$Obj$$anon$5",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy1"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "zio.json.ast.Json$Str$$anon$11",
+      "fields": [
+        {
+          "name": "encodeJsonArrayPipeline$lzy4"
+        },
+        {
+          "name": "encodeJsonLinesPipeline$lzy4"
+        }
+      ]
+    },
+    {
+      "type": "zio.package$",
+      "fields": [
+        {
+          "name": "zio$VersionSpecific$$BoxedBool$lzy1"
+        }
+      ]
+    },
+    {
+      "type": {
+        "proxy": [
+          "sun.misc.SignalHandler"
+        ]
+      }
+    }
+  ],
+  "resources": [
+    {
+      "glob": "META-INF/services/io.modelcontextprotocol.json.McpJsonMapperSupplier"
+    },
+    {
+      "glob": "META-INF/services/io.modelcontextprotocol.json.schema.JsonSchemaValidatorSupplier"
+    },
+    {
+      "glob": "META-INF/services/org.slf4j.spi.SLF4JServiceProvider"
+    },
+    {
+      "glob": "org/slf4j/impl/StaticLoggerBinder.class"
+    }
+  ]
+}
