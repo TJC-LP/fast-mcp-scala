@@ -93,7 +93,7 @@ trait FastMCPPublishingBase extends PublishModule {
 
   /** Version derived from PUBLISH_VERSION env var (set by CI), or SNAPSHOT for local dev */
   override def publishVersion: T[String] =
-    sys.env.getOrElse("PUBLISH_VERSION", "0.3.1-SNAPSHOT")
+    sys.env.getOrElse("PUBLISH_VERSION", "0.3.1")
 
   override def pomSettings: T[PomSettings] = PomSettings(
     description = artifactDescription,
@@ -194,7 +194,7 @@ object `fast-mcp-scala` extends Module {
 
   // Scala.js backend — wraps the TS MCP SDK server on Bun to provide a real cross-platform
   // MCP server runtime. Cross-published to Maven Central as `com.tjclp:fast-mcp-scala_sjs1_3`.
-  object js extends BunScalaJSModule with ScalafmtModule with FastMCPPublishingBase {
+  object js extends BunScalaJSModule with BunPublishModule with ScalafmtModule with FastMCPPublishingBase {
     def scalaVersion = scala3Version
 
     override def moduleKind = Task { ModuleKind.ESModule }
