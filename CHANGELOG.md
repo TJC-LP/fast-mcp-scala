@@ -5,7 +5,13 @@ All notable changes to fast-mcp-scala will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 0.3.0-rc4: Strip `$schema` root key from tool inputSchema
+## [Unreleased] - 0.3.0-rc5: GraalVM native-image reachability metadata
+
+### Added
+
+- **GraalVM native-image reachability metadata** shipped with the JVM artifact at `META-INF/native-image/com.tjclp/fast-mcp-scala_3/reachability-metadata.json`. Covers Jackson record introspection over `io.modelcontextprotocol.spec.McpSchema$*`, zio-json's derivation, reactor-core, izumi-reflect, and `JacksonConversionContext`. Downstream apps can now build a working `native-image` of a fast-mcp-scala stdio server with zero hand-written config — just add `mill.javalib.NativeImageModule` and `jvmId = "graalvm-community:25.0.1"`. Covers initialize / notifications/initialized / tools/list / tools/call / ping / resources/list / prompts/list — the full protocol surface the Claude Agent SDK exercises during handshake.
+
+## [0.3.0-rc4] - Strip `$schema` root key from tool inputSchema
 
 ### Fixed
 
