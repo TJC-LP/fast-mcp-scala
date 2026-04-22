@@ -93,7 +93,7 @@ trait FastMCPPublishingBase extends PublishModule {
 
   /** Version derived from PUBLISH_VERSION env var (set by CI), or SNAPSHOT for local dev */
   override def publishVersion: T[String] =
-    sys.env.getOrElse("PUBLISH_VERSION", "0.3.0-SNAPSHOT")
+    sys.env.getOrElse("PUBLISH_VERSION", "0.3.1-SNAPSHOT")
 
   override def pomSettings: T[PomSettings] = PomSettings(
     description = artifactDescription,

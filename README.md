@@ -415,14 +415,14 @@ For architectural detail, see [`docs/architecture.md`](docs/architecture.md).
 After `publishLocal`:
 
 ```scala 3 ignore
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.3.0-SNAPSHOT"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.3.1-SNAPSHOT"
 ```
 
 Or with Mill:
 
 ```scala 3 ignore
 def ivyDeps = Agg(
-  ivy"com.tjclp::fast-mcp-scala:0.3.0-SNAPSHOT"
+  ivy"com.tjclp::fast-mcp-scala:0.3.1-SNAPSHOT"
 )
 ```
 
