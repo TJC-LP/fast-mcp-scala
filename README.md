@@ -39,10 +39,10 @@ Built on **ZIO 2**, **Tapir**-derived schemas, **Jackson 3** (JVM) / **zio-json*
 
 ```scala 3 ignore
 // JVM — Java SDK-backed runtime with annotations, derived schemas, HTTP + stdio transports.
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.3.0-rc4"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.3.0"
 
 // Scala.js — TS SDK-backed runtime on Bun/Node + the same annotation and typed-contract APIs.
-libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "0.3.0-rc4"
+libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "0.3.0"
 ```
 
 Built against Scala 3.8.3. JVM requires JDK 17+. Scala.js artifact is published for `sjs1_3` (Scala.js 1.x); runs on Bun (first-class) and Node 18+.
@@ -53,7 +53,7 @@ A single-file server with one tool — the same code lives in [`HelloWorld.scala
 
 ```scala 3 raw
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc4
+//> using dep com.tjclp::fast-mcp-scala:0.3.0
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.{*, given}
@@ -300,7 +300,7 @@ Proof: the conformance suite at [`JsServerConformanceTest.scala`](fast-mcp-scala
 
 ```scala 3 raw
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala_sjs1:0.3.0-rc4
+//> using dep com.tjclp::fast-mcp-scala_sjs1:0.3.0
 
 import com.tjclp.fastmcp.{*, given}
 
@@ -377,7 +377,7 @@ Add to `claude_desktop_config.json`:
       "command": "scala-cli",
       "args": [
         "-e",
-        "//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc4",
+        "//> using dep com.tjclp::fast-mcp-scala:0.3.0",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]
