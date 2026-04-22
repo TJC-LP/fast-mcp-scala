@@ -5,6 +5,12 @@ All notable changes to fast-mcp-scala will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-04-22
+
+### Added
+
+- **`BunPublishModule` mixin on the Scala.js artifact.** `fast-mcp-scala_sjs1_3` now publishes with `META-INF/bun/bun-dependencies.json` embedded in the JAR, listing the runtime JS dependencies (`@modelcontextprotocol/sdk@1.29.0`, `zod@4.3.6`, `zod-to-json-schema@3.25.1`). Downstream Scala.js consumers that use `BunScalaJSModule` (from `mill-bun-plugin` 0.2.0+) pick these up automatically via `classpathBunManifests` — no need to redeclare the SDK in their own `bunDeps`. Manifest-only by default (cross-platform safe); set `bunPublishVendoredRuntime = true` to also embed a resolved `node_modules/` tree.
+
 ## [0.3.0] - 2026-04-22
 
 ### Added
