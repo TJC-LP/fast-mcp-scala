@@ -103,9 +103,8 @@ class TaskManager(settings: TaskSettings, tasksRef: Ref[Map[String, TaskEntry]])
         result = promise
       )
       accepted <- tasksRef.modify { all =>
-        val runningForSession = all.values.count(e =>
-          e.sessionId == sessionId && !e.status.isTerminal
-        )
+        val runningForSession =
+          all.values.count(e => e.sessionId == sessionId && !e.status.isTerminal)
         if runningForSession >= settings.maxConcurrentPerSession then (false, all)
         else (true, all.updated(taskId, entry))
       }
