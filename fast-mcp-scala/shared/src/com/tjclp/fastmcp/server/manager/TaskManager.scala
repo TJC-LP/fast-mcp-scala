@@ -162,9 +162,11 @@ class TaskManager(settings: TaskSettings, tasksRef: Ref[Map[String, TaskEntry]])
             )
           )
         case Some(entry) =>
-          // Fiber.interrupt awaits the fiber's completion. The release block in `wrapped`
-          // (above) updates the status entry to Cancelled before fiber.interrupt returns.
-          entry.fiber.interrupt *> tasksRef.get.map { latest =>
+          // Interrupt the fiber, then await the result-promise's exit. recordTerminal updates
+          // tasksRef BEFORE filling the promise, so awaiting the promise guarantees we read a
+          // post-update view (more robust under contention than relying on fiber.interrupt's
+          // implicit release-await).
+          entry.fiber.interrupt *> entry.result.await.exit *> tasksRef.get.map { latest =>
             latest.get(taskId).map(_.toTask).toRight("Task disappeared during cancel")
           }
     }

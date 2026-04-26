@@ -99,13 +99,22 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     val first = runUnsafe(
       tm.create(sessionId = Some("s1"), requestedTtlMs = None, run = never, _ => ZIO.unit)
     )
-    val ex = intercept[TaskConcurrencyLimitExceeded] {
-      val _ = runUnsafe(
-        tm.create(sessionId = Some("s1"), requestedTtlMs = None, run = never, _ => ZIO.unit)
-      )
+    // ZIO's `getOrThrowFiberFailure` wraps the typed error in `FiberFailure`. Run via `.exit`
+    // and pattern-match the cause so the test asserts on the underlying type, not the wrapper.
+    val exit = Unsafe.unsafe { implicit u =>
+      Runtime.default.unsafe
+        .run(
+          tm.create(sessionId = Some("s1"), requestedTtlMs = None, run = never, _ => ZIO.unit)
+        )
     }
-    ex.sessionId shouldBe Some("s1")
-    ex.limit shouldBe 1
+    val cause = exit match
+      case Exit.Failure(c) => c
+      case Exit.Success(_) => fail("Expected concurrency-cap rejection but got success")
+    val typed = cause.failureOption match
+      case Some(t: TaskConcurrencyLimitExceeded) => t
+      case other => fail(s"Expected TaskConcurrencyLimitExceeded but got $other")
+    typed.sessionId shouldBe Some("s1")
+    typed.limit shouldBe 1
     runUnsafe(tm.list(Some("s1"), None)).tasks.map(_.taskId) shouldBe List(first.task.taskId)
     val _ = runUnsafe(gate.succeed(()))
   }
