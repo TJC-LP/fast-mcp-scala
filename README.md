@@ -234,6 +234,42 @@ Need lower-level control? Skip the sugar trait and construct directly — `val s
 
 Curl recipes for both modes are in [`HttpServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/HttpServer.scala).
 
+## Tasks (experimental, off by default)
+
+MCP Tasks (spec **2025-11-25**) wrap long-running `tools/call` invocations in a durable, polled state machine. Clients send `params.task: {ttl}`, get a `CreateTaskResult` immediately, and then poll `tasks/get` / `tasks/list` / `tasks/cancel` / `tasks/result` until completion. Useful for LLM batch jobs, expensive computation, and integrations with external job APIs that would otherwise time out under request/response.
+
+Enable per server (off by default — the spec marks Tasks experimental):
+
+```scala 3 raw
+val server = McpServer(
+  name = "my-server",
+  settings = McpServerSettings(tasks = TaskSettings(enabled = true))
+)
+```
+
+Opt in per tool — annotation path:
+
+```scala 3 raw
+@Tool(name = Some("expensive-op"), taskSupport = Some("optional"))
+def expensiveOp(@Param("input") x: String): String = ???
+```
+
+Opt in per tool — typed-contract path:
+
+```scala 3 raw
+val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
+  .withTaskSupport(TaskSupport.Optional)
+```
+
+`taskSupport` values: `"forbidden"` (default), `"optional"` (clients may augment), `"required"` (clients must — bare calls return `-32601`).
+
+**Transport limitations**: Tasks are dispatched inside fast-mcp-scala's own ZIO HTTP transport because the upstream Java MCP SDK 1.1.1 doesn't yet implement them. As a result:
+
+- **JVM**: works on `runHttp()` with `stateless = false` (the default streamable transport). `runStdio()` and stateless HTTP fail-fast at startup if `tasks.enabled` is true.
+- **JS / Bun**: works on both stateful and stateless `runHttp()`. `runStdio()` fails fast.
+
+When enabled, the `tasks` capability is advertised at `initialize` and each opt-in tool surfaces `execution.taskSupport` on `tools/list`.
+
 ## Customizing decoding (Jackson 3)
 
 fast-mcp-scala uses Jackson 3 to turn raw JSON-RPC arguments into Scala values. Primitives, Scala enums, case classes, `Option`, `List`, `Map`, and `java.time` types work out of the box — no configuration required.

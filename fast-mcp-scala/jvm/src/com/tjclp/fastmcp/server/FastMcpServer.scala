@@ -39,6 +39,8 @@ import com.tjclp.fastmcp.server.manager.ResourceTemplateHandler
 import com.tjclp.fastmcp.server.manager.ToolManager
 import com.tjclp.fastmcp.server.manager.ToolRegistrationOptions
 import com.tjclp.fastmcp.server.manager.ResourceConversions.*
+import com.tjclp.fastmcp.server.manager.TaskManager
+import com.tjclp.fastmcp.server.transport.TaskDispatcher
 import com.tjclp.fastmcp.server.transport.ZioHttpStatelessTransport
 import com.tjclp.fastmcp.server.transport.ZioHttpStreamableTransportProvider
 
@@ -90,17 +92,19 @@ class FastMcpServer(
   override def tool(
       name: String,
       handler: ContextualToolHandler,
-      description: Option[String] = None,
-      inputSchema: ToolInputSchema = ToolInputSchema.default,
-      options: ToolRegistrationOptions = ToolRegistrationOptions(),
-      annotations: Option[ToolAnnotations] = None
+      description: Option[String],
+      inputSchema: ToolInputSchema,
+      options: ToolRegistrationOptions,
+      annotations: Option[ToolAnnotations],
+      taskSupport: Option[TaskSupport]
   ): ZIO[Any, Throwable, FastMcpServer] =
     tool(
       definition = ToolDefinition(
         name = name,
         description = description,
         inputSchema = inputSchema,
-        annotations = annotations
+        annotations = annotations,
+        taskSupport = taskSupport
       ),
       handler = handler,
       options = options
@@ -248,6 +252,17 @@ class FastMcpServer(
     * interrupted, allowing clean shutdown when an MCP client closes the subprocess stdin.
     */
   def runStdio(): ZIO[Any, Throwable, Unit] =
+    if settings.tasks.enabled then
+      ZIO.fail(
+        new IllegalStateException(
+          "MCP Tasks (settings.tasks.enabled) require the streamable HTTP transport. " +
+            "stdio uses the Java SDK's transport which has no tasks dispatch. " +
+            "Disable tasks or call runHttp() with stateless=false."
+        )
+      )
+    else runStdioInternal()
+
+  private def runStdioInternal(): ZIO[Any, Throwable, Unit] =
     ZIO.scoped {
       for {
         stdinClosed <- Promise.make[Nothing, Unit]
@@ -300,6 +315,17 @@ class FastMcpServer(
     * McpStatelessServerHandler. No session state is maintained between requests.
     */
   private def runStatelessHttp(): ZIO[Any, Throwable, Unit] =
+    if settings.tasks.enabled then
+      ZIO.fail(
+        new IllegalStateException(
+          "MCP Tasks (settings.tasks.enabled) require the streamable HTTP transport. " +
+            "stateless HTTP delegates dispatch to the Java SDK which has no tasks support. " +
+            "Disable tasks or set settings.stateless = false."
+        )
+      )
+    else runStatelessHttpInternal()
+
+  private def runStatelessHttpInternal(): ZIO[Any, Throwable, Unit] =
     ZIO.scoped {
       for {
         jsonMapper <- ZIO.attempt(McpJsonDefaults.getMapper())
@@ -330,11 +356,18 @@ class FastMcpServer(
     ZIO.scoped {
       for {
         jsonMapper <- ZIO.attempt(McpJsonDefaults.getMapper())
+        taskDispatcherOpt <-
+          if settings.tasks.enabled then
+            TaskManager.make(settings.tasks).map { tm =>
+              Some(new TaskDispatcher(tm, toolManager, jsonMapper))
+            }
+          else ZIO.succeed(None)
         provider = new ZioHttpStreamableTransportProvider(
           jsonMapper,
           settings.httpEndpoint,
           settings.disallowDelete,
-          settings.keepAliveInterval
+          settings.keepAliveInterval,
+          taskDispatcherOpt
         )
         _ <- ZIO.attempt(setupStreamableServer(provider))
         _ <- ZIO.attempt(

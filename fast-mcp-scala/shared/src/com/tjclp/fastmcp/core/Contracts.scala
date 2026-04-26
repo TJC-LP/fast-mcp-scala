@@ -234,7 +234,14 @@ final case class McpTool[In, Out] private (
     handler: (In, Option[McpContext]) => ZIO[Any, Throwable, Out],
     private[fastmcp] val decoder: McpDecoder[In],
     private[fastmcp] val encoder: McpEncoder[Out]
-)
+):
+
+  /** Opt this tool into experimental MCP Tasks. Without this call the tool defaults to
+    * [[TaskSupport.Forbidden]] — clients invoking it with `params.task` get a `-32601` error. Has
+    * no effect unless [[com.tjclp.fastmcp.server.TaskSettings.enabled]] is true server-side.
+    */
+  def withTaskSupport(value: TaskSupport): McpTool[In, Out] =
+    copy(definition = definition.copy(taskSupport = Some(value)))
 
 object McpTool:
 

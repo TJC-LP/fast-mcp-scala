@@ -124,6 +124,7 @@ server.tool(addTool)
 
 - `@Tool` - Marks a method as an MCP tool. Supports behavioral hints:
   - `title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`, `returnDirect`
+  - `taskSupport: Option[String]` — opt into experimental MCP Tasks polling: `"forbidden"` (default), `"optional"`, or `"required"`. See "Tasks" section below.
 - `@Resource` - Marks a method as an MCP resource (static or templated)
 - `@Prompt` - Marks a method as an MCP prompt
 - `@Param` - Describes parameters/fields with metadata:
@@ -146,6 +147,42 @@ server.tool(addTool)
 
 - **Stdio** (`runStdio()`) — stdin/stdout, used by MCP clients
 - **HTTP** (`runHttp()`) — streamable (sessions + SSE) by default, set `stateless = true` for stateless
+
+### Tasks (experimental, off by default)
+
+MCP Tasks (spec **2025-11-25**) wrap long-running `tools/call` invocations in a durable, polled state machine. Clients send `params.task: {ttl}`, get a `CreateTaskResult` immediately, then poll `tasks/get` / `tasks/result` / `tasks/list` / `tasks/cancel`.
+
+**Enable per server**:
+
+```scala
+val server = McpServer(
+  name = "my-server",
+  settings = McpServerSettings(tasks = TaskSettings(enabled = true))
+)
+```
+
+**Opt in per tool** (annotation):
+
+```scala
+@Tool(name = Some("expensive-op"), taskSupport = Some("optional"))
+def expensiveOp(@Param("input") x: String): String = ???
+```
+
+**Opt in per tool** (typed contract):
+
+```scala
+val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
+  .withTaskSupport(TaskSupport.Optional)
+```
+
+`taskSupport` values: `"forbidden"` (default — no tasks), `"optional"` (clients may augment with a task), `"required"` (clients must — bare calls return `-32601`).
+
+**Transport limitations**:
+
+- **JVM**: Tasks work **only** on `runHttp()` with `stateless = false` (the default streamable transport). `runStdio()` and `runHttp()` with `stateless = true` fail-fast at startup with `IllegalStateException` because the underlying Java MCP SDK 1.1.1 has no tasks support — fast-mcp-scala intercepts dispatch in its own ZIO HTTP transport.
+- **JS** (Bun): Tasks work on `runHttp()` (both stateful and stateless). `runStdio()` rejects task-enabled servers at startup.
+
+The `tasks` capability is advertised on `initialize` only when `settings.tasks.enabled` is true. The `execution.taskSupport` field is injected on `tools/list` entries that opt in.
 
 ### Cross-Platform Architecture
 

@@ -85,23 +85,38 @@ trait ServerCapabilities extends js.Object:
   val resources: js.UndefOr[js.Object]
   val prompts: js.UndefOr[js.Object]
   val logging: js.UndefOr[js.Object]
+  val tasks: js.UndefOr[js.Object]
 
 object ServerCapabilities:
 
   /** Build a `ServerCapabilities` from boolean flags. Each flag controls whether the MCP feature is
     * advertised; fine-grained sub-capabilities (like `listChanged`) are not exposed yet.
+    *
+    * `tasks` follows the spec 2025-11-25 shape: when enabled, advertises support for the `list` /
+    * `cancel` operations and for `tools/call` task augmentation.
     */
   def apply(
       tools: Boolean = false,
       resources: Boolean = false,
       prompts: Boolean = false,
-      logging: Boolean = false
+      logging: Boolean = false,
+      tasks: Boolean = false
   ): ServerCapabilities =
     val raw = js.Dictionary.empty[js.Any]
     if tools then raw("tools") = js.Dictionary.empty[js.Any]
     if resources then raw("resources") = js.Dictionary.empty[js.Any]
     if prompts then raw("prompts") = js.Dictionary.empty[js.Any]
     if logging then raw("logging") = js.Dictionary.empty[js.Any]
+    if tasks then
+      raw("tasks") = js.Dynamic
+        .literal(
+          list = js.Dictionary.empty[js.Any],
+          cancel = js.Dictionary.empty[js.Any],
+          requests = js.Dynamic.literal(
+            tools = js.Dynamic.literal(call = js.Dictionary.empty[js.Any])
+          )
+        )
+        .asInstanceOf[js.Object]
     raw.asInstanceOf[ServerCapabilities]
 
 /** Opaque handle for any TS-SDK transport. */

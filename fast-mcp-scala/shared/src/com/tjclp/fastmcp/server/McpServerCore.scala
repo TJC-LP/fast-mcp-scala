@@ -41,14 +41,16 @@ trait McpServerCore:
       description: Option[String] = None,
       inputSchema: ToolInputSchema = ToolInputSchema.default,
       options: ToolRegistrationOptions = ToolRegistrationOptions(),
-      annotations: Option[ToolAnnotations] = None
+      annotations: Option[ToolAnnotations] = None,
+      taskSupport: Option[TaskSupport] = None
   ): ZIO[Any, Throwable, McpServerCore] =
     tool(
       definition = ToolDefinition(
         name = name,
         description = description,
         inputSchema = inputSchema,
-        annotations = annotations
+        annotations = annotations,
+        taskSupport = taskSupport
       ),
       handler = handler,
       options = options

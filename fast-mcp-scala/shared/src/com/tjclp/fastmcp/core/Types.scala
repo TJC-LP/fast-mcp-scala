@@ -69,8 +69,14 @@ case class ToolDefinition(
     deprecationMessage: Option[String] = None,
     tags: List[String] = List.empty,
     timeoutMillis: Option[Long] = None,
-    annotations: Option[ToolAnnotations] = None
-)
+    annotations: Option[ToolAnnotations] = None,
+    taskSupport: Option[TaskSupport] = None
+):
+
+  /** Effective task-support resolution: `None` (unspecified) is treated as
+    * [[TaskSupport.Forbidden]] per spec 2025-11-25 §"Tool-Level Negotiation".
+    */
+  def effectiveTaskSupport: TaskSupport = taskSupport.getOrElse(TaskSupport.Forbidden)
 
 // --- Prompt Related Types ---
 

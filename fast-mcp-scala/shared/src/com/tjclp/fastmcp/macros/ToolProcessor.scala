@@ -37,9 +37,20 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       hintDestructive,
       hintIdempotent,
       hintOpenWorld,
-      hintReturnDirect
+      hintReturnDirect,
+      hintTaskSupport
     ) =
       MacroUtils.parseToolAnnotationHints(toolAnnot)
+
+    val taskSupportExpr: Expr[Option[com.tjclp.fastmcp.core.TaskSupport]] = hintTaskSupport match
+      case None => '{ None }
+      case Some("forbidden") => '{ Some(com.tjclp.fastmcp.core.TaskSupport.Forbidden) }
+      case Some("optional") => '{ Some(com.tjclp.fastmcp.core.TaskSupport.Optional) }
+      case Some("required") => '{ Some(com.tjclp.fastmcp.core.TaskSupport.Required) }
+      case Some(other) =>
+        report.errorAndAbort(
+          s"@Tool taskSupport must be one of \"forbidden\" | \"optional\" | \"required\" — got \"$other\""
+        )
 
     val hasAnyAnnotation = List(
       hintTitle,
@@ -156,7 +167,8 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
         description = ${ Expr(finalDesc) },
         handler = $handler,
         inputSchema = ToolInputSchema.unsafeFromJsonString($schemaWithMetadata.spaces2),
-        annotations = $annotationsExpr
+        annotations = $annotationsExpr,
+        taskSupport = $taskSupportExpr
       )
     }
 

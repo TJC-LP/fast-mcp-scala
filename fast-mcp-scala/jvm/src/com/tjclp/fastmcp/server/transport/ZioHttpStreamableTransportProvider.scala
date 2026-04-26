@@ -35,7 +35,8 @@ class ZioHttpStreamableTransportProvider(
     endpoint: String = "/mcp",
     disallowDelete: Boolean = false,
     @unused
-    keepAliveInterval: Option[java.time.Duration] = None
+    keepAliveInterval: Option[java.time.Duration] = None,
+    private[fastmcp] val taskDispatcher: Option[TaskDispatcher] = None
 ) extends McpStreamableServerTransportProvider:
 
   @volatile private var sessionFactory: McpStreamableServerSession.Factory =
@@ -149,7 +150,7 @@ class ZioHttpStreamableTransportProvider(
               )
               .block()
 
-            val jsonResponse = jsonMapper.writeValueAsString(
+            val rawJsonResponse = jsonMapper.writeValueAsString(
               new McpSchema.JSONRPCResponse(
                 McpSchema.JSONRPC_VERSION,
                 jsonrpcRequest.id(),
@@ -157,6 +158,9 @@ class ZioHttpStreamableTransportProvider(
                 null
               )
             )
+            val jsonResponse = taskDispatcher
+              .map(_.transformOutgoingJson(rawJsonResponse))
+              .getOrElse(rawJsonResponse)
 
             Response
               .text(jsonResponse)
@@ -191,13 +195,41 @@ class ZioHttpStreamableTransportProvider(
       message: McpSchema.JSONRPCMessage,
       transportContext: io.modelcontextprotocol.common.McpTransportContext
   ): ZIO[Any, String, Response] =
+    val intercepted: Option[ZIO[Any, String, Response]] = (taskDispatcher, message) match
+      case (Some(dispatcher), req: McpSchema.JSONRPCRequest) =>
+        val ctx = Some(
+          new com.tjclp.fastmcp.server.JvmMcpContext(
+            javaExchange = None,
+            transportContext = Some(transportContext)
+          )
+        )
+        dispatcher.intercept(req, Some(session.getId), ctx).map { effect =>
+          effect.map { response =>
+            val raw = jsonMapper.writeValueAsString(response)
+            val transformed = dispatcher.transformOutgoingJson(raw)
+            Response
+              .text(transformed)
+              .addHeader(Header.ContentType(MediaType.application.json))
+              .status(Status.Ok)
+          }
+        }
+      case _ => None
+
+    intercepted.getOrElse(handleSessionPostNormal(session, message, transportContext))
+
+  private def handleSessionPostNormal(
+      session: McpStreamableServerSession,
+      message: McpSchema.JSONRPCMessage,
+      transportContext: io.modelcontextprotocol.common.McpTransportContext
+  ): ZIO[Any, String, Response] =
     message match
       // 2. JSON-RPC Request — return SSE stream with response
       case jsonrpcRequest: McpSchema.JSONRPCRequest =>
         for {
           transport <- ZioHttpStreamableSessionTransport.make(
             session.getId,
-            jsonMapper
+            jsonMapper,
+            taskDispatcher.map(d => (json: String) => d.transformOutgoingJson(json))
           )
           // Run the SDK's response stream synchronously. This calls the handler, pushes the
           // SSE event to the queue via sendMessage, then shuts down the queue via closeGracefully.
@@ -276,7 +308,11 @@ class ZioHttpStreamableTransportProvider(
           .fromOption(Option(sessions.get(sid)))
           .orElseFail("Session not found")
         transport <- ZioHttpStreamableSessionTransport
-          .make(sid, jsonMapper)
+          .make(
+            sid,
+            jsonMapper,
+            taskDispatcher.map(d => (json: String) => d.transformOutgoingJson(json))
+          )
         _ <- ZIO
           .attempt {
             // Establish live stream for server-initiated messages.
@@ -373,7 +409,8 @@ end ZioHttpStreamableTransportProvider
 private[transport] class ZioHttpStreamableSessionTransport private (
     sessionId: String,
     jsonMapper: McpJsonMapper,
-    queue: Queue[Option[ServerSentEvent[String]]]
+    queue: Queue[Option[ServerSentEvent[String]]],
+    outgoingJsonTransformer: Option[String => String]
 ) extends McpStreamableServerTransport:
 
   @volatile private var closed: Boolean = false
@@ -395,7 +432,8 @@ private[transport] class ZioHttpStreamableSessionTransport private (
   override def sendMessage(message: McpSchema.JSONRPCMessage, messageId: String): Mono[Void] =
     Mono.fromRunnable[Void] { () =>
       if !closed then
-        val json = jsonMapper.writeValueAsString(message)
+        val rawJson = jsonMapper.writeValueAsString(message)
+        val json = outgoingJsonTransformer.fold(rawJson)(_(rawJson))
         val event = ServerSentEvent(
           data = json,
           eventType = Some("message"),
@@ -427,8 +465,14 @@ private[transport] object ZioHttpStreamableSessionTransport:
 
   def make(
       sessionId: String,
-      jsonMapper: McpJsonMapper
+      jsonMapper: McpJsonMapper,
+      outgoingJsonTransformer: Option[String => String] = None
   ): ZIO[Any, Nothing, ZioHttpStreamableSessionTransport] =
     for {
       q <- Queue.unbounded[Option[ServerSentEvent[String]]]
-    } yield new ZioHttpStreamableSessionTransport(sessionId, jsonMapper, q)
+    } yield new ZioHttpStreamableSessionTransport(
+      sessionId,
+      jsonMapper,
+      q,
+      outgoingJsonTransformer
+    )

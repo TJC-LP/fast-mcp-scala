@@ -7,7 +7,7 @@ import scala.scalajs.js
 import scala.scalajs.js.JSON
 import scala.scalajs.js.JavaScriptException
 
-import zio.*
+import zio.{Task as _, *}
 
 import com.tjclp.fastmcp.codec.JsMcpDecodeContext
 import com.tjclp.fastmcp.core.*
@@ -35,6 +35,11 @@ final class JsMcpServer(
   val toolManager = new ToolManager()
   val resourceManager = new ResourceManager()
   val promptManager = new PromptManager()
+
+  // TaskManager allocated up-front when tasks are enabled. Even on JS we use the shared ZIO-based
+  // implementation so behavior matches the JVM HTTP path.
+  private val taskManagerOpt: Option[TaskManager] =
+    if settings.tasks.enabled then Some(TaskManager.makeUnsafe(settings.tasks)) else None
 
   private val validator = new tsdk.AjvJsonSchemaValidator()
 
@@ -90,10 +95,17 @@ final class JsMcpServer(
     * SIGINT, etc.).
     */
   override def runStdio(): ZIO[Any, Throwable, Unit] =
-    val transport = new tsdk.StdioServerTransport()
-    ZIO.acquireReleaseWith(connect(transport))(tsServer =>
-      ZioJsPromise.fromJsPromise(tsServer.close()).ignore
-    )(_ => ZIO.never)
+    if settings.tasks.enabled then
+      ZIO.fail(
+        new IllegalStateException(
+          "MCP Tasks (settings.tasks.enabled) require runHttp() — stdio is not supported on JS yet."
+        )
+      )
+    else
+      val transport = new tsdk.StdioServerTransport()
+      ZIO.acquireReleaseWith(connect(transport))(tsServer =>
+        ZioJsPromise.fromJsPromise(tsServer.close()).ignore
+      )(_ => ZIO.never)
 
   /** Bun-first Streamable HTTP transport.
     *
@@ -234,7 +246,8 @@ final class JsMcpServer(
     val capabilities = tsdk.ServerCapabilities(
       tools = !toolManager.listDefinitions().isEmpty,
       resources = !resourceManager.listDefinitions().isEmpty,
-      prompts = !promptManager.listDefinitions().isEmpty
+      prompts = !promptManager.listDefinitions().isEmpty,
+      tasks = settings.tasks.enabled
     )
     val tsServer = new tsdk.Server(
       tsdk.Implementation(name, version),
@@ -283,6 +296,27 @@ final class JsMcpServer(
         (req, extra) => ZioJsPromise.zioToPromise(handleGetPrompt(tsServer, req, extra))
       )
 
+    // Experimental MCP Tasks (spec 2025-11-25). Only registered when settings.tasks.enabled is
+    // true, so that servers without task-aware tools don't expose the tasks capability.
+    taskManagerOpt.foreach { tm =>
+      tsServer.setRequestHandler(
+        tsdk.GetTaskRequestSchema,
+        (req, extra) => ZioJsPromise.zioToPromise(handleTasksGet(tm, req, extra))
+      )
+      tsServer.setRequestHandler(
+        tsdk.ListTasksRequestSchema,
+        (req, extra) => ZioJsPromise.zioToPromise(handleTasksList(tm, req, extra))
+      )
+      tsServer.setRequestHandler(
+        tsdk.CancelTaskRequestSchema,
+        (req, extra) => ZioJsPromise.zioToPromise(handleTasksCancel(tm, req, extra))
+      )
+      tsServer.setRequestHandler(
+        tsdk.GetTaskPayloadRequestSchema,
+        (req, extra) => ZioJsPromise.zioToPromise(handleTasksResult(tm, req, extra))
+      )
+    }
+
   // --- Handlers --------------------------------------------------------------------------------
 
   private def handleListTools(): js.Any =
@@ -300,6 +334,8 @@ final class JsMcpServer(
     val toolName = params.name.asInstanceOf[String]
     val argsJs = params.arguments.asInstanceOf[js.UndefOr[js.Dictionary[js.Any]]]
     val argsMap: Map[String, Any] = argsJs.toOption.fold(Map.empty[String, Any])(_.toMap)
+    val taskParamsJs = params.task.asInstanceOf[js.UndefOr[js.Dictionary[js.Any]]]
+    val ctx = Some(JsMcpContext(tsServer, extra): McpContext)
 
     toolManager.getToolDefinition(toolName) match
       case None =>
@@ -309,17 +345,164 @@ final class JsMcpServer(
           case Some(errorMsg) =>
             ZIO.succeed(JsMcpServer.callToolError(errorMsg))
           case None =>
-            val ctx = Some(JsMcpContext(tsServer, extra): McpContext)
-            toolManager
-              .callTool(toolName, argsMap, ctx)
-              .map(result => JsMcpServer.callToolSuccess(toolName, result))
-              .catchAll(err =>
-                ZIO.succeed(
-                  JsMcpServer.callToolError(
-                    Option(err.getMessage).getOrElse(err.getClass.getSimpleName)
+            val effectiveSupport = defn.effectiveTaskSupport
+            (taskManagerOpt, taskParamsJs.toOption, effectiveSupport) match
+              case (Some(tm), Some(taskParams), TaskSupport.Optional | TaskSupport.Required) =>
+                executeAsTask(tm, toolName, argsMap, taskParams, extra, ctx)
+              case (_, Some(_), _) =>
+                ZIO.fail(
+                  JavaScriptException(
+                    new tsdk.McpError(
+                      tsdk.ErrorCode.MethodNotFound,
+                      s"Tool '$toolName' does not support task augmentation"
+                    )
                   )
                 )
+              case (Some(_), None, TaskSupport.Required) =>
+                ZIO.fail(
+                  JavaScriptException(
+                    new tsdk.McpError(
+                      tsdk.ErrorCode.MethodNotFound,
+                      s"Tool '$toolName' requires task augmentation"
+                    )
+                  )
+                )
+              case _ =>
+                toolManager
+                  .callTool(toolName, argsMap, ctx)
+                  .map(result => JsMcpServer.callToolSuccess(toolName, result))
+                  .catchAll(err =>
+                    ZIO.succeed(
+                      JsMcpServer.callToolError(
+                        Option(err.getMessage).getOrElse(err.getClass.getSimpleName)
+                      )
+                    )
+                  )
+
+  private def executeAsTask(
+      tm: TaskManager,
+      toolName: String,
+      argsMap: Map[String, Any],
+      taskParams: js.Dictionary[js.Any],
+      extra: tsdk.RequestHandlerExtra,
+      ctx: Option[McpContext]
+  ): ZIO[Any, Throwable, js.Any] =
+    val ttlMs = taskParams.get("ttl").flatMap { v =>
+      if js.typeOf(v) == "number" then Some(v.asInstanceOf[Double].toLong) else None
+    }
+    val sessionId = extra.sessionId.toOption
+    val run: ZIO[Any, Throwable, Any] = toolManager
+      .callTool(toolName, argsMap, ctx)
+      .map(result => JsMcpServer.callToolSuccess(toolName, result))
+      .catchAll(err =>
+        ZIO.succeed(
+          JsMcpServer.callToolError(
+            Option(err.getMessage).getOrElse(err.getClass.getSimpleName)
+          )
+        )
+      )
+    tm.create(
+      sessionId = sessionId,
+      requestedTtlMs = ttlMs,
+      run = run.asInstanceOf[ZIO[Any, Throwable, Any]],
+      onStatusChange = _ => ZIO.unit
+    ).map(JsMcpServer.createTaskResultToJs)
+      .catchAll {
+        case _: TaskConcurrencyLimitExceeded =>
+          ZIO.fail(
+            JavaScriptException(
+              new tsdk.McpError(
+                tsdk.ErrorCode.InvalidParams,
+                "Task concurrency limit exceeded for this session"
               )
+            )
+          )
+        case err =>
+          ZIO.fail(
+            JavaScriptException(
+              new tsdk.McpError(
+                tsdk.ErrorCode.InternalError,
+                Option(err.getMessage).getOrElse(err.getClass.getSimpleName)
+              )
+            )
+          )
+      }
+
+  private def handleTasksGet(
+      tm: TaskManager,
+      req: js.Dynamic,
+      extra: tsdk.RequestHandlerExtra
+  ): ZIO[Any, Throwable, js.Any] =
+    val taskId = req.params.taskId.asInstanceOf[String]
+    val sessionId = extra.sessionId.toOption
+    tm.get(taskId, sessionId).flatMap {
+      case None =>
+        ZIO.fail(
+          JavaScriptException(
+            new tsdk.McpError(tsdk.ErrorCode.InvalidParams, s"Task not found: $taskId")
+          )
+        )
+      case Some(task) =>
+        ZIO.succeed(JsMcpServer.taskToJs(task))
+    }
+
+  private def handleTasksList(
+      tm: TaskManager,
+      req: js.Dynamic,
+      extra: tsdk.RequestHandlerExtra
+  ): ZIO[Any, Throwable, js.Any] =
+    val params = req.params.asInstanceOf[js.UndefOr[js.Dynamic]].toOption
+    val cursor = params.flatMap(_.cursor.asInstanceOf[js.UndefOr[String]].toOption)
+    val sessionId = extra.sessionId.toOption
+    tm.list(sessionId, cursor).map { listResult =>
+      val raw = js.Dictionary.empty[js.Any]
+      raw("tasks") = js.Array[js.Any](listResult.tasks.map(JsMcpServer.taskToJs)*)
+      listResult.nextCursor.foreach(c => raw("nextCursor") = c)
+      raw.asInstanceOf[js.Any]
+    }
+
+  private def handleTasksCancel(
+      tm: TaskManager,
+      req: js.Dynamic,
+      extra: tsdk.RequestHandlerExtra
+  ): ZIO[Any, Throwable, js.Any] =
+    val taskId = req.params.taskId.asInstanceOf[String]
+    val sessionId = extra.sessionId.toOption
+    tm.cancel(taskId, sessionId).flatMap {
+      case Left(reason) =>
+        ZIO.fail(
+          JavaScriptException(new tsdk.McpError(tsdk.ErrorCode.InvalidParams, reason))
+        )
+      case Right(task) =>
+        ZIO.succeed(JsMcpServer.taskToJs(task))
+    }
+
+  private def handleTasksResult(
+      tm: TaskManager,
+      req: js.Dynamic,
+      extra: tsdk.RequestHandlerExtra
+  ): ZIO[Any, Throwable, js.Any] =
+    val taskId = req.params.taskId.asInstanceOf[String]
+    val sessionId = extra.sessionId.toOption
+    tm.result(taskId, sessionId)
+      .map(value => value.asInstanceOf[js.Any])
+      .catchAll {
+        case e: NoSuchElementException =>
+          ZIO.fail(
+            JavaScriptException(
+              new tsdk.McpError(tsdk.ErrorCode.InvalidParams, e.getMessage)
+            )
+          )
+        case other =>
+          ZIO.fail(
+            JavaScriptException(
+              new tsdk.McpError(
+                tsdk.ErrorCode.InternalError,
+                Option(other.getMessage).getOrElse(other.getClass.getSimpleName)
+              )
+            )
+          )
+      }
 
   private def handleListResources(): js.Any =
     val defs = resourceManager.listDefinitions().filterNot(_.isTemplate)
@@ -430,6 +613,35 @@ object JsMcpServer:
     defn.description.foreach(d => raw("description") = d)
     raw("inputSchema") = JSON.parse(defn.inputSchema.toJsonString)
     defn.annotations.foreach(a => raw("annotations") = toolAnnotationsToJs(a))
+    defn.taskSupport.foreach { ts =>
+      val executionRaw = js.Dictionary.empty[js.Any]
+      executionRaw("taskSupport") = ts match
+        case TaskSupport.Forbidden => "forbidden"
+        case TaskSupport.Optional => "optional"
+        case TaskSupport.Required => "required"
+      raw("execution") = executionRaw.asInstanceOf[js.Any]
+    }
+    raw.asInstanceOf[js.Any]
+
+  private[server] def taskToJs(task: Task): js.Any =
+    val raw = js.Dictionary.empty[js.Any]
+    raw("taskId") = task.taskId
+    raw("status") = task.status match
+      case TaskStatus.Working => "working"
+      case TaskStatus.InputRequired => "input_required"
+      case TaskStatus.Completed => "completed"
+      case TaskStatus.Failed => "failed"
+      case TaskStatus.Cancelled => "cancelled"
+    task.statusMessage.foreach(m => raw("statusMessage") = m)
+    raw("createdAt") = task.createdAt
+    raw("lastUpdatedAt") = task.lastUpdatedAt
+    task.ttl.foreach(t => raw("ttl") = t.toDouble)
+    task.pollInterval.foreach(p => raw("pollInterval") = p.toDouble)
+    raw.asInstanceOf[js.Any]
+
+  private[server] def createTaskResultToJs(result: CreateTaskResult): js.Any =
+    val raw = js.Dictionary.empty[js.Any]
+    raw("task") = taskToJs(result.task)
     raw.asInstanceOf[js.Any]
 
   private[server] def toolAnnotationsToJs(ann: ToolAnnotations): js.Any =
