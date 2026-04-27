@@ -498,6 +498,43 @@ private[macros] object MacroUtils:
   def invokeFunctionWithArgs(function: Any, args: List[Any]): Any =
     RefResolver.invokeFunctionWithArgs(function, args)
 
+  /** Effect shape detected on an annotated method's dealiased return type.
+    *
+    * Drives whether the macro-generated handler treats the method result as a pure value (wrap in
+    * `ZIO.attempt`) or as an effect that must be flattened (`ZIO`, `Try`, `Either[Throwable, _]`).
+    * Mirrors the typed-contract `ToHandlerEffect` typeclass.
+    */
+  private[macros] enum EffectShape:
+    case Pure, Zio, TryEffect, EitherThrowable
+
+  /** Classify the return type of a `@Tool` / `@Resource` / `@Prompt` method.
+    *
+    * Aborts at macro time if the method returns a `ZIO` with a non-`Any` environment, since the
+    * shared handler signature `(args, ctx) => ZIO[Any, Throwable, Any]` cannot satisfy an
+    * environment requirement.
+    */
+  private[macros] def detectEffectShape(using quotes: Quotes)(
+      methodSym: quotes.reflect.Symbol
+  ): EffectShape =
+    import quotes.reflect.*
+
+    val resType = (methodSym.info match
+      case mt: MethodType => mt.resType
+      case other => other
+    ).dealias
+
+    if resType <:< TypeRepr.of[zio.ZIO[Any, Any, Any]] then EffectShape.Zio
+    else if resType <:< TypeRepr.of[zio.ZIO[Nothing, Any, Any]] then
+      report.errorAndAbort(
+        s"Annotated method '${methodSym.name}' returns ${resType.show}; " +
+          "annotation-based handlers must return ZIO with environment Any. " +
+          "Provide the environment via ZIO.provide(...) inside the method body, " +
+          "or use a typed contract (McpTool.derived) for environment-dependent effects."
+      )
+    else if resType <:< TypeRepr.of[scala.util.Try[Any]] then EffectShape.TryEffect
+    else if resType <:< TypeRepr.of[Either[Throwable, Any]] then EffectShape.EitherThrowable
+    else EffectShape.Pure
+
   /** Takes a JSON schema potentially containing `$defs` and `$ref` and returns a new JSON schema
     * where all references are resolved and inlined.
     */
