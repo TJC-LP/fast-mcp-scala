@@ -14,6 +14,7 @@ import zio.json.*
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.facades.runtime.BunServer
+import com.tjclp.fastmcp.server.TaskSettings
 
 /** Exercises `JsMcpServer.runHttp()` end-to-end over Bun's HTTP server. Uses the global `fetch`
   * API to POST a JSON-RPC initialize + tools/list pair against the running server. No TS SDK
@@ -133,4 +134,54 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       httpFetch("/other", js.Dynamic.literal(method = "POST", body = "{}"))
         .map(resp => resp.status.asInstanceOf[Int] shouldBe 404)
     }
+  }
+
+  "runHttp (stateful tasks)" should "handle tasks/list without params" in {
+    val taskPort = 38918
+    val taskServer = com.tjclp.fastmcp.server.McpServer(
+      "JsHttpTasksServer",
+      "0.1.0",
+      McpServerSettings(
+        host = "127.0.0.1",
+        port = taskPort,
+        httpEndpoint = "/mcp",
+        stateless = false,
+        tasks = TaskSettings(enabled = true)
+      )
+    )
+    val taskBunServer = taskServer.startStatefulHttp()
+
+    def fetchTasks(body: String, sessionId: Option[String] = None): Future[js.Dynamic] =
+      val headers = js.Dictionary[String](
+        "content-type" -> "application/json",
+        "accept" -> "application/json, text/event-stream"
+      )
+      sessionId.foreach(sid => headers("mcp-session-id") = sid)
+      val init = js.Dynamic.literal(
+        method = "POST",
+        headers = headers,
+        body = body
+      )
+      val url = s"http://127.0.0.1:$taskPort/mcp"
+      fromJsPromise(
+        js.Dynamic.global
+          .fetch(url, init)
+          .asInstanceOf[js.Promise[js.Dynamic]]
+      )
+
+    val done = for
+      initResp <- fetchTasks(
+        """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"http-test","version":"0.1.0"}}}"""
+      )
+      sid = initResp.headers.get("mcp-session-id").asInstanceOf[String]
+      listResp <- fetchTasks(
+        """{"jsonrpc":"2.0","id":2,"method":"tasks/list"}""",
+        Some(sid)
+      )
+      body <- fromJsPromise(listResp.text().asInstanceOf[js.Promise[String]])
+    yield
+      listResp.status.asInstanceOf[Int] shouldBe 200
+      body should include(""""tasks":[]""")
+
+    done.andThen { case _ => taskBunServer.stop() }
   }

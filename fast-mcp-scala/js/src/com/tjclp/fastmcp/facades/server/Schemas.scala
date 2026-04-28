@@ -40,3 +40,24 @@ object ListPromptsRequestSchema extends js.Any
 @JSImport("@modelcontextprotocol/sdk/types.js", "GetPromptRequestSchema")
 @js.native
 object GetPromptRequestSchema extends js.Any
+
+// --- Experimental MCP Tasks (spec 2025-11-25) ---
+
+@JSImport("@modelcontextprotocol/sdk/types.js", "GetTaskRequestSchema")
+@js.native
+object GetTaskRequestSchema extends js.Any
+
+@JSImport("@modelcontextprotocol/sdk/types.js", "ListTasksRequestSchema")
+@js.native
+object ListTasksRequestSchema extends js.Any
+
+@JSImport("@modelcontextprotocol/sdk/types.js", "CancelTaskRequestSchema")
+@js.native
+object CancelTaskRequestSchema extends js.Any
+
+/** TS SDK calls the `tasks/result` schema `GetTaskPayloadRequestSchema` (the response is the
+  * underlying request's payload).
+  */
+@JSImport("@modelcontextprotocol/sdk/types.js", "GetTaskPayloadRequestSchema")
+@js.native
+object GetTaskPayloadRequestSchema extends js.Any

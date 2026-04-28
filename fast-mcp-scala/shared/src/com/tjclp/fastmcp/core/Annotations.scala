@@ -39,6 +39,10 @@ import scala.annotation.StaticAnnotation
   *   If Some(true), the tool interacts with the external world (network, filesystem, etc.)
   * @param returnDirect
   *   If Some(true), the result should go directly to the user without LLM post-processing
+  * @param taskSupport
+  *   Per-tool opt-in for experimental MCP Tasks (spec 2025-11-25). One of `"forbidden"` (default,
+  *   no tasks), `"optional"` (clients may augment with a task), or `"required"` (clients must). Has
+  *   no effect unless [[com.tjclp.fastmcp.server.TaskSettings.enabled]] is true on the server.
   */
 class Tool(
     val name: Option[String] = None,
@@ -55,7 +59,9 @@ class Tool(
     val destructiveHint: Option[Boolean] = None,
     val idempotentHint: Option[Boolean] = None,
     val openWorldHint: Option[Boolean] = None,
-    val returnDirect: Option[Boolean] = None
+    val returnDirect: Option[Boolean] = None,
+    // Experimental MCP Tasks (spec 2025-11-25)
+    val taskSupport: Option[String] = None
 ) extends StaticAnnotation
 
 /** Unified annotation for method parameters across Tools, Resources, and Prompts

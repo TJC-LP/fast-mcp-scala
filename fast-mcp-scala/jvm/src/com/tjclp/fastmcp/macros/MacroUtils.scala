@@ -452,6 +452,9 @@ private[macros] object MacroUtils:
     }
 
   /** Extract MCP ToolAnnotation hints from a @Tool annotation term.
+    *
+    * The trailing `taskSupport` slot carries the raw string value (`"forbidden"` | `"optional"` |
+    * `"required"`) for the experimental Tasks feature; the caller validates it.
     */
   def parseToolAnnotationHints(using quotes: Quotes)(
       term: quotes.reflect.Term
@@ -461,7 +464,8 @@ private[macros] object MacroUtils:
       Option[Boolean],
       Option[Boolean],
       Option[Boolean],
-      Option[Boolean]
+      Option[Boolean],
+      Option[String]
   ) =
     import quotes.reflect.*
 
@@ -471,6 +475,7 @@ private[macros] object MacroUtils:
     var idempotentHint: Option[Boolean] = None
     var openWorldHint: Option[Boolean] = None
     var returnDirect: Option[Boolean] = None
+    var taskSupport: Option[String] = None
 
     term match {
       case Apply(Select(New(_), _), argTerms) =>
@@ -487,11 +492,21 @@ private[macros] object MacroUtils:
             openWorldHint = parseOptionBooleanLiteral(valueTerm)
           case NamedArg("returnDirect", valueTerm) =>
             returnDirect = parseOptionBooleanLiteral(valueTerm)
+          case NamedArg("taskSupport", valueTerm) =>
+            taskSupport = parseOptionStringLiteral(valueTerm)
           case _ => ()
         }
       case _ => ()
     }
-    (title, readOnlyHint, destructiveHint, idempotentHint, openWorldHint, returnDirect)
+    (
+      title,
+      readOnlyHint,
+      destructiveHint,
+      idempotentHint,
+      openWorldHint,
+      returnDirect,
+      taskSupport
+    )
 
   // Helper method to invoke a function (runtime)
   // Delegates to the RefResolver implementation which uses MethodHandles

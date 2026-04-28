@@ -4,7 +4,7 @@ package macros
 import scala.util.{Failure, Success, Try}
 
 import org.scalatest.funsuite.AnyFunSuite
-import zio.*
+import zio.{Task as ZioTask, *}
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.JacksonConverter.given
@@ -141,10 +141,10 @@ object EffectReturnTest:
   def addZio(@Param("a") a: Int, @Param("b") b: Int): UIO[Int] = ZIO.succeed(a + b)
 
   @Tool(name = Some("shoutZio"), description = Some("Uppercase via Task"))
-  def shoutZio(@Param("text") text: String): Task[String] = ZIO.attempt(text.toUpperCase)
+  def shoutZio(@Param("text") text: String): ZioTask[String] = ZIO.attempt(text.toUpperCase)
 
   @Tool(name = Some("boomZio"), description = Some("Always fails"))
-  def boomZio(): Task[Int] = ZIO.fail(new RuntimeException("kaboom"))
+  def boomZio(): ZioTask[Int] = ZIO.fail(new RuntimeException("kaboom"))
 
   @Tool(name = Some("divideIo"), description = Some("Divide with non-Throwable error"))
   def divideIo(@Param("a") a: Int, @Param("b") b: Int): IO[String, Int] =
