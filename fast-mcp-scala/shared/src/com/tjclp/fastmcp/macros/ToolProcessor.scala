@@ -83,18 +83,66 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       p.name == "ctx" && p.info <:< TypeRepr.of[McpContext]
     })
 
-    val handler: Expr[ContextualToolHandler] = '{
-      (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
-        ZIO.attempt {
-          val patchedArgs =
-            if ${ Expr(ctxParamPresent) } then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
-            else args
+    val ctxParamPresentExpr = Expr(ctxParamPresent)
 
-          MapToFunctionMacro
-            .callByMap($methodRefExpr)
-            .asInstanceOf[Map[String, Any] => Any](patchedArgs)
-        }
-    }
+    val handler: Expr[ContextualToolHandler] =
+      MacroUtils.detectEffectShape(methodSym) match
+        case MacroUtils.EffectShape.Pure =>
+          '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
+            ZIO.attempt {
+              val patchedArgs =
+                if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
+                else args
+              MapToFunctionMacro
+                .callByMap($methodRefExpr)
+                .asInstanceOf[Map[String, Any] => Any](patchedArgs)
+            }
+          }
+
+        case MacroUtils.EffectShape.Zio =>
+          '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
+            ZIO.suspend {
+              val patchedArgs =
+                if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
+                else args
+              MapToFunctionMacro
+                .callByMap($methodRefExpr)
+                .asInstanceOf[Map[String, Any] => Any](patchedArgs)
+                .asInstanceOf[ZIO[Any, Any, Any]]
+                .mapError {
+                  case t: Throwable => t
+                  case other => new RuntimeException(s"Tool error: $other")
+                }
+            }
+          }
+
+        case MacroUtils.EffectShape.TryEffect =>
+          '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
+            ZIO.suspend {
+              val patchedArgs =
+                if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
+                else args
+              val result = MapToFunctionMacro
+                .callByMap($methodRefExpr)
+                .asInstanceOf[Map[String, Any] => Any](patchedArgs)
+                .asInstanceOf[scala.util.Try[Any]]
+              ZIO.fromTry(result)
+            }
+          }
+
+        case MacroUtils.EffectShape.EitherThrowable =>
+          '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
+            ZIO.suspend {
+              val patchedArgs =
+                if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
+                else args
+              val result = MapToFunctionMacro
+                .callByMap($methodRefExpr)
+                .asInstanceOf[Map[String, Any] => Any](patchedArgs)
+                .asInstanceOf[Either[Throwable, Any]]
+              ZIO.fromEither(result)
+            }
+          }
 
     val rawSchema: Expr[io.circe.Json] = '{
       JsonSchemaMacro.schemaForFunctionArgs(

@@ -75,23 +75,123 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
 
     val methodRefExpr = methodRef(ownerSym, methodSym)
 
+    val coerceBody: Expr[Any => String | Array[Byte]] = '{ (anyResult: Any) =>
+      anyResult match
+        case s: String => s
+        case b: Array[Byte] => b
+        case other => other.toString
+    }
+
+    val effectShape = MacroUtils.detectEffectShape(methodSym)
+
+    val templateHandler: Expr[Map[String, String] => ZIO[Any, Throwable, String | Array[Byte]]] =
+      effectShape match
+        case MacroUtils.EffectShape.Pure =>
+          '{ (params: Map[String, String]) =>
+            ZIO.attempt {
+              val anyResult = MapToFunctionMacro
+                .callByMap($methodRefExpr)
+                .asInstanceOf[Map[String, Any] => Any](params.asInstanceOf[Map[String, Any]])
+              $coerceBody(anyResult)
+            }
+          }
+        case MacroUtils.EffectShape.Zio =>
+          '{ (params: Map[String, String]) =>
+            ZIO
+              .suspend {
+                MapToFunctionMacro
+                  .callByMap($methodRefExpr)
+                  .asInstanceOf[Map[String, Any] => Any](params.asInstanceOf[Map[String, Any]])
+                  .asInstanceOf[ZIO[Any, Any, Any]]
+                  .mapError {
+                    case t: Throwable => t
+                    case other => new RuntimeException(s"Resource error: $other")
+                  }
+              }
+              .map($coerceBody)
+          }
+        case MacroUtils.EffectShape.TryEffect =>
+          '{ (params: Map[String, String]) =>
+            ZIO
+              .suspend {
+                val result = MapToFunctionMacro
+                  .callByMap($methodRefExpr)
+                  .asInstanceOf[Map[String, Any] => Any](params.asInstanceOf[Map[String, Any]])
+                  .asInstanceOf[scala.util.Try[Any]]
+                ZIO.fromTry(result)
+              }
+              .map($coerceBody)
+          }
+        case MacroUtils.EffectShape.EitherThrowable =>
+          '{ (params: Map[String, String]) =>
+            ZIO
+              .suspend {
+                val result = MapToFunctionMacro
+                  .callByMap($methodRefExpr)
+                  .asInstanceOf[Map[String, Any] => Any](params.asInstanceOf[Map[String, Any]])
+                  .asInstanceOf[Either[Throwable, Any]]
+                ZIO.fromEither(result)
+              }
+              .map($coerceBody)
+          }
+
+    val staticHandler: Expr[() => ZIO[Any, Throwable, String | Array[Byte]]] =
+      effectShape match
+        case MacroUtils.EffectShape.Pure =>
+          '{ () =>
+            ZIO.attempt {
+              val anyResult = MapToFunctionMacro
+                .callByMap($methodRefExpr)
+                .asInstanceOf[Map[String, Any] => Any](Map.empty)
+              $coerceBody(anyResult)
+            }
+          }
+        case MacroUtils.EffectShape.Zio =>
+          '{ () =>
+            ZIO
+              .suspend {
+                MapToFunctionMacro
+                  .callByMap($methodRefExpr)
+                  .asInstanceOf[Map[String, Any] => Any](Map.empty)
+                  .asInstanceOf[ZIO[Any, Any, Any]]
+                  .mapError {
+                    case t: Throwable => t
+                    case other => new RuntimeException(s"Resource error: $other")
+                  }
+              }
+              .map($coerceBody)
+          }
+        case MacroUtils.EffectShape.TryEffect =>
+          '{ () =>
+            ZIO
+              .suspend {
+                val result = MapToFunctionMacro
+                  .callByMap($methodRefExpr)
+                  .asInstanceOf[Map[String, Any] => Any](Map.empty)
+                  .asInstanceOf[scala.util.Try[Any]]
+                ZIO.fromTry(result)
+              }
+              .map($coerceBody)
+          }
+        case MacroUtils.EffectShape.EitherThrowable =>
+          '{ () =>
+            ZIO
+              .suspend {
+                val result = MapToFunctionMacro
+                  .callByMap($methodRefExpr)
+                  .asInstanceOf[Map[String, Any] => Any](Map.empty)
+                  .asInstanceOf[Either[Throwable, Any]]
+                ZIO.fromEither(result)
+              }
+              .map($coerceBody)
+          }
+
     val registration: Expr[ZIO[Any, Throwable, McpServerCore]] =
       if isTemplate then
         '{
           $server.resourceTemplate(
             uriPattern = ${ Expr(uri) },
-            handler = (params: Map[String, String]) =>
-              ZIO.attempt {
-                val anyResult = MapToFunctionMacro
-                  .callByMap($methodRefExpr)
-                  .asInstanceOf[Map[String, Any] => Any](
-                    params.asInstanceOf[Map[String, Any]]
-                  )
-                anyResult match
-                  case s: String => s
-                  case b: Array[Byte] => b
-                  case other => other.toString
-              },
+            handler = $templateHandler,
             name = ${ Expr(finalName) },
             description = ${ Expr(finalDesc) },
             mimeType = ${ Expr(mimeTypeOpt) },
@@ -102,16 +202,7 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
         '{
           $server.resource(
             uri = ${ Expr(uri) },
-            handler = () =>
-              ZIO.attempt {
-                val anyResult = MapToFunctionMacro
-                  .callByMap($methodRefExpr)
-                  .asInstanceOf[Map[String, Any] => Any](Map.empty)
-                anyResult match
-                  case s: String => s
-                  case b: Array[Byte] => b
-                  case other => other.toString
-              },
+            handler = $staticHandler,
             name = ${ Expr(finalName) },
             description = ${ Expr(finalDesc) },
             mimeType = ${ Expr(mimeTypeOpt) }

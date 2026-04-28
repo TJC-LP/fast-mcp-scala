@@ -40,25 +40,73 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
 
     val methodRefExpr = methodRef(ownerSym, methodSym)
 
+    val coerceMessages: Expr[Any => List[Message]] = '{ (anyResult: Any) =>
+      anyResult match
+        case msgs: List[?] if msgs.nonEmpty && msgs.head.isInstanceOf[Message] =>
+          msgs.asInstanceOf[List[Message]]
+        case s: String =>
+          List(Message(role = Role.User, content = TextContent(s)))
+        case other =>
+          List(Message(role = Role.User, content = TextContent(other.toString)))
+    }
+
+    val handler: Expr[Map[String, Any] => ZIO[Any, Throwable, List[Message]]] =
+      MacroUtils.detectEffectShape(methodSym) match
+        case MacroUtils.EffectShape.Pure =>
+          '{ (args: Map[String, Any]) =>
+            ZIO.attempt {
+              val result = MapToFunctionMacro
+                .callByMap($methodRefExpr)
+                .asInstanceOf[Map[String, Any] => Any](args)
+              $coerceMessages(result)
+            }
+          }
+        case MacroUtils.EffectShape.Zio =>
+          '{ (args: Map[String, Any]) =>
+            ZIO
+              .suspend {
+                MapToFunctionMacro
+                  .callByMap($methodRefExpr)
+                  .asInstanceOf[Map[String, Any] => Any](args)
+                  .asInstanceOf[ZIO[Any, Any, Any]]
+                  .mapError {
+                    case t: Throwable => t
+                    case other => new RuntimeException(s"Prompt error: $other")
+                  }
+              }
+              .map($coerceMessages)
+          }
+        case MacroUtils.EffectShape.TryEffect =>
+          '{ (args: Map[String, Any]) =>
+            ZIO
+              .suspend {
+                val result = MapToFunctionMacro
+                  .callByMap($methodRefExpr)
+                  .asInstanceOf[Map[String, Any] => Any](args)
+                  .asInstanceOf[scala.util.Try[Any]]
+                ZIO.fromTry(result)
+              }
+              .map($coerceMessages)
+          }
+        case MacroUtils.EffectShape.EitherThrowable =>
+          '{ (args: Map[String, Any]) =>
+            ZIO
+              .suspend {
+                val result = MapToFunctionMacro
+                  .callByMap($methodRefExpr)
+                  .asInstanceOf[Map[String, Any] => Any](args)
+                  .asInstanceOf[Either[Throwable, Any]]
+                ZIO.fromEither(result)
+              }
+              .map($coerceMessages)
+          }
+
     val registration: Expr[ZIO[Any, Throwable, McpServerCore]] = '{
       $server.prompt(
         name = ${ Expr(finalName) },
         description = ${ Expr(finalDesc) },
         arguments = $maybeArgs,
-        handler = (args: Map[String, Any]) =>
-          ZIO.attempt {
-            val result = MapToFunctionMacro
-              .callByMap($methodRefExpr)
-              .asInstanceOf[Map[String, Any] => Any](args)
-
-            result match
-              case msgs: List[?] if msgs.nonEmpty && msgs.head.isInstanceOf[Message] =>
-                msgs.asInstanceOf[List[Message]]
-              case s: String =>
-                List(Message(role = Role.User, content = TextContent(s)))
-              case other =>
-                List(Message(role = Role.User, content = TextContent(other.toString)))
-          }
+        handler = $handler
       )
     }
 
