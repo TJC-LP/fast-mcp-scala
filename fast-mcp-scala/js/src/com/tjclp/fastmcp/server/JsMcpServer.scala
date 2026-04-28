@@ -322,7 +322,9 @@ final class JsMcpServer(
   private def handleListTools(): js.Any =
     val tools = toolManager
       .listDefinitions()
-      .map(JsMcpServer.toolDefinitionToJs)
+      .map(defn =>
+        JsMcpServer.toolDefinitionToJs(defn, includeTaskSupport = settings.tasks.enabled)
+      )
     js.Dynamic.literal(tools = js.Array[js.Any](tools*))
 
   private def handleCallTool(
@@ -607,20 +609,24 @@ object JsMcpServer:
 
   private val base64Enc = Base64.getEncoder
 
-  private[server] def toolDefinitionToJs(defn: ToolDefinition): js.Any =
+  private[server] def toolDefinitionToJs(
+      defn: ToolDefinition,
+      includeTaskSupport: Boolean
+  ): js.Any =
     val raw = js.Dictionary.empty[js.Any]
     raw("name") = defn.name
     defn.description.foreach(d => raw("description") = d)
     raw("inputSchema") = JSON.parse(defn.inputSchema.toJsonString)
     defn.annotations.foreach(a => raw("annotations") = toolAnnotationsToJs(a))
-    defn.taskSupport.foreach { ts =>
-      val executionRaw = js.Dictionary.empty[js.Any]
-      executionRaw("taskSupport") = ts match
-        case TaskSupport.Forbidden => "forbidden"
-        case TaskSupport.Optional => "optional"
-        case TaskSupport.Required => "required"
-      raw("execution") = executionRaw.asInstanceOf[js.Any]
-    }
+    if includeTaskSupport then
+      defn.taskSupport.foreach { ts =>
+        val executionRaw = js.Dictionary.empty[js.Any]
+        executionRaw("taskSupport") = ts match
+          case TaskSupport.Forbidden => "forbidden"
+          case TaskSupport.Optional => "optional"
+          case TaskSupport.Required => "required"
+        raw("execution") = executionRaw.asInstanceOf[js.Any]
+      }
     raw.asInstanceOf[js.Any]
 
   private[server] def taskToJs(task: Task): js.Any =

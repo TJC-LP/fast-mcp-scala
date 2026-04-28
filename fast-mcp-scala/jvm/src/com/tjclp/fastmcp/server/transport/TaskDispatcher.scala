@@ -11,7 +11,7 @@ import zio.{System as _, Task as _, *}
 
 import core.*
 import core.TypeConversions.toJava
-import server.McpContext
+import server.{ErrorMapper, McpContext}
 import server.manager.{TaskConcurrencyLimitExceeded, TaskManager, ToolManager}
 
 /** Translates tasks-related JSON-RPC traffic into [[TaskManager]] operations.
@@ -131,17 +131,21 @@ private[fastmcp] class TaskDispatcher(
         taskManager
           .result(taskId, sessionId)
           .fold(
-            err =>
-              new McpSchema.JSONRPCResponse(
-                McpSchema.JSONRPC_VERSION,
-                request.id(),
-                null,
-                new McpSchema.JSONRPCResponse.JSONRPCError(
-                  McpSchema.ErrorCodes.INTERNAL_ERROR,
-                  s"Task execution error: ${err.getMessage}",
-                  null
+            {
+              case err: NoSuchElementException =>
+                invalidParams(request, Option(err.getMessage).getOrElse("Task not found"))
+              case err =>
+                new McpSchema.JSONRPCResponse(
+                  McpSchema.JSONRPC_VERSION,
+                  request.id(),
+                  null,
+                  new McpSchema.JSONRPCResponse.JSONRPCError(
+                    McpSchema.ErrorCodes.INTERNAL_ERROR,
+                    s"Task execution error: ${err.getMessage}",
+                    null
+                  )
                 )
-              ),
+            },
             value =>
               // The underlying value is whatever the original request produced (typically a
               // McpSchema.CallToolResult). The SDK's mapper handles either case.
@@ -214,9 +218,11 @@ private[fastmcp] class TaskDispatcher(
       case Some(handler) =>
         // Erase the result type — TaskManager doesn't know what the tool returns, only the
         // dispatch layer does. The outgoing tasks/result will see the raw value passed back.
-        val run: ZIO[Any, Throwable, Any] = handler(argsMap, ctx).flatMap { v =>
-          ZIO.attempt(toCallToolResult(v))
-        }
+        val run: ZIO[Any, Throwable, Any] =
+          handler(argsMap, ctx).foldZIO(
+            err => ZIO.succeed(ErrorMapper.toCallToolResult(err)),
+            v => ZIO.attempt(toCallToolResult(v))
+          )
         taskManager
           .create(
             sessionId = sessionId,

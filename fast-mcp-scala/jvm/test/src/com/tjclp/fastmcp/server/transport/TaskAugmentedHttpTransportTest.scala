@@ -45,6 +45,14 @@ class TaskAugmentedHttpTransportTest extends AnyFlatSpec with Matchers {
       List(TextContent("alpha"), ImageContent(data = "Zm9v", mimeType = "image/png"))
 
     @Tool(
+      name = Some("broken-task"),
+      description = Some("Fails during task execution"),
+      taskSupport = Some("optional")
+    )
+    def brokenTask(): String =
+      throw new RuntimeException("task boom")
+
+    @Tool(
       name = Some("blocky"),
       description = Some("Sleeps for 500ms to keep a task slot occupied for cap tests"),
       taskSupport = Some("optional")
@@ -235,6 +243,17 @@ class TaskAugmentedHttpTransportTest extends AnyFlatSpec with Matchers {
     body should include("Task not found")
   }
 
+  "tasks/result" should "fail with -32602 for unknown task ID" in {
+    val sid = initSession()
+    val (code, body) = post(
+      """{"jsonrpc":"2.0","id":18,"method":"tasks/result","params":{"taskId":"does-not-exist"}}""",
+      sessionId = Some(sid)
+    )
+    code shouldBe 200
+    body should include("-32602")
+    body should include("Task not found")
+  }
+
   "tasks/result" should "return the underlying tool result after completion" in {
     val sid = initSession()
     val (_, createBody) = post(
@@ -248,6 +267,22 @@ class TaskAugmentedHttpTransportTest extends AnyFlatSpec with Matchers {
     )
     code shouldBe 200
     body should include("Slowly hello, Result")
+  }
+
+  it should "preserve tool error results for failed handlers" in {
+    val sid = initSession()
+    val (_, createBody) = post(
+      """{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"broken-task","arguments":{},"task":{"ttl":60000}}}""",
+      sessionId = Some(sid)
+    )
+    val taskId = extractTaskId(createBody)
+    val (code, body) = post(
+      s"""{"jsonrpc":"2.0","id":20,"method":"tasks/result","params":{"taskId":"$taskId"}}""",
+      sessionId = Some(sid)
+    )
+    code shouldBe 200
+    body should include(""""isError":true""")
+    body should include("task boom")
   }
 
   it should "preserve structured content from task-backed tool calls" in {
