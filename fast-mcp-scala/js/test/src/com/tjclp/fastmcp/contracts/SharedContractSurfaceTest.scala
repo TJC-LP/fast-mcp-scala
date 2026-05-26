@@ -23,7 +23,7 @@ class SharedContractSurfaceTest extends AnyFunSuite:
       """{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}}}"""
     )
 
-    val tool = McpTool.withSchema[AddArgs, AddResult, Any](
+    val tool = McpTool.withSchema[AddArgs, AddResult](
       name = "typed-add",
       description = Some("Add two numbers"),
       inputSchema = schema
@@ -31,7 +31,7 @@ class SharedContractSurfaceTest extends AnyFunSuite:
       AddResult((args.a + args.b).toString)
     }
 
-    val prompt = McpPrompt[GreetingArgs, Any](
+    val prompt = McpPrompt[GreetingArgs](
       name = "typed-prompt",
       arguments = List(PromptArgument("name", Some("The name"), required = true))
     ) { args =>
@@ -39,9 +39,9 @@ class SharedContractSurfaceTest extends AnyFunSuite:
     }
 
     val staticResource =
-      McpStaticResource[Any]("static://welcome", description = Some("Welcome message"))("welcome")
+      McpStaticResource("static://welcome", description = Some("Welcome message"))("welcome")
 
-    val templateResource = McpTemplateResource[UserProfileArgs, Any](
+    val templateResource = McpTemplateResource[UserProfileArgs](
       uriPattern = "users://{userId}/profile",
       arguments = List(ResourceArgument("userId", Some("The user id"), required = true))
     ) { args =>

@@ -55,10 +55,10 @@ trait McpServerApp[T <: Transport, Self <: Singleton](using
   def version: String = "0.1.0"
   def settings: McpServerSettings = McpServerSettings()
 
-  def tools: List[McpTool[?, ?, Any]] = Nil
-  def prompts: List[McpPrompt[?, Any]] = Nil
-  def staticResources: List[McpStaticResource[Any]] = Nil
-  def templateResources: List[McpTemplateResource[?, Any]] = Nil
+  def tools: List[McpTool[?, ?]] = Nil
+  def prompts: List[McpPrompt[?]] = Nil
+  def staticResources: List[McpStaticResource] = Nil
+  def templateResources: List[McpTemplateResource[?]] = Nil
 
   final def buildCore: ZIO[Any, Throwable, McpServerCore[Any]] =
     val core = factory.build(name, version, settings)

@@ -43,14 +43,14 @@ class RootImportSurfaceTest extends AnyFunSuite {
     val typed = ToolDefinition("typed-tool", None, schema)
     assert(typed.inputSchema.toJsonString.contains("object"))
 
-    val typedTool = McpTool[HelloArgs, HelloResult, Any](
+    val typedTool = McpTool[HelloArgs, HelloResult](
       name = "typed-hello",
       description = Some("Typed greeting")
     ) { args =>
       HelloResult(s"Hello, ${args.name}!")
     }
 
-    val typedPrompt = McpPrompt[HelloArgs, Any](
+    val typedPrompt = McpPrompt[HelloArgs](
       name = "typed-prompt",
       arguments = List(PromptArgument("name", Some("The person to greet"), required = true))
     ) { args =>
@@ -58,9 +58,9 @@ class RootImportSurfaceTest extends AnyFunSuite {
     }
 
     val staticResource =
-      McpStaticResource[Any]("static://hello", description = Some("Greeting resource"))("hello")
+      McpStaticResource("static://hello", description = Some("Greeting resource"))("hello")
 
-    val templateResource = McpTemplateResource[HelloArgs, Any](
+    val templateResource = McpTemplateResource[HelloArgs](
       uriPattern = "users://{name}",
       arguments = List(ResourceArgument("name", Some("The user name"), required = true))
     ) { args =>

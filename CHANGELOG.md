@@ -14,9 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once at `server.runHttp().provide(...)` instead of inside every method body. Construct the
   server with `McpServer.typed[R]("name")` (or `FastMcpServer.typed[R]`) so `runHttp()` returns
   `ZIO[R, Throwable, Unit]`. The macro emits a compile-time error if a handler's `R` isn't
-  satisfied by the server's type. Typed contracts gain a third `R` type parameter
-  (`McpTool[In, Out, R]`, `McpPrompt[In, R]`, `McpStaticResource[R]`,
-  `McpTemplateResource[In, R]`) with a default of `Any` for backward compatibility. Closes #55.
+  satisfied by the server's type. Typed contract factories accept an explicit environment type
+  where needed (`McpTool[In, Out, R]`, `McpPrompt[In, R]`,
+  `McpTemplateResource[In, R]`; static resources use `McpStaticResource.withEnv[R]`). Existing
+  no-environment arities remain source-compatible (`McpTool[In, Out]`, `McpPrompt[In]`,
+  `McpStaticResource`, `McpTemplateResource[In]`). Closes #55.
 
 ### Changed
 

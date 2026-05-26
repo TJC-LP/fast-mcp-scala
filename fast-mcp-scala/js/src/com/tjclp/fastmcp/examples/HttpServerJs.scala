@@ -29,7 +29,7 @@ object HttpServerJs extends McpServerApp[Http, HttpServerJs.type]:
     """{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"""
   )
 
-  private val greetTool = McpTool.withSchema[GreetArgs, GreetResult, Any](
+  private val greetTool = McpTool.withSchema[GreetArgs, GreetResult](
     name = "greet",
     inputSchema = greetSchema,
     description = Some("Say hello")
@@ -42,4 +42,4 @@ object HttpServerJs extends McpServerApp[Http, HttpServerJs.type]:
     stateless = false
   )
 
-  override val tools: List[McpTool[?, ?, Any]] = List(greetTool)
+  override val tools: List[McpTool[?, ?]] = List(greetTool)

@@ -157,10 +157,10 @@ server.tool(addTool)
 
 ### Typed Contracts
 
-- `McpTool[In, Out, R]` - Typed tool with `McpTool.derived` for auto-schema derivation. `R` defaults to `Any`; supply explicitly for layer-aware handlers (`McpTool[Args, Out, Client](...)`).
-- `McpPrompt[In, R]` - Typed prompt with manual argument metadata
-- `McpStaticResource[R]` - Typed static resource
-- `McpTemplateResource[In, R]` - Typed resource template
+- `McpTool[In, Out]` / `McpTool[In, Out, R](...)` - Typed tool with auto-schema derivation; supply `R` explicitly for layer-aware handlers.
+- `McpPrompt[In]` / `McpPrompt[In, R](...)` - Typed prompt with manual argument metadata
+- `McpStaticResource` / `McpStaticResource.withEnv[R]` - Typed static resource
+- `McpTemplateResource[In]` / `McpTemplateResource[In, R](...)` - Typed resource template
 - `McpDecoder[T]` / `McpEncoder[A]` - Platform-neutral codecs
 - `ToolSchemaProvider[A]` - Auto-derives `inputSchema` from `@Param`-annotated case classes on both JVM and JS
 - `McpEncoder` falls back to `JsonEncoder[A]` → `TextContent(a.toJson)` via ZIO JSON

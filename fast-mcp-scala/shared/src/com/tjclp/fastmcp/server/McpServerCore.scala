@@ -67,15 +67,34 @@ trait McpServerCore[R]:
     )
 
   def tool[In, Out, R1 >: R](
-      contract: McpTool[In, Out, R1]
+      contract: McpTool.WithEnv[In, Out, R1]
   ): ZIO[Any, Throwable, McpServerCore[R]] =
     tool(contract, ToolRegistrationOptions())
 
   def tool[In, Out, R1 >: R](
-      contract: McpTool[In, Out, R1],
+      contract: McpTool.WithEnv[In, Out, R1],
       options: ToolRegistrationOptions
   ): ZIO[Any, Throwable, McpServerCore[R]] =
     tool[R1](
+      definition = contract.definition,
+      handler = (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
+        ZIO
+          .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
+          .flatMap(input => contract.handler(input, ctxOpt))
+          .map(contract.encoder.encode),
+      options = options
+    )
+
+  def tool[In, Out](
+      contract: McpTool[In, Out]
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    tool(contract, ToolRegistrationOptions())
+
+  def tool[In, Out](
+      contract: McpTool[In, Out],
+      options: ToolRegistrationOptions
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    tool[Any](
       definition = contract.definition,
       handler = (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
         ZIO
@@ -112,14 +131,24 @@ trait McpServerCore[R]:
     )
 
   def resource[R1 >: R](
-      contract: McpStaticResource[R1]
+      contract: McpStaticResource.WithEnv[R1]
   ): ZIO[Any, Throwable, McpServerCore[R]] =
     resource[R1](contract.definition, contract.handler)
 
+  def resource(
+      contract: McpStaticResource
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    resource[Any](contract.definition, contract.handler)
+
   def resource[In, R1 >: R](
-      contract: McpTemplateResource[In, R1]
+      contract: McpTemplateResource.WithEnv[In, R1]
   ): ZIO[Any, Throwable, McpServerCore[R]] =
     resourceTemplate[In, R1](contract)
+
+  def resource[In](
+      contract: McpTemplateResource[In]
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    resourceTemplate[In](contract)
 
   // --- Template resource registration ---
 
@@ -149,9 +178,20 @@ trait McpServerCore[R]:
     )
 
   def resourceTemplate[In, R1 >: R](
-      contract: McpTemplateResource[In, R1]
+      contract: McpTemplateResource.WithEnv[In, R1]
   ): ZIO[Any, Throwable, McpServerCore[R]] =
     resourceTemplate[R1](
+      definition = contract.definition,
+      handler = (params: Map[String, String]) =>
+        ZIO
+          .attempt(contract.decoder.decode(contract.definition.uri, params, decodeContext))
+          .flatMap(contract.handler)
+    )
+
+  def resourceTemplate[In](
+      contract: McpTemplateResource[In]
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    resourceTemplate[Any](
       definition = contract.definition,
       handler = (params: Map[String, String]) =>
         ZIO
@@ -178,9 +218,20 @@ trait McpServerCore[R]:
     )
 
   def prompt[In, R1 >: R](
-      contract: McpPrompt[In, R1]
+      contract: McpPrompt.WithEnv[In, R1]
   ): ZIO[Any, Throwable, McpServerCore[R]] =
     prompt[R1](
+      definition = contract.definition,
+      handler = (args: Map[String, Any]) =>
+        ZIO
+          .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
+          .flatMap(contract.handler)
+    )
+
+  def prompt[In](
+      contract: McpPrompt[In]
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    prompt[Any](
       definition = contract.definition,
       handler = (args: Map[String, Any]) =>
         ZIO

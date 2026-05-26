@@ -37,8 +37,8 @@ object ContractServer extends McpServerApp[Stdio, ContractServer.type]:
 
   override def name: String = "ContractServer"
 
-  override val tools: List[McpTool[?, ?, Any]] = List(
-    McpTool[AddArgs, AddResult, Any](
+  override val tools: List[McpTool[?, ?]] = List(
+    McpTool[AddArgs, AddResult](
       name = "typed-add",
       description = Some("Add two numbers using a typed request/response contract")
     ) { args =>
@@ -46,8 +46,8 @@ object ContractServer extends McpServerApp[Stdio, ContractServer.type]:
     }
   )
 
-  override val prompts: List[McpPrompt[?, Any]] = List(
-    McpPrompt[GreetingArgs, Any](
+  override val prompts: List[McpPrompt[?]] = List(
+    McpPrompt[GreetingArgs](
       name = "typed-greeting",
       description = Some("Render a greeting prompt from a typed request"),
       arguments = List(PromptArgument("name", Some("The name to greet"), required = true))
@@ -56,15 +56,15 @@ object ContractServer extends McpServerApp[Stdio, ContractServer.type]:
     }
   )
 
-  override val staticResources: List[McpStaticResource[Any]] = List(
-    McpStaticResource[Any](
+  override val staticResources: List[McpStaticResource] = List(
+    McpStaticResource(
       uri = "static://welcome",
       description = Some("A static welcome message")
     )("Welcome to typed fast-mcp-scala")
   )
 
-  override val templateResources: List[McpTemplateResource[?, Any]] = List(
-    McpTemplateResource[UserProfileArgs, Any](
+  override val templateResources: List[McpTemplateResource[?]] = List(
+    McpTemplateResource[UserProfileArgs](
       uriPattern = "users://{userId}/profile",
       description = Some("A typed resource template"),
       arguments = List(ResourceArgument("userId", Some("The user id"), required = true))
