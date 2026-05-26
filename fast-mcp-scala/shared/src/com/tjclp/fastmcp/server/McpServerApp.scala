@@ -12,12 +12,12 @@ import com.tjclp.fastmcp.macros.RegistrationMacro.*
   * every `@Tool` / `@Prompt` / `@Resource` method on it.
   */
 trait SelfScan[Self]:
-  def apply(core: McpServerCore): McpServerCore
+  def apply(core: McpServerCore[Any]): McpServerCore[Any]
 
 object SelfScan:
 
   inline given [Self <: Singleton]: SelfScan[Self] = new SelfScan[Self]:
-    def apply(core: McpServerCore): McpServerCore =
+    def apply(core: McpServerCore[Any]): McpServerCore[Any] =
       core.scanAnnotationsQuiet[Self]
 
 /** Declarative entry point for building an MCP server.
@@ -35,6 +35,10 @@ object SelfScan:
   * Override `name`, `version`, `settings`, or the `tools` / `prompts` / `staticResources` /
   * `templateResources` lists to compose annotation scanning with typed contracts.
   *
+  * The default `McpServerApp` flow pins `R = Any`, so annotated methods must return effects that
+  * don't depend on a ZIO environment. For layer-aware servers, build a `FastMcpServer[R]` directly
+  * and call `runHttp().provide(...)`.
+  *
   * @tparam T
   *   transport marker ([[Transport.Stdio]] or [[Transport.Http]])
   * @tparam Self
@@ -51,12 +55,12 @@ trait McpServerApp[T <: Transport, Self <: Singleton](using
   def version: String = "0.1.0"
   def settings: McpServerSettings = McpServerSettings()
 
-  def tools: List[McpTool[?, ?]] = Nil
-  def prompts: List[McpPrompt[?]] = Nil
-  def staticResources: List[McpStaticResource] = Nil
-  def templateResources: List[McpTemplateResource[?]] = Nil
+  def tools: List[McpTool[?, ?, Any]] = Nil
+  def prompts: List[McpPrompt[?, Any]] = Nil
+  def staticResources: List[McpStaticResource[Any]] = Nil
+  def templateResources: List[McpTemplateResource[?, Any]] = Nil
 
-  final def buildCore: ZIO[Any, Throwable, McpServerCore] =
+  final def buildCore: ZIO[Any, Throwable, McpServerCore[Any]] =
     val core = factory.build(name, version, settings)
     val _ = selfScan(core)
     for

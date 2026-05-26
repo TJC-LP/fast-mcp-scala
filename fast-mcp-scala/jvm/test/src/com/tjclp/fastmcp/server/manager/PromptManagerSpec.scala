@@ -15,7 +15,7 @@ import com.tjclp.fastmcp.core.TextContent
 class PromptManagerSpec extends AnyFlatSpec with Matchers {
 
   "getPrompt" should "fail when required arguments are missing" in {
-    val pm = new PromptManager
+    val pm = new PromptManager[Any]
     val promptDef = PromptDefinition(
       "p1",
       Some("desc"),
@@ -43,7 +43,7 @@ class PromptManagerSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "return handler result when required arguments provided" in {
-    val pm = new PromptManager
+    val pm = new PromptManager[Any]
     val promptDef = PromptDefinition(
       "p2",
       None,
@@ -68,7 +68,7 @@ class PromptManagerSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "fail when prompt not found" in {
-    val pm = new PromptManager
+    val pm = new PromptManager[Any]
     val ex = intercept[Throwable] {
       Unsafe.unsafe { implicit u =>
         Runtime.default.unsafe
@@ -80,7 +80,7 @@ class PromptManagerSpec extends AnyFlatSpec with Matchers {
   }
 
   "listDefinitions" should "return empty list when no prompts and populated after registration" in {
-    val pm = new PromptManager
+    val pm = new PromptManager[Any]
     pm.listDefinitions() shouldBe Nil
 
     val defn1 = PromptDefinition("p", None, None)

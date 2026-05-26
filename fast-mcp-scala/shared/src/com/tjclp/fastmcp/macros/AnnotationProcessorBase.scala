@@ -6,8 +6,8 @@ import scala.quoted.*
 import com.tjclp.fastmcp.server.McpServerCore
 
 /** Helper trait capturing the common boilerplate shared by the three annotation processors (Tool /
-  * Prompt / Resource). Generated registration code targets the abstract `McpServerCore` trait so a
-  * single shared implementation works on every backend.
+  * Prompt / Resource). Generated registration code targets the abstract `McpServerCore[R]` trait so
+  * a single shared implementation works on every backend.
   */
 private[macros] trait AnnotationProcessorBase:
 
@@ -50,10 +50,14 @@ private[macros] trait AnnotationProcessorBase:
 
   /** Execute the registration effect eagerly inside the default ZIO runtime, returning the server
     * value so callers can inline the expression directly.
+    *
+    * Registration is environment-free (`ZIO[Any, Throwable, ?]`) even when the *handlers* require
+    * an `R` — handler effects only run later, on the server's `executionRuntime` captured at
+    * `runHttp[R]()` / `runStdio[R]()` entry.
     */
-  protected def runAndReturnServer(
-      server: Expr[McpServerCore]
-  )(registration: Expr[Any])(using Quotes): Expr[McpServerCore] =
+  protected def runAndReturnServer[R: Type](
+      server: Expr[McpServerCore[R]]
+  )(registration: Expr[Any])(using Quotes): Expr[McpServerCore[R]] =
     '{
       import zio.*
       Unsafe.unsafe { implicit unsafe =>

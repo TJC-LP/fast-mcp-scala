@@ -18,7 +18,7 @@ object FastMcpServerShutdownSpec extends ZIOSpecDefault {
           closedFlag <- ZIO.succeed(new AtomicBoolean(false))
 
           server <- ZIO.succeed(
-            new FastMcpServer() {
+            new FastMcpServer[Any]() {
               override def runStdio() =
                 ZIO.scoped {
                   ZIO.acquireRelease(

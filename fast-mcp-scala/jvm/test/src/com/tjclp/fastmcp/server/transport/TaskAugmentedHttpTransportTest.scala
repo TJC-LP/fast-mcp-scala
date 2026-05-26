@@ -73,8 +73,9 @@ class TaskAugmentedHttpTransportTest extends AnyFlatSpec with Matchers {
     )
     val _ = server.scanAnnotations[TestServer.type]
     val jsonMapper = McpJsonDefaults.getMapper()
-    val taskManager = TaskManager.makeUnsafe(taskSettings)
-    val dispatcher = new TaskDispatcher(taskManager, server.toolManager, jsonMapper)
+    val taskManager = TaskManager.makeUnsafe[Any](taskSettings)
+    val dispatcher =
+      new TaskDispatcher[Any](taskManager, server.toolManager, jsonMapper, Runtime.default)
     val provider =
       new ZioHttpStreamableTransportProvider(jsonMapper, "/mcp", false, None, Some(dispatcher))
     server.setupStreamableServer(provider)
@@ -357,8 +358,9 @@ class TaskAugmentedHttpTransportTest extends AnyFlatSpec with Matchers {
     )
     val _ = server.scanAnnotations[TestServer.type]
     val jsonMapper = McpJsonDefaults.getMapper()
-    val taskManager = TaskManager.makeUnsafe(capped)
-    val dispatcher = new TaskDispatcher(taskManager, server.toolManager, jsonMapper)
+    val taskManager = TaskManager.makeUnsafe[Any](capped)
+    val dispatcher =
+      new TaskDispatcher[Any](taskManager, server.toolManager, jsonMapper, Runtime.default)
     val provider =
       new ZioHttpStreamableTransportProvider(jsonMapper, "/mcp", false, None, Some(dispatcher))
     server.setupStreamableServer(provider)

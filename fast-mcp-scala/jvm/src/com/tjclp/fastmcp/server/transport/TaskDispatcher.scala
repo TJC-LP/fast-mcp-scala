@@ -29,10 +29,11 @@ import server.manager.{TaskConcurrencyLimitExceeded, TaskManager, ToolManager}
   * post-process is the cheapest way to surface them on the wire without forking the SDK.
   */
 @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.AsInstanceOf"))
-private[fastmcp] class TaskDispatcher(
-    taskManager: TaskManager,
-    toolManager: ToolManager,
-    jsonMapper: McpJsonMapper
+private[fastmcp] class TaskDispatcher[R](
+    taskManager: TaskManager[R],
+    toolManager: ToolManager[R],
+    jsonMapper: McpJsonMapper,
+    runtime: Runtime[R]
 ):
 
   /** Try to handle a JSON-RPC request entirely within the dispatcher. Returns `Some(effect)` when
@@ -218,11 +219,14 @@ private[fastmcp] class TaskDispatcher(
       case Some(handler) =>
         // Erase the result type — TaskManager doesn't know what the tool returns, only the
         // dispatch layer does. The outgoing tasks/result will see the raw value passed back.
-        val run: ZIO[Any, Throwable, Any] =
+        val run: ZIO[R, Throwable, Any] =
           handler(argsMap, ctx).foldZIO(
             err => ZIO.succeed(ErrorMapper.toCallToolResult(err)),
             v => ZIO.attempt(toCallToolResult(v))
           )
+        // `taskManager.create` needs `R` (because the forked effect does); discharge via the
+        // server's captured runtime environment so the surrounding `intercept` keeps its `UIO`
+        // signature for the transport layer.
         taskManager
           .create(
             sessionId = sessionId,
@@ -230,6 +234,7 @@ private[fastmcp] class TaskDispatcher(
             run = run,
             onStatusChange = _ => ZIO.unit // notifications wired in the transport, not here
           )
+          .provideEnvironment(runtime.environment)
           .fold(
             {
               // Cap exceeded is a request-rejection (-32602), not a generic server error.

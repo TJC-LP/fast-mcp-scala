@@ -16,7 +16,7 @@ import zio.*
   */
 class FastMcpServerZioMonoSpec extends AnyFlatSpec with Matchers {
 
-  private val server = new FastMcpServer()
+  private val server = new FastMcpServer[Any]()
 
   "zioToMono" should "convert successful ZIO effects to Mono with the same result" in {
     val mono: Mono[Int] = server.zioToMono(ZIO.succeed(42))

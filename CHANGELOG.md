@@ -5,6 +5,27 @@ All notable changes to fast-mcp-scala will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Annotation and typed-contract handlers may declare ZIO environment requirements.** `@Tool` /
+  `@Resource` / `@Prompt` methods can return `ZIO[R, E, A]` with `R ≠ Any`; provide the layer
+  once at `server.runHttp().provide(...)` instead of inside every method body. Construct the
+  server with `McpServer.typed[R]("name")` (or `FastMcpServer.typed[R]`) so `runHttp()` returns
+  `ZIO[R, Throwable, Unit]`. The macro emits a compile-time error if a handler's `R` isn't
+  satisfied by the server's type. Typed contracts gain a third `R` type parameter
+  (`McpTool[In, Out, R]`, `McpPrompt[In, R]`, `McpStaticResource[R]`,
+  `McpTemplateResource[In, R]`) with a default of `Any` for backward compatibility. Closes #55.
+
+### Changed
+
+- **`McpServerCore`, `FastMcpServer`, and `JsMcpServer` are now parameterized on `R`.** The
+  default `McpServer("name")` factory still returns the `R = Any` form; explicit type
+  application (`FastMcpServer[Client]("name")`) or `McpServer.typed[R]("name")` gives a typed
+  server. Existing code that wrote `FastMcpServer` or `JsMcpServer` as bare types needs
+  `FastMcpServer[Any]` / `JsMcpServer[Any]`.
+
 ## [0.3.2] - 2026-04-28
 
 ### Added

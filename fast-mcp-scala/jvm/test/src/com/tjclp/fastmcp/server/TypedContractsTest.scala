@@ -45,7 +45,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
 
     runUnsafe(
       server.tool(
-        McpTool[AddArgs, AddResult](
+        McpTool[AddArgs, AddResult, Any](
           name = "typed-add",
           description = Some("Add two numbers")
         ) { args =>
@@ -74,7 +74,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
 
     runUnsafe(
       server.tool(
-        McpTool[AddArgs, String](
+        McpTool[AddArgs, String, Any](
           name = "typed-context",
           description = Some("Context-aware typed tool")
         ).contextual { (args, ctxOpt) =>
@@ -100,7 +100,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
 
     runUnsafe(
       server.prompt(
-        McpPrompt[GreetingArgs](
+        McpPrompt[GreetingArgs, Any](
           name = "typed-prompt",
           arguments = List(PromptArgument("name", Some("The name to greet"), required = true))
         ) { args =>
@@ -111,7 +111,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
 
     runUnsafe(
       server.resource(
-        McpStaticResource(
+        McpStaticResource[Any](
           uri = "static://welcome",
           description = Some("Welcome message")
         )("welcome")
@@ -120,7 +120,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
 
     runUnsafe(
       server.resource(
-        McpTemplateResource[UserProfileArgs](
+        McpTemplateResource[UserProfileArgs, Any](
           uriPattern = "users://{userId}/profile",
           description = Some("User profile"),
           arguments = List(ResourceArgument("userId", Some("The user id"), required = true))

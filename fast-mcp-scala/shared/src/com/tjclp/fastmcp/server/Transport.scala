@@ -26,14 +26,17 @@ type Http = Transport.Http
 /** Typeclass that maps a [[Transport]] marker to the effectful runner that starts the server on
   * that transport. Platform-neutral — each given just delegates to the relevant method on
   * [[McpServerCore]].
+  *
+  * `core: McpServerCore[Any]` because this trait is part of the default `McpServerApp` flow; users
+  * needing layer-aware servers call `runHttp()` directly on a typed `FastMcpServer[R]` instead.
   */
 trait TransportRunner[T <: Transport]:
-  def run(core: McpServerCore): ZIO[Any, Throwable, Unit]
+  def run(core: McpServerCore[Any]): ZIO[Any, Throwable, Unit]
 
 object TransportRunner:
 
   given stdio: TransportRunner[Stdio] with
-    def run(core: McpServerCore): ZIO[Any, Throwable, Unit] = core.runStdio()
+    def run(core: McpServerCore[Any]): ZIO[Any, Throwable, Unit] = core.runStdio()
 
   given http: TransportRunner[Http] with
-    def run(core: McpServerCore): ZIO[Any, Throwable, Unit] = core.runHttp()
+    def run(core: McpServerCore[Any]): ZIO[Any, Throwable, Unit] = core.runHttp()

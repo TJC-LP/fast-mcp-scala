@@ -524,9 +524,10 @@ private[macros] object MacroUtils:
 
   /** Classify the return type of a `@Tool` / `@Resource` / `@Prompt` method.
     *
-    * Aborts at macro time if the method returns a `ZIO` with a non-`Any` environment, since the
-    * shared handler signature `(args, ctx) => ZIO[Any, Throwable, Any]` cannot satisfy an
-    * environment requirement.
+    * `ZIO` returns are accepted for any environment `R`. The annotation processors emit handlers
+    * typed at `ContextualToolHandler[R]` so the surrounding server's `R` (set at construction time
+    * via `FastMcpServer[R](...)`) is checked by Scala's normal type system against each method's
+    * requirement. Providing the layer happens at `server.runHttp[R]().provide(...)`.
     */
   private[macros] def detectEffectShape(using quotes: Quotes)(
       methodSym: quotes.reflect.Symbol
@@ -538,17 +539,32 @@ private[macros] object MacroUtils:
       case other => other
     ).dealias
 
-    if resType <:< TypeRepr.of[zio.ZIO[Any, Any, Any]] then EffectShape.Zio
-    else if resType <:< TypeRepr.of[zio.ZIO[Nothing, Any, Any]] then
-      report.errorAndAbort(
-        s"Annotated method '${methodSym.name}' returns ${resType.show}; " +
-          "annotation-based handlers must return ZIO with environment Any. " +
-          "Provide the environment via ZIO.provide(...) inside the method body, " +
-          "or use a typed contract (McpTool.derived) for environment-dependent effects."
-      )
+    val zioSym = TypeRepr.of[zio.ZIO].typeSymbol
+    if resType.baseClasses.contains(zioSym) then EffectShape.Zio
     else if resType <:< TypeRepr.of[scala.util.Try[Any]] then EffectShape.TryEffect
     else if resType <:< TypeRepr.of[Either[Throwable, Any]] then EffectShape.EitherThrowable
     else EffectShape.Pure
+
+  /** Extract the `R` type argument from a method that returns `ZIO[R, E, A]`. Returns `None` for
+    * non-ZIO returns (the processor uses `Any` in that case — the handler doesn't require an
+    * environment).
+    */
+  private[macros] def extractZioRequirement(using quotes: Quotes)(
+      methodSym: quotes.reflect.Symbol
+  ): Option[quotes.reflect.TypeRepr] =
+    import quotes.reflect.*
+
+    val resType = (methodSym.info match
+      case mt: MethodType => mt.resType
+      case other => other
+    ).dealias
+
+    val zioSym = TypeRepr.of[zio.ZIO].typeSymbol
+    if resType.baseClasses.contains(zioSym) then
+      resType.baseType(zioSym) match
+        case AppliedType(_, args) if args.length == 3 => Some(args.head)
+        case _ => None
+    else None
 
   /** Takes a JSON schema potentially containing `$defs` and `$ref` and returns a new JSON schema
     * where all references are resolved and inlined.

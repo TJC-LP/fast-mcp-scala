@@ -33,7 +33,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     """{"type":"object","properties":{"msg":{"type":"string"}},"required":["msg"]}"""
   )
 
-  private val pingTool = McpTool.withSchema[PingArgs, PingResult](
+  private val pingTool = McpTool.withSchema[PingArgs, PingResult, Any](
     name = "ping",
     description = Some("echo"),
     inputSchema = pingSchema

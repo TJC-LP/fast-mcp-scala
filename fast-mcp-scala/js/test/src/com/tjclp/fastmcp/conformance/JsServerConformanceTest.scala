@@ -44,29 +44,29 @@ class JsServerConformanceTest extends AsyncFlatSpec with Matchers with BeforeAnd
   given JsonDecoder[UserArgs] = DeriveJsonDecoder.gen[UserArgs]
   given JsonDecoder[GreetArgs] = DeriveJsonDecoder.gen[GreetArgs]
 
-  private val addTool = McpTool[AddArgs, AddResult](
+  private val addTool = McpTool[AddArgs, AddResult, Any](
     name = "typed-add",
     description = Some("Add two ints")
   )(args => AddResult(args.a + args.b))
 
-  private val brokenTool = McpTool[AddArgs, AddResult](
+  private val brokenTool = McpTool[AddArgs, AddResult, Any](
     name = "broken",
     description = Some("Always fails")
   )(_ => ZIO.fail(new RuntimeException("kaboom")))
 
-  private val welcomeResource = McpStaticResource(
+  private val welcomeResource = McpStaticResource[Any](
     uri = "static://welcome",
     description = Some("Welcome")
   )("Welcome to JsMcpServer!")
 
-  private val userResource = McpTemplateResource[UserArgs](
+  private val userResource = McpTemplateResource[UserArgs, Any](
     uriPattern = "users://{userId}/profile",
     description = Some("User profile"),
     mimeType = Some("application/json"),
     arguments = List(ResourceArgument("userId", Some("user id"), required = true))
   )(args => s"""{"userId":"${args.userId}"}""")
 
-  private val greetingPrompt = McpPrompt[GreetArgs](
+  private val greetingPrompt = McpPrompt[GreetArgs, Any](
     name = "greeting",
     description = Some("Greet someone"),
     arguments = List(PromptArgument("name", Some("the name"), required = true))

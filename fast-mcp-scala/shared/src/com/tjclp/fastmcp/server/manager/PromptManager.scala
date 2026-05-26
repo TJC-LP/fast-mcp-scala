@@ -10,17 +10,25 @@ import zio.*
 import core.*
 import server.*
 
-/** Function type for prompt handlers Takes arguments and returns a list of Messages wrapped in ZIO
+/** Function type for prompt handlers Takes arguments and returns a list of Messages wrapped in ZIO.
+  *
+  * Parameterized on the ZIO environment `R`. A handler that declares `ZIO[Client, Throwable, ...]`
+  * may be stored on a manager whose `R = Client` (or a subtype), so the user-supplied environment
+  * (passed via `server.runHttp().provide(...)`) reaches the handler at execution time.
   */
-type PromptHandler = Map[String, Any] => ZIO[Any, Throwable, List[Message]]
+type PromptHandler[R] = Map[String, Any] => ZIO[R, Throwable, List[Message]]
 
 /** Manager for MCP prompts
   *
-  * Responsible for registering, storing, and rendering prompts
+  * Responsible for registering, storing, and rendering prompts.
+  *
+  * @tparam R
+  *   the ZIO environment all stored handlers may require; supplied by the server at `runHttp[R]()`
+  *   / `runStdio[R]()` entry.
   */
-class PromptManager extends Manager[PromptDefinition]:
+class PromptManager[R] extends Manager[PromptDefinition]:
   // Thread-safe storage for registered prompts
-  private val prompts = new ConcurrentHashMap[String, (PromptDefinition, PromptHandler)]()
+  private val prompts = new ConcurrentHashMap[String, (PromptDefinition, PromptHandler[R])]()
 
   /** Register a prompt with the manager
     *
@@ -35,7 +43,7 @@ class PromptManager extends Manager[PromptDefinition]:
     */
   def addPrompt(
       name: String,
-      handler: PromptHandler,
+      handler: PromptHandler[R],
       definition: PromptDefinition
   ): ZIO[Any, Throwable, Unit] =
     ZIO
@@ -68,7 +76,7 @@ class PromptManager extends Manager[PromptDefinition]:
       name: String,
       arguments: Map[String, Any],
       context: Option[McpContext]
-  ): ZIO[Any, Throwable, List[Message]] =
+  ): ZIO[R, Throwable, List[Message]] =
     getPromptHandler(name) match
       case Some(handler) =>
         // Get the prompt definition to validate required arguments
@@ -105,7 +113,7 @@ class PromptManager extends Manager[PromptDefinition]:
     * @return
     *   Option containing the handler if found
     */
-  def getPromptHandler(name: String): Option[PromptHandler] =
+  def getPromptHandler(name: String): Option[PromptHandler[R]] =
     Option(prompts.get(name)).map(_._2)
 
   /** Get a prompt definition by name

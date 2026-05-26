@@ -20,8 +20,8 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
   private def newManager(
       maxConcurrent: Int = 64,
       defaultTtl: Long = 3_600_000L
-  ): TaskManager =
-    TaskManager.makeUnsafe(
+  ): TaskManager[Any] =
+    TaskManager.makeUnsafe[Any](
       TaskSettings(
         enabled = true,
         defaultTtlMs = defaultTtl,
@@ -182,7 +182,7 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
   }
 
   "TTL clamping" should "respect maxTtlMs" in {
-    val tm = TaskManager.makeUnsafe(
+    val tm = TaskManager.makeUnsafe[Any](
       TaskSettings(
         enabled = true,
         defaultTtlMs = 1_000L,

@@ -15,7 +15,7 @@ class ToolManagerSpec extends AnyFlatSpec with Matchers {
   private val stringSchema = ToolInputSchema.unsafeFromJsonString("""{"type":"string"}""")
 
   "addTool" should "overwrite existing tool by default and update definition" in {
-    val manager = new ToolManager
+    val manager = new ToolManager[Any]
     val def1 = ToolDefinition("t1", Some("first"), objectSchema)
     val def2 = ToolDefinition("t1", Some("second"), stringSchema)
     // First registration
@@ -35,7 +35,7 @@ class ToolManagerSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "fail when duplicates are disallowed and warnOnDuplicates is false" in {
-    val manager = new ToolManager
+    val manager = new ToolManager[Any]
     val options = ToolRegistrationOptions(warnOnDuplicates = false)
     val def1 = ToolDefinition("t2", None, objectSchema)
     val def2 = ToolDefinition("t2", None, stringSchema)
@@ -57,7 +57,7 @@ class ToolManagerSpec extends AnyFlatSpec with Matchers {
   }
 
   "callTool" should "fail when tool not found" in {
-    val manager = new ToolManager
+    val manager = new ToolManager[Any]
     val ex = intercept[Throwable] {
       Unsafe.unsafe { implicit u =>
         Runtime.default.unsafe
@@ -69,7 +69,7 @@ class ToolManagerSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "execute handler and return result" in {
-    val manager = new ToolManager
+    val manager = new ToolManager[Any]
     val defn = ToolDefinition("t3", None, ToolInputSchema.unsafeFromJsonString("{}"))
     Unsafe.unsafe { implicit u =>
       Runtime.default.unsafe
@@ -83,9 +83,10 @@ class ToolManagerSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "pass context to handler" in {
-    val manager = new ToolManager
+    val manager = new ToolManager[Any]
     val captured = new java.util.concurrent.atomic.AtomicReference[Option[McpContext]](None)
-    val handler: ContextualToolHandler = (_, ctx) => ZIO.succeed { captured.set(ctx); "ctx-ok" }
+    val handler: ContextualToolHandler[Any] = (_, ctx) =>
+      ZIO.succeed { captured.set(ctx); "ctx-ok" }
     val defn = ToolDefinition("t4", None, ToolInputSchema.unsafeFromJsonString("{}"))
     // Register with context-aware handler
     Unsafe.unsafe { implicit u =>

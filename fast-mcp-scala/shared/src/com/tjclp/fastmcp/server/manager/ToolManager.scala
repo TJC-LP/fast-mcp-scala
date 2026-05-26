@@ -11,8 +11,13 @@ import zio.*
 import core.*
 import server.*
 
-// Context-aware handler type
-type ContextualToolHandler = (Map[String, Any], Option[McpContext]) => ZIO[Any, Throwable, Any]
+/** Context-aware tool handler.
+  *
+  * Parameterized on the ZIO environment `R`. A handler that declares `ZIO[Client, Throwable, ...]`
+  * may be stored on a manager whose `R = Client` (or a subtype), so the user-supplied environment
+  * (passed via `server.runHttp().provide(...)`) reaches the handler at execution time.
+  */
+type ContextualToolHandler[R] = (Map[String, Any], Option[McpContext]) => ZIO[R, Throwable, Any]
 
 /** Options for tool registration
   */
@@ -25,11 +30,15 @@ case class ToolRegistrationOptions(
 
 /** Manager for MCP tools
   *
-  * Responsible for registering, storing, and executing tools
+  * Responsible for registering, storing, and executing tools.
+  *
+  * @tparam R
+  *   the ZIO environment all stored handlers may require; supplied by the server at `runHttp[R]()`
+  *   / `runStdio[R]()` entry.
   */
-class ToolManager extends Manager[ToolDefinition]:
+class ToolManager[R] extends Manager[ToolDefinition]:
   // Thread-safe storage for registered tools - public for direct access in examples
-  val tools = new ConcurrentHashMap[String, (ToolDefinition, ContextualToolHandler)]()
+  val tools = new ConcurrentHashMap[String, (ToolDefinition, ContextualToolHandler[R])]()
 
   private def checkToolConflict(
       name: String,
@@ -54,7 +63,7 @@ class ToolManager extends Manager[ToolDefinition]:
     */
   def addTool(
       name: String,
-      handler: ContextualToolHandler,
+      handler: ContextualToolHandler[R],
       definition: ToolDefinition,
       options: ToolRegistrationOptions = ToolRegistrationOptions()
   ): ZIO[Any, Throwable, Unit] =
@@ -86,7 +95,7 @@ class ToolManager extends Manager[ToolDefinition]:
       name: String,
       arguments: Map[String, Any],
       context: Option[McpContext]
-  ): ZIO[Any, Throwable, Any] =
+  ): ZIO[R, Throwable, Any] =
     for
       // Get the handler and definition
       handlerOpt <- ZIO.succeed(getToolHandler(name))
@@ -117,7 +126,7 @@ class ToolManager extends Manager[ToolDefinition]:
     * @return
     *   Option containing the handler if found
     */
-  def getToolHandler(name: String): Option[ContextualToolHandler] =
+  def getToolHandler(name: String): Option[ContextualToolHandler[R]] =
     Option(tools.get(name)).map(_._2)
 
   /** Get a tool definition by name

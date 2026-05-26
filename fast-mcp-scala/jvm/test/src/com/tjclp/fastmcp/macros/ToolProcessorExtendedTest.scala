@@ -44,7 +44,7 @@ class ToolProcessorExtendedTest extends AnyFunSuite with Matchers {
 /** Companion object with tool definitions for testing */
 object ToolProcessorExtendedTest {
   // Create a test server for tool registration
-  val server = new FastMcpServer("TestServer", "0.1.0")
+  val server = new FastMcpServer[Any]("TestServer", "0.1.0")
 
   /** A tool that uses the McpContext parameter */
   @Tool(name = Some("context-aware-tool"), description = Some("A tool that uses context"))
