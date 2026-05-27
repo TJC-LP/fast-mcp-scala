@@ -80,6 +80,7 @@ trait ServerCapabilities extends js.Object:
   val tools: js.UndefOr[js.Object] = js.native
   val resources: js.UndefOr[js.Object] = js.native
   val prompts: js.UndefOr[js.Object] = js.native
+  val logging: js.UndefOr[js.Object] = js.native
 
 // --- Tool types ---
 

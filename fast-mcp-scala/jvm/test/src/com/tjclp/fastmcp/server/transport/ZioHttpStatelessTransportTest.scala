@@ -119,6 +119,15 @@ class ZioHttpStatelessTransportTest extends AnyFlatSpec with Matchers {
     body should include("\"protocolVersion\"")
   }
 
+  it should "not advertise the logging capability (issue #56)" in {
+    val (code, body) = post(
+      """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"""
+    )
+    code shouldBe 200
+    body should include("\"tools\"") // sanity: at least one capability still advertised
+    body should not include "\"logging\""
+  }
+
   "notifications/initialized" should "return 202" in {
     val (code, _) = post(
       """{"jsonrpc":"2.0","method":"notifications/initialized"}"""

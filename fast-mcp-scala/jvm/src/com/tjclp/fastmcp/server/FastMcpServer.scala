@@ -690,12 +690,18 @@ class FastMcpServer[R](
       if (promptManager.listDefinitions().nonEmpty)
         new McpSchema.ServerCapabilities.PromptCapabilities(true)
       else null
-    val loggingCapabilities = new McpSchema.ServerCapabilities.LoggingCapabilities()
 
+    // Pass null for logging — fast-mcp-scala exposes no logging API yet (issue #56).
+    // The stateless server respects this null. The stateful server (streamable HTTP,
+    // stdio) forces `.mutate().logging().build()` at McpAsyncServer.java:136,164, so
+    // it still advertises `logging: {}` — but it also auto-registers a no-op handler
+    // for `logging/setLevel` there, so clients don't see a "Missing handler" error.
+    // Resolving the cosmetic advertisement on stateful paths requires bypassing the
+    // Java SDK entirely (planned for a future rewrite).
     new McpSchema.ServerCapabilities(
       null,
       null, // experimental
-      loggingCapabilities,
+      null, // logging
       promptCapabilities,
       resourceCapabilities,
       toolCapabilities
