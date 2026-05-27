@@ -46,59 +46,79 @@ import com.tjclp.fastmcp.server.transport.ZioHttpStreamableTransportProvider
 
 /** JVM implementation of the shared `McpServerCore` trait — the thing you actually run.
   *
-  * `FastMcpServer` wraps the Java MCP SDK (`mcp-core` 1.1.1) and exposes the high-level API users
-  * interact with: `.tool(...)`, `.prompt(...)`, `.resource(...)`, plus the annotation macro entry
-  * point `.scanAnnotations[T]` (via `RegistrationMacro`). Transports are chosen at run time — call
-  * `.runStdio()` for stdin/stdout (Claude Desktop, MCP Inspector) or `.runHttp()` for the full MCP
-  * Streamable HTTP spec (SSE + sessions by default, `stateless = true` opt-in).
+  * `FastMcpServer[R]` wraps the Java MCP SDK (`mcp-core` 1.1.1) and exposes the high-level API
+  * users interact with: `.tool(...)`, `.prompt(...)`, `.resource(...)`, plus the annotation macro
+  * entry point `.scanAnnotations[T]` (via `RegistrationMacro`). Transports are chosen at run time —
+  * call `.runStdio()` for stdin/stdout (Claude Desktop, MCP Inspector) or `.runHttp()` for the full
+  * MCP Streamable HTTP spec (SSE + sessions by default, `stateless = true` opt-in).
+  *
+  * `R` is the ZIO environment all handlers can require. The default `McpServer("name")` factory
+  * builds a `FastMcpServer[Any]`; for layer-aware servers use `FastMcpServer[Client]("name")` (or
+  * `McpServer.typed[Client]`) and supply the layer via `server.runHttp().provide(...)`.
   *
   * Prefer the [[com.tjclp.fastmcp.server.McpServer$]] factory (`McpServer("name", ...)`) over
   * constructing this class directly — the factory keeps the call site framework-agnostic.
   */
-@SuppressWarnings(Array("org.wartremover.warts.Null"))
-class FastMcpServer(
+@SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Var"))
+class FastMcpServer[R](
     val name: String = "FastMCPScala",
     version: String = "0.1.0",
     settings: McpServerSettings = McpServerSettings()
-) extends com.tjclp.fastmcp.server.McpServerCore:
+) extends com.tjclp.fastmcp.server.McpServerCore[R]:
   val dependencies: List[String] = settings.dependencies
   protected val decodeContext: McpDecodeContext = JacksonConversionContext.default
   // Initialize managers
-  val toolManager = new ToolManager()
-  val resourceManager = new ResourceManager()
-  val promptManager = new PromptManager()
+  val toolManager = new ToolManager[R]()
+  val resourceManager = new ResourceManager[R]()
+  val promptManager = new PromptManager[R]()
 
   // Placeholder for the Java MCP Server instances
   private var underlyingJavaServer: Option[McpAsyncServer] = None
   private var underlyingStatelessServer: Option[McpStatelessAsyncServer] = None
 
+  // The ZIO runtime used to dispatch every handler. Defaults to `Runtime.default` (sound for
+  // `R = Any`); `runStdio()` / `runHttp()` overwrite this with `ZIO.runtime[R]` so the user's
+  // `.provide(layer)` reaches every handler invocation. Volatile because the Java SDK invokes
+  // handlers on its own thread pool and may observe the assignment from a different thread than
+  // the one that ran `runHttp()`.
+  @volatile private var executionRuntime: Runtime[R] =
+    Runtime.default.asInstanceOf[Runtime[R]]
+
+  /** Test hook: install a specific `Runtime[R]` so direct calls to `toolManager.callTool(...)`
+    * (bypassing `runStdio` / `runHttp`) can satisfy `R` for handlers that require services.
+    */
+  private[fastmcp] def setExecutionRuntime(runtime: Runtime[R]): Unit =
+    executionRuntime = runtime
+
   // --- Private Java Handler Converters ---
 
   /** Register a tool with the server
     */
-  override def tool(
+  override def tool[R1 >: R](
       definition: ToolDefinition,
-      handler: ContextualToolHandler,
+      handler: ContextualToolHandler[R1],
       options: ToolRegistrationOptions
-  ): ZIO[Any, Throwable, FastMcpServer] =
-    toolManager.addTool(definition.name, handler, definition, options).as(this)
+  ): ZIO[Any, Throwable, FastMcpServer[R]] =
+    toolManager
+      .addTool(definition.name, handler.asInstanceOf[ContextualToolHandler[R]], definition, options)
+      .as(this)
 
-  override def tool(
+  override def tool[R1 >: R](
       definition: ToolDefinition,
-      handler: ContextualToolHandler
-  ): ZIO[Any, Throwable, FastMcpServer] =
-    tool(definition, handler, ToolRegistrationOptions())
+      handler: ContextualToolHandler[R1]
+  ): ZIO[Any, Throwable, FastMcpServer[R]] =
+    tool[R1](definition, handler, ToolRegistrationOptions())
 
-  override def tool(
+  override def tool[R1 >: R](
       name: String,
-      handler: ContextualToolHandler,
+      handler: ContextualToolHandler[R1],
       description: Option[String],
       inputSchema: ToolInputSchema,
       options: ToolRegistrationOptions,
       annotations: Option[ToolAnnotations],
       taskSupport: Option[TaskSupport]
-  ): ZIO[Any, Throwable, FastMcpServer] =
-    tool(
+  ): ZIO[Any, Throwable, FastMcpServer[R]] =
+    tool[R1](
       definition = ToolDefinition(
         name = name,
         description = description,
@@ -110,39 +130,42 @@ class FastMcpServer(
       options = options
     )
 
-  def tool(
+  def tool[R1 >: R](
       name: String,
-      handler: ContextualToolHandler,
+      handler: ContextualToolHandler[R1],
       description: Option[String],
       inputSchema: Either[McpSchema.JsonSchema, String],
       options: ToolRegistrationOptions,
       annotations: Option[ToolAnnotations]
-  ): ZIO[Any, Throwable, FastMcpServer] =
-    tool(
+  ): ZIO[Any, Throwable, FastMcpServer[R]] =
+    tool[R1](
       name = name,
       handler = handler,
       description = description,
       inputSchema = fromEither(inputSchema),
       options = options,
-      annotations = annotations
+      annotations = annotations,
+      taskSupport = None
     )
 
   /** Register a **static** resource with the server.
     */
-  override def resource(
+  override def resource[R1 >: R](
       definition: ResourceDefinition,
-      handler: ResourceHandler
-  ): ZIO[Any, Throwable, FastMcpServer] =
-    resourceManager.addStaticResource(definition.uri, handler, definition).as(this)
+      handler: ResourceHandler[R1]
+  ): ZIO[Any, Throwable, FastMcpServer[R]] =
+    resourceManager
+      .addStaticResource(definition.uri, handler.asInstanceOf[ResourceHandler[R]], definition)
+      .as(this)
 
-  override def resource(
+  override def resource[R1 >: R](
       uri: String,
-      handler: ResourceHandler, // () => ZIO[Any, Throwable, String | Array[Byte]]
+      handler: ResourceHandler[R1], // () => ZIO[R1, Throwable, String | Array[Byte]]
       name: Option[String] = None,
       description: Option[String] = None,
       mimeType: Option[String] = Some("text/plain") // Default mimeType here
-  ): ZIO[Any, Throwable, FastMcpServer] = {
-    resource(
+  ): ZIO[Any, Throwable, FastMcpServer[R]] = {
+    resource[R1](
       definition = ResourceDefinition(
         uri = uri,
         name = name,
@@ -157,21 +180,27 @@ class FastMcpServer(
 
   /** Register a **templated** resource with the server.
     */
-  override def resourceTemplate(
+  override def resourceTemplate[R1 >: R](
       definition: ResourceDefinition,
-      handler: ResourceTemplateHandler
-  ): ZIO[Any, Throwable, FastMcpServer] =
-    resourceManager.addTemplateResource(definition.uri, handler, definition).as(this)
+      handler: ResourceTemplateHandler[R1]
+  ): ZIO[Any, Throwable, FastMcpServer[R]] =
+    resourceManager
+      .addTemplateResource(
+        definition.uri,
+        handler.asInstanceOf[ResourceTemplateHandler[R]],
+        definition
+      )
+      .as(this)
 
-  override def resourceTemplate(
+  override def resourceTemplate[R1 >: R](
       uriPattern: String,
-      handler: ResourceTemplateHandler, // Map[String, String] => ZIO[Any, Throwable, String | Array[Byte]]
+      handler: ResourceTemplateHandler[R1],
       name: Option[String] = None,
       description: Option[String] = None,
       mimeType: Option[String] = Some("text/plain"), // Default mimeType here
       arguments: Option[List[ResourceArgument]] = None // Arguments might be passed by macro
-  ): ZIO[Any, Throwable, FastMcpServer] = {
-    resourceTemplate(
+  ): ZIO[Any, Throwable, FastMcpServer[R]] = {
+    resourceTemplate[R1](
       definition = ResourceDefinition(
         uri = uriPattern,
         name = name,
@@ -186,19 +215,21 @@ class FastMcpServer(
 
   /** Register a prompt with the server
     */
-  override def prompt(
+  override def prompt[R1 >: R](
       definition: PromptDefinition,
-      handler: PromptHandler
-  ): ZIO[Any, Throwable, FastMcpServer] =
-    promptManager.addPrompt(definition.name, handler, definition).as(this)
+      handler: PromptHandler[R1]
+  ): ZIO[Any, Throwable, FastMcpServer[R]] =
+    promptManager
+      .addPrompt(definition.name, handler.asInstanceOf[PromptHandler[R]], definition)
+      .as(this)
 
-  override def prompt(
+  override def prompt[R1 >: R](
       name: String,
-      handler: PromptHandler,
+      handler: PromptHandler[R1],
       description: Option[String] = None,
       arguments: Option[List[PromptArgument]] = None
-  ): ZIO[Any, Throwable, FastMcpServer] =
-    prompt(
+  ): ZIO[Any, Throwable, FastMcpServer[R]] =
+    prompt[R1](
       definition = PromptDefinition(name, description, arguments),
       handler = handler
     )
@@ -240,7 +271,7 @@ class FastMcpServer(
 
   /** Run the server with the specified transport
     */
-  def run(transport: String = "stdio"): ZIO[Any, Throwable, Unit] =
+  def run(transport: String = "stdio"): ZIO[R, Throwable, Unit] =
     transport.toLowerCase match
       case "stdio" => runStdio()
       case "http" => runHttp()
@@ -250,8 +281,12 @@ class FastMcpServer(
 
   /** Run the server with stdio transport. Completes when stdin reaches EOF or the fiber is
     * interrupted, allowing clean shutdown when an MCP client closes the subprocess stdin.
+    *
+    * Returns `ZIO[R, Throwable, Unit]` so a user-provided layer (e.g. `.provide(Client.default)`)
+    * is satisfied by the surrounding ZIO before this effect actually executes. The captured runtime
+    * is reused for every handler invocation.
     */
-  def runStdio(): ZIO[Any, Throwable, Unit] =
+  def runStdio(): ZIO[R, Throwable, Unit] =
     if settings.tasks.enabled then
       ZIO.fail(
         new IllegalStateException(
@@ -260,7 +295,13 @@ class FastMcpServer(
             "Disable tasks or call runHttp() with stateless=false."
         )
       )
-    else runStdioInternal()
+    else captureRuntime *> runStdioInternal()
+
+  /** Capture the surrounding `Runtime[R]` and stash it in `executionRuntime` so every later handler
+    * call uses it. Runs once per `runStdio` / `runHttp` invocation.
+    */
+  private def captureRuntime: ZIO[R, Nothing, Unit] =
+    ZIO.runtime[R].flatMap(rt => ZIO.succeed(setExecutionRuntime(rt)))
 
   private def runStdioInternal(): ZIO[Any, Throwable, Unit] =
     ZIO.scoped {
@@ -304,10 +345,16 @@ class FastMcpServer(
     *
     * When `settings.stateless` is true, uses stateless transport (no sessions, no SSE). When false
     * (default), uses streamable transport with session management and SSE streaming.
+    *
+    * Returns `ZIO[R, Throwable, Unit]` so a user-provided layer (e.g. `.provide(Client.default)`)
+    * is satisfied by the surrounding ZIO before this effect actually executes. The captured runtime
+    * is reused for every handler invocation.
     */
-  def runHttp(): ZIO[Any, Throwable, Unit] =
-    if settings.stateless then runStatelessHttp()
-    else runStreamableHttp()
+  def runHttp(): ZIO[R, Throwable, Unit] =
+    captureRuntime *> (
+      if settings.stateless then runStatelessHttp()
+      else runStreamableHttp()
+    )
 
   /** Run the server with stateless HTTP transport via zio-http.
     *
@@ -358,8 +405,8 @@ class FastMcpServer(
         jsonMapper <- ZIO.attempt(McpJsonDefaults.getMapper())
         taskDispatcherOpt <-
           if settings.tasks.enabled then
-            TaskManager.make(settings.tasks).map { tm =>
-              Some(new TaskDispatcher(tm, toolManager, jsonMapper))
+            TaskManager.make[R](settings.tasks).map { tm =>
+              Some(new TaskDispatcher[R](tm, toolManager, jsonMapper, executionRuntime))
             }
           else ZIO.succeed(None)
         provider = new ZioHttpStreamableTransportProvider(
@@ -663,12 +710,13 @@ class FastMcpServer(
     McpSchema.ReadResourceResult
   ]] =
     (_, _) => {
-      val handlerOpt: Option[ResourceHandler] = resourceManager.getResourceHandler(registeredUri)
+      val handlerOpt: Option[ResourceHandler[R]] =
+        resourceManager.getResourceHandler(registeredUri)
       handlerOpt match {
         case Some(handler) =>
           // Execute the ZIO effect and convert to Mono
-          val contentEffect: ZIO[Any, Throwable, String | Array[Byte]] = handler()
-          val finalEffect: ZIO[Any, Throwable, McpSchema.ReadResourceResult] = contentEffect
+          val contentEffect: ZIO[R, Throwable, String | Array[Byte]] = handler()
+          val finalEffect: ZIO[R, Throwable, McpSchema.ReadResourceResult] = contentEffect
             .flatMap { content =>
               val mimeTypeOpt =
                 resourceManager.getResourceDefinition(registeredUri).flatMap(_.mimeType)
@@ -751,7 +799,7 @@ class FastMcpServer(
               templateManager.extractVariableValues(requestedUri).asScala.toMap
 
             val contentEffect = handler(params)
-            val finalEffect: ZIO[Any, Throwable, McpSchema.ReadResourceResult] = contentEffect
+            val finalEffect: ZIO[R, Throwable, McpSchema.ReadResourceResult] = contentEffect
               .flatMap { content =>
                 val mimeTypeOpt = resourceManager
                   .listDefinitions()
@@ -784,12 +832,15 @@ class FastMcpServer(
 
   /** Converts a ZIO effect to a Reactor Mono. Executes the ZIO effect asynchronously and bridges
     * the result/error to the MonoSink.
+    *
+    * Runs the effect on `executionRuntime` (captured at `runStdio` / `runHttp` entry), so any `R`
+    * requirement in the underlying handler is discharged by the user-supplied layer.
     */
   // Visible within server package so tests can exercise directly without reflection.
-  private[server] def zioToMono[A](effect: ZIO[Any, Throwable, A]): Mono[A] = {
+  private[server] def zioToMono[A](effect: ZIO[R, Throwable, A]): Mono[A] = {
     Mono.create { sink =>
       Unsafe.unsafe { implicit unsafe =>
-        Runtime.default.unsafe.runToFuture(effect).onComplete {
+        executionRuntime.unsafe.runToFuture(effect).onComplete {
           case Success(value) => sink.success(value)
           case Failure(error) => sink.error(error)
         }
@@ -801,12 +852,12 @@ class FastMcpServer(
     * handling. Errors are mapped to McpSchema.CallToolResult with isError flag set.
     */
   private[server] def zioToMonoWithErrorHandling[A](
-      effect: ZIO[Any, Throwable, A],
+      effect: ZIO[R, Throwable, A],
       resultTransform: A => McpSchema.CallToolResult
   ): Mono[McpSchema.CallToolResult] = {
     Mono.create { sink =>
       Unsafe.unsafe { implicit unsafe =>
-        Runtime.default.unsafe
+        executionRuntime.unsafe
           .runToFuture(
             effect.fold(
               // Error case - map to CallToolResult with isError=true
@@ -843,10 +894,10 @@ class FastMcpServer(
         .getOrElse(Map.empty)
       val context = JvmMcpContext(Some(exchange))
 
-      val messagesEffect: ZIO[Any, Throwable, List[Message]] =
+      val messagesEffect: ZIO[R, Throwable, List[Message]] =
         promptManager.getPrompt(promptName, scalaArgs, Some(context))
 
-      val finalEffect: ZIO[Any, Throwable, McpSchema.GetPromptResult] = messagesEffect.map {
+      val finalEffect: ZIO[R, Throwable, McpSchema.GetPromptResult] = messagesEffect.map {
         messages =>
           val javaMessages = messages.map(_.toJava).asJava
           val description = promptManager
@@ -881,7 +932,7 @@ class FastMcpServer(
         .getOrElse(Map.empty)
       val context = JvmMcpContext(javaExchange = Some(exchange))
 
-      val resultEffect: ZIO[Any, Throwable, Any] =
+      val resultEffect: ZIO[R, Throwable, Any] =
         toolManager.callTool(toolName, scalaArgs, Some(context))
 
       zioToMonoWithErrorHandling(resultEffect, transformToolResult(toolName))
@@ -902,7 +953,7 @@ class FastMcpServer(
         .getOrElse(Map.empty)
       val context = JvmMcpContext(transportContext = Some(ctx))
 
-      val resultEffect: ZIO[Any, Throwable, Any] =
+      val resultEffect: ZIO[R, Throwable, Any] =
         toolManager.callTool(toolName, scalaArgs, Some(context))
 
       zioToMonoWithErrorHandling(resultEffect, transformToolResult(toolName))
@@ -918,7 +969,7 @@ class FastMcpServer(
     (_, _) => {
       resourceManager.getResourceHandler(registeredUri) match {
         case Some(handler) =>
-          val finalEffect: ZIO[Any, Throwable, McpSchema.ReadResourceResult] = handler()
+          val finalEffect: ZIO[R, Throwable, McpSchema.ReadResourceResult] = handler()
             .flatMap { content =>
               val mimeTypeOpt =
                 resourceManager.getResourceDefinition(registeredUri).flatMap(_.mimeType)
@@ -968,7 +1019,7 @@ class FastMcpServer(
               templateManager.extractVariableValues(requestedUri).asScala.toMap
 
             val contentEffect = handler(params)
-            val finalEffect: ZIO[Any, Throwable, McpSchema.ReadResourceResult] = contentEffect
+            val finalEffect: ZIO[R, Throwable, McpSchema.ReadResourceResult] = contentEffect
               .flatMap { content =>
                 val mimeTypeOpt = resourceManager
                   .listDefinitions()
@@ -1012,10 +1063,10 @@ class FastMcpServer(
         .getOrElse(Map.empty)
       val context = JvmMcpContext(transportContext = Some(ctx))
 
-      val messagesEffect: ZIO[Any, Throwable, List[Message]] =
+      val messagesEffect: ZIO[R, Throwable, List[Message]] =
         promptManager.getPrompt(promptName, scalaArgs, Some(context))
 
-      val finalEffect: ZIO[Any, Throwable, McpSchema.GetPromptResult] = messagesEffect.map {
+      val finalEffect: ZIO[R, Throwable, McpSchema.GetPromptResult] = messagesEffect.map {
         messages =>
           val javaMessages = messages.map(_.toJava).asJava
           val description = promptManager
@@ -1086,13 +1137,26 @@ object FastMcpServer:
   ): ZIO[Any, Throwable, Unit] =
     McpServer.stdio(name, version, settings)
 
-  /** Create a new FastMCPScala instance with the given settings
+  /** Create a new FastMCPScala instance with the given settings — default `R = Any` for backward
+    * compatibility. For layer-aware servers use `FastMcpServer.typed[R](...)` or apply the type
+    * parameter explicitly: `FastMcpServer[Client]("name")`.
     */
   def apply(
       name: String = "FastMCPScala",
       version: String = "0.1.0",
       settings: McpServerSettings = McpServerSettings()
-  ): FastMcpServer =
+  ): FastMcpServer[Any] =
     McpServer(name, version, settings)
+
+  /** Layer-aware factory. `FastMcpServer.typed[Client]("name")` returns `FastMcpServer[Client]`,
+    * whose `runHttp()` returns `ZIO[Client, Throwable, Unit]` — supply `Client` via
+    * `.provide(Client.default)` on the resulting effect.
+    */
+  def typed[R](
+      name: String = "FastMCPScala",
+      version: String = "0.1.0",
+      settings: McpServerSettings = McpServerSettings()
+  ): FastMcpServer[R] =
+    new FastMcpServer[R](name, version, settings)
 
 end FastMcpServer

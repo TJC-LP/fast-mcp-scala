@@ -10,7 +10,7 @@ import com.tjclp.fastmcp.server.manager.ToolRegistrationOptions
 
 class FastMcpServerTest extends AnyFunSuite with Matchers {
   test("Server instantiation with default settings") {
-    val server = new FastMcpServer()
+    val server = new FastMcpServer[Any]()
 
     assert(server.name == "FastMCPScala")
   }
@@ -20,13 +20,13 @@ class FastMcpServerTest extends AnyFunSuite with Matchers {
       port = 8080,
       host = "localhost"
     )
-    val server = new FastMcpServer(name = "TestServer", settings = settings)
+    val server = new FastMcpServer[Any](name = "TestServer", settings = settings)
 
     assert(server.name == "TestServer")
   }
 
   test("legacy Either schema overload should work for FastMcpServer and McpServerCore") {
-    val concrete = new FastMcpServer(name = "CompatServer")
+    val concrete = new FastMcpServer[Any](name = "CompatServer")
     val schema = Left(
       McpJsonDefaults
         .getMapper()
@@ -50,7 +50,7 @@ class FastMcpServerTest extends AnyFunSuite with Matchers {
 
     concrete.toolManager.getToolDefinition("legacy-concrete") should not be empty
 
-    val asApi: McpServerCore = concrete
+    val asApi: McpServerCore[Any] = concrete
     Unsafe.unsafe { implicit unsafe =>
       Runtime.default.unsafe
         .run(

@@ -13,15 +13,26 @@ object McpServer:
     */
   given McpServerCoreFactory with
 
-    def build(name: String, version: String, settings: McpServerSettings): McpServerCore =
-      new JsMcpServer(name, version, settings)
+    def build(name: String, version: String, settings: McpServerSettings): McpServerCore[Any] =
+      new JsMcpServer[Any](name, version, settings)
 
   def apply(
       name: String = "FastMCPScala",
       version: String = "0.1.0",
       settings: McpServerSettings = McpServerSettings()
-  ): JsMcpServer =
-    new JsMcpServer(name, version, settings)
+  ): JsMcpServer[Any] =
+    new JsMcpServer[Any](name, version, settings)
+
+  /** Layer-aware factory. `McpServer.typed[Client]("name")` returns `JsMcpServer[Client]`. The
+    * resulting server's `runHttp() / runStdio()` returns `ZIO[Client, Throwable, Unit]` — complete
+    * it with `.provide(Client.default)`.
+    */
+  def typed[R](
+      name: String = "FastMCPScala",
+      version: String = "0.1.0",
+      settings: McpServerSettings = McpServerSettings()
+  ): JsMcpServer[R] =
+    new JsMcpServer[R](name, version, settings)
 
   /** Create a server and run it on stdio in one step. */
   def stdio(

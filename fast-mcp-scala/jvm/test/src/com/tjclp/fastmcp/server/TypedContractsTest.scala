@@ -142,6 +142,61 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
     templateResult shouldBe "profile:42"
   }
 
+  test("typed contract no-env arities remain source compatible") {
+    val tool: McpTool[AddArgs, AddResult] =
+      McpTool[AddArgs, AddResult](name = "compat-add") { args =>
+        AddResult(args.a + args.b)
+      }
+    val tools: List[McpTool[?, ?]] = List(tool)
+
+    val prompt: McpPrompt[GreetingArgs] =
+      McpPrompt[GreetingArgs](
+        name = "compat-prompt",
+        arguments = List(PromptArgument("name", Some("The name to greet"), required = true))
+      ) { args =>
+        List(Message(Role.User, TextContent(s"Hello ${args.name}!")))
+      }
+    val prompts: List[McpPrompt[?]] = List(prompt)
+
+    val staticResource: McpStaticResource =
+      McpStaticResource(uri = "static://compat")("compat")
+    val staticResources: List[McpStaticResource] = List(staticResource)
+
+    val templateResource: McpTemplateResource[UserProfileArgs] =
+      McpTemplateResource[UserProfileArgs](
+        uriPattern = "users://{userId}/compat",
+        arguments = List(ResourceArgument("userId", Some("The user id"), required = true))
+      ) { args =>
+        s"compat:${args.userId}"
+      }
+    val templateResources: List[McpTemplateResource[?]] = List(templateResource)
+
+    tools.head.definition.name shouldBe "compat-add"
+    prompts.head.definition.name shouldBe "compat-prompt"
+    staticResources.head.definition.uri shouldBe "static://compat"
+    templateResources.head.definition.isTemplate shouldBe true
+  }
+
+  test("environment typed tool contracts accept no-env ZIO handlers") {
+    val server = FastMcpServer.typed[Ref[Int]]("TypedNoEnvZioServer", "0.1.0")
+    val contract =
+      McpTool[AddArgs, AddResult, Ref[Int]](
+        name = "typed-no-env-zio",
+        description = Some("No-env ZIO handler on an env-aware contract")
+      ) { args =>
+        ZIO.succeed(AddResult(args.a + args.b))
+      }
+
+    val result = runUnsafe(
+      (for
+        _ <- server.tool(contract)
+        out <- server.toolManager.callTool("typed-no-env-zio", Map("a" -> 3, "b" -> 4), None)
+      yield out).provideLayer(ZLayer.fromZIO(Ref.make(0)))
+    )
+
+    result shouldBe List(TextContent("""{"sum":7}"""))
+  }
+
   test("typed request schemas include @Param metadata on fields and nested fields") {
     val schema = parse(ToolInputSchema.derived[ProfileArgs].toJsonString).toOption.get
 

@@ -116,7 +116,7 @@ class ResourceProcessorTest extends AnyFunSuite {
   */
 object ResourceProcessorTest {
   // Create a test server for resource registration
-  val server = new FastMcpServer("TestServer", "0.1.0")
+  val server = new FastMcpServer[Any]("TestServer", "0.1.0")
 
   /** A static resource for testing
     */

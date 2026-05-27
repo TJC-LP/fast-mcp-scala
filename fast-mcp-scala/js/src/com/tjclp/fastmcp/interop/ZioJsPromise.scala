@@ -23,8 +23,16 @@ object ZioJsPromise:
     * `js.Promise[A]`.
     */
   def zioToPromise[A](effect: ZIO[Any, Throwable, A]): js.Promise[A] =
+    zioToPromise[Any, A](Runtime.default)(effect)
+
+  /** Run a `ZIO[R, Throwable, A]` on the supplied runtime and expose the result as a
+    * `js.Promise[A]`. Used by the JS server to thread the runtime captured at `runHttp[R]` /
+    * `runStdio[R]` entry into each handler invocation, so user-supplied layers reach the effects
+    * that need them.
+    */
+  def zioToPromise[R, A](runtime: Runtime[R])(effect: ZIO[R, Throwable, A]): js.Promise[A] =
     val future = Unsafe.unsafe { implicit unsafe =>
-      Runtime.default.unsafe.runToFuture(effect)
+      runtime.unsafe.runToFuture(effect)
     }
     new js.Promise[A]((resolve, reject) =>
       future.onComplete {

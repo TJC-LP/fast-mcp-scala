@@ -23,23 +23,37 @@ import com.tjclp.fastmcp.server.manager.*
   * Typed-contract registration flows through the shared trait's `tool`/`prompt`/`resource`
   * overloads, which pipe arguments through a given `McpDecoder[In]` and encode results via
   * `McpEncoder[Out]`. See [[com.tjclp.fastmcp.codec.JsMcpDecoders]] for the default givens.
+  *
+  * `R` is the ZIO environment all handlers can require. The default factory pins `R = Any`; for
+  * layer-aware servers use `JsMcpServer[R](...)` and supply the layer via
+  * `.runHttp().provide(...)`.
   */
-final class JsMcpServer(
+@SuppressWarnings(Array("org.wartremover.warts.Var"))
+final class JsMcpServer[R](
     val name: String,
     val version: String,
     val settings: McpServerSettings = McpServerSettings()
-) extends McpServerCore:
+) extends McpServerCore[R]:
 
   override protected val decodeContext: McpDecodeContext = JsMcpDecodeContext.default
 
-  val toolManager = new ToolManager()
-  val resourceManager = new ResourceManager()
-  val promptManager = new PromptManager()
+  val toolManager = new ToolManager[R]()
+  val resourceManager = new ResourceManager[R]()
+  val promptManager = new PromptManager[R]()
 
   // TaskManager allocated up-front when tasks are enabled. Even on JS we use the shared ZIO-based
   // implementation so behavior matches the JVM HTTP path.
-  private val taskManagerOpt: Option[TaskManager] =
-    if settings.tasks.enabled then Some(TaskManager.makeUnsafe(settings.tasks)) else None
+  private val taskManagerOpt: Option[TaskManager[R]] =
+    if settings.tasks.enabled then Some(TaskManager.makeUnsafe[R](settings.tasks)) else None
+
+  // The ZIO runtime used to dispatch every handler. Bun is single-threaded so no @volatile.
+  // `runStdio()` / `runHttp()` overwrite this with `ZIO.runtime[R]` so the user's
+  // `.provide(layer)` reaches every handler invocation.
+  private var executionRuntime: Runtime[R] = Runtime.default.asInstanceOf[Runtime[R]]
+
+  /** Test hook to install a specific runtime for direct-dispatch tests. */
+  private[fastmcp] def setExecutionRuntime(runtime: Runtime[R]): Unit =
+    executionRuntime = runtime
 
   private val validator = new tsdk.AjvJsonSchemaValidator()
 
@@ -50,34 +64,46 @@ final class JsMcpServer(
 
   // --- Tool registration -----------------------------------------------------------------------
 
-  override def tool(
+  override def tool[R1 >: R](
       definition: ToolDefinition,
-      handler: ContextualToolHandler,
+      handler: ContextualToolHandler[R1],
       options: ToolRegistrationOptions
-  ): ZIO[Any, Throwable, McpServerCore] =
-    toolManager.addTool(definition.name, handler, definition, options).as(this)
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    toolManager
+      .addTool(definition.name, handler.asInstanceOf[ContextualToolHandler[R]], definition, options)
+      .as(this)
 
   // --- Resource registration -------------------------------------------------------------------
 
-  override def resource(
+  override def resource[R1 >: R](
       definition: ResourceDefinition,
-      handler: ResourceHandler
-  ): ZIO[Any, Throwable, McpServerCore] =
-    resourceManager.addStaticResource(definition.uri, handler, definition).as(this)
+      handler: ResourceHandler[R1]
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    resourceManager
+      .addStaticResource(definition.uri, handler.asInstanceOf[ResourceHandler[R]], definition)
+      .as(this)
 
-  override def resourceTemplate(
+  override def resourceTemplate[R1 >: R](
       definition: ResourceDefinition,
-      handler: ResourceTemplateHandler
-  ): ZIO[Any, Throwable, McpServerCore] =
-    resourceManager.addTemplateResource(definition.uri, handler, definition).as(this)
+      handler: ResourceTemplateHandler[R1]
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    resourceManager
+      .addTemplateResource(
+        definition.uri,
+        handler.asInstanceOf[ResourceTemplateHandler[R]],
+        definition
+      )
+      .as(this)
 
   // --- Prompt registration ---------------------------------------------------------------------
 
-  override def prompt(
+  override def prompt[R1 >: R](
       definition: PromptDefinition,
-      handler: PromptHandler
-  ): ZIO[Any, Throwable, McpServerCore] =
-    promptManager.addPrompt(definition.name, handler, definition).as(this)
+      handler: PromptHandler[R1]
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    promptManager
+      .addPrompt(definition.name, handler.asInstanceOf[PromptHandler[R]], definition)
+      .as(this)
 
   // --- Lifecycle -------------------------------------------------------------------------------
 
@@ -93,8 +119,12 @@ final class JsMcpServer(
 
   /** Connect to `StdioServerTransport` and suspend until the Node/Bun runtime exits (stdin EOF,
     * SIGINT, etc.).
+    *
+    * Returns `ZIO[R, Throwable, Unit]` so a user-provided layer (e.g. `.provide(Client.default)`)
+    * is satisfied by the surrounding ZIO before the effect actually executes. The captured runtime
+    * is reused for every handler invocation.
     */
-  override def runStdio(): ZIO[Any, Throwable, Unit] =
+  override def runStdio(): ZIO[R, Throwable, Unit] =
     if settings.tasks.enabled then
       ZIO.fail(
         new IllegalStateException(
@@ -102,10 +132,18 @@ final class JsMcpServer(
         )
       )
     else
-      val transport = new tsdk.StdioServerTransport()
-      ZIO.acquireReleaseWith(connect(transport))(tsServer =>
-        ZioJsPromise.fromJsPromise(tsServer.close()).ignore
-      )(_ => ZIO.never)
+      captureRuntime *> {
+        val transport = new tsdk.StdioServerTransport()
+        ZIO.acquireReleaseWith(connect(transport))(tsServer =>
+          ZioJsPromise.fromJsPromise(tsServer.close()).ignore
+        )(_ => ZIO.never)
+      }
+
+  /** Capture the surrounding `Runtime[R]` and stash it in `executionRuntime` so every later handler
+    * call uses it. Runs once per `runStdio` / `runHttp` invocation.
+    */
+  private def captureRuntime: ZIO[R, Nothing, Unit] =
+    ZIO.runtime[R].flatMap(rt => ZIO.succeed(setExecutionRuntime(rt)))
 
   /** Bun-first Streamable HTTP transport.
     *
@@ -118,8 +156,8 @@ final class JsMcpServer(
     * Honors `host`, `port`, `httpEndpoint`, and `disallowDelete`. `keepAliveInterval` is a
     * documented JS no-op — the transport handles stream keep-alive internally on Bun.
     */
-  override def runHttp(): ZIO[Any, Throwable, Unit] =
-    ZIO.acquireReleaseWith(
+  override def runHttp(): ZIO[R, Throwable, Unit] =
+    captureRuntime *> ZIO.acquireReleaseWith(
       ZIO.attempt {
         if settings.stateless then startStatelessHttp()
         else startStatefulHttp()
@@ -183,7 +221,7 @@ final class JsMcpServer(
     val transport =
       new tsdk.WebStandardStreamableHttpServerTransport(tsdk.WebStreamableHttpOptions.stateless)
 
-    ZioJsPromise.zioToPromise {
+    ZioJsPromise.zioToPromise(executionRuntime) {
       ZIO.acquireReleaseWith(
         for
           tsServer <- ZIO.attempt(buildTsServer())
@@ -230,7 +268,7 @@ final class JsMcpServer(
           )
         lazy val tsServer: tsdk.Server = buildTsServer()
 
-        ZioJsPromise.zioToPromise(
+        ZioJsPromise.zioToPromise(executionRuntime)(
           for
             _ <- ZioJsPromise.fromJsPromise(tsServer.connect(transport))
             resp <- ZioJsPromise.fromJsPromise(transport.handleRequest(req))
@@ -267,33 +305,37 @@ final class JsMcpServer(
     if hasTools then
       tsServer.setRequestHandler(
         tsdk.ListToolsRequestSchema,
-        (_, _) => ZioJsPromise.zioToPromise(ZIO.attempt(handleListTools()))
+        (_, _) => ZioJsPromise.zioToPromise(executionRuntime)(ZIO.attempt(handleListTools()))
       )
       tsServer.setRequestHandler(
         tsdk.CallToolRequestSchema,
-        (req, extra) => ZioJsPromise.zioToPromise(handleCallTool(tsServer, req, extra))
+        (req, extra) =>
+          ZioJsPromise.zioToPromise(executionRuntime)(handleCallTool(tsServer, req, extra))
       )
     if hasResources then
       tsServer.setRequestHandler(
         tsdk.ListResourcesRequestSchema,
-        (_, _) => ZioJsPromise.zioToPromise(ZIO.attempt(handleListResources()))
+        (_, _) => ZioJsPromise.zioToPromise(executionRuntime)(ZIO.attempt(handleListResources()))
       )
       tsServer.setRequestHandler(
         tsdk.ListResourceTemplatesRequestSchema,
-        (_, _) => ZioJsPromise.zioToPromise(ZIO.attempt(handleListResourceTemplates()))
+        (_, _) =>
+          ZioJsPromise.zioToPromise(executionRuntime)(ZIO.attempt(handleListResourceTemplates()))
       )
       tsServer.setRequestHandler(
         tsdk.ReadResourceRequestSchema,
-        (req, extra) => ZioJsPromise.zioToPromise(handleReadResource(tsServer, req, extra))
+        (req, extra) =>
+          ZioJsPromise.zioToPromise(executionRuntime)(handleReadResource(tsServer, req, extra))
       )
     if hasPrompts then
       tsServer.setRequestHandler(
         tsdk.ListPromptsRequestSchema,
-        (_, _) => ZioJsPromise.zioToPromise(ZIO.attempt(handleListPrompts()))
+        (_, _) => ZioJsPromise.zioToPromise(executionRuntime)(ZIO.attempt(handleListPrompts()))
       )
       tsServer.setRequestHandler(
         tsdk.GetPromptRequestSchema,
-        (req, extra) => ZioJsPromise.zioToPromise(handleGetPrompt(tsServer, req, extra))
+        (req, extra) =>
+          ZioJsPromise.zioToPromise(executionRuntime)(handleGetPrompt(tsServer, req, extra))
       )
 
     // Experimental MCP Tasks (spec 2025-11-25). Only registered when settings.tasks.enabled is
@@ -301,19 +343,21 @@ final class JsMcpServer(
     taskManagerOpt.foreach { tm =>
       tsServer.setRequestHandler(
         tsdk.GetTaskRequestSchema,
-        (req, extra) => ZioJsPromise.zioToPromise(handleTasksGet(tm, req, extra))
+        (req, extra) => ZioJsPromise.zioToPromise(executionRuntime)(handleTasksGet(tm, req, extra))
       )
       tsServer.setRequestHandler(
         tsdk.ListTasksRequestSchema,
-        (req, extra) => ZioJsPromise.zioToPromise(handleTasksList(tm, req, extra))
+        (req, extra) => ZioJsPromise.zioToPromise(executionRuntime)(handleTasksList(tm, req, extra))
       )
       tsServer.setRequestHandler(
         tsdk.CancelTaskRequestSchema,
-        (req, extra) => ZioJsPromise.zioToPromise(handleTasksCancel(tm, req, extra))
+        (req, extra) =>
+          ZioJsPromise.zioToPromise(executionRuntime)(handleTasksCancel(tm, req, extra))
       )
       tsServer.setRequestHandler(
         tsdk.GetTaskPayloadRequestSchema,
-        (req, extra) => ZioJsPromise.zioToPromise(handleTasksResult(tm, req, extra))
+        (req, extra) =>
+          ZioJsPromise.zioToPromise(executionRuntime)(handleTasksResult(tm, req, extra))
       )
     }
 
@@ -331,7 +375,7 @@ final class JsMcpServer(
       tsServer: tsdk.Server,
       req: js.Dynamic,
       extra: tsdk.RequestHandlerExtra
-  ): ZIO[Any, Throwable, js.Any] =
+  ): ZIO[R, Throwable, js.Any] =
     val params = req.params
     val toolName = params.name.asInstanceOf[String]
     val argsJs = params.arguments.asInstanceOf[js.UndefOr[js.Dictionary[js.Any]]]
@@ -382,18 +426,18 @@ final class JsMcpServer(
                   )
 
   private def executeAsTask(
-      tm: TaskManager,
+      tm: TaskManager[R],
       toolName: String,
       argsMap: Map[String, Any],
       taskParams: js.Dictionary[js.Any],
       extra: tsdk.RequestHandlerExtra,
       ctx: Option[McpContext]
-  ): ZIO[Any, Throwable, js.Any] =
+  ): ZIO[R, Throwable, js.Any] =
     val ttlMs = taskParams.get("ttl").flatMap { v =>
       if js.typeOf(v) == "number" then Some(v.asInstanceOf[Double].toLong) else None
     }
     val sessionId = extra.sessionId.toOption
-    val run: ZIO[Any, Throwable, Any] = toolManager
+    val run: ZIO[R, Throwable, Any] = toolManager
       .callTool(toolName, argsMap, ctx)
       .map(result => JsMcpServer.callToolSuccess(toolName, result))
       .catchAll(err =>
@@ -431,7 +475,7 @@ final class JsMcpServer(
       }
 
   private def handleTasksGet(
-      tm: TaskManager,
+      tm: TaskManager[R],
       req: js.Dynamic,
       extra: tsdk.RequestHandlerExtra
   ): ZIO[Any, Throwable, js.Any] =
@@ -449,7 +493,7 @@ final class JsMcpServer(
     }
 
   private def handleTasksList(
-      tm: TaskManager,
+      tm: TaskManager[R],
       req: js.Dynamic,
       extra: tsdk.RequestHandlerExtra
   ): ZIO[Any, Throwable, js.Any] =
@@ -464,7 +508,7 @@ final class JsMcpServer(
     }
 
   private def handleTasksCancel(
-      tm: TaskManager,
+      tm: TaskManager[R],
       req: js.Dynamic,
       extra: tsdk.RequestHandlerExtra
   ): ZIO[Any, Throwable, js.Any] =
@@ -480,7 +524,7 @@ final class JsMcpServer(
     }
 
   private def handleTasksResult(
-      tm: TaskManager,
+      tm: TaskManager[R],
       req: js.Dynamic,
       extra: tsdk.RequestHandlerExtra
   ): ZIO[Any, Throwable, js.Any] =
@@ -522,7 +566,7 @@ final class JsMcpServer(
       tsServer: tsdk.Server,
       req: js.Dynamic,
       extra: tsdk.RequestHandlerExtra
-  ): ZIO[Any, Throwable, js.Any] =
+  ): ZIO[R, Throwable, js.Any] =
     val uri = req.params.uri.asInstanceOf[String]
     val ctx = Some(JsMcpContext(tsServer, extra): McpContext)
     val mimeType = resourceMimeType(uri)
@@ -550,7 +594,7 @@ final class JsMcpServer(
       tsServer: tsdk.Server,
       req: js.Dynamic,
       extra: tsdk.RequestHandlerExtra
-  ): ZIO[Any, Throwable, js.Any] =
+  ): ZIO[R, Throwable, js.Any] =
     val params = req.params
     val promptName = params.name.asInstanceOf[String]
     val argsJs = params.arguments.asInstanceOf[js.UndefOr[js.Dictionary[js.Any]]]

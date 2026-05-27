@@ -95,6 +95,28 @@ object MyServer extends ZIOAppDefault:
     yield ()
 ```
 
+#### ZIO environment-aware handlers
+
+Annotated methods may also return `ZIO[R, E, A]` with `R ≠ Any`. Construct the server with the
+matching environment type (`McpServer.typed[R]("name")` or `FastMcpServer.typed[R]("name")`) and
+provide the layer at the server boundary via `.provide(...)`:
+
+```scala
+object MyServer extends ZIOAppDefault:
+  @Tool() def fetch(): ZIO[zio.http.Client, Throwable, String] =
+    ZIO.serviceWithZIO[zio.http.Client](_.url("https://example.com").get)
+
+  override def run =
+    for
+      server <- ZIO.succeed(McpServer.typed[zio.http.Client]("MyServer"))
+      _ <- ZIO.attempt(server.scanAnnotations[MyServer.type])
+      _ <- server.runHttp().provide(zio.http.Client.default)
+    yield ()
+```
+
+If a method's required `R` isn't satisfied by the server's type, the macro emits a compile-time
+error pointing at the mismatched handler.
+
 ### Typed Contract Path (cross-platform)
 
 ```scala
@@ -135,10 +157,10 @@ server.tool(addTool)
 
 ### Typed Contracts
 
-- `McpTool[In, Out]` - Typed tool with `McpTool.derived` for auto-schema derivation
-- `McpPrompt[In]` - Typed prompt with manual argument metadata
-- `McpStaticResource` - Typed static resource
-- `McpTemplateResource[In]` - Typed resource template
+- `McpTool[In, Out]` / `McpTool[In, Out, R](...)` - Typed tool with auto-schema derivation; supply `R` explicitly for layer-aware handlers.
+- `McpPrompt[In]` / `McpPrompt[In, R](...)` - Typed prompt with manual argument metadata
+- `McpStaticResource` / `McpStaticResource.withEnv[R]` - Typed static resource
+- `McpTemplateResource[In]` / `McpTemplateResource[In, R](...)` - Typed resource template
 - `McpDecoder[T]` / `McpEncoder[A]` - Platform-neutral codecs
 - `ToolSchemaProvider[A]` - Auto-derives `inputSchema` from `@Param`-annotated case classes on both JVM and JS
 - `McpEncoder` falls back to `JsonEncoder[A]` → `TextContent(a.toJson)` via ZIO JSON

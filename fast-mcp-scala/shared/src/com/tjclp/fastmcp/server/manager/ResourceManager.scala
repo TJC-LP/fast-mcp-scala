@@ -10,28 +10,36 @@ import zio.*
 import com.tjclp.fastmcp.core.ResourceDefinition
 import com.tjclp.fastmcp.server.McpContext
 
-/** Function type for resource handlers */
-type ResourceHandler = () => ZIO[Any, Throwable, String | Array[Byte]]
+/** Function type for resource handlers.
+  *
+  * Parameterized on the ZIO environment `R` so a handler declaring `ZIO[Client, Throwable, String |
+  * Array[Byte]]` can be mounted on a server whose `R = Client` (or a subtype).
+  */
+type ResourceHandler[R] = () => ZIO[R, Throwable, String | Array[Byte]]
 
-/** Function type for resource template handlers */
-type ResourceTemplateHandler = Map[String, String] => ZIO[Any, Throwable, String | Array[Byte]]
+/** Function type for resource template handlers; analogous environment parameterization. */
+type ResourceTemplateHandler[R] = Map[String, String] => ZIO[R, Throwable, String | Array[Byte]]
 
 /** Manager for MCP resources.
   *
   * Since we assume scheme-based URIs such as `users://{id}/profile`, template match patterns are
   * anchored with `^` and `$` so only exact matches pass.
+  *
+  * @tparam R
+  *   the ZIO environment all stored handlers may require; supplied by the server at `runHttp[R]()`
+  *   / `runStdio[R]()` entry.
   */
-class ResourceManager extends Manager[ResourceDefinition]:
+class ResourceManager[R] extends Manager[ResourceDefinition]:
 
   private val staticResources =
-    new ConcurrentHashMap[String, (ResourceDefinition, ResourceHandler)]()
+    new ConcurrentHashMap[String, (ResourceDefinition, ResourceHandler[R])]()
 
   private val templateResources =
-    new ConcurrentHashMap[String, (ResourceDefinition, ResourceTemplateHandler)]()
+    new ConcurrentHashMap[String, (ResourceDefinition, ResourceTemplateHandler[R])]()
 
   def addStaticResource(
       uri: String,
-      handler: ResourceHandler,
+      handler: ResourceHandler[R],
       definition: ResourceDefinition
   ): ZIO[Any, Throwable, Unit] =
     ZIO
@@ -49,14 +57,14 @@ class ResourceManager extends Manager[ResourceDefinition]:
   /** Backward-compatible alias for the previous ResourceManager API. */
   def addResource(
       uri: String,
-      handler: ResourceHandler,
+      handler: ResourceHandler[R],
       definition: ResourceDefinition
   ): ZIO[Any, Throwable, Unit] =
     addStaticResource(uri, handler, definition)
 
   def addTemplateResource(
       uriPattern: String,
-      handler: ResourceTemplateHandler,
+      handler: ResourceTemplateHandler[R],
       definition: ResourceDefinition
   ): ZIO[Any, Throwable, Unit] =
     ZIO
@@ -90,7 +98,7 @@ class ResourceManager extends Manager[ResourceDefinition]:
   /** Backward-compatible alias for the previous ResourceManager API. */
   def addResourceTemplate(
       uriPattern: String,
-      handler: ResourceTemplateHandler,
+      handler: ResourceTemplateHandler[R],
       definition: ResourceDefinition
   ): ZIO[Any, Throwable, Unit] =
     addTemplateResource(uriPattern, handler, definition)
@@ -105,17 +113,17 @@ class ResourceManager extends Manager[ResourceDefinition]:
   def listTemplateResources(): List[ResourceDefinition] =
     templateResources.values().asScala.map(_._1).toList
 
-  def getStaticResourceHandler(uri: String): Option[ResourceHandler] =
+  def getStaticResourceHandler(uri: String): Option[ResourceHandler[R]] =
     Option(staticResources.get(uri)).map(_._2)
 
   /** Alias used by FastMcpServer */
-  def getResourceHandler(uri: String): Option[ResourceHandler] = getStaticResourceHandler(uri)
+  def getResourceHandler(uri: String): Option[ResourceHandler[R]] = getStaticResourceHandler(uri)
 
-  def getTemplateResourceHandler(uriPattern: String): Option[ResourceTemplateHandler] =
+  def getTemplateResourceHandler(uriPattern: String): Option[ResourceTemplateHandler[R]] =
     Option(templateResources.get(uriPattern)).map(_._2)
 
   /** Alias used by FastMcpServer */
-  def getTemplateHandler(uriPattern: String): Option[ResourceTemplateHandler] =
+  def getTemplateHandler(uriPattern: String): Option[ResourceTemplateHandler[R]] =
     getTemplateResourceHandler(uriPattern)
 
   def getResourceDefinition(uri: String): Option[ResourceDefinition] =
@@ -132,7 +140,7 @@ class ResourceManager extends Manager[ResourceDefinition]:
     pattern.matches(uri).map(pattern.extractParams(uri, _))
 
   def findMatchingTemplate(uri: String): Option[
-    (ResourceTemplatePattern, ResourceDefinition, ResourceTemplateHandler, Map[String, String])
+    (ResourceTemplatePattern, ResourceDefinition, ResourceTemplateHandler[R], Map[String, String])
   ] =
     templateResources
       .entrySet()
@@ -152,7 +160,7 @@ class ResourceManager extends Manager[ResourceDefinition]:
   def readResource(
       uri: String,
       context: Option[McpContext]
-  ): ZIO[Any, Throwable, String | Array[Byte]] =
+  ): ZIO[R, Throwable, String | Array[Byte]] =
     Option(staticResources.get(uri)) match
       case Some((_, handler)) =>
         handler()

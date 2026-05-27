@@ -36,7 +36,7 @@ class ZioHttpStreamableTransportProvider(
     disallowDelete: Boolean = false,
     @unused
     keepAliveInterval: Option[java.time.Duration] = None,
-    private[fastmcp] val taskDispatcher: Option[TaskDispatcher] = None
+    private[fastmcp] val taskDispatcher: Option[TaskDispatcher[?]] = None
 ) extends McpStreamableServerTransportProvider:
 
   @volatile private var sessionFactory: McpStreamableServerSession.Factory =

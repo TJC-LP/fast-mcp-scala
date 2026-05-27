@@ -7,15 +7,16 @@ import zio.*
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.McpServerCore
+import com.tjclp.fastmcp.server.manager.PromptHandler
 
 /** Cross-platform `@Prompt` annotation processor. Emits registration against [[McpServerCore]]. */
 private[macros] object PromptProcessor extends AnnotationProcessorBase:
 
-  def processPromptAnnotation(using Quotes)(
-      server: Expr[McpServerCore],
+  def processPromptAnnotation[R: Type](using Quotes)(
+      server: Expr[McpServerCore[R]],
       ownerSym: quotes.reflect.Symbol,
       methodSym: quotes.reflect.Symbol
-  ): Expr[McpServerCore] =
+  ): Expr[McpServerCore[R]] =
     import quotes.reflect.*
 
     val methodName = methodSym.name
@@ -50,64 +51,81 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
           List(Message(role = Role.User, content = TextContent(other.toString)))
     }
 
-    val handler: Expr[Map[String, Any] => ZIO[Any, Throwable, List[Message]]] =
-      MacroUtils.detectEffectShape(methodSym) match
-        case MacroUtils.EffectShape.Pure =>
-          '{ (args: Map[String, Any]) =>
-            ZIO.attempt {
-              val result = MapToFunctionMacro
-                .callByMap($methodRefExpr)
-                .asInstanceOf[Map[String, Any] => Any](args)
-              $coerceMessages(result)
-            }
-          }
-        case MacroUtils.EffectShape.Zio =>
-          '{ (args: Map[String, Any]) =>
-            ZIO
-              .suspend {
-                MapToFunctionMacro
-                  .callByMap($methodRefExpr)
-                  .asInstanceOf[Map[String, Any] => Any](args)
-                  .asInstanceOf[ZIO[Any, Any, Any]]
-                  .mapError {
-                    case t: Throwable => t
-                    case other => new RuntimeException(s"Prompt error: $other")
-                  }
-              }
-              .map($coerceMessages)
-          }
-        case MacroUtils.EffectShape.TryEffect =>
-          '{ (args: Map[String, Any]) =>
-            ZIO
-              .suspend {
-                val result = MapToFunctionMacro
-                  .callByMap($methodRefExpr)
-                  .asInstanceOf[Map[String, Any] => Any](args)
-                  .asInstanceOf[scala.util.Try[Any]]
-                ZIO.fromTry(result)
-              }
-              .map($coerceMessages)
-          }
-        case MacroUtils.EffectShape.EitherThrowable =>
-          '{ (args: Map[String, Any]) =>
-            ZIO
-              .suspend {
-                val result = MapToFunctionMacro
-                  .callByMap($methodRefExpr)
-                  .asInstanceOf[Map[String, Any] => Any](args)
-                  .asInstanceOf[Either[Throwable, Any]]
-                ZIO.fromEither(result)
-              }
-              .map($coerceMessages)
-          }
+    val effectShape = MacroUtils.detectEffectShape(methodSym)
 
-    val registration: Expr[ZIO[Any, Throwable, McpServerCore]] = '{
-      $server.prompt(
-        name = ${ Expr(finalName) },
-        description = ${ Expr(finalDesc) },
-        arguments = $maybeArgs,
-        handler = $handler
+    val rMethodType: Type[?] = MacroUtils
+      .extractZioRequirement(methodSym)
+      .map(_.asType)
+      .getOrElse(TypeRepr.of[Any].asType)
+
+    val rServerRepr = TypeRepr.of[R]
+    val rMethodRepr = rMethodType match { case '[t] => TypeRepr.of[t] }
+    if !(rServerRepr <:< rMethodRepr) then
+      report.errorAndAbort(
+        s"@Prompt '$methodName' requires ZIO environment '${rMethodRepr.show}' but the server's " +
+          s"environment type is '${rServerRepr.show}', which does not provide it. " +
+          s"Construct the server as FastMcpServer[${rServerRepr.show} & ${rMethodRepr.show}] " +
+          s"(or wider), or remove the environment requirement from the method body."
       )
-    }
 
-    runAndReturnServer(server)(registration)
+    val registration: Expr[ZIO[Any, Throwable, McpServerCore[R]]] = rMethodType match
+      case '[rMethod] =>
+        val handler: Expr[PromptHandler[rMethod]] = effectShape match
+          case MacroUtils.EffectShape.Pure =>
+            '{ (args: Map[String, Any]) =>
+              ZIO.attempt {
+                val result = MapToFunctionMacro
+                  .callByMap($methodRefExpr)
+                  .asInstanceOf[Map[String, Any] => Any](args)
+                $coerceMessages(result)
+              }
+            }
+          case MacroUtils.EffectShape.Zio =>
+            '{ (args: Map[String, Any]) =>
+              ZIO
+                .suspend {
+                  MapToFunctionMacro
+                    .callByMap($methodRefExpr)
+                    .asInstanceOf[Map[String, Any] => Any](args)
+                    .asInstanceOf[ZIO[rMethod, Any, Any]]
+                    .mapError {
+                      case t: Throwable => t
+                      case other => new RuntimeException(s"Prompt error: $other")
+                    }
+                }
+                .map($coerceMessages)
+            }
+          case MacroUtils.EffectShape.TryEffect =>
+            '{ (args: Map[String, Any]) =>
+              ZIO
+                .suspend {
+                  val result = MapToFunctionMacro
+                    .callByMap($methodRefExpr)
+                    .asInstanceOf[Map[String, Any] => Any](args)
+                    .asInstanceOf[scala.util.Try[Any]]
+                  ZIO.fromTry(result)
+                }
+                .map($coerceMessages)
+            }
+          case MacroUtils.EffectShape.EitherThrowable =>
+            '{ (args: Map[String, Any]) =>
+              ZIO
+                .suspend {
+                  val result = MapToFunctionMacro
+                    .callByMap($methodRefExpr)
+                    .asInstanceOf[Map[String, Any] => Any](args)
+                    .asInstanceOf[Either[Throwable, Any]]
+                  ZIO.fromEither(result)
+                }
+                .map($coerceMessages)
+            }
+
+        // See ToolProcessor for an explanation of the cast.
+        '{
+          $server.prompt(
+            definition = PromptDefinition(${ Expr(finalName) }, ${ Expr(finalDesc) }, $maybeArgs),
+            handler = $handler.asInstanceOf[com.tjclp.fastmcp.server.manager.PromptHandler[R]]
+          )
+        }
+
+    runAndReturnServer[R](server)(registration)

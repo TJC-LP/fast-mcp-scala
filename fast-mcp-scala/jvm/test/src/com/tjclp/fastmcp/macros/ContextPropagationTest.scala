@@ -42,7 +42,7 @@ class ContextPropagationTest extends AnyFunSuite:
     val capturedContext = new AtomicReference[Option[McpContext]](None)
 
     // Create a simple server for testing
-    val server = new FastMcpServer("ContextTestServer")
+    val server = new FastMcpServer[Any]("ContextTestServer")
 
     // Create a mock context with client info
     val mockClient = new McpSchema.Implementation("TestClient", "1.0.0")
@@ -84,7 +84,7 @@ class ContextPropagationTest extends AnyFunSuite:
 
   test("@Tool annotations properly handle context parameters") {
     // Set up a test server
-    val server = new FastMcpServer("AnnotationContextTest")
+    val server = new FastMcpServer[Any]("AnnotationContextTest")
 
     // Get the tool definition
     server.scanAnnotations[ContextAwareTool.type]

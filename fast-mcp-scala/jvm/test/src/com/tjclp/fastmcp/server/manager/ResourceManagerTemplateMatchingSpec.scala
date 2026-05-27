@@ -9,32 +9,32 @@ import zio.*
 class ResourceManagerTemplateMatchingSpec extends AnyFlatSpec with Matchers {
 
   "extractTemplateParams" should "match single placeholder and extract params" in {
-    val rm = new ResourceManager
+    val rm = new ResourceManager[Any]
     val params = rm.extractTemplateParams("users://{id}/profile", "users://123/profile")
     params shouldBe Some(Map("id" -> "123"))
   }
 
   it should "match multiple placeholders and extract params" in {
-    val rm = new ResourceManager
+    val rm = new ResourceManager[Any]
     val params = rm.extractTemplateParams("items://{cat}/{itemId}", "items://books/xyz-987")
     params shouldBe Some(Map("cat" -> "books", "itemId" -> "xyz-987"))
   }
 
   it should "support placeholder names beyond \\w" in {
-    val rm = new ResourceManager
+    val rm = new ResourceManager[Any]
     val params =
       rm.extractTemplateParams("repos://{owner-name}/{repo_name}", "repos://tjc-lp/fast_mcp")
     params shouldBe Some(Map("owner-name" -> "tjc-lp", "repo_name" -> "fast_mcp"))
   }
 
   it should "not match URIs not fitting pattern" in {
-    val rm = new ResourceManager
+    val rm = new ResourceManager[Any]
     val params = rm.extractTemplateParams("users://{id}/profile", "users://123/profile/extra")
     params shouldBe None
   }
 
   "ResourceManager.readResource" should "prefer static resources over templates" in {
-    val rm = new ResourceManager
+    val rm = new ResourceManager[Any]
     // Register static
     Unsafe.unsafe { implicit u =>
       Runtime.default.unsafe
@@ -79,7 +79,7 @@ class ResourceManagerTemplateMatchingSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "fail when no resource is found" in {
-    val rm = new ResourceManager
+    val rm = new ResourceManager[Any]
     val ex = intercept[Throwable] {
       Unsafe.unsafe { implicit u =>
         Runtime.default.unsafe.run(rm.readResource("nope://x", None)).getOrThrowFiberFailure()
@@ -89,7 +89,7 @@ class ResourceManagerTemplateMatchingSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "fail fast when template placeholders are missing matching arguments" in {
-    val rm = new ResourceManager
+    val rm = new ResourceManager[Any]
 
     val ex = intercept[Throwable] {
       Unsafe.unsafe { implicit u =>
@@ -116,7 +116,7 @@ class ResourceManagerTemplateMatchingSpec extends AnyFlatSpec with Matchers {
   }
 
   "getResourceDefinition / getResourceHandler" should "return Some for existing static resource" in {
-    val rm = new ResourceManager
+    val rm = new ResourceManager[Any]
     val staticUri = "foo://static"
     val defn = ResourceDefinition(staticUri, Some("n"), Some("d"))
 

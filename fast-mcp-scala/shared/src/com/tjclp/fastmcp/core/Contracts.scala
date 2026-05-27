@@ -1,5 +1,6 @@
 package com.tjclp.fastmcp.core
 
+import scala.annotation.targetName
 import scala.reflect.ClassTag
 
 import zio.*
@@ -175,26 +176,30 @@ object AsResourceBody:
   given AsResourceBody[String | Array[Byte]] with
     def coerce(a: String | Array[Byte]): String | Array[Byte] = a
 
-/** Typeclass that lifts an effect-shaped `F[A]` into `ZIO[Any, Throwable, A]`.
+/** Typeclass that lifts an effect-shaped `F[A]` into `ZIO[R, Throwable, A]`.
   *
   * Used by the typed-contract factories so a handler lambda can return a `ZIO`, `Either[Throwable,
   * _]`, or `Try` without the caller wrapping it. Pure-value handlers bypass this typeclass via a
   * dedicated overload — they don't need an effect witness. Users wanting another effect system
   * (e.g. `cats.effect.IO`) supply their own given.
+  *
+  * `R` is the lifted effect's ZIO environment. The `ZIO[R, E, *]` given carries `R` through; pure /
+  * `Either` / `Try` givens lift into `ZIO[Any, ...]`, which by ZIO's contravariance is a subtype of
+  * `ZIO[R, ...]` for any `R`.
   */
-trait ToHandlerEffect[F[_]]:
-  def lift[A](fa: => F[A]): ZIO[Any, Throwable, A]
+trait ToHandlerEffect[F[_], R]:
+  def lift[A](fa: => F[A]): ZIO[R, Throwable, A]
 
 object ToHandlerEffect:
 
-  given [E <: Throwable]: ToHandlerEffect[[A] =>> ZIO[Any, E, A]] with
-    def lift[A](fa: => ZIO[Any, E, A]): ZIO[Any, Throwable, A] = fa
+  given [R, R0 >: R, E <: Throwable]: ToHandlerEffect[[A] =>> ZIO[R0, E, A], R] with
+    def lift[A](fa: => ZIO[R0, E, A]): ZIO[R, Throwable, A] = fa
 
-  given ToHandlerEffect[[A] =>> Either[Throwable, A]] with
-    def lift[A](fa: => Either[Throwable, A]): ZIO[Any, Throwable, A] = ZIO.fromEither(fa)
+  given [R]: ToHandlerEffect[[A] =>> Either[Throwable, A], R] with
+    def lift[A](fa: => Either[Throwable, A]): ZIO[R, Throwable, A] = ZIO.fromEither(fa)
 
-  given ToHandlerEffect[scala.util.Try] with
-    def lift[A](fa: => scala.util.Try[A]): ZIO[Any, Throwable, A] = ZIO.fromTry(fa)
+  given [R]: ToHandlerEffect[scala.util.Try, R] with
+    def lift[A](fa: => scala.util.Try[A]): ZIO[R, Throwable, A] = ZIO.fromTry(fa)
 
 /** Public resource template argument metadata. */
 case class ResourceArgument(
@@ -245,6 +250,21 @@ final case class McpTool[In, Out] private (
 
 object McpTool:
 
+  /** Environment-aware typed tool contract. Use `McpTool[In, Out, R](...)` to construct one; the
+    * nested type keeps the original `McpTool[In, Out]` arity source-compatible for no-environment
+    * handlers and type annotations.
+    */
+  final case class WithEnv[In, Out, R] private[McpTool] (
+      definition: ToolDefinition,
+      handler: (In, Option[McpContext]) => ZIO[R, Throwable, Out],
+      private[fastmcp] val decoder: McpDecoder[In],
+      private[fastmcp] val encoder: McpEncoder[Out]
+  ):
+
+    /** Opt this tool into experimental MCP Tasks. */
+    def withTaskSupport(value: TaskSupport): WithEnv[In, Out, R] =
+      copy(definition = definition.copy(taskSupport = Some(value)))
+
   /** Builder produced by [[apply]] — holds the `ToolDefinition` and captures `In`/`Out` so the
     * handler call site can infer the effect type `F` from the lambda's return.
     */
@@ -257,7 +277,9 @@ object McpTool:
       new McpTool(definition, (in, _) => ZIO.attempt(handler(in)), decoder, encoder)
 
     /** Attach an effectful handler `In => F[Out]` for any `F` with a given [[ToHandlerEffect]]. */
-    def apply[F[_]](handler: In => F[Out])(using effect: ToHandlerEffect[F]): McpTool[In, Out] =
+    def apply[F[_]](handler: In => F[Out])(using
+        effect: ToHandlerEffect[F, Any]
+    ): McpTool[In, Out] =
       new McpTool(definition, (in, _) => effect.lift(handler(in)), decoder, encoder)
 
     /** Attach a pure contextual handler that sees the optional [[McpContext]]. */
@@ -267,8 +289,33 @@ object McpTool:
     /** Attach an effectful contextual handler. */
     def contextual[F[_]](
         handler: (In, Option[McpContext]) => F[Out]
-    )(using effect: ToHandlerEffect[F]): McpTool[In, Out] =
+    )(using effect: ToHandlerEffect[F, Any]): McpTool[In, Out] =
       new McpTool(definition, (in, ctx) => effect.lift(handler(in, ctx)), decoder, encoder)
+
+  /** Environment-aware builder produced by the three-type-argument factory. */
+  final class EnvBuilder[In, Out, R] private[McpTool] (
+      definition: ToolDefinition
+  )(using decoder: McpDecoder[In], encoder: McpEncoder[Out]):
+
+    /** Attach a pure handler `In => Out`. */
+    def apply(handler: In => Out): WithEnv[In, Out, R] =
+      new WithEnv(definition, (in, _) => ZIO.attempt(handler(in)), decoder, encoder)
+
+    /** Attach an effectful handler `In => F[Out]` for any `F` with a given [[ToHandlerEffect]]. */
+    def apply[F[_]](handler: In => F[Out])(using
+        effect: ToHandlerEffect[F, R]
+    ): WithEnv[In, Out, R] =
+      new WithEnv(definition, (in, _) => effect.lift(handler(in)), decoder, encoder)
+
+    /** Attach a pure contextual handler that sees the optional [[McpContext]]. */
+    def contextual(handler: (In, Option[McpContext]) => Out): WithEnv[In, Out, R] =
+      new WithEnv(definition, (in, ctx) => ZIO.attempt(handler(in, ctx)), decoder, encoder)
+
+    /** Attach an effectful contextual handler. */
+    def contextual[F[_]](
+        handler: (In, Option[McpContext]) => F[Out]
+    )(using effect: ToHandlerEffect[F, R]): WithEnv[In, Out, R] =
+      new WithEnv(definition, (in, ctx) => effect.lift(handler(in, ctx)), decoder, encoder)
 
   /** Primary factory. Returns a [[Builder]]; apply it with your handler lambda:
     *
@@ -279,6 +326,11 @@ object McpTool:
     *
     *   McpTool[AddArgs, Int](name = "add") { args =>
     *     ZIO.succeed(args.a + args.b)   // ZIO
+    *   }
+    *
+    *   // Layer-dependent handler — supply R explicitly:
+    *   McpTool[AddArgs, Int, Client](name = "add") { args =>
+    *     ZIO.serviceWithZIO[Client](_.do(args))
     *   }
     * }}}
     *
@@ -303,6 +355,46 @@ object McpTool:
       )
     )
 
+  /** Environment-aware factory. Use this form when the handler depends on services supplied via
+    * `server.runHttp().provide(...)`.
+    */
+  @targetName("applyWithEnvName")
+  def apply[In, Out, R](name: String)(using
+      schemaProvider: ToolSchemaProvider[In],
+      decoder: McpDecoder[In],
+      encoder: McpEncoder[Out]
+  ): EnvBuilder[In, Out, R] =
+    apply[In, Out, R](name, None, None)
+
+  /** Environment-aware factory with a description. */
+  @targetName("applyWithEnvDescription")
+  def apply[In, Out, R](name: String, description: Option[String])(using
+      schemaProvider: ToolSchemaProvider[In],
+      decoder: McpDecoder[In],
+      encoder: McpEncoder[Out]
+  ): EnvBuilder[In, Out, R] =
+    apply[In, Out, R](name, description, None)
+
+  /** Environment-aware factory with complete metadata. */
+  @targetName("applyWithEnvFull")
+  def apply[In, Out, R](
+      name: String,
+      description: Option[String],
+      annotations: Option[ToolAnnotations]
+  )(using
+      schemaProvider: ToolSchemaProvider[In],
+      decoder: McpDecoder[In],
+      encoder: McpEncoder[Out]
+  ): EnvBuilder[In, Out, R] =
+    new EnvBuilder(
+      ToolDefinition(
+        name = name,
+        description = description,
+        inputSchema = schemaProvider.inputSchema,
+        annotations = annotations
+      )
+    )
+
   /** Factory that skips the `ToolSchemaProvider` summoning and uses a hand-written JSON schema. */
   def withSchema[In, Out](
       name: String,
@@ -311,6 +403,40 @@ object McpTool:
       annotations: Option[ToolAnnotations] = None
   )(using decoder: McpDecoder[In], encoder: McpEncoder[Out]): Builder[In, Out] =
     new Builder(
+      ToolDefinition(
+        name = name,
+        description = description,
+        inputSchema = inputSchema,
+        annotations = annotations
+      )
+    )
+
+  /** Environment-aware factory that skips schema derivation and uses a hand-written JSON schema. */
+  @targetName("withSchemaWithEnvName")
+  def withSchema[In, Out, R](
+      name: String,
+      inputSchema: ToolInputSchema
+  )(using decoder: McpDecoder[In], encoder: McpEncoder[Out]): EnvBuilder[In, Out, R] =
+    withSchema[In, Out, R](name, inputSchema, None, None)
+
+  /** Environment-aware schema factory with a description. */
+  @targetName("withSchemaWithEnvDescription")
+  def withSchema[In, Out, R](
+      name: String,
+      inputSchema: ToolInputSchema,
+      description: Option[String]
+  )(using decoder: McpDecoder[In], encoder: McpEncoder[Out]): EnvBuilder[In, Out, R] =
+    withSchema[In, Out, R](name, inputSchema, description, None)
+
+  /** Environment-aware schema factory with complete metadata. */
+  @targetName("withSchemaWithEnvFull")
+  def withSchema[In, Out, R](
+      name: String,
+      inputSchema: ToolInputSchema,
+      description: Option[String],
+      annotations: Option[ToolAnnotations]
+  )(using decoder: McpDecoder[In], encoder: McpEncoder[Out]): EnvBuilder[In, Out, R] =
+    new EnvBuilder(
       ToolDefinition(
         name = name,
         description = description,
@@ -330,6 +456,16 @@ object McpTool:
   ): McpTool[In, Out] =
     new McpTool(definition, handler, decoder, encoder)
 
+  /** Internal environment-aware constructor used by macros. */
+  @targetName("unsafeFromDefinitionWithEnv")
+  private[fastmcp] def unsafeFromDefinition[In, Out, R](
+      definition: ToolDefinition
+  )(handler: (In, Option[McpContext]) => ZIO[R, Throwable, Out])(using
+      decoder: McpDecoder[In],
+      encoder: McpEncoder[Out]
+  ): WithEnv[In, Out, R] =
+    new WithEnv(definition, handler, decoder, encoder)
+
 /** Shared typed contract for an MCP prompt.
   *
   * Pairs a `PromptDefinition` with a handler that turns the typed argument into the list of
@@ -346,6 +482,13 @@ final case class McpPrompt[In] private (
 )
 
 object McpPrompt:
+
+  /** Environment-aware typed prompt contract. */
+  final case class WithEnv[In, R] private[McpPrompt] (
+      definition: PromptDefinition,
+      handler: In => ZIO[R, Throwable, List[Message]],
+      private[fastmcp] val decoder: McpDecoder[In]
+  )
 
   private def normalizeArguments(arguments: List[PromptArgument]): Option[List[PromptArgument]] =
     Option.when(arguments.nonEmpty)(arguments)
@@ -364,8 +507,23 @@ object McpPrompt:
     /** Attach an effectful handler `In => F[List[Message]]`. */
     def apply[F[_]](
         handler: In => F[List[Message]]
-    )(using effect: ToHandlerEffect[F]): McpPrompt[In] =
+    )(using effect: ToHandlerEffect[F, Any]): McpPrompt[In] =
       new McpPrompt(definition, in => effect.lift(handler(in)), decoder)
+
+  /** Environment-aware builder produced by the two-type-argument factory. */
+  final class EnvBuilder[In, R] private[McpPrompt] (
+      definition: PromptDefinition
+  )(using decoder: McpDecoder[In]):
+
+    /** Attach a pure handler `In => List[Message]`. */
+    def apply(handler: In => List[Message]): WithEnv[In, R] =
+      new WithEnv(definition, in => ZIO.attempt(handler(in)), decoder)
+
+    /** Attach an effectful handler `In => F[List[Message]]`. */
+    def apply[F[_]](
+        handler: In => F[List[Message]]
+    )(using effect: ToHandlerEffect[F, R]): WithEnv[In, R] =
+      new WithEnv(definition, in => effect.lift(handler(in)), decoder)
 
   /** Primary factory. Apply the returned [[Builder]] with your handler lambda. */
   def apply[In](
@@ -374,6 +532,36 @@ object McpPrompt:
       arguments: List[PromptArgument] = Nil
   )(using decoder: McpDecoder[In]): Builder[In] =
     new Builder(PromptDefinition(name, description, normalizeArguments(arguments)))
+
+  /** Environment-aware factory. */
+  @targetName("applyWithEnvName")
+  def apply[In, R](name: String)(using decoder: McpDecoder[In]): EnvBuilder[In, R] =
+    apply[In, R](name, None, Nil)
+
+  /** Environment-aware factory with a description. */
+  @targetName("applyWithEnvDescription")
+  def apply[In, R](
+      name: String,
+      description: Option[String]
+  )(using decoder: McpDecoder[In]): EnvBuilder[In, R] =
+    apply[In, R](name, description, Nil)
+
+  /** Environment-aware factory with arguments. */
+  @targetName("applyWithEnvArguments")
+  def apply[In, R](
+      name: String,
+      arguments: List[PromptArgument]
+  )(using decoder: McpDecoder[In]): EnvBuilder[In, R] =
+    apply[In, R](name, None, arguments)
+
+  /** Environment-aware factory with complete metadata. */
+  @targetName("applyWithEnvFull")
+  def apply[In, R](
+      name: String,
+      description: Option[String],
+      arguments: List[PromptArgument]
+  )(using decoder: McpDecoder[In]): EnvBuilder[In, R] =
+    new EnvBuilder(PromptDefinition(name, description, normalizeArguments(arguments)))
 
 /** Shared typed contract for a static (non-templated) MCP resource.
   *
@@ -386,6 +574,12 @@ final case class McpStaticResource private (
 )
 
 object McpStaticResource:
+
+  /** Environment-aware typed static resource contract. */
+  final case class WithEnv[R] private[McpStaticResource] (
+      definition: ResourceDefinition,
+      handler: () => ZIO[R, Throwable, String | Array[Byte]]
+  )
 
   /** Builder produced by [[apply]] — carries the `ResourceDefinition`; apply it with your body. */
   final class Builder private[McpStaticResource] (definition: ResourceDefinition):
@@ -401,8 +595,21 @@ object McpStaticResource:
       */
     def effect[F[_], A](
         handler: => F[A]
-    )(using effect: ToHandlerEffect[F], body: AsResourceBody[A]): McpStaticResource =
+    )(using effect: ToHandlerEffect[F, Any], body: AsResourceBody[A]): McpStaticResource =
       new McpStaticResource(definition, () => effect.lift(handler).map(body.coerce))
+
+  /** Environment-aware builder. */
+  final class EnvBuilder[R] private[McpStaticResource] (definition: ResourceDefinition):
+
+    /** Attach a pure handler returning text or binary. */
+    def apply[A](handler: => A)(using body: AsResourceBody[A]): WithEnv[R] =
+      new WithEnv(definition, () => ZIO.attempt(body.coerce(handler)))
+
+    /** Attach an effectful handler returning any `F[A]` whose `A` coerces into a resource body. */
+    def effect[F[_], A](
+        handler: => F[A]
+    )(using effect: ToHandlerEffect[F, R], body: AsResourceBody[A]): WithEnv[R] =
+      new WithEnv(definition, () => effect.lift(handler).map(body.coerce))
 
   /** Primary factory. Apply the returned [[Builder]] with your handler block. */
   def apply(
@@ -412,6 +619,24 @@ object McpStaticResource:
       mimeType: Option[String] = Some("text/plain")
   ): Builder =
     new Builder(
+      ResourceDefinition(
+        uri = uri,
+        name = name,
+        description = description,
+        mimeType = mimeType,
+        isTemplate = false,
+        arguments = None
+      )
+    )
+
+  /** Environment-aware factory. */
+  def withEnv[R](
+      uri: String,
+      name: Option[String] = None,
+      description: Option[String] = None,
+      mimeType: Option[String] = Some("text/plain")
+  ): EnvBuilder[R] =
+    new EnvBuilder(
       ResourceDefinition(
         uri = uri,
         name = name,
@@ -438,6 +663,13 @@ final case class McpTemplateResource[In] private (
 
 object McpTemplateResource:
 
+  /** Environment-aware typed template resource contract. */
+  final case class WithEnv[In, R] private[McpTemplateResource] (
+      definition: ResourceDefinition,
+      handler: In => ZIO[R, Throwable, String | Array[Byte]],
+      private[fastmcp] val decoder: McpDecoder[In]
+  )
+
   private def normalizeArguments(
       arguments: List[ResourceArgument]
   ): Option[List[ResourceArgument]] =
@@ -455,8 +687,30 @@ object McpTemplateResource:
     /** Attach an effectful handler `In => F[A]` (ZIO, Either, Try, ...). */
     def effect[F[_], A](
         handler: In => F[A]
-    )(using effect: ToHandlerEffect[F], body: AsResourceBody[A]): McpTemplateResource[In] =
+    )(using
+        effect: ToHandlerEffect[F, Any],
+        body: AsResourceBody[A]
+    ): McpTemplateResource[In] =
       new McpTemplateResource(
+        definition,
+        in => effect.lift(handler(in)).map(body.coerce),
+        decoder
+      )
+
+  /** Environment-aware builder produced by the two-type-argument factory. */
+  final class EnvBuilder[In, R] private[McpTemplateResource] (
+      definition: ResourceDefinition
+  )(using decoder: McpDecoder[In]):
+
+    /** Attach a pure handler `In => A` (text or binary). */
+    def apply[A](handler: In => A)(using body: AsResourceBody[A]): WithEnv[In, R] =
+      new WithEnv(definition, in => ZIO.attempt(body.coerce(handler(in))), decoder)
+
+    /** Attach an effectful handler `In => F[A]` (ZIO, Either, Try, ...). */
+    def effect[F[_], A](
+        handler: In => F[A]
+    )(using effect: ToHandlerEffect[F, R], body: AsResourceBody[A]): WithEnv[In, R] =
+      new WithEnv(
         definition,
         in => effect.lift(handler(in)).map(body.coerce),
         decoder
@@ -471,6 +725,48 @@ object McpTemplateResource:
       arguments: List[ResourceArgument] = Nil
   )(using decoder: McpDecoder[In]): Builder[In] =
     new Builder(
+      ResourceDefinition(
+        uri = uriPattern,
+        name = name,
+        description = description,
+        mimeType = mimeType,
+        isTemplate = true,
+        arguments = normalizeArguments(arguments)
+      )
+    )
+
+  /** Environment-aware factory. */
+  @targetName("applyWithEnvUri")
+  def apply[In, R](uriPattern: String)(using decoder: McpDecoder[In]): EnvBuilder[In, R] =
+    apply[In, R](uriPattern, None, None, Some("text/plain"), Nil)
+
+  /** Environment-aware factory with arguments. */
+  @targetName("applyWithEnvArguments")
+  def apply[In, R](
+      uriPattern: String,
+      arguments: List[ResourceArgument]
+  )(using decoder: McpDecoder[In]): EnvBuilder[In, R] =
+    apply[In, R](uriPattern, None, None, Some("text/plain"), arguments)
+
+  /** Environment-aware factory with description and arguments. */
+  @targetName("applyWithEnvDescriptionArguments")
+  def apply[In, R](
+      uriPattern: String,
+      description: Option[String],
+      arguments: List[ResourceArgument]
+  )(using decoder: McpDecoder[In]): EnvBuilder[In, R] =
+    apply[In, R](uriPattern, None, description, Some("text/plain"), arguments)
+
+  /** Environment-aware factory with complete metadata. */
+  @targetName("applyWithEnvFull")
+  def apply[In, R](
+      uriPattern: String,
+      name: Option[String],
+      description: Option[String],
+      mimeType: Option[String],
+      arguments: List[ResourceArgument]
+  )(using decoder: McpDecoder[In]): EnvBuilder[In, R] =
+    new EnvBuilder(
       ResourceDefinition(
         uri = uriPattern,
         name = name,

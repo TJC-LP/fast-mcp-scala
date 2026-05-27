@@ -16,11 +16,11 @@ import com.tjclp.fastmcp.server.manager.*
   */
 private[macros] object ToolProcessor extends AnnotationProcessorBase:
 
-  def processToolAnnotation(using Quotes)(
-      server: Expr[McpServerCore],
+  def processToolAnnotation[R: Type](using Quotes)(
+      server: Expr[McpServerCore[R]],
       ownerSym: quotes.reflect.Symbol,
       methodSym: quotes.reflect.Symbol
-  ): Expr[McpServerCore] =
+  ): Expr[McpServerCore[R]] =
     import quotes.reflect.*
 
     val methodName = methodSym.name
@@ -85,64 +85,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
 
     val ctxParamPresentExpr = Expr(ctxParamPresent)
 
-    val handler: Expr[ContextualToolHandler] =
-      MacroUtils.detectEffectShape(methodSym) match
-        case MacroUtils.EffectShape.Pure =>
-          '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
-            ZIO.attempt {
-              val patchedArgs =
-                if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
-                else args
-              MapToFunctionMacro
-                .callByMap($methodRefExpr)
-                .asInstanceOf[Map[String, Any] => Any](patchedArgs)
-            }
-          }
-
-        case MacroUtils.EffectShape.Zio =>
-          '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
-            ZIO.suspend {
-              val patchedArgs =
-                if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
-                else args
-              MapToFunctionMacro
-                .callByMap($methodRefExpr)
-                .asInstanceOf[Map[String, Any] => Any](patchedArgs)
-                .asInstanceOf[ZIO[Any, Any, Any]]
-                .mapError {
-                  case t: Throwable => t
-                  case other => new RuntimeException(s"Tool error: $other")
-                }
-            }
-          }
-
-        case MacroUtils.EffectShape.TryEffect =>
-          '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
-            ZIO.suspend {
-              val patchedArgs =
-                if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
-                else args
-              val result = MapToFunctionMacro
-                .callByMap($methodRefExpr)
-                .asInstanceOf[Map[String, Any] => Any](patchedArgs)
-                .asInstanceOf[scala.util.Try[Any]]
-              ZIO.fromTry(result)
-            }
-          }
-
-        case MacroUtils.EffectShape.EitherThrowable =>
-          '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
-            ZIO.suspend {
-              val patchedArgs =
-                if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
-                else args
-              val result = MapToFunctionMacro
-                .callByMap($methodRefExpr)
-                .asInstanceOf[Map[String, Any] => Any](patchedArgs)
-                .asInstanceOf[Either[Throwable, Any]]
-              ZIO.fromEither(result)
-            }
-          }
+    val effectShape = MacroUtils.detectEffectShape(methodSym)
 
     val rawSchema: Expr[io.circe.Json] = '{
       JsonSchemaMacro.schemaForFunctionArgs(
@@ -209,18 +152,109 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
         }
         '{ MacroUtils.injectParamMetadata($rawSchema, $metadataMapExpr) }
 
-    val registration: Expr[ZIO[Any, Throwable, McpServerCore]] = '{
-      $server.tool(
-        name = ${ Expr(finalName) },
-        description = ${ Expr(finalDesc) },
-        handler = $handler,
-        inputSchema = ToolInputSchema.unsafeFromJsonString($schemaWithMetadata.spaces2),
-        annotations = $annotationsExpr,
-        taskSupport = $taskSupportExpr
-      )
-    }
+    // The method's required ZIO environment. `Any` for non-ZIO returns (pure / Try / Either) —
+    // those handlers don't require an environment, which is a `ZIO[Any, ...]` subtype of any
+    // `ZIO[R, ...]` by contravariance. For ZIO returns this is `R1` from `ZIO[R1, E, A]`.
+    val rMethodType: Type[?] = MacroUtils
+      .extractZioRequirement(methodSym)
+      .map(_.asType)
+      .getOrElse(TypeRepr.of[Any].asType)
 
-    runAndReturnServer(server)(registration)
+    // Pre-flight R-check with a friendlier error than Scala's bound-violation message.
+    val rServerRepr = TypeRepr.of[R]
+    val rMethodRepr = rMethodType match { case '[t] => TypeRepr.of[t] }
+    if !(rServerRepr <:< rMethodRepr) then
+      report.errorAndAbort(
+        s"@Tool '$methodName' requires ZIO environment '${rMethodRepr.show}' but the server's " +
+          s"environment type is '${rServerRepr.show}', which does not provide it. " +
+          s"Construct the server as FastMcpServer[${rServerRepr.show} & ${rMethodRepr.show}] " +
+          s"(or wider), or remove the environment requirement from the method body."
+      )
+
+    // Handler typed at the method's required environment. Scala's normal type-checker enforces
+    // that the surrounding `server.tool[R1 >: R](handler: ContextualToolHandler[R1])` constraint
+    // is satisfied — but we've already verified that above with a friendlier message.
+    val registration: Expr[ZIO[Any, Throwable, McpServerCore[R]]] = rMethodType match
+      case '[rMethod] =>
+        val handler: Expr[ContextualToolHandler[rMethod]] = effectShape match
+          case MacroUtils.EffectShape.Pure =>
+            '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
+              ZIO.attempt {
+                val patchedArgs =
+                  if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
+                  else args
+                MapToFunctionMacro
+                  .callByMap($methodRefExpr)
+                  .asInstanceOf[Map[String, Any] => Any](patchedArgs)
+              }
+            }
+
+          case MacroUtils.EffectShape.Zio =>
+            '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
+              ZIO.suspend {
+                val patchedArgs =
+                  if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
+                  else args
+                MapToFunctionMacro
+                  .callByMap($methodRefExpr)
+                  .asInstanceOf[Map[String, Any] => Any](patchedArgs)
+                  .asInstanceOf[ZIO[rMethod, Any, Any]]
+                  .mapError {
+                    case t: Throwable => t
+                    case other => new RuntimeException(s"Tool error: $other")
+                  }
+              }
+            }
+
+          case MacroUtils.EffectShape.TryEffect =>
+            '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
+              ZIO.suspend {
+                val patchedArgs =
+                  if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
+                  else args
+                val result = MapToFunctionMacro
+                  .callByMap($methodRefExpr)
+                  .asInstanceOf[Map[String, Any] => Any](patchedArgs)
+                  .asInstanceOf[scala.util.Try[Any]]
+                ZIO.fromTry(result)
+              }
+            }
+
+          case MacroUtils.EffectShape.EitherThrowable =>
+            '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
+              ZIO.suspend {
+                val patchedArgs =
+                  if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
+                  else args
+                val result = MapToFunctionMacro
+                  .callByMap($methodRefExpr)
+                  .asInstanceOf[Map[String, Any] => Any](patchedArgs)
+                  .asInstanceOf[Either[Throwable, Any]]
+                ZIO.fromEither(result)
+              }
+            }
+
+        // Cast the handler to `ContextualToolHandler[R]`. The macro has already verified
+        // `R <:< rMethod` above, so the cast is sound at runtime: providing `R` to an effect
+        // that may require `rMethod` works because the server's environment is at least as wide
+        // as the handler's. The cast is only needed to side-step a macro-time variance gap
+        // (Scala can't prove the bound `R1 >: R` for `R1 = rMethod` without per-call evidence).
+        '{
+          $server.tool(
+            definition = ToolDefinition(
+              name = ${ Expr(finalName) },
+              description = ${ Expr(finalDesc) },
+              inputSchema = ToolInputSchema.unsafeFromJsonString($schemaWithMetadata.spaces2),
+              annotations = $annotationsExpr,
+              taskSupport = $taskSupportExpr
+            ),
+            handler =
+              $handler.asInstanceOf[com.tjclp.fastmcp.server.manager.ContextualToolHandler[R]],
+            options = com.tjclp.fastmcp.server.manager.ToolRegistrationOptions()
+          )
+        }
+
+    runAndReturnServer[R](server)(registration)
 
   private def optionStringExpr(using Quotes)(opt: Option[String]): Expr[Option[String]] =
     opt match

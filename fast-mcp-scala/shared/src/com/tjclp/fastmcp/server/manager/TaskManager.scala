@@ -49,8 +49,13 @@ private final case class TaskEntry(
   * `sessionId` means session-less (single-user / stdio-style) — visible to all callers. The HTTP
   * transport supplies a session ID; the stdio transport doesn't (and stdio doesn't support tasks
   * anyway, since the Java SDK owns dispatch there).
+  *
+  * @tparam R
+  *   the ZIO environment the wrapped effect may require. `tm.create(...)` runs inside the server's
+  *   `executionRuntime` (the runtime captured at `runHttp[R]()` entry), so the forked daemon fiber
+  *   inherits `R` automatically and discharges it at fiber start.
   */
-class TaskManager(settings: TaskSettings, tasksRef: Ref[Map[String, TaskEntry]]):
+class TaskManager[R](settings: TaskSettings, tasksRef: Ref[Map[String, TaskEntry]]):
 
   /** Create a task wrapping `run`. Returns immediately with a [[CreateTaskResult]]; the underlying
     * effect executes on a background daemon fiber.
@@ -74,9 +79,9 @@ class TaskManager(settings: TaskSettings, tasksRef: Ref[Map[String, TaskEntry]])
   def create(
       sessionId: Option[String],
       requestedTtlMs: Option[Long],
-      run: ZIO[Any, Throwable, Any],
+      run: ZIO[R, Throwable, Any],
       onStatusChange: Task => UIO[Unit]
-  ): IO[Throwable, CreateTaskResult] =
+  ): ZIO[R, Throwable, CreateTaskResult] =
     for
       taskId <- ZIO.succeed(TaskManager.newTaskId())
       promise <- Promise.make[Throwable, Any]
@@ -85,6 +90,9 @@ class TaskManager(settings: TaskSettings, tasksRef: Ref[Map[String, TaskEntry]])
       ttlMs = effectiveTtl(requestedTtlMs)
       // acquireReleaseExitWith runs the release uninterruptibly, so the status update + promise
       // completion always happen, even if the fiber is interrupted via tasks/cancel.
+      // `forkDaemon` inherits the current runtime — in production this is the server's
+      // `executionRuntime` captured at `runHttp[R]()` entry, so any `R` the run effect requires is
+      // already discharged by the inherited environment.
       wrapped =
         ZIO.acquireReleaseExitWith(ZIO.unit)((_, exit: Exit[Throwable, Any]) =>
           recordTerminal(taskId, exit, promise, onStatusChange)
@@ -263,15 +271,15 @@ final class TaskConcurrencyLimitExceeded(
 object TaskManager:
 
   /** Allocate a new manager with empty state. */
-  def make(settings: TaskSettings): UIO[TaskManager] =
-    Ref.make(Map.empty[String, TaskEntry]).map(new TaskManager(settings, _))
+  def make[R](settings: TaskSettings): UIO[TaskManager[R]] =
+    Ref.make(Map.empty[String, TaskEntry]).map(new TaskManager[R](settings, _))
 
   /** Synchronous constructor for non-ZIO call sites (e.g., the JS server's lazy initializer).
     * Internally identical to [[make]].
     */
-  def makeUnsafe(settings: TaskSettings): TaskManager =
+  def makeUnsafe[R](settings: TaskSettings): TaskManager[R] =
     Unsafe.unsafe { implicit unsafe =>
-      new TaskManager(settings, Ref.unsafe.make(Map.empty[String, TaskEntry]))
+      new TaskManager[R](settings, Ref.unsafe.make(Map.empty[String, TaskEntry]))
     }
 
   /** Cross-platform UUIDv4 generator. We can't use `java.util.UUID.randomUUID()` because Scala.js
