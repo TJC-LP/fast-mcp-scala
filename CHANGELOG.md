@@ -7,26 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-27
+
+Highlights: a type-safety overhaul that threads the ZIO environment `R`
+through the entire server stack, plus a fix for issue #56.
+
 ### Added
 
-- **Annotation and typed-contract handlers may declare ZIO environment requirements.** `@Tool` /
-  `@Resource` / `@Prompt` methods can return `ZIO[R, E, A]` with `R ≠ Any`; provide the layer
-  once at `server.runHttp().provide(...)` instead of inside every method body. Construct the
-  server with `McpServer.typed[R]("name")` (or `FastMcpServer.typed[R]`) so `runHttp()` returns
-  `ZIO[R, Throwable, Unit]`. The macro emits a compile-time error if a handler's `R` isn't
-  satisfied by the server's type. Typed contract factories accept an explicit environment type
-  where needed (`McpTool[In, Out, R]`, `McpPrompt[In, R]`,
-  `McpTemplateResource[In, R]`; static resources use `McpStaticResource.withEnv[R]`). Existing
-  no-environment arities remain source-compatible (`McpTool[In, Out]`, `McpPrompt[In]`,
-  `McpStaticResource`, `McpTemplateResource[In]`). Closes #55.
+- **End-to-end ZIO environment threading for handlers (`R`-aware servers).**
+  `@Tool` / `@Resource` / `@Prompt` methods — and typed-contract handlers —
+  can now return `ZIO[R, E, A]` with `R ≠ Any`. Construct the server with
+  `McpServer.typed[R]("name")` (or `FastMcpServer.typed[R]`) and provide the
+  layer once at the boundary: `server.runHttp().provide(Client.default)`.
+  No more wrapping every method body in its own `.provide(...)`. Closes #55.
+- **Compile-time `R`-mismatch errors from the annotation macros.** If a
+  `@Tool` / `@Resource` / `@Prompt` method requires an `R` the server can't
+  satisfy, the macro now emits a targeted compile-time error pointing at the
+  offending handler, instead of failing at runtime when a missing layer is
+  encountered. Replaces the previous blanket `errorAndAbort` on any
+  `ZIO[R, ...]` return type.
+- **Typed contract factories accept an explicit environment type.**
+  `McpTool[In, Out, R]`, `McpPrompt[In, R]`, `McpTemplateResource[In, R]`,
+  and `McpStaticResource.withEnv[R]` cover the typed paths. Existing
+  no-environment arities (`McpTool[In, Out]`, `McpPrompt[In]`,
+  `McpStaticResource`, `McpTemplateResource[In]`) remain source-compatible.
 
 ### Changed
 
-- **`McpServerCore`, `FastMcpServer`, and `JsMcpServer` are now parameterized on `R`.** The
-  default `McpServer("name")` factory still returns the `R = Any` form; explicit type
-  application (`FastMcpServer[Client]("name")`) or `McpServer.typed[R]("name")` gives a typed
-  server. Existing code that wrote `FastMcpServer` or `JsMcpServer` as bare types needs
-  `FastMcpServer[Any]` / `JsMcpServer[Any]`.
+- **`McpServerCore`, `FastMcpServer`, `JsMcpServer`, the managers, and the
+  typed-contract handlers are now parameterized on `R`.** The default
+  `McpServer("name")` factory still returns the `R = Any` form for
+  back-compat; explicit type application (`FastMcpServer[Client]("name")`)
+  or `McpServer.typed[R]("name")` gives a typed server.
+  **Migration:** code that referenced `FastMcpServer` or `JsMcpServer` as
+  bare types now needs `FastMcpServer[Any]` / `JsMcpServer[Any]`.
+- **Handler dispatch captures `ZIO.runtime[R]` once at server entry and
+  runs every handler effect on that runtime.** This is how the user's
+  `.provide(layer)` at the server boundary reaches every handler
+  invocation, including forked daemon fibers used by `TaskDispatcher` (JVM)
+  and `TaskManager.create` (JS) — they inherit the surrounding runtime via
+  `forkDaemon`.
+
+### Fixed
+
+- **Stop advertising the `logging` capability on the stateless HTTP transport.** The Java MCP
+  SDK 1.1.1 stateless server never registers a `logging/setLevel` handler, so spec-compliant
+  clients (e.g. MCP Inspector) would call the advertised method and receive HTTP 400 with
+  `Missing handler for request type: logging/setLevel`. `FastMcpServer` now passes `null` for
+  the `logging` argument when building `ServerCapabilities`, matching the JS path which never
+  advertised it. The stateful HTTP and stdio paths still cosmetically advertise `logging:{}`
+  because the underlying Java SDK forces `.mutate().logging().build()` at
+  `McpAsyncServer.java:136,164`; there the SDK auto-registers a no-op handler so clients do
+  not see a 400. Closes #56.
 
 ## [0.3.2] - 2026-04-28
 
