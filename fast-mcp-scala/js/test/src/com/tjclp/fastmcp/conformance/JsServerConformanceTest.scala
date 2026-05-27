@@ -162,6 +162,13 @@ class JsServerConformanceTest extends AsyncFlatSpec with Matchers with BeforeAnd
     }
   }
 
+  it should "not advertise the logging capability (issue #56)" in {
+    ensureConnected().map { c =>
+      val caps = c.getServerCapabilities().toOption
+      caps.flatMap(_.logging.toOption).isDefined shouldBe false
+    }
+  }
+
   // --- Tools ---
 
   "tools/list" should "return registered typed contracts" in {
