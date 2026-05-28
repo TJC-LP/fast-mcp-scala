@@ -142,7 +142,7 @@ final class Builtins[R](
       json <- ok(EmptyResult())
     yield json
 
-  /** Build an [[McpContext]] for the current request. The native context carries no SDK exchange
-    * object — server-initiated sends go through [[Session]] instead (wired at M7).
+  /** Build an [[McpContext]] for the current request, bound to its session so handlers can push
+    * log/progress notifications back to the client over [[Session.outbound]].
     */
-  private def contextFor(session: Session): McpContext = McpContext.empty
+  private def contextFor(session: Session): McpContext = McpContext.withSession(session)
