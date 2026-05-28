@@ -82,7 +82,7 @@ final class McpServer[R](
   /** Build the immutable router from the (now-populated) managers + settings. Allocates a
     * [[TaskManager]] only when tasks are enabled.
     */
-  private def buildRouter: UIO[McpRouter[R]] =
+  private[fastmcp] def buildRouter: UIO[McpRouter[R]] =
     val taskMgr: UIO[Option[TaskManager[R]]] =
       if settings.tasks.enabled then TaskManager.make[R](settings.tasks).map(Some(_))
       else ZIO.none

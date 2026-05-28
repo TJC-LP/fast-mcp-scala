@@ -1,6 +1,8 @@
 package com.tjclp.fastmcp
 package server.transport
 
+import java.util.UUID
+
 import zio.*
 import zio.http.*
 import zio.stream.*
@@ -8,13 +10,20 @@ import zio.stream.*
 import com.tjclp.fastmcp.server.McpServerSettings
 import com.tjclp.fastmcp.server.router.{McpRouter, Session}
 
-/** JVM [[TransportBackend]] — pure ZIO over `System.in`/`System.out` (stdio) and ZIO HTTP
-  * (stateless). No `Unsafe`, no runtime capture, no Mono: the native router is ZIO, so `R` flows
-  * straight through `Server.serve` and the user's `.provide(...)`.
+/** JVM [[TransportBackend]] — pure ZIO over `System.in`/`System.out` (stdio) and ZIO HTTP. No
+  * `Unsafe`, no runtime capture, no Mono: the native router is ZIO, so `R` flows straight through
+  * `Server.serve` and the user's `.provide(...)`.
   *
-  * Streamable HTTP (sessions + SSE) is added in Stage D; until then `serveHttp` runs stateless.
+  * `serveHttp` branches on `settings.stateless`:
+  *   - **stateless** — one ephemeral [[Session]] per POST, single JSON reply, no SSE, no DELETE.
+  *   - **streamable** (default) — durable sessions keyed by the `mcp-session-id` header, a `GET`
+  *     SSE channel draining each session's outbound queue (server→client push), and `DELETE` to
+  *     terminate. This is the transport MCP Tasks run on (sessions persist across create→poll).
   */
 object JvmTransportBackend extends TransportBackend:
+
+  /** Spec header carrying the streamable-HTTP session id (echoed on the `initialize` response). */
+  private val SessionIdHeader = "mcp-session-id"
 
   override def serveStdio[R](
       router: McpRouter[R],
@@ -49,28 +58,58 @@ object JvmTransportBackend extends TransportBackend:
       router: McpRouter[R],
       settings: McpServerSettings
   ): ZIO[R, Throwable, Unit] =
-    // Stage B: stateless request/response. Stage D branches on settings.stateless for streamable.
     // Capture the environment ZIO-natively and thread it into each handler via provideEnvironment,
-    // so Routes are `Routes[Any]` — Server.serve then needs only `Server`, avoiding the generic-R
+    // so Routes stay `Routes[Any]` — Server.serve then needs only `Server`, avoiding the generic-R
     // HasNoScope constraint. No Unsafe, no runtime capture.
-    val ep = settings.httpEndpoint.stripPrefix("/")
     ZIO.environment[R].flatMap { env =>
-      val routes: Routes[Any, Response] = Routes(
-        Method.POST / ep -> handler { (request: Request) =>
-          handleStatelessPost(router, request).provideEnvironment(env)
-        },
-        Method.GET / ep -> handler((_: Request) =>
-          ZIO.succeed(Response.status(Status.MethodNotAllowed))
-        ),
-        Method.DELETE / ep -> handler((_: Request) =>
-          ZIO.succeed(Response.status(Status.MethodNotAllowed))
-        )
-      )
-      Server
-        .serve(routes)
-        .provideLayer(Server.defaultWith(_.binding(settings.host, settings.port)))
-        .unit
+      httpRoutes(router, settings, env).flatMap(routes => serve(routes, settings))
     }
+
+  /** Build the HTTP routes, branching on `settings.stateless` and allocating a fresh session store
+    * for the streamable case. Exposed to tests so specs can drive requests through
+    * `routes.runZIO(...)` in-memory, without binding a TCP port.
+    */
+  private[fastmcp] def httpRoutes[R](
+      router: McpRouter[R],
+      settings: McpServerSettings,
+      env: ZEnvironment[R]
+  ): UIO[Routes[Any, Response]] =
+    val ep = settings.httpEndpoint.stripPrefix("/")
+    if settings.stateless then ZIO.succeed(statelessRoutes(router, ep, env))
+    else
+      Ref
+        .make(Map.empty[String, Session])
+        .map(store => streamableRoutes(router, ep, env, store, settings))
+
+  private def serve(
+      routes: Routes[Any, Response],
+      settings: McpServerSettings
+  ): ZIO[Any, Throwable, Unit] =
+    Server
+      .serve(routes)
+      .provideLayer(Server.defaultWith(_.binding(settings.host, settings.port)))
+      .unit
+
+  // ---------------------------------------------------------------------------
+  // Stateless: request/response, no session state, no SSE.
+  // ---------------------------------------------------------------------------
+
+  private def statelessRoutes[R](
+      router: McpRouter[R],
+      ep: String,
+      env: ZEnvironment[R]
+  ): Routes[Any, Response] =
+    Routes(
+      Method.POST / ep -> handler { (request: Request) =>
+        handleStatelessPost(router, request).provideEnvironment(env)
+      },
+      Method.GET / ep -> handler((_: Request) =>
+        ZIO.succeed(Response.status(Status.MethodNotAllowed))
+      ),
+      Method.DELETE / ep -> handler((_: Request) =>
+        ZIO.succeed(Response.status(Status.MethodNotAllowed))
+      )
+    )
 
   /** One stateless POST: fresh ephemeral session, dispatch a single frame, return the reply (or
     * `202 Accepted` for a notification, which produces no body).
@@ -89,7 +128,130 @@ object JvmTransportBackend extends TransportBackend:
       yield reply match
         case Some(json) => Response.json(json)
         case None => Response.status(Status.Accepted)
-    effect.catchAll(msg => ZIO.succeed(Response.text(msg).status(Status.BadRequest)))
+    effect.catchAll(msg => ZIO.succeed(errorResponse(Status.BadRequest, msg)))
+
+  // ---------------------------------------------------------------------------
+  // Streamable: durable sessions + SSE server-push + DELETE termination.
+  // ---------------------------------------------------------------------------
+
+  private def streamableRoutes[R](
+      router: McpRouter[R],
+      ep: String,
+      env: ZEnvironment[R],
+      store: Ref[Map[String, Session]],
+      settings: McpServerSettings
+  ): Routes[Any, Response] =
+    Routes(
+      Method.POST / ep -> handler { (request: Request) =>
+        handleStreamablePost(router, store, request).provideEnvironment(env)
+      },
+      Method.GET / ep -> handler { (request: Request) =>
+        handleStreamableGet(store, request)
+      },
+      Method.DELETE / ep -> handler { (request: Request) =>
+        handleStreamableDelete(store, request, settings.disallowDelete)
+      }
+    )
+
+  /** POST on the streamable transport.
+    *
+    *   - No `mcp-session-id` header → treat as the opening `initialize`: mint a session, dispatch,
+    *     and echo the new id back in the response header.
+    *   - With the header → look up the durable session (404 if unknown) and dispatch in its context
+    *     (so client info, log level, and in-flight task state persist across requests).
+    *
+    * A request reply is returned as a single JSON body; notifications get `202 Accepted`. Any
+    * server→client messages a handler pushes go out over the session's `GET` SSE channel.
+    */
+  private def handleStreamablePost[R](
+      router: McpRouter[R],
+      store: Ref[Map[String, Session]],
+      request: Request
+  ): ZIO[R, Nothing, Response] =
+    request.body.asString.either.flatMap {
+      case Left(err) =>
+        ZIO.succeed(
+          errorResponse(Status.BadRequest, Option(err.getMessage).getOrElse("body read error"))
+        )
+      case Right(body) =>
+        request.rawHeader(SessionIdHeader) match
+          case Some(id) =>
+            store.get.map(_.get(id)).flatMap {
+              case None =>
+                ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
+              case Some(session) =>
+                MessageLoop
+                  .handleFrame(router, session, body)
+                  .map(toPostResponse(_, session, isNew = false))
+            }
+          case None =>
+            for
+              session <- Session.make(UUID.randomUUID().toString)
+              _ <- store.update(_ + (session.sessionId -> session))
+              reply <- MessageLoop.handleFrame(router, session, body)
+            yield toPostResponse(reply, session, isNew = true)
+    }
+
+  /** GET opens the server→client SSE channel for a session: each message offered to the session's
+    * outbound queue is emitted as an SSE `message` event. The stream ends when the session is
+    * `DELETE`d (queue shutdown) or the client disconnects.
+    */
+  private def handleStreamableGet(
+      store: Ref[Map[String, Session]],
+      request: Request
+  ): ZIO[Any, Nothing, Response] =
+    request.rawHeader(SessionIdHeader) match
+      case None =>
+        ZIO.succeed(
+          errorResponse(Status.BadRequest, s"Session ID required in $SessionIdHeader header")
+        )
+      case Some(id) =>
+        store.get.map { sessions =>
+          sessions.get(id) match
+            case None => errorResponse(Status.NotFound, s"Session not found: $id")
+            case Some(session) =>
+              val sse: ZStream[Any, Nothing, ServerSentEvent[String]] =
+                ZStream
+                  .fromQueue(session.outbound)
+                  .map(msg =>
+                    ServerSentEvent(MessageLoop.encodeOutbound(msg), eventType = Some("message"))
+                  )
+              Response.fromServerSentEvents(sse)
+        }
+
+  /** DELETE terminates a session: drop it from the store and shut down its outbound queue (which
+    * ends any open `GET` SSE stream). `405` when delete is disallowed by settings.
+    */
+  private def handleStreamableDelete(
+      store: Ref[Map[String, Session]],
+      request: Request,
+      disallowDelete: Boolean
+  ): ZIO[Any, Nothing, Response] =
+    if disallowDelete then ZIO.succeed(Response.status(Status.MethodNotAllowed))
+    else
+      request.rawHeader(SessionIdHeader) match
+        case None =>
+          ZIO.succeed(
+            errorResponse(Status.BadRequest, s"Session ID required in $SessionIdHeader header")
+          )
+        case Some(id) =>
+          store.modify(sessions => (sessions.get(id), sessions - id)).flatMap {
+            case Some(session) => session.outbound.shutdown.as(Response.status(Status.Ok))
+            case None => ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
+          }
+
+  /** Render a dispatch reply for a streamable POST, echoing the `mcp-session-id` header on the
+    * `initialize` response (the only time `isNew` is true).
+    */
+  private def toPostResponse(reply: Option[String], session: Session, isNew: Boolean): Response =
+    reply match
+      case Some(json) =>
+        val resp = Response.json(json)
+        if isNew then resp.addHeader(Header.Custom(SessionIdHeader, session.sessionId)) else resp
+      case None => Response.status(Status.Accepted)
+
+  private def errorResponse(status: Status, message: String): Response =
+    Response.text(message).status(status)
 
   private def writeLine(line: String): Task[Unit] =
     ZIO.attempt {

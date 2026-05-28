@@ -1,63 +1,61 @@
 package com.tjclp.fastmcp
 package examples
 
+import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.matchers.should.Matchers
 import zio.*
-import zio.test.*
-import zio.test.Assertion.*
 
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.manager.*
 import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
-object ResourceTemplateTest extends ZIOSpecDefault:
+/** Resource-template registration and parameter extraction through the native managers. */
+class ResourceTemplateTest extends AnyFunSuite with Matchers:
 
-  def spec = suite("ResourceTemplateTest")(
-    test("Resource templates are registered correctly") {
-      for {
-        server <- ZIO.succeed(McpServer("TestServer"))
+  private def runUnsafe[A](effect: ZIO[Any, Throwable, A]): A =
+    Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(effect).getOrThrowFiberFailure())
 
-        // Register a simple template
-        _ <- server.resourceTemplate(
-          uriPattern = "users://{userId}",
-          handler = (params: Map[String, String]) => ZIO.succeed(s"User: ${params("userId")}"),
-          name = Some("GetUser"),
-          description = Some("Get user by ID"),
-          arguments = Some(List(ResourceArgument("userId", Some("User ID"), true)))
-        )
+  test("Resource templates are registered correctly") {
+    val server = McpServer("TestServer")
 
-        // Native managers expose template vs static definitions directly
-        templates = server.resourceManager.listTemplateResources()
-        resources = server.resourceManager.listStaticResources()
+    runUnsafe(
+      server.resourceTemplate(
+        uriPattern = "users://{userId}",
+        handler = (params: Map[String, String]) => ZIO.succeed(s"User: ${params("userId")}"),
+        name = Some("GetUser"),
+        description = Some("Get user by ID"),
+        arguments = Some(List(ResourceArgument("userId", Some("User ID"), true)))
+      )
+    )
 
-      } yield {
-        assert(templates.size)(equalTo(1)) &&
-        assert(templates.head.uri)(equalTo("users://{userId}")) &&
-        assert(templates.head.name)(equalTo(Some("GetUser"))) &&
-        assert(resources.size)(equalTo(0)) // Templates should not appear in resources list
-      }
-    },
-    test("Resource templates handle parameters correctly") {
-      for {
-        server <- ZIO.succeed(McpServer("TestServer"))
+    val templates = server.resourceManager.listTemplateResources()
+    val resources = server.resourceManager.listStaticResources()
 
-        // Register a multi-param template
-        _ <- server.resourceTemplate(
-          uriPattern = "repos://{owner}/{repo}/issues/{id}",
-          handler = (params: Map[String, String]) =>
-            ZIO.succeed(s"Issue ${params("id")} in ${params("owner")}/${params("repo")}"),
-          name = Some("GetIssue"),
-          arguments = Some(
-            List(
-              ResourceArgument("owner", Some("Repository owner"), true),
-              ResourceArgument("repo", Some("Repository name"), true),
-              ResourceArgument("id", Some("Issue ID"), true)
-            )
+    templates.size shouldBe 1
+    templates.head.uri shouldBe "users://{userId}"
+    templates.head.name shouldBe Some("GetUser")
+    resources.size shouldBe 0 // templates should not appear in the static resources list
+  }
+
+  test("Resource templates handle parameters correctly") {
+    val server = McpServer("TestServer")
+
+    runUnsafe(
+      server.resourceTemplate(
+        uriPattern = "repos://{owner}/{repo}/issues/{id}",
+        handler = (params: Map[String, String]) =>
+          ZIO.succeed(s"Issue ${params("id")} in ${params("owner")}/${params("repo")}"),
+        name = Some("GetIssue"),
+        arguments = Some(
+          List(
+            ResourceArgument("owner", Some("Repository owner"), true),
+            ResourceArgument("repo", Some("Repository name"), true),
+            ResourceArgument("id", Some("Issue ID"), true)
           )
         )
+      )
+    )
 
-        // Test the handler resolves template params and runs the body
-        result <- server.resourceManager.readResource("repos://github/fastmcp/issues/123", None)
-
-      } yield assert(result)(equalTo("Issue 123 in github/fastmcp"))
-    }
-  )
+    val result = runUnsafe(server.resourceManager.readResource("repos://github/fastmcp/issues/123", None))
+    result shouldBe "Issue 123 in github/fastmcp"
+  }
