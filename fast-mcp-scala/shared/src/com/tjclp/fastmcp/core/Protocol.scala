@@ -67,7 +67,8 @@ object ProgressToken:
       },
       JsonDecoder[zio.json.ast.Json].mapOrFail {
         case zio.json.ast.Json.Str(s) => Right(StringToken(s))
-        case zio.json.ast.Json.Num(n) if n.isWhole => Right(NumberToken(n.toLong))
+        // Json.Num wraps java.math.BigDecimal — wrap in scala BigDecimal for isWhole/toLong.
+        case zio.json.ast.Json.Num(n) if BigDecimal(n).isWhole => Right(NumberToken(BigDecimal(n).toLong))
         case other => Left(s"progressToken must be string or whole number, got: $other")
       }
     )

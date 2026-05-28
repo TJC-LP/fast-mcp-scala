@@ -202,11 +202,15 @@ Pure-Scala wire types for all 2025-11-25 server-handled messages. **Verified: ev
 - `core/wire/Notifications.scala` — `NotificationMethods` + params
 `Content` ADT in `core/Types.scala` refactored to 2025-11-25 shape (added `AudioContent`, `ResourceLink`; `Annotations` + `_meta` on every variant; dropped `EmbeddedResourceContent`).
 
-### M3 — Codecs (in progress)
-Trivial `DeriveJsonCodec.gen` givens already inlined in M2. M3 narrows to the hard cases:
-- `ResourceContents` text-vs-blob discrimination (no `type` tag — discriminate by which field is present)
-- `ToolInputSchema` / `ToolOutputSchema`: opaque-string ↔ embedded JSON Schema object at the serialization boundary
-- absent-vs-null `_meta` round-trips
-- fixture corpus + round-trip tests in `shared/test`
+### M3 — Codecs (done, commit 0a79205)
+Trivial `DeriveJsonCodec.gen` givens inlined in M2; M3 did the hard cases and **validated all four against real zio-json 0.7.44 / Scala 3.8.3 via a standalone scala-cli harness — all pass** (can't run the in-tree suite until M8 since the module is red):
+- `Content` ADT: `@jsonHint` drives the `type` discriminator (NOT the `extends Content("text")` ctor arg — latent bug, the codec never hit the wire under Jackson). Fixed for all 5 variants + `CompletionReference`.
+- `ToolInputSchema`/`ToolOutputSchema`: embedded-object codec (opaque-string ↔ JSON object), so `inputSchema` is an object on the wire, never a string.
+- `ResourceContents`: AST-discriminated text-vs-blob (no `type` tag), rejects objects with neither field.
+- absent-vs-null `_meta`: confirmed zio-json omits `None` fields (no `null` emitted) by default — no special handling needed.
+Regression net: `jvm/test/.../core/wire/WireCodecRoundTripTest.scala`.
+
+### M4 — JSON-RPC core + router + middleware (in progress)
+Reference: `~/git/typescript-sdk/packages/core/src/shared/protocol.ts` + `packages/server/src/`. Target package: `shared/src/com/tjclp/fastmcp/jsonrpc/` (envelope + error) and `shared/src/com/tjclp/fastmcp/server/router/` (router, session, middleware).
 
 Update this section at each milestone boundary.
