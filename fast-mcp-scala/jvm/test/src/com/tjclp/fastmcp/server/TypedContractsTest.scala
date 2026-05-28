@@ -178,7 +178,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
   }
 
   test("environment typed tool contracts accept no-env ZIO handlers") {
-    val server = FastMcpServer.typed[Ref[Int]]("TypedNoEnvZioServer", "0.1.0")
+    val server = McpServer.typed[Ref[Int]]("TypedNoEnvZioServer", "0.1.0")
     val contract =
       McpTool[AddArgs, AddResult, Ref[Int]](
         name = "typed-no-env-zio",

@@ -6,6 +6,7 @@ import zio.*
 import zio.json.*
 
 import com.tjclp.fastmcp.{given, *}
+import com.tjclp.fastmcp.codec.DefaultDecodeContext
 
 class RootImportSurfaceTest extends AnyFunSuite {
 
@@ -72,7 +73,7 @@ class RootImportSurfaceTest extends AnyFunSuite {
     assert(staticResource.definition.uri == "static://hello")
     assert(templateResource.definition.isTemplate)
 
-    val ctx = McpContext()
+    val ctx = McpContext.empty
     assert(ctx.getClientInfo.isEmpty)
 
     val promptMessage: Message = Message(Role.User, TextContent("hi"))
@@ -81,7 +82,7 @@ class RootImportSurfaceTest extends AnyFunSuite {
     val tagged = summon[McpDecoder[TaggedId]].decode(
       "tagged",
       """{"value":"abc"}""",
-      JacksonConversionContext.default
+      DefaultDecodeContext.default
     )
     assert(tagged == TaggedId("abc"))
   }

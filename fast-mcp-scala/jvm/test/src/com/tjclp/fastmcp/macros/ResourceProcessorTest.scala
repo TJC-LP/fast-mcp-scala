@@ -8,6 +8,7 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.manager.ResourceArgument
+import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
 /** Integration test for Resource annotation and processor This tests the full workflow of resource
   * annotation processing
@@ -116,7 +117,7 @@ class ResourceProcessorTest extends AnyFunSuite {
   */
 object ResourceProcessorTest {
   // Create a test server for resource registration
-  val server = new FastMcpServer[Any]("TestServer", "0.1.0")
+  val server = new McpServer[Any]("TestServer", "0.1.0")
 
   /** A static resource for testing
     */

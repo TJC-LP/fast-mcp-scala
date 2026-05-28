@@ -5,7 +5,21 @@ import org.scalatest.matchers.should.Matchers
 import zio.json.*
 import zio.json.ast.Json
 
-import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.core.{
+  AudioContent,
+  Content,
+  EmbeddedResource,
+  ImageContent,
+  LoggingLevel,
+  Protocol,
+  ResourceLink,
+  Role,
+  TaskSupport,
+  TextContent,
+  ToolExecution,
+  ToolInputSchema,
+  toAst
+}
 
 /** M3 regression net: round-trips the native-core wire types through their zio-json codecs and
   * asserts the spec-critical encodings (discriminator tags, absent-vs-null `_meta`, embedded

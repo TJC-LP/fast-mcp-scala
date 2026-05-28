@@ -5,9 +5,9 @@ import org.scalatest.funsuite.AnyFunSuite
 import zio.*
 
 import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.macros.JacksonConverter.given
 import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
 import com.tjclp.fastmcp.server.*
+import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
 /** Annotated tool handler with a `Ref[Int]` environment requirement. */
 object EnvReturnToolHandlers:
@@ -30,14 +30,14 @@ object EnvReturnResourceHandlers:
       .map(name => List(Message(role = Role.User, content = TextContent(s"Hello $name"))))
 
 /** Verifies that `@Tool` / `@Resource` / `@Prompt` macros accept ZIO returns with non-Any
-  * environments (issue #55). The server's `R` flows from `FastMcpServer[R]("name")` into each
+  * environments (issue #55). The server's `R` flows from `McpServer.typed[R]("name")` into each
   * macro-generated handler; user-supplied layers reach the handler through the runtime captured
   * at `runHttp[R]() / runStdio[R]()` entry.
   *
-  * The first three tests drive the macro's handler directly by installing a `Runtime[R]` on the
-  * server (the test hook `setExecutionRuntime`). The fourth test asserts the `runHttp()`
-  * signature compiles into a `ZIO[R, Throwable, Unit]` so users can chain `.provide(...)`
-  * end-to-end.
+  * The first three tests drive the macro's handler directly, providing `R` through the
+  * `Runtime[R]` they run the effect on (built from the env layer). The fourth test asserts the
+  * `runHttp()` signature compiles into a `ZIO[R, Throwable, Unit]` so users can chain
+  * `.provide(...)` end-to-end.
   */
 class EnvReturnTest extends AnyFunSuite:
 
@@ -50,14 +50,12 @@ class EnvReturnTest extends AnyFunSuite:
     }
 
   test("@Tool returning ZIO[Ref[Int], Throwable, Int] reads from the Ref") {
-    val server = FastMcpServer.typed[Ref[Int]]("EnvReturnToolServer", "0.1.0")
+    val server = McpServer.typed[Ref[Int]]("EnvReturnToolServer", "0.1.0")
     server.scanAnnotations[EnvReturnToolHandlers.type]
 
     val runtime = Unsafe.unsafe { implicit unsafe =>
       Runtime.unsafe.fromLayer(ZLayer.fromZIO(Ref.make(0)))
     }
-    server.setExecutionRuntime(runtime)
-
     val first = runWithRuntime(runtime, server.toolManager.callTool("inc", Map.empty, None))
     val second = runWithRuntime(runtime, server.toolManager.callTool("inc", Map.empty, None))
     assert(first == 1, s"expected 1 after first inc, got $first")
@@ -65,14 +63,12 @@ class EnvReturnTest extends AnyFunSuite:
   }
 
   test("@Resource returning ZIO[Ref[String], Throwable, String] reads from the Ref") {
-    val server = FastMcpServer.typed[Ref[String]]("EnvReturnResourceServer", "0.1.0")
+    val server = McpServer.typed[Ref[String]]("EnvReturnResourceServer", "0.1.0")
     server.scanAnnotations[EnvReturnResourceHandlers.type]
 
     val runtime = Unsafe.unsafe { implicit unsafe =>
       Runtime.unsafe.fromLayer(ZLayer.fromZIO(Ref.make("env-value")))
     }
-    server.setExecutionRuntime(runtime)
-
     val body = runWithRuntime(
       runtime,
       server.resourceManager.readResource("env-resource://current", None)
@@ -81,14 +77,12 @@ class EnvReturnTest extends AnyFunSuite:
   }
 
   test("@Prompt returning ZIO[Ref[String], Throwable, List[Message]] reads from the Ref") {
-    val server = FastMcpServer.typed[Ref[String]]("EnvReturnPromptServer", "0.1.0")
+    val server = McpServer.typed[Ref[String]]("EnvReturnPromptServer", "0.1.0")
     server.scanAnnotations[EnvReturnResourceHandlers.type]
 
     val runtime = Unsafe.unsafe { implicit unsafe =>
       Runtime.unsafe.fromLayer(ZLayer.fromZIO(Ref.make("greeted-name")))
     }
-    server.setExecutionRuntime(runtime)
-
     val messages = runWithRuntime(
       runtime,
       server.promptManager.getPrompt("env-greeting", Map.empty, None)
@@ -101,7 +95,7 @@ class EnvReturnTest extends AnyFunSuite:
   }
 
   test("runHttp[R]() returns ZIO[R, Throwable, Unit] so users can call .provide(layer)") {
-    val server = FastMcpServer.typed[Ref[Int]]("EnvReturnHttpServer", "0.1.0")
+    val server = McpServer.typed[Ref[Int]]("EnvReturnHttpServer", "0.1.0")
     server.scanAnnotations[EnvReturnToolHandlers.type]
 
     // The compile-check is the test: prove that the new API surface lets a user write
