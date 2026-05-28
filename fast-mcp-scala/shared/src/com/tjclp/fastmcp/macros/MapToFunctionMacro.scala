@@ -7,19 +7,21 @@ import scala.quoted.*
 
 import zio.json.*
 
-import com.tjclp.fastmcp.codec.JsMcpDecodeContext
+import com.tjclp.fastmcp.codec.DefaultDecodeContext
 import com.tjclp.fastmcp.core.McpDecodeContext
 import com.tjclp.fastmcp.core.McpDecoder
 
-/** JS-target `Map[String, Any] => R` handler generator.
+/** The single, platform-neutral `Map[String, Any] => R` handler generator.
   *
-  * The JVM version relies on Jackson-backed `JacksonConverter`; the JS backend instead prefers a
-  * user-provided `McpDecoder[T]` and falls back to `zio-json` `JsonDecoder[T]` (deriving one for
-  * product/sum types when necessary).
+  * Promoted to `shared/` from the (portable) JS version — it prefers a user-provided
+  * `McpDecoder[T]` and falls back to deriving a zio-json `JsonDecoder[T]`. This replaces the old
+  * JVM `MapToFunctionMacro` that summoned the now-deleted Jackson `JacksonConverter`, so the
+  * annotation/macro decode path is identical on JVM and Scala.js. Pairs with the shared
+  * [[DefaultDecodeContext]].
   */
 object MapToFunctionMacro:
 
-  private val baseContext = JsMcpDecodeContext.default
+  private val baseContext = DefaultDecodeContext.default
 
   transparent inline def callByMap[F](inline f: F): Any =
     ${ callByMapImpl('f, '{ MapToFunctionMacro.baseContext }) }

@@ -37,9 +37,14 @@ export core.{
 }
 export core.McpEncoder.given
 export core.ToHandlerEffect.given
+// Native-core shared codec + schema derivation (one copy for both platforms).
+export core.ToolSchemaProviders.given
+export codec.McpDecoders.given
+export macros.RegistrationMacro.*
 export server.{
   Http,
   McpContext,
+  McpServer,
   McpServerApp,
   McpServerCore,
   McpServerCoreFactory,
@@ -48,3 +53,4 @@ export server.{
   Transport,
   TransportRunner
 }
+export server.McpServer.given

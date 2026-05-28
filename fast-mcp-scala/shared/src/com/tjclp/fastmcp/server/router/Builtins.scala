@@ -48,6 +48,7 @@ final class Builtins[R](
       req <- decodeParams[InitializeRequestParams](params, "initialize")
       negotiated = negotiateVersion(req.protocolVersion)
       _ <- session.setProtocolVersion(negotiated)
+      _ <- session.setClientInfo(req.clientInfo, req.capabilities)
       result = InitializeResult(
         protocolVersion = negotiated,
         capabilities = capabilities,
@@ -79,7 +80,7 @@ final class Builtins[R](
       args = req.arguments match
         case Some(Json.Obj(fields)) => fields.toMap
         case _ => Map.empty[String, Any]
-      ctx = contextFor(session)
+      ctx <- contextFor(session)
       result <- toolManager
         .callTool(req.name, args, Some(ctx))
         .mapError(McpError.fromThrowable)
@@ -105,7 +106,7 @@ final class Builtins[R](
   val resourcesRead: RequestHandler[R] = (session, params) =>
     for
       req <- decodeParams[ReadResourceRequestParams](params, "resources/read")
-      ctx = contextFor(session)
+      ctx <- contextFor(session)
       body <- resourceManager.readResource(req.uri, Some(ctx)).mapError(McpError.fromThrowable)
       mime = resourceManager.getResourceDefinition(req.uri).flatMap(_.mimeType)
       contents = WireMapping.resourceContentsToWire(req.uri, mime, body)
@@ -122,7 +123,7 @@ final class Builtins[R](
     for
       req <- decodeParams[GetPromptRequestParams](params, "prompts/get")
       args = req.arguments.getOrElse(Map.empty).view.mapValues(v => v: Any).toMap
-      ctx = contextFor(session)
+      ctx <- contextFor(session)
       messages <- promptManager
         .getPrompt(req.name, args, Some(ctx))
         .mapError(McpError.fromThrowable)
@@ -142,7 +143,12 @@ final class Builtins[R](
       json <- ok(EmptyResult())
     yield json
 
-  /** Build an [[McpContext]] for the current request, bound to its session so handlers can push
-    * log/progress notifications back to the client over [[Session.outbound]].
+  /** Build an [[McpContext]] for the current request, bound to its session (so handlers can push
+    * log/progress notifications) and snapshotting the client info/capabilities captured at
+    * `initialize` (so handlers can read them synchronously).
     */
-  private def contextFor(session: Session): McpContext = McpContext.withSession(session)
+  private def contextFor(session: Session): UIO[McpContext] =
+    for
+      info <- session.clientInfo
+      caps <- session.clientCapabilities
+    yield McpContext.withSession(session, info, caps)

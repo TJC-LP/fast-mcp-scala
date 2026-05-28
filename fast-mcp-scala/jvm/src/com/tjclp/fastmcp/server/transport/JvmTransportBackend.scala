@@ -87,5 +87,8 @@ object JvmTransportBackend extends TransportBackend:
       out.flush()
     }
 
-/** The JVM platform seam — imported into scope (via `ExportsJvm`) so `McpServer(...)` resolves. */
-given TransportBackend = JvmTransportBackend
+  /** The JVM platform seam, in the impl object so it's exportable (givens can't be wildcard-
+    * exported straight from a package). `ExportsJvm` re-exports this so `import
+    * com.tjclp.fastmcp.*` puts a `TransportBackend` in scope and `McpServer(...)` resolves.
+    */
+  given instance: TransportBackend = this

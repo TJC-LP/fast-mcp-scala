@@ -23,11 +23,11 @@ object ContextEchoServer extends McpServerApp[Stdio, ContextEchoServer.type]:
       note: Option[String],
       ctx: McpContext
   ): String =
-    val clientName = ctx.getClientInfo.map(_.name()).getOrElse("Unknown Client")
-    val clientVersion = ctx.getClientInfo.map(_.version()).getOrElse("Unknown Version")
-    val hasRootListChanges = ctx.getClientCapabilities
-      .exists(c => c.roots() != null && c.roots().listChanged() == true)
-    val hasSampling = ctx.getClientCapabilities.exists(c => c.sampling() != null)
+    val clientName = ctx.getClientInfo.map(_.name).getOrElse("Unknown Client")
+    val clientVersion = ctx.getClientInfo.map(_.version).getOrElse("Unknown Version")
+    val hasRootListChanges =
+      ctx.getClientCapabilities.exists(_.roots.exists(_.listChanged.contains(true)))
+    val hasSampling = ctx.getClientCapabilities.exists(_.sampling.isDefined)
     s"""Client: $clientName v$clientVersion
        |Note: ${note.getOrElse("(none)")}
        |Client Capabilities:

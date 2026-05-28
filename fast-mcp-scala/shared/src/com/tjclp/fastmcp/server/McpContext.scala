@@ -6,7 +6,12 @@ import zio.json.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.core.{LoggingLevel, LoggingMessageNotificationParams, ProgressToken}
-import com.tjclp.fastmcp.core.wire.{NotificationMethods, ProgressNotificationParams}
+import com.tjclp.fastmcp.core.wire.{
+  ClientCapabilities,
+  Implementation,
+  NotificationMethods,
+  ProgressNotificationParams
+}
 import com.tjclp.fastmcp.jsonrpc.JsonRpcMessage
 import com.tjclp.fastmcp.server.router.Session
 
@@ -18,11 +23,19 @@ import com.tjclp.fastmcp.server.router.Session
   * channel to the wire.
   */
 open class McpContext private[fastmcp] (
-    private[fastmcp] val session: Option[Session] = None
+    private[fastmcp] val session: Option[Session] = None,
+    private val clientInfoSnapshot: Option[Implementation] = None,
+    private val clientCapabilitiesSnapshot: Option[ClientCapabilities] = None
 ):
 
   /** The connection/session id, if this request arrived over a session-bearing transport. */
   def sessionId: Option[String] = session.map(_.sessionId)
+
+  /** The client's declared identity from `initialize` (name/version/title), if known. */
+  def getClientInfo: Option[Implementation] = clientInfoSnapshot
+
+  /** The client's declared capabilities from `initialize`, if known. */
+  def getClientCapabilities: Option[ClientCapabilities] = clientCapabilitiesSnapshot
 
   /** Emit a `notifications/message` log to the client, honoring the client's `logging/setLevel`
     * threshold. No-op if no session (e.g. a direct in-process call) or below the set level.
@@ -59,5 +72,11 @@ object McpContext:
   /** Default empty context — used by macros / direct calls when no session is available. */
   def empty: McpContext = new McpContext
 
-  /** Context bound to a request's session (used by the built-in handlers). */
-  def withSession(session: Session): McpContext = new McpContext(Some(session))
+  /** Context bound to a request's session (used by the built-in handlers). The client info /
+    * capabilities are snapshotted so handlers can read them synchronously.
+    */
+  def withSession(
+      session: Session,
+      clientInfo: Option[Implementation] = None,
+      clientCapabilities: Option[ClientCapabilities] = None
+  ): McpContext = new McpContext(Some(session), clientInfo, clientCapabilities)

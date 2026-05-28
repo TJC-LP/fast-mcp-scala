@@ -4,6 +4,7 @@ import zio.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.core.LoggingLevel
+import com.tjclp.fastmcp.core.wire.{ClientCapabilities, Implementation}
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, RequestId}
 
 /** Per-connection MCP session state.
@@ -25,6 +26,8 @@ final class Session private (
     private val subscriptionsRef: Ref[Set[String]],
     private val serverRequestCounter: Ref[Long],
     private val inflight: Ref[Map[RequestId, Fiber.Runtime[?, ?]]],
+    private val clientInfoRef: Ref[Option[Implementation]],
+    private val clientCapabilitiesRef: Ref[Option[ClientCapabilities]],
     val outbound: Queue[JsonRpcMessage]
 ):
 
@@ -33,6 +36,12 @@ final class Session private (
 
   def logLevel: UIO[Option[LoggingLevel]] = logLevelRef.get
   def setLogLevel(level: LoggingLevel): UIO[Unit] = logLevelRef.set(Some(level))
+
+  /** Client identity + capabilities, captured from the `initialize` request. */
+  def clientInfo: UIO[Option[Implementation]] = clientInfoRef.get
+  def clientCapabilities: UIO[Option[ClientCapabilities]] = clientCapabilitiesRef.get
+  def setClientInfo(info: Implementation, caps: ClientCapabilities): UIO[Unit] =
+    clientInfoRef.set(Some(info)) *> clientCapabilitiesRef.set(Some(caps))
 
   def markInitialized: UIO[Unit] = initializedRef.set(true)
   def isInitialized: UIO[Boolean] = initializedRef.get
@@ -74,5 +83,7 @@ object Session:
       subs <- Ref.make(Set.empty[String])
       cnt <- Ref.make(0L)
       inflight <- Ref.make(Map.empty[RequestId, Fiber.Runtime[?, ?]])
+      cInfo <- Ref.make(Option.empty[Implementation])
+      cCaps <- Ref.make(Option.empty[ClientCapabilities])
       outbound <- Queue.unbounded[JsonRpcMessage]
-    yield new Session(sessionId, pv, ll, init, subs, cnt, inflight, outbound)
+    yield new Session(sessionId, pv, ll, init, subs, cnt, inflight, cInfo, cCaps, outbound)
