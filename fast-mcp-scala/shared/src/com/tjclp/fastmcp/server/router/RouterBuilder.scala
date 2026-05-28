@@ -1,13 +1,15 @@
 package com.tjclp.fastmcp.server.router
 
+import com.tjclp.fastmcp.core.Tasks
 import com.tjclp.fastmcp.core.wire.Implementation
 import com.tjclp.fastmcp.server.McpServerSettings
-import com.tjclp.fastmcp.server.manager.{PromptManager, ResourceManager, ToolManager}
+import com.tjclp.fastmcp.server.manager.{PromptManager, ResourceManager, TaskManager, ToolManager}
 
 /** Assembles an [[McpRouter]] from the populated managers + settings.
   *
   * Honest-capabilities principle: a method's built-in handler is registered ONLY when its backing
-  * content exists (tools registered ⇒ `tools/list`+`tools/call`; prompts ⇒ `prompts/*`; etc.).
+  * content exists (tools registered ⇒ `tools/list`+`tools/call`; prompts ⇒ the `prompts` group;
+  * etc.).
   * Since [[McpRouter.deriveCapabilities]] reads the registered method set, capabilities can never
   * over-advertise — issue #56 cannot recur.
   *
@@ -22,11 +24,13 @@ object RouterBuilder:
       promptManager: PromptManager[R],
       resourceManager: ResourceManager[R],
       settings: McpServerSettings,
-      middlewares: List[Middleware[R]] = Nil,
+      taskManager: Option[TaskManager[R]] = None,
+      validator: SchemaValidator = SchemaValidator.permissive,
+      extraMiddlewares: List[Middleware[R]] = Nil,
       hooks: ServerHooks[R] = ServerHooks.noop[R],
       loggingEnabled: Boolean = false
   ): McpRouter[R] =
-    val tasksEnabled = settings.tasks.enabled
+    val tasksOn = settings.tasks.enabled && taskManager.isDefined
 
     val resourceDefs = resourceManager.listDefinitions()
     val hasTools = toolManager.listDefinitions().nonEmpty
@@ -47,7 +51,7 @@ object RouterBuilder:
     val resourcesSubscribe = false // subscribe handlers not implemented yet
     val listChanged = false // dynamic list-change notifications not implemented yet
 
-    val capabilities = McpRouter.deriveCapabilities(methods, tasksEnabled, resourcesSubscribe, listChanged)
+    val capabilities = McpRouter.deriveCapabilities(methods, tasksOn, resourcesSubscribe, listChanged)
 
     val builtins = new Builtins[R](
       serverInfo = serverInfo,
@@ -56,9 +60,11 @@ object RouterBuilder:
       toolManager = toolManager,
       promptManager = promptManager,
       resourceManager = resourceManager,
-      tasksEnabled = tasksEnabled,
+      tasksEnabled = tasksOn,
       exposeTemplates = exposeTemplates
     )
+
+    val taskHandlers = taskManager.map(tm => new TaskHandlers[R](tm))
 
     // Map each registered method to its built-in handler.
     val requestHandlers: Map[String, RequestHandler[R]] =
@@ -79,17 +85,33 @@ object RouterBuilder:
            Map(Methods.PromptsList -> builtins.promptsList, Methods.PromptsGet -> builtins.promptsGet)
          else Map.empty) ++
         (if loggingEnabled then Map(Methods.LoggingSetLevel -> builtins.loggingSetLevel)
-         else Map.empty)
+         else Map.empty) ++
+        (taskHandlers match
+          case Some(th) if tasksOn =>
+            Map(
+              Tasks.MethodTasksGet -> th.get,
+              Tasks.MethodTasksList -> th.list,
+              Tasks.MethodTasksCancel -> th.cancel,
+              Tasks.MethodTasksResult -> th.result
+            )
+          case _ => Map.empty)
 
     val notificationHandlers: Map[String, NotificationHandler[R]] =
       Map(com.tjclp.fastmcp.core.wire.NotificationMethods.Initialized -> builtins.initialized)
+
+    // Chain order (head = outermost): validation runs first, then task augmentation, then the
+    // handler. ValidationMiddleware with the permissive default is a pass-through.
+    val middlewares: List[Middleware[R]] =
+      (new ValidationMiddleware[R](validator, toolManager) :: Nil) ++
+        taskManager.filter(_ => tasksOn).map(tm => new TaskMiddleware[R](tm, toolManager)).toList ++
+        extraMiddlewares
 
     new McpRouter[R](
       requestHandlers = requestHandlers,
       notificationHandlers = notificationHandlers,
       middlewares = middlewares,
       hooks = hooks,
-      tasksEnabled = tasksEnabled,
+      tasksEnabled = tasksOn,
       resourcesSubscribe = resourcesSubscribe,
       listChanged = listChanged
     )

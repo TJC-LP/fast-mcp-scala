@@ -3,7 +3,10 @@ package com.tjclp.fastmcp.core.wire
 import zio.json.*
 import zio.json.ast.Json
 
-import com.tjclp.fastmcp.core.*
+// Import only non-colliding core symbols by name. A wildcard `import core.*` would shadow the
+// same-package wire types (Tool/Resource/Prompt) with core's `@Tool`/`@Resource`/`@Prompt`
+// annotation classes — Scala ranks wildcard imports ABOVE same-package-different-file defs.
+import com.tjclp.fastmcp.core.{Content, Cursor, TaskParams}
 
 /** Request `params` and result bodies for every MCP method fast-mcp-scala handles as a server.
   *

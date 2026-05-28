@@ -4,7 +4,7 @@ import zio.*
 import zio.json.*
 import zio.json.ast.Json
 
-import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.core.{Protocol, SetLevelRequestParams}
 import com.tjclp.fastmcp.core.wire.*
 import com.tjclp.fastmcp.jsonrpc.McpError
 import com.tjclp.fastmcp.server.McpContext
@@ -57,7 +57,8 @@ final class Builtins[R](
       json <- ok(result)
     yield json
 
-  val initialized: NotificationHandler[R] = (session, _) => session.markInitialized.mapError(McpError.fromThrowable)
+  // markInitialized is a UIO (cannot fail); it widens to ZIO[R, McpError, Unit] directly.
+  val initialized: NotificationHandler[R] = (session, _) => session.markInitialized
 
   /** Pick the protocol version to respond with: echo the client's if we support it, else our
     * latest. (The client disconnects if it can't accept our choice.)
