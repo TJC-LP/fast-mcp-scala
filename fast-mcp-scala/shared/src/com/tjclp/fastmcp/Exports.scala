@@ -37,7 +37,6 @@ export core.{
 export core.McpEncoder.given
 export core.ToHandlerEffect.given
 export server.{
-  FastMcpServerSettings,
   Http,
   McpContext,
   McpServerApp,

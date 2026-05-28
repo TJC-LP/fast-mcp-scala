@@ -20,11 +20,9 @@ object Versions {
   val zio = "2.1.20"
   val zioSchema = "1.7.4"
   val zioJson = "0.7.44"
-  val jackson3 = "3.0.3"
   val tapir = "1.11.42"
   val jsonSchemaCirce = "0.11.10"
   val zioHttp = "3.4.0"
-  val mcpSdk = "1.1.1"
   val scalaTest = "3.2.19"
   val scalaCheck = "1.18.1"
 }
@@ -164,18 +162,13 @@ object `fast-mcp-scala` extends Module {
       mvn"dev.zio::zio-schema:${Versions.zioSchema}",
       mvn"dev.zio::zio-schema-json:${Versions.zioSchema}",
       mvn"dev.zio::zio-schema-derivation:${Versions.zioSchema}",
-      // Jackson 3 for macro/runtime conversion internals
-      mvn"tools.jackson.core:jackson-databind:${Versions.jackson3}",
       // Tapir
       mvn"com.softwaremill.sttp.tapir::tapir-core:${Versions.tapir}",
       mvn"com.softwaremill.sttp.tapir::tapir-apispec-docs:${Versions.tapir}",
       mvn"com.softwaremill.sttp.tapir::tapir-json-circe:${Versions.tapir}",
       mvn"com.softwaremill.sttp.apispec::jsonschema-circe:${Versions.jsonSchemaCirce}",
-      // ZIO HTTP for stateless HTTP transport
-      mvn"dev.zio::zio-http:${Versions.zioHttp}",
-      // MCP SDK (Java library - split into core + jackson3 as the default runtime binding)
-      mvn"io.modelcontextprotocol.sdk:mcp-core:${Versions.mcpSdk}",
-      mvn"io.modelcontextprotocol.sdk:mcp-json-jackson3:${Versions.mcpSdk}"
+      // ZIO HTTP for HTTP transports (stateless + streamable)
+      mvn"dev.zio::zio-http:${Versions.zioHttp}"
     )
 
     override def mainClass = Some("fastmcp.FastMCPMain")
@@ -233,7 +226,9 @@ object `fast-mcp-scala` extends Module {
     )
 
     override def bunDeps = Task {
-      Seq(bun"@modelcontextprotocol/sdk@1.29.0", bun"zod@4.3.6", bun"zod-to-json-schema@3.25.1")
+      // TS MCP SDK + Zod are gone from production — native Scala dispatch lives in shared/.
+      // The TS SDK is re-introduced as a test-time client in `js.test` for cross-validation.
+      Seq.empty[mill.bun.BunDep]
     }
 
     // bunJsEnv is what BunScalaJSTests uses for the Bun process env

@@ -54,10 +54,3 @@ case class McpServerSettings(
     // Experimental MCP Tasks (spec 2025-11-25). Off by default.
     tasks: TaskSettings = TaskSettings()
 )
-
-/** Deprecated alias for [[McpServerSettings]]. Kept for one release cycle to ease the rename. */
-@deprecated("Use McpServerSettings", since = "0.3.0-rc2")
-type FastMcpServerSettings = McpServerSettings
-
-@deprecated("Use McpServerSettings", since = "0.3.0-rc2")
-val FastMcpServerSettings = McpServerSettings
