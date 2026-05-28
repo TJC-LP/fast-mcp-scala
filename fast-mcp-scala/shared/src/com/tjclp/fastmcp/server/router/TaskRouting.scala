@@ -5,31 +5,27 @@ import zio.json.*
 import zio.json.ast.Json
 
 // Explicit core imports: `import core.*` would make `Task` ambiguous with `zio.Task`.
-import com.tjclp.fastmcp.core.{
-  Task,
-  TaskParams,
-  Tasks,
-  TaskStatusNotificationParams,
-  TaskSupport
-}
+import com.tjclp.fastmcp.core.{Task, TaskParams, TaskStatusNotificationParams, TaskSupport, Tasks}
 import com.tjclp.fastmcp.jsonrpc.JsonRpcMessage
 import com.tjclp.fastmcp.jsonrpc.McpError
 import com.tjclp.fastmcp.server.manager.{TaskManager, ToolManager}
 
 /** `params` shape for tasks/get, tasks/cancel, tasks/result. */
 private case class TaskIdParams(taskId: String)
+
 private object TaskIdParams:
   given JsonDecoder[TaskIdParams] = DeriveJsonDecoder.gen[TaskIdParams]
 
 /** `params` shape for tasks/list (paginated). */
 private case class TaskListParams(cursor: Option[String] = None)
+
 private object TaskListParams:
   given JsonDecoder[TaskListParams] = DeriveJsonDecoder.gen[TaskListParams]
 
 /** Task augmentation as router middleware — the clean replacement for the old transport-layer
   * `TaskDispatcher` hack. Wraps `tools/call`: when the client supplies `params.task` and the tool
-  * opts in (`execution.taskSupport` ≠ Forbidden), the call is wrapped in a [[TaskManager]] task —
-  * a `CreateTaskResult` is returned immediately and the work runs in the background, with status
+  * opts in (`execution.taskSupport` ≠ Forbidden), the call is wrapped in a [[TaskManager]] task — a
+  * `CreateTaskResult` is returned immediately and the work runs in the background, with status
   * pushed over the session's outbound channel. All other methods pass through untouched.
   *
   * Tool-level negotiation (spec 2025-11-25):
@@ -74,7 +70,9 @@ final class TaskMiddleware[R](
               case (false, TaskSupport.Required) =>
                 ZIO.fail(McpError.methodNotFound(s"Tool '$name' requires task augmentation"))
               case (true, TaskSupport.Forbidden) =>
-                ZIO.fail(McpError.methodNotFound(s"Tool '$name' does not support task augmentation"))
+                ZIO.fail(
+                  McpError.methodNotFound(s"Tool '$name' does not support task augmentation")
+                )
               case _ =>
                 next(session, params)
 
@@ -103,6 +101,7 @@ final class TaskMiddleware[R](
 
 /** Minimal lens for reading `params.task.ttl` without re-decoding the whole call. */
 private case class CallToolRequestParamsLite(task: Option[TaskParams] = None)
+
 private object CallToolRequestParamsLite:
   given JsonDecoder[CallToolRequestParamsLite] = DeriveJsonDecoder.gen[CallToolRequestParamsLite]
 
@@ -145,7 +144,9 @@ final class TaskHandlers[R](taskManager: TaskManager[R]):
   val result: RequestHandler[R] = (session, params) =>
     for
       req <- decodeParams[TaskIdParams](params, "tasks/result")
-      raw <- taskManager.result(req.taskId, Some(session.sessionId)).mapError(McpError.fromThrowable)
+      raw <- taskManager
+        .result(req.taskId, Some(session.sessionId))
+        .mapError(McpError.fromThrowable)
       // The task's run effect returned the tool-call result JSON; pass it straight through.
       json = raw match
         case j: Json => j

@@ -20,7 +20,8 @@ import com.tjclp.fastmcp.server.transport.TransportBackend
   * Prefer the [[McpServer$]] factory (`McpServer("name")` / `McpServer.typed[R]("name")`) over
   * constructing this directly.
   *
-  * @tparam R the ZIO environment all handlers may require; provided via `runHttp().provide(...)`.
+  * @tparam R
+  *   the ZIO environment all handlers may require; provided via `runHttp().provide(...)`.
   */
 final class McpServer[R](
     val name: String = "FastMCPScala",
@@ -61,7 +62,11 @@ final class McpServer[R](
       handler: ResourceTemplateHandler[R1]
   ): ZIO[Any, Throwable, McpServerCore[R]] =
     resourceManager
-      .addTemplateResource(definition.uri, handler.asInstanceOf[ResourceTemplateHandler[R]], definition)
+      .addTemplateResource(
+        definition.uri,
+        handler.asInstanceOf[ResourceTemplateHandler[R]],
+        definition
+      )
       .as(this)
 
   override def prompt[R1 >: R](
@@ -112,6 +117,7 @@ object McpServer:
 
   /** Lets the shared `McpServerApp` sugar build a server without naming the concrete type. */
   given (using TransportBackend): McpServerCoreFactory with
+
     def build(name: String, version: String, settings: McpServerSettings): McpServerCore[Any] =
       new McpServer[Any](name, version, settings)
 

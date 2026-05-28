@@ -10,8 +10,8 @@ import com.tjclp.fastmcp.core.{Content, Cursor, TaskParams}
 
 /** Request `params` and result bodies for every MCP method fast-mcp-scala handles as a server.
   *
-  * These are the *inner* shapes — the JSON-RPC envelope (`jsonrpc`/`id`/`method`) lives in the
-  * M4 `jsonrpc` package. A handler decodes `params` into one of these, returns one of the result
+  * These are the *inner* shapes — the JSON-RPC envelope (`jsonrpc`/`id`/`method`) lives in the M4
+  * `jsonrpc` package. A handler decodes `params` into one of these, returns one of the result
   * types, and the router wraps it back into a `JSONRPCResultResponse`.
   *
   * Naming mirrors the spec exactly. Optional fields are `Option` so absent ≠ null on the wire;
@@ -22,11 +22,13 @@ import com.tjclp.fastmcp.core.{Content, Cursor, TaskParams}
 
 /** Params common to paginated list requests (`tools/list`, `resources/list`, etc.). */
 case class PaginatedRequestParams(cursor: Option[Cursor] = None)
+
 object PaginatedRequestParams:
   given JsonCodec[PaginatedRequestParams] = DeriveJsonCodec.gen[PaginatedRequestParams]
 
 /** An empty result — the spec's `EmptyResult`, used by `ping` and `logging/setLevel`. */
 case class EmptyResult(_meta: Option[Map[String, Json]] = None)
+
 object EmptyResult:
   given JsonCodec[EmptyResult] = DeriveJsonCodec.gen[EmptyResult]
 
@@ -37,6 +39,7 @@ case class InitializeRequestParams(
     capabilities: ClientCapabilities,
     clientInfo: Implementation
 )
+
 object InitializeRequestParams:
   given JsonCodec[InitializeRequestParams] = DeriveJsonCodec.gen[InitializeRequestParams]
 
@@ -47,6 +50,7 @@ case class InitializeResult(
     instructions: Option[String] = None,
     _meta: Option[Map[String, Json]] = None
 )
+
 object InitializeResult:
   given JsonCodec[InitializeResult] = DeriveJsonCodec.gen[InitializeResult]
 
@@ -57,6 +61,7 @@ case class ListToolsResult(
     nextCursor: Option[Cursor] = None,
     _meta: Option[Map[String, Json]] = None
 )
+
 object ListToolsResult:
   given JsonCodec[ListToolsResult] = DeriveJsonCodec.gen[ListToolsResult]
 
@@ -72,12 +77,13 @@ case class CallToolRequestParams(
     task: Option[TaskParams] = None,
     _meta: Option[Map[String, Json]] = None
 )
+
 object CallToolRequestParams:
   given JsonCodec[CallToolRequestParams] = DeriveJsonCodec.gen[CallToolRequestParams]
 
-/** `tools/call` result. `isError` distinguishes a tool-level failure (reported in-band so the
-  * model can self-correct) from a protocol error. `structuredContent` carries typed output when
-  * the tool declares an `outputSchema`.
+/** `tools/call` result. `isError` distinguishes a tool-level failure (reported in-band so the model
+  * can self-correct) from a protocol error. `structuredContent` carries typed output when the tool
+  * declares an `outputSchema`.
   */
 case class CallToolResult(
     content: List[Content],
@@ -85,6 +91,7 @@ case class CallToolResult(
     isError: Option[Boolean] = None,
     _meta: Option[Map[String, Json]] = None
 )
+
 object CallToolResult:
   given JsonCodec[CallToolResult] = DeriveJsonCodec.gen[CallToolResult]
 
@@ -95,6 +102,7 @@ case class ListResourcesResult(
     nextCursor: Option[Cursor] = None,
     _meta: Option[Map[String, Json]] = None
 )
+
 object ListResourcesResult:
   given JsonCodec[ListResourcesResult] = DeriveJsonCodec.gen[ListResourcesResult]
 
@@ -105,12 +113,14 @@ case class ListResourceTemplatesResult(
     nextCursor: Option[Cursor] = None,
     _meta: Option[Map[String, Json]] = None
 )
+
 object ListResourceTemplatesResult:
   given JsonCodec[ListResourceTemplatesResult] = DeriveJsonCodec.gen[ListResourceTemplatesResult]
 
 // ---------- resources/read ----------
 
 case class ReadResourceRequestParams(uri: String, _meta: Option[Map[String, Json]] = None)
+
 object ReadResourceRequestParams:
   given JsonCodec[ReadResourceRequestParams] = DeriveJsonCodec.gen[ReadResourceRequestParams]
 
@@ -118,6 +128,7 @@ case class ReadResourceResult(
     contents: List[ResourceContents],
     _meta: Option[Map[String, Json]] = None
 )
+
 object ReadResourceResult:
   given JsonCodec[ReadResourceResult] = DeriveJsonCodec.gen[ReadResourceResult]
 
@@ -128,6 +139,7 @@ case class ListPromptsResult(
     nextCursor: Option[Cursor] = None,
     _meta: Option[Map[String, Json]] = None
 )
+
 object ListPromptsResult:
   given JsonCodec[ListPromptsResult] = DeriveJsonCodec.gen[ListPromptsResult]
 
@@ -138,6 +150,7 @@ case class GetPromptRequestParams(
     arguments: Option[Map[String, String]] = None,
     _meta: Option[Map[String, Json]] = None
 )
+
 object GetPromptRequestParams:
   given JsonCodec[GetPromptRequestParams] = DeriveJsonCodec.gen[GetPromptRequestParams]
 
@@ -146,6 +159,7 @@ case class GetPromptResult(
     description: Option[String] = None,
     _meta: Option[Map[String, Json]] = None
 )
+
 object GetPromptResult:
   given JsonCodec[GetPromptResult] = DeriveJsonCodec.gen[GetPromptResult]
 
@@ -160,12 +174,13 @@ sealed trait CompletionReference(@scala.annotation.unused `type`: String)
 @jsonHint("ref/prompt")
 case class PromptReference(name: String, title: Option[String] = None)
     extends CompletionReference("ref/prompt")
+
 object PromptReference:
   given JsonCodec[PromptReference] = DeriveJsonCodec.gen[PromptReference]
 
 @jsonHint("ref/resource")
-case class ResourceTemplateReference(uri: String)
-    extends CompletionReference("ref/resource")
+case class ResourceTemplateReference(uri: String) extends CompletionReference("ref/resource")
+
 object ResourceTemplateReference:
   given JsonCodec[ResourceTemplateReference] = DeriveJsonCodec.gen[ResourceTemplateReference]
 
@@ -173,10 +188,12 @@ object CompletionReference:
   given JsonCodec[CompletionReference] = DeriveJsonCodec.gen[CompletionReference]
 
 case class CompletionArgument(name: String, value: String)
+
 object CompletionArgument:
   given JsonCodec[CompletionArgument] = DeriveJsonCodec.gen[CompletionArgument]
 
 case class CompletionContext(arguments: Option[Map[String, String]] = None)
+
 object CompletionContext:
   given JsonCodec[CompletionContext] = DeriveJsonCodec.gen[CompletionContext]
 
@@ -186,16 +203,19 @@ case class CompleteRequestParams(
     context: Option[CompletionContext] = None,
     _meta: Option[Map[String, Json]] = None
 )
+
 object CompleteRequestParams:
   given JsonCodec[CompleteRequestParams] = DeriveJsonCodec.gen[CompleteRequestParams]
 
 /** The inner `completion` object of a `completion/complete` result. `values` is capped at 100 by
-  * the spec — enforcement lives in the handler, not the type. */
+  * the spec — enforcement lives in the handler, not the type.
+  */
 case class Completion(
     values: List[String],
     total: Option[Int] = None,
     hasMore: Option[Boolean] = None
 )
+
 object Completion:
   given JsonCodec[Completion] = DeriveJsonCodec.gen[Completion]
 
@@ -203,5 +223,6 @@ case class CompleteResult(
     completion: Completion,
     _meta: Option[Map[String, Json]] = None
 )
+
 object CompleteResult:
   given JsonCodec[CompleteResult] = DeriveJsonCodec.gen[CompleteResult]

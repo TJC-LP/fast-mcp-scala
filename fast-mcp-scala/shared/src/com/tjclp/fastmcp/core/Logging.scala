@@ -11,10 +11,11 @@ enum LoggingLevel:
 
 object LoggingLevel:
 
-  /** Numerical severity used by middleware comparisons. Lower = more verbose, higher = more
-    * severe. Matches RFC-5424 ordering.
+  /** Numerical severity used by middleware comparisons. Lower = more verbose, higher = more severe.
+    * Matches RFC-5424 ordering.
     */
   extension (level: LoggingLevel)
+
     def severity: Int = level match
       case Debug => 0
       case Info => 1
@@ -58,5 +59,6 @@ case class LoggingMessageNotificationParams(
 )
 
 object LoggingMessageNotificationParams:
+
   given JsonCodec[LoggingMessageNotificationParams] =
     DeriveJsonCodec.gen[LoggingMessageNotificationParams]

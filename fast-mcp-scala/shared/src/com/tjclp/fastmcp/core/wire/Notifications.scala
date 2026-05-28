@@ -7,8 +7,8 @@ import com.tjclp.fastmcp.core.ProgressToken
 
 /** Notification method-name constants and `params` shapes.
   *
-  * Notifications carry no `id` and expect no response. The method names are centralized here so
-  * the router and emit sites agree on the wire strings.
+  * Notifications carry no `id` and expect no response. The method names are centralized here so the
+  * router and emit sites agree on the wire strings.
   */
 object NotificationMethods:
   val Initialized: String = "notifications/initialized"
@@ -20,14 +20,15 @@ object NotificationMethods:
   val ToolsListChanged: String = "notifications/tools/list_changed"
   val PromptsListChanged: String = "notifications/prompts/list_changed"
 
-/** `notifications/cancelled` params. `requestId` is the id of the in-flight request to abort;
-  * the M4 router cancels the matching fiber. Task cancellation uses `tasks/cancel` instead, so
+/** `notifications/cancelled` params. `requestId` is the id of the in-flight request to abort; the
+  * M4 router cancels the matching fiber. Task cancellation uses `tasks/cancel` instead, so
   * `requestId` targets non-task requests only.
   */
 case class CancelledNotificationParams(
     requestId: Option[Json] = None,
     reason: Option[String] = None
 )
+
 object CancelledNotificationParams:
   given JsonCodec[CancelledNotificationParams] = DeriveJsonCodec.gen[CancelledNotificationParams]
 
@@ -40,6 +41,7 @@ case class ProgressNotificationParams(
     total: Option[Double] = None,
     message: Option[String] = None
 )
+
 object ProgressNotificationParams:
   given JsonCodec[ProgressNotificationParams] = DeriveJsonCodec.gen[ProgressNotificationParams]
 
@@ -47,6 +49,8 @@ object ProgressNotificationParams:
   * `resources/subscribe`.
   */
 case class ResourceUpdatedNotificationParams(uri: String)
+
 object ResourceUpdatedNotificationParams:
+
   given JsonCodec[ResourceUpdatedNotificationParams] =
     DeriveJsonCodec.gen[ResourceUpdatedNotificationParams]

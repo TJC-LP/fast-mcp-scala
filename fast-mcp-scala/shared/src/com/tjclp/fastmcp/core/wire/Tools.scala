@@ -35,12 +35,13 @@ object Tool:
   // (Types.scala), ToolExecution in core (Tasks.scala), ToolOutputSchema below.
   given JsonCodec[Tool] = DeriveJsonCodec.gen[Tool]
 
-/** Optional JSON Schema describing the tool's structured output. Stored as an opaque string for
-  * the same reasons [[ToolInputSchema]] is — schema authoring lives outside the type system.
+/** Optional JSON Schema describing the tool's structured output. Stored as an opaque string for the
+  * same reasons [[ToolInputSchema]] is — schema authoring lives outside the type system.
   */
 opaque type ToolOutputSchema = String
 
 object ToolOutputSchema:
+
   def fromJsonString(schema: String): Either[String, ToolOutputSchema] =
     schema.fromJson[Json].map(_ => schema)
 
@@ -60,9 +61,12 @@ object ToolOutputSchema:
 
 extension (schema: ToolOutputSchema)
   def toJsonString: String = schema
+
   def toAst: Json =
-    schema.fromJson[Json].fold(
-      error =>
-        throw new IllegalStateException(s"Stored tool output schema is invalid JSON: $error"),
-      identity
-    )
+    schema
+      .fromJson[Json]
+      .fold(
+        error =>
+          throw new IllegalStateException(s"Stored tool output schema is invalid JSON: $error"),
+        identity
+      )

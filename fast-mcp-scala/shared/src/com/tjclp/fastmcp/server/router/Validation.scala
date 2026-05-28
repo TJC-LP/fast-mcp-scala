@@ -22,9 +22,9 @@ object SchemaValidator:
   /** Accept everything — the default when no validator is configured. */
   val permissive: SchemaValidator = (_, _) => Right(())
 
-/** Middleware that validates `tools/call` arguments against the tool's declared input schema
-  * before the handler runs. No-ops for every other method. With [[SchemaValidator.permissive]] it
-  * is a pass-through, so it is always safe to install.
+/** Middleware that validates `tools/call` arguments against the tool's declared input schema before
+  * the handler runs. No-ops for every other method. With [[SchemaValidator.permissive]] it is a
+  * pass-through, so it is always safe to install.
   */
 final class ValidationMiddleware[R](
     validator: SchemaValidator,

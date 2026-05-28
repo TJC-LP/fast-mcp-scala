@@ -52,10 +52,13 @@ open class McpContext private[fastmcp] (
           case Some(min) if level.severity < min.severity => ZIO.unit
           case _ =>
             val params = LoggingMessageNotificationParams(level, data, logger)
-            s.send(JsonRpcMessage.Notification(NotificationMethods.Message, params.toJsonAST.toOption))
+            s.send(
+              JsonRpcMessage.Notification(NotificationMethods.Message, params.toJsonAST.toOption)
+            )
         }
 
-  /** Emit a `notifications/progress` update for the given progress token. No-op without a session. */
+  /** Emit a `notifications/progress` update for the given progress token. No-op without a session.
+    */
   def sendProgress(
       progressToken: ProgressToken,
       progress: Double,

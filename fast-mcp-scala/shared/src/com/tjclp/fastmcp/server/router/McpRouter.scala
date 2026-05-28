@@ -25,8 +25,8 @@ object Methods:
   val CompletionComplete = "completion/complete"
   val LoggingSetLevel = "logging/setLevel"
 
-/** The MCP dispatcher — the native-Scala replacement for the Java SDK's `McpAsyncServer` and the
-  * TS SDK's `Server`.
+/** The MCP dispatcher — the native-Scala replacement for the Java SDK's `McpAsyncServer` and the TS
+  * SDK's `Server`.
   *
   * Built once per server start from an immutable handler map (M5 registers the built-ins). The
   * dispatcher:
@@ -37,13 +37,20 @@ object Methods:
   *   - **derives [[ServerCapabilities]] from which handlers are registered** — `logging` is
   *     advertised iff a `logging/setLevel` handler is wired, which fixes issue #56 by construction.
   *
-  * @param requestHandlers terminal handlers keyed by method
-  * @param notificationHandlers terminal notification handlers keyed by method
-  * @param middlewares applied around every request handler; head = outermost
-  * @param hooks observability hooks
-  * @param tasksEnabled whether the `tasks` capability is advertised
-  * @param resourcesSubscribe advertise `resources.subscribe`
-  * @param listChanged advertise `listChanged` on tools/resources/prompts
+  * @param requestHandlers
+  *   terminal handlers keyed by method
+  * @param notificationHandlers
+  *   terminal notification handlers keyed by method
+  * @param middlewares
+  *   applied around every request handler; head = outermost
+  * @param hooks
+  *   observability hooks
+  * @param tasksEnabled
+  *   whether the `tasks` capability is advertised
+  * @param resourcesSubscribe
+  *   advertise `resources.subscribe`
+  * @param listChanged
+  *   advertise `listChanged` on tools/resources/prompts
   */
 final class McpRouter[R](
     requestHandlers: Map[String, RequestHandler[R]],
@@ -108,7 +115,9 @@ final class McpRouter[R](
                     val err = McpError.internalError(
                       Option(cause.squashWith(identity).getMessage).getOrElse("internal error")
                     )
-                    hooks.onError(method, err, session).as(Some(Failure(Some(id), err.toErrorObject)))
+                    hooks
+                      .onError(method, err, session)
+                      .as(Some(Failure(Some(id), err.toErrorObject)))
         yield resp
 
   private def dispatchNotification(session: Session, method: String, params: Json): URIO[R, Unit] =
@@ -129,8 +138,8 @@ final class McpRouter[R](
 object McpRouter:
 
   /** Derive [[ServerCapabilities]] from the set of registered request-method names plus settings.
-    * Shared by the router instance and the `initialize` built-in so both report identical caps.
-    * The crux of issue #56: `logging` appears only when `logging/setLevel` is registered.
+    * Shared by the router instance and the `initialize` built-in so both report identical caps. The
+    * crux of issue #56: `logging` appears only when `logging/setLevel` is registered.
     */
   def deriveCapabilities(
       methods: Set[String],

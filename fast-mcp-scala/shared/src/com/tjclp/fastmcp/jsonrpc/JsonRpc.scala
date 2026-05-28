@@ -5,15 +5,16 @@ import zio.json.ast.Json
 
 import com.tjclp.fastmcp.core.Protocol
 
-/** A JSON-RPC 2.0 request/response id. The spec allows `string | number`; we keep numbers as
-  * `Long` (the spec discourages fractional ids) and preserve the original kind so responses echo
-  * the client's id shape exactly.
+/** A JSON-RPC 2.0 request/response id. The spec allows `string | number`; we keep numbers as `Long`
+  * (the spec discourages fractional ids) and preserve the original kind so responses echo the
+  * client's id shape exactly.
   */
 enum RequestId:
   case StrId(value: String)
   case NumId(value: Long)
 
 object RequestId:
+
   given JsonCodec[RequestId] = JsonCodec(
     JsonEncoder[Json].contramap[RequestId] {
       case StrId(s) => Json.Str(s)
@@ -35,10 +36,10 @@ object JsonRpcErrorObject:
 
 /** The JSON-RPC 2.0 message ADT.
   *
-  * Wire discrimination is *structural*, not tag-based: a message with `method` + `id` is a
-  * request, `method` without `id` is a notification, `result` is a success response, `error` is an
-  * error response. We hand-roll the codec to honor that (and to emit `jsonrpc: "2.0"` and omit
-  * absent `params`/`data` precisely).
+  * Wire discrimination is *structural*, not tag-based: a message with `method` + `id` is a request,
+  * `method` without `id` is a notification, `result` is a success response, `error` is an error
+  * response. We hand-roll the codec to honor that (and to emit `jsonrpc: "2.0"` and omit absent
+  * `params`/`data` precisely).
   *
   * Batching was dropped from the spec at 2025-06-18, so there is no array case.
   */
@@ -84,11 +85,13 @@ object JsonRpcMessage:
       (m.get("method"), m.get("result"), m.get("error")) match
         case (Some(Json.Str(method)), _, _) =>
           val params = m.get("params")
-          if hasId then
-            m("id").as[RequestId].map(Request(_, method, params))
+          if hasId then m("id").as[RequestId].map(Request(_, method, params))
           else Right(Notification(method, params))
         case (_, Some(result), _) =>
-          m.get("id").toRight("JSON-RPC success response missing `id`").flatMap(_.as[RequestId]).map(Success(_, result))
+          m.get("id")
+            .toRight("JSON-RPC success response missing `id`")
+            .flatMap(_.as[RequestId])
+            .map(Success(_, result))
         case (_, _, Some(err)) =>
           val idOpt =
             if hasId then m("id").as[RequestId].toOption else None

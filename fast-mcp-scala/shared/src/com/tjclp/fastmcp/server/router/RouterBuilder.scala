@@ -9,9 +9,8 @@ import com.tjclp.fastmcp.server.manager.{PromptManager, ResourceManager, TaskMan
   *
   * Honest-capabilities principle: a method's built-in handler is registered ONLY when its backing
   * content exists (tools registered ⇒ `tools/list`+`tools/call`; prompts ⇒ the `prompts` group;
-  * etc.).
-  * Since [[McpRouter.deriveCapabilities]] reads the registered method set, capabilities can never
-  * over-advertise — issue #56 cannot recur.
+  * etc.). Since [[McpRouter.deriveCapabilities]] reads the registered method set, capabilities can
+  * never over-advertise — issue #56 cannot recur.
   *
   * Called by the server orchestrator at `runStdio()` / `runHttp()`, after registration is done.
   */
@@ -43,7 +42,9 @@ object RouterBuilder:
     // Which request methods this server will answer — drives capability derivation.
     val methods: Set[String] = Set(Methods.Ping, Methods.Initialize) ++
       Option.when(hasTools)(Set(Methods.ToolsList, Methods.ToolsCall)).getOrElse(Set.empty) ++
-      Option.when(hasResources)(Set(Methods.ResourcesList, Methods.ResourcesRead)).getOrElse(Set.empty) ++
+      Option
+        .when(hasResources)(Set(Methods.ResourcesList, Methods.ResourcesRead))
+        .getOrElse(Set.empty) ++
       Option.when(exposeTemplates)(Set(Methods.ResourcesTemplatesList)).getOrElse(Set.empty) ++
       Option.when(hasPrompts)(Set(Methods.PromptsList, Methods.PromptsGet)).getOrElse(Set.empty) ++
       Option.when(loggingEnabled)(Set(Methods.LoggingSetLevel)).getOrElse(Set.empty)
@@ -51,7 +52,8 @@ object RouterBuilder:
     val resourcesSubscribe = false // subscribe handlers not implemented yet
     val listChanged = false // dynamic list-change notifications not implemented yet
 
-    val capabilities = McpRouter.deriveCapabilities(methods, tasksOn, resourcesSubscribe, listChanged)
+    val capabilities =
+      McpRouter.deriveCapabilities(methods, tasksOn, resourcesSubscribe, listChanged)
 
     val builtins = new Builtins[R](
       serverInfo = serverInfo,
@@ -76,13 +78,19 @@ object RouterBuilder:
            Map(Methods.ToolsList -> builtins.toolsList, Methods.ToolsCall -> builtins.toolsCall)
          else Map.empty) ++
         (if hasResources then
-           Map(Methods.ResourcesList -> builtins.resourcesList, Methods.ResourcesRead -> builtins.resourcesRead)
+           Map(
+             Methods.ResourcesList -> builtins.resourcesList,
+             Methods.ResourcesRead -> builtins.resourcesRead
+           )
          else Map.empty) ++
         (if exposeTemplates then
            Map(Methods.ResourcesTemplatesList -> builtins.resourcesTemplatesList)
          else Map.empty) ++
         (if hasPrompts then
-           Map(Methods.PromptsList -> builtins.promptsList, Methods.PromptsGet -> builtins.promptsGet)
+           Map(
+             Methods.PromptsList -> builtins.promptsList,
+             Methods.PromptsGet -> builtins.promptsGet
+           )
          else Map.empty) ++
         (if loggingEnabled then Map(Methods.LoggingSetLevel -> builtins.loggingSetLevel)
          else Map.empty) ++
@@ -94,7 +102,8 @@ object RouterBuilder:
               Tasks.MethodTasksCancel -> th.cancel,
               Tasks.MethodTasksResult -> th.result
             )
-          case _ => Map.empty)
+          case _ => Map.empty
+        )
 
     val notificationHandlers: Map[String, NotificationHandler[R]] =
       Map(com.tjclp.fastmcp.core.wire.NotificationMethods.Initialized -> builtins.initialized)

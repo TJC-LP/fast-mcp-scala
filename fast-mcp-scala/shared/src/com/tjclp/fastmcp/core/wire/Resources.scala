@@ -11,7 +11,8 @@ import com.tjclp.fastmcp.core.Role
   *
   * Field semantics per MCP 2025-11-25:
   *   - `audience` lists who the content is for (clients use it to filter what reaches the model).
-  *   - `priority` is `0.0 .. 1.0` — clients use it to decide what to surface under context pressure.
+  *   - `priority` is `0.0 .. 1.0` — clients use it to decide what to surface under context
+  *     pressure.
   *   - `lastModified` is an ISO 8601 timestamp for staleness display.
   */
 case class Annotations(
@@ -60,9 +61,9 @@ object ResourceTemplate:
 /** Contents of a specific resource or sub-resource as returned by `resources/read`. Either text
   * (UTF-8 source) or blob (base64-encoded binary).
   *
-  * Spec models this as `TextResourceContents | BlobResourceContents` — a sum type discriminated
-  * by which of `text` / `blob` is present (not by a `type` field). Wire codecs hand-rolled in M3
-  * will handle that discrimination.
+  * Spec models this as `TextResourceContents | BlobResourceContents` — a sum type discriminated by
+  * which of `text` / `blob` is present (not by a `type` field). Wire codecs hand-rolled in M3 will
+  * handle that discrimination.
   */
 sealed trait ResourceContents:
   def uri: String
@@ -90,6 +91,7 @@ object BlobResourceContents:
   given JsonCodec[BlobResourceContents] = DeriveJsonCodec.gen[BlobResourceContents]
 
 object ResourceContents:
+
   // The spec models ResourceContents as `TextResourceContents | BlobResourceContents` with NO
   // `type` discriminator — variants are told apart by which of `text` / `blob` is present. So we
   // hand-roll discrimination over the JSON AST rather than using @jsonDiscriminator.

@@ -40,6 +40,7 @@ final class Session private (
   /** Client identity + capabilities, captured from the `initialize` request. */
   def clientInfo: UIO[Option[Implementation]] = clientInfoRef.get
   def clientCapabilities: UIO[Option[ClientCapabilities]] = clientCapabilitiesRef.get
+
   def setClientInfo(info: Implementation, caps: ClientCapabilities): UIO[Unit] =
     clientInfoRef.set(Some(info)) *> clientCapabilitiesRef.set(Some(caps))
 
@@ -50,8 +51,8 @@ final class Session private (
   def unsubscribe(uri: String): UIO[Unit] = subscriptionsRef.update(_ - uri)
   def isSubscribed(uri: String): UIO[Boolean] = subscriptionsRef.get.map(_.contains(uri))
 
-  /** Allocate the next id for a server-initiated request. Prefixed so server ids never collide
-    * with client-issued ids on the same connection.
+  /** Allocate the next id for a server-initiated request. Prefixed so server ids never collide with
+    * client-issued ids on the same connection.
     */
   def nextServerRequestId: UIO[RequestId] =
     serverRequestCounter.updateAndGet(_ + 1).map(n => RequestId.StrId(s"srv-$n"))

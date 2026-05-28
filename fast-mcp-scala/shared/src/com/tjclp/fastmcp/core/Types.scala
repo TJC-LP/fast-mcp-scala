@@ -183,9 +183,9 @@ case class AudioContent(
 object AudioContent:
   given JsonCodec[AudioContent] = DeriveJsonCodec.gen[AudioContent]
 
-/** A resource the server can read, included inline as content. Per spec 2025-11-25 §Content,
-  * this is a `Resource` plus a `type: "resource_link"` discriminator. Wire shape matches the
-  * full [[Resource]] fields.
+/** A resource the server can read, included inline as content. Per spec 2025-11-25 §Content, this
+  * is a `Resource` plus a `type: "resource_link"` discriminator. Wire shape matches the full
+  * [[Resource]] fields.
   */
 @jsonHint("resource_link")
 case class ResourceLink(

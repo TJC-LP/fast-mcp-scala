@@ -19,7 +19,11 @@ object MessageLoop:
     * inbound responses (which produce no reply). Never fails: malformed JSON becomes a JSON-RPC
     * parse-error response; dispatch failures are already mapped to error responses by the router.
     */
-  def handleFrame[R](router: McpRouter[R], session: Session, frame: String): URIO[R, Option[String]] =
+  def handleFrame[R](
+      router: McpRouter[R],
+      session: Session,
+      frame: String
+  ): URIO[R, Option[String]] =
     frame.fromJson[JsonRpcMessage] match
       case Right(message) =>
         router.dispatch(session, message).map(_.map(_.toJson))

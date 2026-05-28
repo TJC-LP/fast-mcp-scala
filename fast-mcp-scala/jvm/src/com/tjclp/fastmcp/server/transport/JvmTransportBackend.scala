@@ -16,7 +16,10 @@ import com.tjclp.fastmcp.server.router.{McpRouter, Session}
   */
 object JvmTransportBackend extends TransportBackend:
 
-  override def serveStdio[R](router: McpRouter[R], settings: McpServerSettings): ZIO[R, Throwable, Unit] =
+  override def serveStdio[R](
+      router: McpRouter[R],
+      settings: McpServerSettings
+  ): ZIO[R, Throwable, Unit] =
     for
       session <- Session.make("stdio")
       // One writer owns stdout; both replies and server-pushed outbound go through it so lines
@@ -42,7 +45,10 @@ object JvmTransportBackend extends TransportBackend:
         }
     yield ()
 
-  override def serveHttp[R](router: McpRouter[R], settings: McpServerSettings): ZIO[R, Throwable, Unit] =
+  override def serveHttp[R](
+      router: McpRouter[R],
+      settings: McpServerSettings
+  ): ZIO[R, Throwable, Unit] =
     // Stage B: stateless request/response. Stage D branches on settings.stateless for streamable.
     // Capture the environment ZIO-natively and thread it into each handler via provideEnvironment,
     // so Routes are `Routes[Any]` — Server.serve then needs only `Server`, avoiding the generic-R
@@ -53,8 +59,12 @@ object JvmTransportBackend extends TransportBackend:
         Method.POST / ep -> handler { (request: Request) =>
           handleStatelessPost(router, request).provideEnvironment(env)
         },
-        Method.GET / ep -> handler((_: Request) => ZIO.succeed(Response.status(Status.MethodNotAllowed))),
-        Method.DELETE / ep -> handler((_: Request) => ZIO.succeed(Response.status(Status.MethodNotAllowed)))
+        Method.GET / ep -> handler((_: Request) =>
+          ZIO.succeed(Response.status(Status.MethodNotAllowed))
+        ),
+        Method.DELETE / ep -> handler((_: Request) =>
+          ZIO.succeed(Response.status(Status.MethodNotAllowed))
+        )
       )
       Server
         .serve(routes)
@@ -71,7 +81,9 @@ object JvmTransportBackend extends TransportBackend:
   ): ZIO[R, Nothing, Response] =
     val effect =
       for
-        body <- request.body.asString.mapError(e => Option(e.getMessage).getOrElse("body read error"))
+        body <- request.body.asString.mapError(e =>
+          Option(e.getMessage).getOrElse("body read error")
+        )
         session <- Session.make("stateless")
         reply <- MessageLoop.handleFrame(router, session, body)
       yield reply match

@@ -10,10 +10,10 @@ import com.tjclp.fastmcp.core.{
   Message,
   PromptDefinition,
   ResourceDefinition,
+  TaskSupport,
   TextContent,
   ToolDefinition,
-  ToolExecution,
-  TaskSupport
+  ToolExecution
 }
 import com.tjclp.fastmcp.core.wire.*
 
@@ -22,8 +22,8 @@ import com.tjclp.fastmcp.core.wire.*
   */
 object WireMapping:
 
-  /** [[ToolDefinition]] → wire [[Tool]]. `execution.taskSupport` is emitted only when the server
-    * is task-enabled and the tool opts in (≠ Forbidden).
+  /** [[ToolDefinition]] → wire [[Tool]]. `execution.taskSupport` is emitted only when the server is
+    * task-enabled and the tool opts in (≠ Forbidden).
     */
   def toolToWire(d: ToolDefinition, tasksEnabled: Boolean): Tool =
     val exec =
@@ -62,10 +62,10 @@ object WireMapping:
     Prompt(name = d.name, description = d.description, arguments = d.arguments)
 
   /** Convert a tool handler's untyped result into a [[CallToolResult]]. Ports the old
-    * `FastMcpServer.transformToolResult`: a `String` becomes one `TextContent`, an `Array[Byte]`
-    * a base64 image, a `Content` / `List[Content]` passes through, and anything else degrades to
-    * its `toString`. Tool *failures* never reach here — those are mapped to `isError = true`
-    * separately at the dispatch boundary.
+    * `FastMcpServer.transformToolResult`: a `String` becomes one `TextContent`, an `Array[Byte]` a
+    * base64 image, a `Content` / `List[Content]` passes through, and anything else degrades to its
+    * `toString`. Tool *failures* never reach here — those are mapped to `isError = true` separately
+    * at the dispatch boundary.
     */
   def toolResultToWire(result: Any): CallToolResult =
     val content: List[Content] = result match
@@ -85,7 +85,11 @@ object WireMapping:
   /** Resource read result (`String | Array[Byte]`) → wire [[ResourceContents]]. Text stays text;
     * bytes become a base64 blob.
     */
-  def resourceContentsToWire(uri: String, mimeType: Option[String], body: String | Array[Byte]): ResourceContents =
+  def resourceContentsToWire(
+      uri: String,
+      mimeType: Option[String],
+      body: String | Array[Byte]
+  ): ResourceContents =
     body match
       case s: String => TextResourceContents(uri = uri, text = s, mimeType = mimeType)
       case bytes: Array[Byte] =>
