@@ -219,7 +219,21 @@ Native dispatch kernel. Envelope codec validated standalone (round-trips + struc
 - `server/router/McpRouter.scala` — dispatcher; **capabilities derived from registered handlers (issue #56 fix)**; fork-per-request cancellation
 Whole shared/ tree compiled via scala-cli (zio+zio-json+tapir): **all M2–M4 files clean**; only the 4 macro processors error, due to the platform-split macro support files (`MapToFunctionMacro`/`MacroUtils`) absent from a standalone source set — orthogonal, fine in the real mill build.
 
-### M5 — Built-in handlers + validation middleware (in progress)
-Decode-path note: the typed-contract decoder was Jackson-backed on JVM (`JacksonConversionContext`, deleted M1) and `js.JSON`-backed on JS (`JsMcpDecodeContext`). Per the convergence directive, M5 introduces ONE shared zio-json-based `McpDecodeContext` impl in `shared/codec/`, used by both platforms. tools/call bridges `arguments: Json` → `Map[String,Any]` → manager → `Any` → `CallToolResult` (porting old `transformToolResult`).
+### M5 — Built-in handlers + validation middleware (done, commits 6c6b17d et al.)
+All built-ins + the convergence decode path. Decode path validated standalone (Map[String,Json] → writeValueAsString → zio-json → typed case class). Whole shared/ tree recompiled via scala-cli: every codec + server/router file clean (only the 4 macro processors error — platform-split, orthogonal). New files:
+- `codec/DefaultDecodeContext.scala` — the ONE zio-json `McpDecodeContext`, replaces JVM Jackson + JS `js.JSON`. Args flow as `Json` AST (no Scala null).
+- `codec/McpDecoders.scala` — the ONE `McpDecoder` derivation, promoted from the (already-portable) JS `JsMcpDecoders`.
+- `server/router/WireMapping.scala` — registration-type → wire-type pure maps + `toolResultToWire` (port of `transformToolResult`).
+- `server/router/Builtins.scala` — ping/initialize/initialized/tools/resources/prompts/logging handlers.
+- `server/router/RouterBuilder.scala` — honest-capabilities assembly (handler registered ⇒ capability advertised).
+- `server/router/Validation.scala` — `SchemaValidator` seam (permissive default) + middleware.
+- `server/router/TaskRouting.scala` — `TaskMiddleware` (tasks as middleware, not a transport hack) + `tasks/*` handlers.
+
+Bugs caught by the scala-cli shared compile (all would've surfaced at M8): wire/core wildcard-import shadowing (Scala ranks wildcard imports above same-package-different-file defs — `import core.*` shadowed wire `Tool` with the `@Tool` annotation); `zio.Task` vs `core.Task`; `.mapError` on a UIO; `/*`-in-doc-comment nesting (`prompts/*` opened an unclosed nested comment).
+
+**Convergence status:** shared `codec/` now provides one decoder for both platforms. M7 deletes the JS-specific `codec/JsMcpDecoders.scala` + `codec/JsMcpDecodeContext.scala` and points `ExportsJs`/`ExportsJvm` at the shared ones.
+
+### M6 — Transports (next)
+Shared `StdioTransport`/`HttpTransport` over `McpRouter`; thin platform I/O adapters (JVM ZIO HTTP / Bun.serve). Session.outbound drains to the client (completes the server-initiated push path scaffolded in M4).
 
 Update this section at each milestone boundary.
