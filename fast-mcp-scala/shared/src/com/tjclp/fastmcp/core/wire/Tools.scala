@@ -30,6 +30,11 @@ case class Tool(
     _meta: Option[Map[String, Json]] = None
 )
 
+object Tool:
+  // All field codecs live in their own companions: ToolAnnotations + ToolInputSchema in core
+  // (Types.scala), ToolExecution in core (Tasks.scala), ToolOutputSchema below.
+  given JsonCodec[Tool] = DeriveJsonCodec.gen[Tool]
+
 /** Optional JSON Schema describing the tool's structured output. Stored as an opaque string for
   * the same reasons [[ToolInputSchema]] is — schema authoring lives outside the type system.
   */
@@ -46,6 +51,12 @@ object ToolOutputSchema:
     )
 
   def fromAst(schema: Json): ToolOutputSchema = schema.toJson
+
+  /** Wire codec — embedded JSON Schema object, mirroring [[ToolInputSchema]]. */
+  given JsonCodec[ToolOutputSchema] = JsonCodec(
+    JsonEncoder[Json].contramap[ToolOutputSchema](s => s.fromJson[Json].getOrElse(Json.Obj())),
+    JsonDecoder[Json].map[ToolOutputSchema](_.toJson)
+  )
 
 extension (schema: ToolOutputSchema)
   def toJsonString: String = schema

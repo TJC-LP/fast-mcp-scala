@@ -90,18 +90,22 @@ object BlobResourceContents:
   given JsonCodec[BlobResourceContents] = DeriveJsonCodec.gen[BlobResourceContents]
 
 object ResourceContents:
-  // Hand-rolled in M3: presence-of-`text` vs presence-of-`blob` discrimination. Placeholder
-  // derivation here so the type is summon-able; M3 will replace it.
+  // The spec models ResourceContents as `TextResourceContents | BlobResourceContents` with NO
+  // `type` discriminator — variants are told apart by which of `text` / `blob` is present. So we
+  // hand-roll discrimination over the JSON AST rather than using @jsonDiscriminator.
   given JsonEncoder[ResourceContents] = JsonEncoder[Json].contramap {
-    case t: TextResourceContents => t.toJsonAST.toOption.getOrElse(Json.Obj())
-    case b: BlobResourceContents => b.toJsonAST.toOption.getOrElse(Json.Obj())
+    case t: TextResourceContents => t.toJsonAST.getOrElse(Json.Obj())
+    case b: BlobResourceContents => b.toJsonAST.getOrElse(Json.Obj())
   }
 
   given JsonDecoder[ResourceContents] = JsonDecoder[Json].mapOrFail {
-    case obj: Json.Obj =>
-      val fields = obj.fields.toMap
-      if fields.contains("text") then obj.toString.fromJson[TextResourceContents]
-      else if fields.contains("blob") then obj.toString.fromJson[BlobResourceContents]
-      else Left("ResourceContents requires either `text` or `blob` field")
+    case obj @ Json.Obj(fields) =>
+      val keys = fields.map(_._1)
+      if keys.contains("text") then JsonDecoder[TextResourceContents].fromJsonAST(obj)
+      else if keys.contains("blob") then JsonDecoder[BlobResourceContents].fromJsonAST(obj)
+      else Left("ResourceContents requires either a `text` or `blob` field")
     case other => Left(s"ResourceContents must be a JSON object, got: $other")
   }
+
+  given JsonCodec[ResourceContents] =
+    JsonCodec(summon[JsonEncoder[ResourceContents]], summon[JsonDecoder[ResourceContents]])

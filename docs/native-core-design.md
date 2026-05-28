@@ -179,7 +179,34 @@ Only after M1–M7 are green:
 | 2026-05-27 | Two-track response to #56 | Quick win (PR #58) + this rewrite. |
 | 2026-05-27 | Worktree + branch `tjc-1131-native-mcp-core` | Branched from `main` (98d1097). |
 | 2026-05-27 | TS SDK stays as test-only dep (tentative) | Confirm at M1. |
+| 2026-05-28 | Pacing: **chaotic, re-green at M8 only** | Strip SDKs first; accept a red tree M1→M7; single PR at M8. |
+| 2026-05-28 | Version target **0.5.0** | v0.4.0 already shipped on `main`. Kill `FastMcpServerSettings` alias (honors the deprecation promise originally aimed at 0.4.0). |
+| 2026-05-28 | **No `FastMcpServer`/`JsMcpServer` split** | ONE concrete `McpServer` in `shared/`; platforms contribute only transport adapters via given-based dispatch. Delete `McpServerCore` trait + factory in M7. |
+| 2026-05-28 | TS SDK confirmed test-only | Dropped from production `bunDeps`; returns in `js.test`. |
+| 2026-05-28 | `~/git/typescript-sdk` is the canonical reference | pnpm monorepo: `packages/core/src/types/spec.types.ts` (3250 lines) is the wire-type source of truth; `packages/server` for dispatch. |
 
 ## Working notes
 
-Pending — to be expanded as M1 begins. Update this section at each milestone boundary.
+### M1 — Burn (done, commit 56bcb49)
+Deleted 21 files / ~2240 lines. All Java + TS SDK refs gone from production except `FastMcpServer.scala` / `JsMcpServer.scala` (gutted in M7). Known cascade breakage to clean up later: `ExportsJvm.scala` (re-exports deleted `JacksonConverter` / `JvmToolSchemaProviders` / `McpEncoders`) and `examples/TaskManagerServer.scala` (uses deleted `DeriveJacksonConverter`). `Versions.mcpSdk` + `Versions.jackson3` removed.
+
+### M2 — Schema (done, commits 0c7fead, ef5a944, ad6dfbd)
+Pure-Scala wire types for all 2025-11-25 server-handled messages. **Verified: every new `shared/core` file typechecks clean** (`jvm.compile` errors are all M1 cascade in the two files named above). Layout decision: spec wire types live in `core.wire.*` to avoid colliding with the macro annotation classes in `core` (`@Tool`/`@Resource`/`@Prompt` are top-level `core` types named `Tool`/`Resource`/`Prompt`). New files:
+- `core/Protocol.scala` — version constants, `ErrorCodes`, `Cursor`, `ProgressToken`
+- `core/Logging.scala` — `LoggingLevel` (+severity), `SetLevelRequestParams`, `LoggingMessageNotificationParams`
+- `core/wire/Capabilities.scala` — `Implementation`, `Icon`, server/client capability trees
+- `core/wire/Resources.scala` — `Annotations`, `Resource`, `ResourceTemplate`, `ResourceContents` ADT
+- `core/wire/Tools.scala` — `Tool`, `ToolOutputSchema`
+- `core/wire/Prompts.scala` — `Prompt`, `PromptMessage`
+- `core/wire/Envelopes.scala` — all request-params + result bodies
+- `core/wire/Notifications.scala` — `NotificationMethods` + params
+`Content` ADT in `core/Types.scala` refactored to 2025-11-25 shape (added `AudioContent`, `ResourceLink`; `Annotations` + `_meta` on every variant; dropped `EmbeddedResourceContent`).
+
+### M3 — Codecs (in progress)
+Trivial `DeriveJsonCodec.gen` givens already inlined in M2. M3 narrows to the hard cases:
+- `ResourceContents` text-vs-blob discrimination (no `type` tag — discriminate by which field is present)
+- `ToolInputSchema` / `ToolOutputSchema`: opaque-string ↔ embedded JSON Schema object at the serialization boundary
+- absent-vs-null `_meta` round-trips
+- fixture corpus + round-trip tests in `shared/test`
+
+Update this section at each milestone boundary.

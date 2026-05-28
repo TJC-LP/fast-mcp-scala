@@ -154,11 +154,13 @@ object GetPromptResult:
 @jsonDiscriminator("type")
 sealed trait CompletionReference(@scala.annotation.unused `type`: String)
 
+@jsonHint("ref/prompt")
 case class PromptReference(name: String, title: Option[String] = None)
     extends CompletionReference("ref/prompt")
 object PromptReference:
   given JsonCodec[PromptReference] = DeriveJsonCodec.gen[PromptReference]
 
+@jsonHint("ref/resource")
 case class ResourceTemplateReference(uri: String)
     extends CompletionReference("ref/resource")
 object ResourceTemplateReference:

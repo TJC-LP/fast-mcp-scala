@@ -16,6 +16,9 @@ case class ToolAnnotations(
     returnDirect: Option[Boolean] = None
 )
 
+object ToolAnnotations:
+  given JsonCodec[ToolAnnotations] = DeriveJsonCodec.gen[ToolAnnotations]
+
 // --- Tool Related Types ---
 
 case class ToolExample(
@@ -48,6 +51,17 @@ object ToolInputSchema:
 
   def fromAst(schema: Json): ToolInputSchema =
     schema.toJson
+
+  /** Wire codec: on the JSON-RPC wire `inputSchema` is an embedded JSON Schema *object*, never a
+    * string. We store it as an opaque string, so encode = parse-string-to-AST and decode =
+    * serialize-AST-to-string. Inside this companion the opacity is transparent.
+    */
+  given JsonCodec[ToolInputSchema] = JsonCodec(
+    JsonEncoder[Json].contramap[ToolInputSchema] { s =>
+      s.fromJson[Json].getOrElse(Json.Obj())
+    },
+    JsonDecoder[Json].map[ToolInputSchema](_.toJson)
+  )
 
 extension (schema: ToolInputSchema)
   def toJsonString: String = schema
@@ -124,6 +138,12 @@ object Role:
 //
 // Each variant carries optional [[Annotations]] (audience/priority/lastModified) and `_meta`.
 // `_meta` is `Option[Map[String, Json]]` so absent ≠ null on the wire.
+//
+// IMPORTANT: zio-json's `@jsonDiscriminator` keys off each subtype's `@jsonHint`, NOT the
+// `extends Content("text")` constructor arg (that arg is inert for serialization). Without the
+// hints the wire tag would be the class name (`TextContent`) instead of the spec value (`text`).
+// In the previous Jackson/Java-SDK architecture this codec never touched the wire, so the bug was
+// latent; native dispatch makes it live.
 
 @jsonDiscriminator("type")
 sealed trait Content(@scala.annotation.unused `type`: String)
@@ -131,6 +151,7 @@ sealed trait Content(@scala.annotation.unused `type`: String)
 object Content:
   given JsonCodec[Content] = DeriveJsonCodec.gen[Content]
 
+@jsonHint("text")
 case class TextContent(
     text: String,
     annotations: Option[Annotations] = None,
@@ -140,6 +161,7 @@ case class TextContent(
 object TextContent:
   given JsonCodec[TextContent] = DeriveJsonCodec.gen[TextContent]
 
+@jsonHint("image")
 case class ImageContent(
     data: String,
     mimeType: String,
@@ -150,6 +172,7 @@ case class ImageContent(
 object ImageContent:
   given JsonCodec[ImageContent] = DeriveJsonCodec.gen[ImageContent]
 
+@jsonHint("audio")
 case class AudioContent(
     data: String,
     mimeType: String,
@@ -164,6 +187,7 @@ object AudioContent:
   * this is a `Resource` plus a `type: "resource_link"` discriminator. Wire shape matches the
   * full [[Resource]] fields.
   */
+@jsonHint("resource_link")
 case class ResourceLink(
     uri: String,
     name: String,
@@ -179,6 +203,7 @@ case class ResourceLink(
 object ResourceLink:
   given JsonCodec[ResourceLink] = DeriveJsonCodec.gen[ResourceLink]
 
+@jsonHint("resource")
 case class EmbeddedResource(
     resource: ResourceContents,
     annotations: Option[Annotations] = None,
