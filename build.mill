@@ -228,7 +228,7 @@ object `fast-mcp-scala` extends Module {
     override def bunDeps = Task {
       // TS MCP SDK + Zod are gone from production — native Scala dispatch lives in shared/.
       // The TS SDK is re-introduced as a test-time client in `js.test` for cross-validation.
-      Seq.empty[mill.bun.BunDep]
+      Seq.empty[String]
     }
 
     // bunJsEnv is what BunScalaJSTests uses for the Bun process env

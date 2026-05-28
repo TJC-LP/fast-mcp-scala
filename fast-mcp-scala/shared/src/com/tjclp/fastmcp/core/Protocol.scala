@@ -47,7 +47,8 @@ object Cursor:
   def apply(value: String): Cursor = value
   extension (c: Cursor) def value: String = c
 
-  given JsonCodec[Cursor] = JsonCodec.string.asInstanceOf[JsonCodec[Cursor]]
+  // Inside the companion the opacity is transparent, so a String codec IS a Cursor codec.
+  given JsonCodec[Cursor] = JsonCodec.string
 
 /** Token identifying an in-flight request for progress correlation. Wire shape is `string |
   * number`.
