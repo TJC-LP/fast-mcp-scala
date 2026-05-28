@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-28
+
+Highlights: **the entire MCP protocol layer is now native pure-Scala 3** — both
+vendored SDKs are gone from the production classpath. The JSON-RPC core, wire
+types, router, built-in handlers, middleware, and the Tasks state machine all
+live in `shared/`; the JVM and Scala.js modules contribute only a single
+`given TransportBackend`. User-facing API (`@Tool`, `McpTool.derived`,
+`McpServer.typed[R]`) is unchanged.
+
+### Changed
+
+- **BREAKING — native MCP core; both SDKs removed from production.** The Java MCP
+  SDK (`mcp-core` + `mcp-json-jackson3`) and Jackson are removed from the JVM
+  classpath, and the TypeScript `@modelcontextprotocol/sdk` is removed from the
+  JS production bundle (it stays as a test-time conformance client). Wire
+  (de)serialization is ZIO JSON on both platforms.
+- **One `McpServer[R]` for both platforms.** The per-platform `FastMcpServer`
+  (JVM) and `JsMcpServer` (JS) are replaced by a single `shared/` `McpServer`;
+  each platform supplies only a `TransportBackend` given.
+- **Capabilities are derived from the registered handler map.** A capability is
+  advertised only when its handler is wired — so `logging` is no longer
+  advertised unless a logging handler exists (the root cause of #56).
+- **Tool handler failures now surface as `CallToolResult { isError: true }`**
+  (with the message as text content) instead of a JSON-RPC protocol error, per
+  the MCP spec. An unknown tool name still returns a protocol error.
+- **Spec target is 2025-11-25.** Pre-2025-06-18 wire support is dropped.
+- Transports, native: stdio + stateless HTTP + streamable HTTP (durable sessions,
+  SSE, DELETE) on the JVM via pure ZIO HTTP (no `Unsafe`/Mono bridge); `Bun.serve`
+  + Node stdio on Scala.js. The streamable `GET` SSE *push* channel is JVM-only
+  for now; the JS transport returns `405` for `GET` (spec-allowed).
+
+### Removed
+
+- The deprecated `FastMcpServerSettings` alias (use `McpServerSettings`).
+- Stale GraalVM native-image reachability metadata (it described the removed
+  Java SDK + Jackson reflection). Regenerate with the `native-image-agent`
+  against a native-core server if you build native images.
+
+### Fixed
+
+- **#56** — the server no longer advertises a `logging` capability when no
+  logging handler is registered, on every transport (stdio, stateless HTTP,
+  streamable HTTP). Verified end-to-end on both platforms.
+- `tasks/list` with no `params` now decodes (optional cursor) instead of failing
+  with `-32602`.
+
 ## [0.4.0] - 2026-05-27
 
 Highlights: a type-safety overhaul that threads the ZIO environment `R`

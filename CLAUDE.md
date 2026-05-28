@@ -201,27 +201,30 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
 
 **Transport limitations**:
 
-- **JVM**: Tasks work **only** on `runHttp()` with `stateless = false` (the default streamable transport). `runStdio()` and `runHttp()` with `stateless = true` fail-fast at startup with `IllegalStateException` because the underlying Java MCP SDK 1.1.1 has no tasks support — fast-mcp-scala intercepts dispatch in its own ZIO HTTP transport.
-- **JS** (Bun): Tasks work on `runHttp()` (both stateful and stateless). `runStdio()` rejects task-enabled servers at startup.
+- Tasks dispatch is native **router middleware** (no transport-layer special-casing) on both platforms.
+- **JVM** and **JS**: Tasks require `runHttp()` with `stateless = false` (the default streamable transport) — a task's create→poll lifecycle needs the durable session that only the streamable transport keeps. stdio and stateless HTTP have no per-session task store to poll.
 
 The `tasks` capability is advertised on `initialize` only when `settings.tasks.enabled` is true. The `execution.taskSupport` field is injected on `tools/list` entries that opt in.
 
 ### Cross-Platform Architecture
 
 The codebase is split into three sibling trees under `fast-mcp-scala/`:
-- `shared/` — annotations, types, managers, `McpServerCore` trait, typed contracts
-- `jvm/` — Java SDK interop (`TypeConversions`, `JvmMcpContext`), macros, transports, examples
-- `js/` — Bun-first Scala.js runtime (`JsMcpServer`), TS SDK facades, examples, tests
+- `shared/` — the entire native MCP core: annotations, wire types, JSON-RPC, ZIO JSON codecs, the router + built-in handlers + middleware, `McpServer[R]` + `McpServerCore`, typed contracts, and the `TransportBackend` seam
+- `jvm/` — the JVM `TransportBackend` (ZIO HTTP + `System.in`/`System.out`), the schema-derivation macros, and examples
+- `js/` — the Scala.js `TransportBackend` (`Bun.serve` + Node stdio), small JS facades, and examples
 
-JVM module reads from `shared/src/ + jvm/src/`. JS module reads from `shared/src/ + js/src/`.
+JVM module reads from `shared/src/ + jvm/src/`. JS module reads from `shared/src/ + js/src/` (plus the compile-time-only schema macros under `jvm/src/.../macros`).
 
-### Java SDK Interop
+### Native MCP core (no vendored SDK)
 
-fast-mcp-scala wraps the Java MCP SDK 1.1.1 (`mcp-core` + `mcp-json-jackson3`). Interop is internal:
-- `TypeConversions` — `private[fastmcp]` extension methods (`.toJava`)
-- `JvmMcpContext` — `private[fastmcp]`, extends `McpContext`
-- `JacksonConverter extends McpDecoder` — bridges JVM converters to shared codec layer
-- `JacksonConversionContext extends McpDecodeContext` — Jackson 3 backed
+As of 0.5.0 there is **no wrapped SDK** — the MCP protocol layer is pure Scala 3 in `shared/`:
+- `jsonrpc/` — `JsonRpcMessage` + `McpError` (the JSON-RPC 2.0 envelope)
+- `core/wire/` + `core/Types.scala` — the 2025-11-25 wire types with ZIO JSON codecs
+- `server/router/` — `McpRouter`, `Builtins`, `Middleware`, `RouterBuilder`, `WireMapping`, Tasks
+- `codec/` — `DefaultDecodeContext` + `McpDecoders` (one ZIO JSON decode path for both platforms)
+- `server/transport/` — `TransportBackend` (the platform seam) + `MessageLoop` (parse → dispatch → encode)
+
+Each platform provides exactly one `given TransportBackend` (`JvmTransportBackend` / `JsTransportBackend`); everything else is shared. The TypeScript `@modelcontextprotocol/sdk` is used only as a test-time conformance client.
 
 ## Code Quality
 
@@ -279,7 +282,7 @@ rm -rf out/fast-mcp-scala && ./mill fast-mcp-scala.compile
 ./mill -i __.publishLocal
 ```
 
-Then in your project use version `0.4.0`.
+Then in your project use version `0.5.0-SNAPSHOT`.
 
 ## Dependencies
 
@@ -288,10 +291,8 @@ Key dependencies (versions in `build.mill`):
 - ZIO 2.1.20 - Effect system
 - ZIO JSON 0.7.44 - JSON codecs (shared)
 - ZIO HTTP 3.4.0 - HTTP transport
-- Jackson 3.0.3 (`tools.jackson`) - Runtime conversion (JVM)
-- Tapir 1.11.42 - Schema derivation
-- Java MCP SDK 1.1.1 - Protocol implementation (`mcp-core` + `mcp-json-jackson3`)
+- Tapir 1.11.42 - Compile-time JSON Schema derivation
 - mill-bun-plugin 0.2.0 - Scala.js + Bun build integration
-- `@modelcontextprotocol/sdk` 1.29.0 - TS MCP SDK (JS runtime + conformance tests)
+- `@modelcontextprotocol/sdk` 1.29.0 - TS MCP SDK (test-time conformance client only)
 - WartRemover 3.5.6 - Code quality
 - ScalaTest 3.2.19 - Testing
