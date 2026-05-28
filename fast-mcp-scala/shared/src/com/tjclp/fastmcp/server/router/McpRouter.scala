@@ -59,23 +59,11 @@ final class McpRouter[R](
     * present only when its handler is wired.
     */
   val capabilities: ServerCapabilities =
-    val lc = if listChanged then Some(true) else None
-    ServerCapabilities(
-      tools = Option.when(requestHandlers.contains(Methods.ToolsList))(ToolsCapability(listChanged = lc)),
-      resources = Option.when(requestHandlers.contains(Methods.ResourcesList))(
-        ResourcesCapability(
-          subscribe = Option.when(resourcesSubscribe)(true),
-          listChanged = lc
-        )
-      ),
-      prompts = Option.when(requestHandlers.contains(Methods.PromptsList))(PromptsCapability(listChanged = lc)),
-      completions = Option.when(requestHandlers.contains(Methods.CompletionComplete))(Json.Obj()),
-      logging = Option.when(requestHandlers.contains(Methods.LoggingSetLevel))(Json.Obj()),
-      tasks = Option.when(tasksEnabled)(
-        ServerTasksCapability(requests =
-          Some(ServerTasksRequests(tools = Some(ServerTasksToolsRequest(call = Some(Json.Obj())))))
-        )
-      )
+    McpRouter.deriveCapabilities(
+      requestHandlers.keySet,
+      tasksEnabled,
+      resourcesSubscribe,
+      listChanged
     )
 
   /** Dispatch one inbound message. Never fails — handler errors become JSON-RPC error responses.
@@ -137,3 +125,32 @@ final class McpRouter[R](
           case Some(reqId) => session.cancelInflight(reqId)
           case None => ZIO.unit
       case Left(_) => ZIO.unit
+
+object McpRouter:
+
+  /** Derive [[ServerCapabilities]] from the set of registered request-method names plus settings.
+    * Shared by the router instance and the `initialize` built-in so both report identical caps.
+    * The crux of issue #56: `logging` appears only when `logging/setLevel` is registered.
+    */
+  def deriveCapabilities(
+      methods: Set[String],
+      tasksEnabled: Boolean,
+      resourcesSubscribe: Boolean,
+      listChanged: Boolean
+  ): ServerCapabilities =
+    val lc = Option.when(listChanged)(true)
+    ServerCapabilities(
+      tools = Option.when(methods.contains(Methods.ToolsList))(ToolsCapability(listChanged = lc)),
+      resources = Option.when(methods.contains(Methods.ResourcesList))(
+        ResourcesCapability(subscribe = Option.when(resourcesSubscribe)(true), listChanged = lc)
+      ),
+      prompts =
+        Option.when(methods.contains(Methods.PromptsList))(PromptsCapability(listChanged = lc)),
+      completions = Option.when(methods.contains(Methods.CompletionComplete))(Json.Obj()),
+      logging = Option.when(methods.contains(Methods.LoggingSetLevel))(Json.Obj()),
+      tasks = Option.when(tasksEnabled)(
+        ServerTasksCapability(requests =
+          Some(ServerTasksRequests(tools = Some(ServerTasksToolsRequest(call = Some(Json.Obj())))))
+        )
+      )
+    )

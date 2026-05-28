@@ -210,7 +210,16 @@ Trivial `DeriveJsonCodec.gen` givens inlined in M2; M3 did the hard cases and **
 - absent-vs-null `_meta`: confirmed zio-json omits `None` fields (no `null` emitted) by default — no special handling needed.
 Regression net: `jvm/test/.../core/wire/WireCodecRoundTripTest.scala`.
 
-### M4 — JSON-RPC core + router + middleware (in progress)
-Reference: `~/git/typescript-sdk/packages/core/src/shared/protocol.ts` + `packages/server/src/`. Target package: `shared/src/com/tjclp/fastmcp/jsonrpc/` (envelope + error) and `shared/src/com/tjclp/fastmcp/server/router/` (router, session, middleware).
+### M4 — JSON-RPC core + router + middleware (done, commit pending push)
+Native dispatch kernel. Envelope codec validated standalone (round-trips + structural discrimination all pass). **Caught a second latent bug: `Json.Num` wraps `java.math.BigDecimal` (no `.isWhole`/`.toLong`) — fixed in `JsonRpc.scala` RequestId AND `Protocol.scala` ProgressToken.** New files:
+- `jsonrpc/JsonRpc.scala` — `RequestId`, `JsonRpcErrorObject`, `JsonRpcMessage` ADT (Request/Notification/Success/Failure), hand-rolled structural codec
+- `jsonrpc/McpError.scala` — error ADT (subsumes deleted `ErrorMapper`)
+- `server/router/Session.scala` — per-connection state + in-flight fiber registry + outbound queue
+- `server/router/Middleware.scala` — `RequestHandler`/`NotificationHandler`, `Middleware` chain, `ServerHooks`
+- `server/router/McpRouter.scala` — dispatcher; **capabilities derived from registered handlers (issue #56 fix)**; fork-per-request cancellation
+Whole shared/ tree compiled via scala-cli (zio+zio-json+tapir): **all M2–M4 files clean**; only the 4 macro processors error, due to the platform-split macro support files (`MapToFunctionMacro`/`MacroUtils`) absent from a standalone source set — orthogonal, fine in the real mill build.
+
+### M5 — Built-in handlers + validation middleware (in progress)
+Decode-path note: the typed-contract decoder was Jackson-backed on JVM (`JacksonConversionContext`, deleted M1) and `js.JSON`-backed on JS (`JsMcpDecodeContext`). Per the convergence directive, M5 introduces ONE shared zio-json-based `McpDecodeContext` impl in `shared/codec/`, used by both platforms. tools/call bridges `arguments: Json` → `Map[String,Any]` → manager → `Any` → `CallToolResult` (porting old `transformToolResult`).
 
 Update this section at each milestone boundary.
