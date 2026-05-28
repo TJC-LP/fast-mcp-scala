@@ -78,6 +78,16 @@ object WireMapping:
       case other => List(TextContent(other.toString))
     CallToolResult(content = content, isError = Some(false))
 
+  /** Convert a tool *execution* failure into an error [[CallToolResult]] (`isError = true`) with
+    * the message as text content. Per the MCP spec, a handler that throws surfaces as a tool result
+    * with `isError = true`, not as a JSON-RPC protocol error.
+    */
+  def toolErrorToWire(error: Throwable): CallToolResult =
+    CallToolResult(
+      content = List(TextContent(Option(error.getMessage).getOrElse(error.toString))),
+      isError = Some(true)
+    )
+
   /** Prompt handler result (`List[Message]`) → wire [[PromptMessage]] list. */
   def promptMessagesToWire(messages: List[Message]): List[PromptMessage] =
     messages.map(m => PromptMessage(role = m.role, content = m.content))

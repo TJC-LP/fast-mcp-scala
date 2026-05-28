@@ -15,6 +15,7 @@ import zio.json.*
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.facades.runtime.BunServer
 import com.tjclp.fastmcp.server.TaskSettings
+import com.tjclp.fastmcp.server.transport.{startStatefulHttp, startStatelessHttp}
 
 /** Exercises `JsMcpServer.runHttp()` end-to-end over Bun's HTTP server. Uses the global `fetch`
   * API to POST a JSON-RPC initialize + tools/list pair against the running server. No TS SDK

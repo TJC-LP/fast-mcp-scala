@@ -8,7 +8,12 @@ import com.tjclp.fastmcp.core.{Protocol, SetLevelRequestParams}
 import com.tjclp.fastmcp.core.wire.*
 import com.tjclp.fastmcp.jsonrpc.McpError
 import com.tjclp.fastmcp.server.McpContext
-import com.tjclp.fastmcp.server.manager.{PromptManager, ResourceManager, ToolManager}
+import com.tjclp.fastmcp.server.manager.{
+  PromptManager,
+  ResourceManager,
+  ToolManager,
+  ToolNotFoundError
+}
 
 /** The built-in MCP request/notification handlers, parameterized on the server environment `R`.
   *
@@ -81,10 +86,14 @@ final class Builtins[R](
         case Some(Json.Obj(fields)) => fields.toMap
         case _ => Map.empty[String, Any]
       ctx <- contextFor(session)
-      result <- toolManager
-        .callTool(req.name, args, Some(ctx))
-        .mapError(McpError.fromThrowable)
-      json <- ok(WireMapping.toolResultToWire(result))
+      outcome <- toolManager.callTool(req.name, args, Some(ctx)).either
+      json <- outcome match
+        case Right(result) => ok(WireMapping.toolResultToWire(result))
+        // Unknown tool is bad input (protocol error); a handler that threw is a tool-level failure
+        // surfaced as an error result (isError = true), per the MCP spec.
+        case Left(_: ToolNotFoundError) =>
+          ZIO.fail(McpError.invalidParams(s"Unknown tool: ${req.name}"))
+        case Left(err) => ok(WireMapping.toolErrorToWire(err))
     yield json
 
   // ---- resources ----

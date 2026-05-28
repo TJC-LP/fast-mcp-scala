@@ -8,13 +8,13 @@ import com.tjclp.fastmcp.core.{Content, ImageContent, McpDecoder, McpEncoder}
 
 class JsMcpDecodeContextTest extends AnyFunSuite:
 
-  import JsMcpDecoders.given
+  import McpDecoders.given
 
   case class Add(a: Int, b: Int) derives JsonDecoder
   case class User(id: String, profile: UserProfile) derives JsonDecoder
   case class UserProfile(name: String, age: Int) derives JsonDecoder
 
-  private val ctx = JsMcpDecodeContext.default
+  private val ctx = DefaultDecodeContext.default
 
   test("writeValueAsString round-trips a Scala Map via js.JSON") {
     val map = Map("a" -> 2, "b" -> 3)

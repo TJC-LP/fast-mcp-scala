@@ -29,6 +29,9 @@ object AnnotatedServer extends McpServerApp[Stdio, AnnotatedServer.type]:
 
   override def name: String = "MacroAnnotatedServer"
 
+  // Expose the templated resource via resources/templates/list so clients can discover it.
+  override def settings: McpServerSettings = McpServerSettings(exposeTemplatesEndpoint = true)
+
   // JSON codec for the result
   given JsonEncoder[CalculatorResult] = DeriveJsonEncoder.gen[CalculatorResult]
 

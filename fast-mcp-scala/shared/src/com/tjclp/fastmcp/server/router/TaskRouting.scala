@@ -114,7 +114,13 @@ final class TaskHandlers[R](taskManager: TaskManager[R]):
     ZIO.succeed(value.toJsonAST.getOrElse(Json.Obj()))
 
   private def decodeParams[A: JsonDecoder](params: Json, ctx: String): IO[McpError, A] =
-    ZIO.fromEither(params.as[A]).mapError(err => McpError.invalidParams(s"$ctx: $err"))
+    // A request may omit `params` entirely (arrives as Json.Null). Treat that as an empty object so
+    // handlers with all-optional params (e.g. tasks/list's cursor) decode to their defaults;
+    // required-field handlers (tasks/get/cancel/result) still fail with a clear "missing field".
+    val normalized = params match
+      case Json.Null => Json.Obj()
+      case other => other
+    ZIO.fromEither(normalized.as[A]).mapError(err => McpError.invalidParams(s"$ctx: $err"))
 
   val get: RequestHandler[R] = (session, params) =>
     for
