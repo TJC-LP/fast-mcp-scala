@@ -36,23 +36,47 @@ object JvmTransportBackend extends TransportBackend:
       // never interleave.
       outLock <- Semaphore.make(1)
       emit = (line: String) => outLock.withPermit(writeLine(line))
-      // Drain server-initiated messages (log/progress notifications) to stdout.
+      inLines =
+        ZStream
+          .fromInputStream(java.lang.System.in)
+          .via(ZPipeline.utf8Decode)
+          .via(ZPipeline.splitLines)
+          .map(_.trim)
+          .filter(_.nonEmpty)
+      _ <- stdioLoop(router, session, inLines, emit)
+    yield ()
+
+  /** The stdio dispatch loop, factored out of [[serveStdio]] so it can be driven over in-memory
+    * streams in tests (no real `System.in`/`System.out`).
+    *
+    * Spawns the outbound drainer (server→client pushes) and consumes each inbound line, dispatching
+    * **each frame in its own fiber** so the read loop keeps consuming while a handler is blocked —
+    * e.g. a tool awaiting a server→client roots/list or sampling response, whose reply is itself a
+    * *later* inbound frame. Sequential dispatch deadlocks such handlers (and a `notifications/
+    * cancelled` arriving mid-request). `emit` serializes writes, so forked replies never
+    * interleave.
+    */
+  private[fastmcp] def stdioLoop[R](
+      router: McpRouter[R],
+      session: Session,
+      inLines: ZStream[Any, Throwable, String],
+      emit: String => Task[Unit]
+  ): ZIO[R, Throwable, Unit] =
+    for
       _ <- session.outbound.take
         .flatMap(msg => emit(MessageLoop.encodeOutbound(msg)))
         .forever
         .forkDaemon
-      _ <- ZStream
-        .fromInputStream(java.lang.System.in)
-        .via(ZPipeline.utf8Decode)
-        .via(ZPipeline.splitLines)
-        .map(_.trim)
-        .filter(_.nonEmpty)
-        .runForeach { line =>
-          MessageLoop.handleFrame(router, session, line).flatMap {
+      _ <- inLines.runForeach { line =>
+        MessageLoop
+          .handleFrame(router, session, line)
+          .flatMap {
             case Some(reply) => emit(reply)
             case None => ZIO.unit
           }
-        }
+          .forkDaemon
+          .unit
+      }
     yield ()
 
   override def serveHttp[R](
