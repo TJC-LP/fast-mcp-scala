@@ -7,7 +7,7 @@ import zio.json.ast.Json
 import com.tjclp.fastmcp.core.{Protocol, SetLevelRequestParams}
 import com.tjclp.fastmcp.core.wire.*
 import com.tjclp.fastmcp.jsonrpc.McpError
-import com.tjclp.fastmcp.server.McpContext
+import com.tjclp.fastmcp.server.{CompletionHandler, McpContext}
 import com.tjclp.fastmcp.server.manager.{
   PromptManager,
   ResourceManager,
@@ -33,7 +33,8 @@ final class Builtins[R](
     promptManager: PromptManager[R],
     resourceManager: ResourceManager[R],
     tasksEnabled: Boolean,
-    exposeTemplates: Boolean
+    exposeTemplates: Boolean,
+    completionHandler: Option[CompletionHandler[R]] = None
 ):
 
   /** Helper: decode `params` into `A`, failing with InvalidParams. */
@@ -151,6 +152,24 @@ final class Builtins[R](
       _ <- session.setLogLevel(req.level)
       json <- ok(EmptyResult())
     yield json
+
+  // ---- completion ----
+
+  /** `completion/complete` — argument autocompletion. Registered only when a completion provider is
+    * wired (so the `completions` capability stays honest); the `None` branch is therefore
+    * defensive.
+    */
+  val complete: RequestHandler[R] = (session, params) =>
+    completionHandler match
+      case None =>
+        ZIO.fail(McpError.methodNotFound(Methods.CompletionComplete))
+      case Some(handler) =>
+        for
+          req <- decodeParams[CompleteRequestParams](params, "completion/complete")
+          ctx <- contextFor(session)
+          completion <- handler(req, Some(ctx)).mapError(McpError.fromThrowable)
+          json <- ok(CompleteResult(completion = completion))
+        yield json
 
   /** Build an [[McpContext]] for the current request, bound to its session (so handlers can push
     * log/progress notifications) and snapshotting the client info/capabilities captured at

@@ -16,11 +16,16 @@ case class Implementation(
 object Implementation:
   given JsonCodec[Implementation] = DeriveJsonCodec.gen[Implementation]
 
-/** Optional UI icon attached to an [[Implementation]] or other metadata-bearing wire types. */
+/** Optional UI icon attached to an [[Implementation]] or other metadata-bearing wire types.
+  *
+  * `sizes` is a list of size strings (e.g. `["48x48", "96x96"]`) per spec; `theme` (DRAFT-2026) is
+  * an optional `"light"`/`"dark"` display hint.
+  */
 case class Icon(
     src: String,
     mimeType: Option[String] = None,
-    sizes: Option[String] = None
+    sizes: Option[List[String]] = None,
+    theme: Option[String] = None
 )
 
 object Icon:

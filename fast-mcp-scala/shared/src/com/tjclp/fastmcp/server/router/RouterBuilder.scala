@@ -2,7 +2,7 @@ package com.tjclp.fastmcp.server.router
 
 import com.tjclp.fastmcp.core.Tasks
 import com.tjclp.fastmcp.core.wire.Implementation
-import com.tjclp.fastmcp.server.McpServerSettings
+import com.tjclp.fastmcp.server.{CompletionHandler, McpServerSettings}
 import com.tjclp.fastmcp.server.manager.{PromptManager, ResourceManager, TaskManager, ToolManager}
 
 /** Assembles an [[McpRouter]] from the populated managers + settings.
@@ -24,6 +24,7 @@ object RouterBuilder:
       resourceManager: ResourceManager[R],
       settings: McpServerSettings,
       taskManager: Option[TaskManager[R]] = None,
+      completionHandler: Option[CompletionHandler[R]] = None,
       validator: SchemaValidator = SchemaValidator.permissive,
       extraMiddlewares: List[Middleware[R]] = Nil,
       hooks: ServerHooks[R] = ServerHooks.noop[R],
@@ -37,6 +38,7 @@ object RouterBuilder:
     val hasTemplates = resourceDefs.exists(_.isTemplate)
     val hasResources = hasStatic || hasTemplates
     val hasPrompts = promptManager.listDefinitions().nonEmpty
+    val hasCompletion = completionHandler.isDefined
     val exposeTemplates = hasTemplates && settings.exposeTemplatesEndpoint
 
     // Which request methods this server will answer — drives capability derivation.
@@ -47,6 +49,7 @@ object RouterBuilder:
         .getOrElse(Set.empty) ++
       Option.when(exposeTemplates)(Set(Methods.ResourcesTemplatesList)).getOrElse(Set.empty) ++
       Option.when(hasPrompts)(Set(Methods.PromptsList, Methods.PromptsGet)).getOrElse(Set.empty) ++
+      Option.when(hasCompletion)(Set(Methods.CompletionComplete)).getOrElse(Set.empty) ++
       Option.when(loggingEnabled)(Set(Methods.LoggingSetLevel)).getOrElse(Set.empty)
 
     val resourcesSubscribe = false // subscribe handlers not implemented yet
@@ -63,7 +66,8 @@ object RouterBuilder:
       promptManager = promptManager,
       resourceManager = resourceManager,
       tasksEnabled = tasksOn,
-      exposeTemplates = exposeTemplates
+      exposeTemplates = exposeTemplates,
+      completionHandler = completionHandler
     )
 
     val taskHandlers = taskManager.map(tm => new TaskHandlers[R](tm))
@@ -93,6 +97,8 @@ object RouterBuilder:
            )
          else Map.empty) ++
         (if loggingEnabled then Map(Methods.LoggingSetLevel -> builtins.loggingSetLevel)
+         else Map.empty) ++
+        (if hasCompletion then Map(Methods.CompletionComplete -> builtins.complete)
          else Map.empty) ++
         (taskHandlers match
           case Some(th) if tasksOn =>

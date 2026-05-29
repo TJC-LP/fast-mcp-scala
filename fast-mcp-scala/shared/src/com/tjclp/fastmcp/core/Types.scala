@@ -3,7 +3,7 @@ package com.tjclp.fastmcp.core
 import zio.json.*
 import zio.json.ast.Json
 
-import com.tjclp.fastmcp.core.wire.{Annotations, Icon, ResourceContents}
+import com.tjclp.fastmcp.core.wire.{Annotations, Icon, ResourceContents, ToolOutputSchema}
 
 // --- Tool Annotations (MCP behavioral hints for clients) ---
 
@@ -86,7 +86,8 @@ case class ToolDefinition(
     tags: List[String] = List.empty,
     timeoutMillis: Option[Long] = None,
     annotations: Option[ToolAnnotations] = None,
-    taskSupport: Option[TaskSupport] = None
+    taskSupport: Option[TaskSupport] = None,
+    outputSchema: Option[ToolOutputSchema] = None
 ):
 
   /** Effective task-support resolution: `None` (unspecified) is treated as
@@ -99,7 +100,8 @@ case class ToolDefinition(
 case class PromptArgument(
     name: String,
     description: Option[String],
-    required: Boolean = false
+    required: Boolean = false,
+    title: Option[String] = None
 )
 
 object PromptArgument:

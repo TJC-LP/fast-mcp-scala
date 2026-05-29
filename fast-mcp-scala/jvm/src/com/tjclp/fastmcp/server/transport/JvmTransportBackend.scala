@@ -7,6 +7,7 @@ import zio.*
 import zio.http.*
 import zio.stream.*
 
+import com.tjclp.fastmcp.core.Protocol
 import com.tjclp.fastmcp.server.McpServerSettings
 import com.tjclp.fastmcp.server.router.{McpRouter, Session}
 
@@ -118,6 +119,14 @@ object JvmTransportBackend extends TransportBackend:
       router: McpRouter[R],
       request: Request
   ): ZIO[R, Nothing, Response] =
+    postHeaderError(request) match
+      case Some(err) => ZIO.succeed(err)
+      case None => statelessDispatch(router, request)
+
+  private def statelessDispatch[R](
+      router: McpRouter[R],
+      request: Request
+  ): ZIO[R, Nothing, Response] =
     val effect =
       for
         body <- request.body.asString.mapError(e =>
@@ -168,6 +177,15 @@ object JvmTransportBackend extends TransportBackend:
       store: Ref[Map[String, Session]],
       request: Request
   ): ZIO[R, Nothing, Response] =
+    postHeaderError(request) match
+      case Some(err) => ZIO.succeed(err)
+      case None => streamablePostDispatch(router, store, request)
+
+  private def streamablePostDispatch[R](
+      router: McpRouter[R],
+      store: Ref[Map[String, Session]],
+      request: Request
+  ): ZIO[R, Nothing, Response] =
     request.body.asString.either.flatMap {
       case Left(err) =>
         ZIO.succeed(
@@ -197,6 +215,14 @@ object JvmTransportBackend extends TransportBackend:
     * `DELETE`d (queue shutdown) or the client disconnects.
     */
   private def handleStreamableGet(
+      store: Ref[Map[String, Session]],
+      request: Request
+  ): ZIO[Any, Nothing, Response] =
+    getHeaderError(request) match
+      case Some(err) => ZIO.succeed(err)
+      case None => streamableGetDispatch(store, request)
+
+  private def streamableGetDispatch(
       store: Ref[Map[String, Session]],
       request: Request
   ): ZIO[Any, Nothing, Response] =
@@ -249,6 +275,37 @@ object JvmTransportBackend extends TransportBackend:
         val resp = Response.json(json)
         if isNew then resp.addHeader(Header.Custom(SessionIdHeader, session.sessionId)) else resp
       case None => Response.status(Status.Accepted)
+
+  // --- Header validation (validate `Accept` + `mcp-protocol-version`; lenient when absent, so
+  // header-less clients still work while clearly-wrong headers are rejected per spec). ---
+
+  private def acceptsAny(req: Request, types: List[String]): Boolean =
+    req.rawHeader("accept") match
+      case None => true // absent Accept is treated as "accepts anything"
+      case Some(a) =>
+        val lower = a.toLowerCase
+        lower.contains("*/*") || types.exists(lower.contains)
+
+  private def protocolVersionOk(req: Request): Boolean =
+    req.rawHeader("mcp-protocol-version").forall(Protocol.SupportedProtocolVersions.contains)
+
+  /** POST guard: `Accept` (if present) must allow `application/json`; `mcp-protocol-version` (if
+    * present) must be supported.
+    */
+  private def postHeaderError(req: Request): Option[Response] =
+    if !protocolVersionOk(req) then
+      Some(errorResponse(Status.BadRequest, "Unsupported mcp-protocol-version header"))
+    else if !acceptsAny(req, List("application/json", "application/*")) then
+      Some(errorResponse(Status.NotAcceptable, "Accept must allow application/json"))
+    else None
+
+  /** GET guard (SSE channel): `Accept` (if present) must allow `text/event-stream`. */
+  private def getHeaderError(req: Request): Option[Response] =
+    if !protocolVersionOk(req) then
+      Some(errorResponse(Status.BadRequest, "Unsupported mcp-protocol-version header"))
+    else if !acceptsAny(req, List("text/event-stream", "text/*")) then
+      Some(errorResponse(Status.NotAcceptable, "Accept must allow text/event-stream"))
+    else None
 
   private def errorResponse(status: Status, message: String): Response =
     Response.text(message).status(status)

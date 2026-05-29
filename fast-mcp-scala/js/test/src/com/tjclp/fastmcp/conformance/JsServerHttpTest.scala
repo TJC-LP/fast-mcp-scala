@@ -130,6 +130,19 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     }
   }
 
+  it should "reject POST with a non-JSON Accept (406)" in {
+    serverReady.flatMap { _ =>
+      httpFetch(
+        "/mcp",
+        js.Dynamic.literal(
+          method = "POST",
+          headers = js.Dictionary("accept" -> "text/plain"),
+          body = "{}"
+        )
+      ).map(resp => resp.status.asInstanceOf[Int] shouldBe 406)
+    }
+  }
+
   it should "return 404 for unknown paths" in {
     serverReady.flatMap { _ =>
       httpFetch("/other", js.Dynamic.literal(method = "POST", body = "{}"))

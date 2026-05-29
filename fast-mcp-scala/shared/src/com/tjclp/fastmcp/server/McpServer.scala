@@ -5,10 +5,18 @@ import zio.*
 
 import com.tjclp.fastmcp.codec.DefaultDecodeContext
 import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.core.wire.Implementation
+import com.tjclp.fastmcp.core.wire.{CompleteRequestParams, Completion, Implementation}
 import com.tjclp.fastmcp.server.manager.*
 import com.tjclp.fastmcp.server.router.{McpRouter, RouterBuilder}
 import com.tjclp.fastmcp.server.transport.TransportBackend
+
+/** A completion provider for `completion/complete` (argument autocompletion): given the request
+  * (ref + argument + optional context), return candidate values. Registered via
+  * [[McpServer.completion]]; when one is registered the server advertises the `completions`
+  * capability and routes `completion/complete` to it.
+  */
+type CompletionHandler[R] =
+  (CompleteRequestParams, Option[McpContext]) => ZIO[R, Throwable, Completion]
 
 /** The single, platform-neutral MCP server.
   *
@@ -37,6 +45,11 @@ final class McpServer[R](
   val toolManager: ToolManager[R] = new ToolManager[R]()
   val resourceManager: ResourceManager[R] = new ResourceManager[R]()
   val promptManager: PromptManager[R] = new PromptManager[R]()
+
+  // Optional argument-completion provider; when set, `completion/complete` is wired and the
+  // `completions` capability is advertised. (Single handler, so a plain atomic holder, not a manager.)
+  private val completionRef =
+    new java.util.concurrent.atomic.AtomicReference[Option[CompletionHandler[R]]](None)
 
   // --- Registration (the trait's overloads delegate to these four abstracts) ---
 
@@ -77,6 +90,15 @@ final class McpServer[R](
       .addPrompt(definition.name, handler.asInstanceOf[PromptHandler[R]], definition)
       .as(this)
 
+  /** Register the `completion/complete` argument-completion provider. Advertises the `completions`
+    * capability and routes completion requests to `handler`.
+    */
+  def completion[R1 >: R](handler: CompletionHandler[R1]): ZIO[Any, Throwable, McpServerCore[R]] =
+    ZIO.succeed {
+      completionRef.set(Some(handler.asInstanceOf[CompletionHandler[R]]))
+      this
+    }
+
   // --- Lifecycle ---
 
   /** Build the immutable router from the (now-populated) managers + settings. Allocates a
@@ -94,7 +116,8 @@ final class McpServer[R](
         promptManager = promptManager,
         resourceManager = resourceManager,
         settings = settings,
-        taskManager = tm
+        taskManager = tm,
+        completionHandler = completionRef.get()
       )
     }
 

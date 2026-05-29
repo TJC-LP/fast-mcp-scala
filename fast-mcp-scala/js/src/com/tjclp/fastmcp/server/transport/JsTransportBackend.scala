@@ -5,6 +5,7 @@ import scala.scalajs.js
 
 import zio.*
 
+import com.tjclp.fastmcp.core.Protocol
 import com.tjclp.fastmcp.facades.node.NodeProcess
 import com.tjclp.fastmcp.facades.runtime.{
   Bun,
@@ -126,8 +127,13 @@ object JsTransportBackend extends TransportBackend:
       req: js.Dynamic
   ): ZIO[R, Throwable, js.Dynamic] =
     if pathOf(req) != settings.httpEndpoint then ZIO.succeed(webResponse(404, "Not Found"))
-    else if settings.stateless then handleStateless(router, req)
-    else handleStreamable(router, settings, store, req)
+    else
+      val headerErr = if methodOf(req) == "POST" then postHeaderError(req) else None
+      headerErr match
+        case Some(err) => ZIO.succeed(err)
+        case None =>
+          if settings.stateless then handleStateless(router, req)
+          else handleStreamable(router, settings, store, req)
 
   private def handleStateless[R](
       router: McpRouter[R],
@@ -201,6 +207,22 @@ object JsTransportBackend extends TransportBackend:
   // -------------------------------------------------------------------------
 
   private def methodOf(req: js.Dynamic): String = req.method.asInstanceOf[String]
+
+  /** POST guard: `Accept` (if present) must allow application/json; `mcp-protocol-version` (if
+    * present) must be supported. Lenient when headers are absent. Mirrors the JVM transport.
+    */
+  private def postHeaderError(req: js.Dynamic): Option[js.Dynamic] =
+    val accept = Option(req.headers.get("accept").asInstanceOf[String]).map(_.toLowerCase)
+    val acceptsJson =
+      accept.forall(a =>
+        a.contains("*/*") || a.contains("application/json") || a.contains("application/*")
+      )
+    val versionOk =
+      Option(req.headers.get("mcp-protocol-version").asInstanceOf[String])
+        .forall(Protocol.SupportedProtocolVersions.contains)
+    if !versionOk then Some(webResponse(400, "Unsupported mcp-protocol-version header"))
+    else if !acceptsJson then Some(webResponse(406, "Accept must allow application/json"))
+    else None
 
   private def pathOf(req: js.Dynamic): String =
     // `new URL(req.url).pathname` is the Web-Standard way to pull the path from a Request.

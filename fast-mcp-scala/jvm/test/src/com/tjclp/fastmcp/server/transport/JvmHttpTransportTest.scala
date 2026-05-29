@@ -116,3 +116,19 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val routes = buildRoutes(stateless = true)
     run(routes, Request.get(URL(Path.root / "mcp"))).status shouldBe Status.MethodNotAllowed
   }
+
+  test("POST with an Accept that excludes application/json is rejected (406)") {
+    val routes = buildRoutes(stateless = true)
+    val req = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(initFrame))
+      .addHeader(Header.Custom("accept", "text/plain"))
+    run(routes, req).status shouldBe Status.NotAcceptable
+  }
+
+  test("POST with an unsupported mcp-protocol-version is rejected (400)") {
+    val routes = buildRoutes(stateless = true)
+    val req = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(initFrame))
+      .addHeader(Header.Custom("mcp-protocol-version", "1999-01-01"))
+    run(routes, req).status shouldBe Status.BadRequest
+  }

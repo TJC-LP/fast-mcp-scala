@@ -35,6 +35,7 @@ object WireMapping:
       inputSchema = d.inputSchema,
       title = d.annotations.flatMap(_.title),
       description = d.description,
+      outputSchema = d.outputSchema,
       annotations = d.annotations,
       execution = exec
     )
