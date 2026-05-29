@@ -74,8 +74,10 @@ final class McpRouter[R](
     )
 
   /** Dispatch one inbound message. Never fails — handler errors become JSON-RPC error responses.
-    * Returns `Some(response)` for requests, `None` for notifications, cancelled requests, and
-    * inbound responses (server-initiated request correlation is a later milestone).
+    * Returns `Some(response)` for requests, `None` for notifications and cancelled requests.
+    * Inbound responses (`Success`/`Failure`) are routed to the matching pending server-initiated
+    * request via [[Session.completePending]] (a null-id error response can't be correlated, so it's
+    * ignored).
     */
   def dispatch(session: Session, message: JsonRpcMessage): URIO[R, Option[JsonRpcMessage]] =
     message match
@@ -83,7 +85,11 @@ final class McpRouter[R](
         dispatchRequest(session, id, method, params.getOrElse(Json.Null))
       case Notification(method, params) =>
         dispatchNotification(session, method, params.getOrElse(Json.Null)).as(None)
-      case _: Success | _: Failure =>
+      case Success(id, result) =>
+        session.completePending(id, Right(result)).as(None)
+      case Failure(Some(id), error) =>
+        session.completePending(id, Left(error)).as(None)
+      case Failure(None, _) =>
         ZIO.none
 
   private def dispatchRequest(

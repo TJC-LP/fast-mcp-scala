@@ -8,18 +8,26 @@ This audit compares **fast-mcp-scala native core** (a pure Scala/JVM implementat
 
 ---
 
-## Status — Phase-1 fixes landed (2026-05-29)
+## Status — Phase-1 fixes + server→client correlation landed (2026-05-29)
 
-Since this audit was generated, the **Phase-1 quick-win gaps have been fixed** (with tests; both
-platforms green). The matrix and roadmap below are the original audit snapshot; current disposition:
+Since this audit was generated, the **Phase-1 quick-win gaps and the one architectural gap (server→client
+request correlation) have been fixed** (with tests; both platforms green). The matrix and roadmap below are
+the original audit snapshot; current disposition:
 
 - ✅ `Icon.sizes` → `List[String]` + `Icon.theme` added
 - ✅ `PromptArgument.title` added
 - ✅ `Tool.outputSchema` carried on `ToolDefinition` and mapped to the wire
 - ✅ `completion/complete` handler + registration (honest `completions` capability — advertised only when a provider is wired)
 - ✅ HTTP `Accept` + `mcp-protocol-version` validation (JVM + JS; lenient when absent, rejects clearly-wrong)
-- ⏳ **Deferred** — server→client request/response **correlation plumbing** (the one architectural piece; unblocks sampling / elicitation / roots).
-- ⏳ **Future scope** — DRAFT-2026 tracks (sampling, elicitation, roots, OAuth, HTTP resumability).
+- ✅ **Server→client request/response correlation plumbing** — `Session` pending-promise registry +
+  `McpRouter` routes inbound `Success`/`Failure` to the matching request. On top of it, three
+  capability-gated `McpContext` methods (2025-11-25 wire shapes): `listRoots` (`roots/list`),
+  `createMessage` (`sampling/createMessage`), `elicit` (`elicitation/create`, form mode). Requires a
+  session-bearing bidirectional transport (stdio on both platforms; streamable HTTP on JVM); stateless
+  HTTP / JS HTTP have no server-push channel, so these time out there by design.
+- ⏳ **Future scope** — DRAFT-2026 extras (sampling `tools`/`toolChoice` + ToolUse/ToolResult content;
+  elicitation `url` mode + `notifications/elicitation/complete`; task-augmented server requests), plus OAuth
+  and HTTP resumability.
 
 ---
 

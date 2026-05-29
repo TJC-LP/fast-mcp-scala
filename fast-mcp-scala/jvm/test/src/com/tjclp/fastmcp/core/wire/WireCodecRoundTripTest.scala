@@ -185,4 +185,57 @@ class WireCodecRoundTripTest extends AnyFlatSpec with Matchers {
     TaskSupport.values.foreach(ts => roundTrips(ts))
     TaskSupport.Required.toJson shouldBe "\"required\""
   }
+
+  // ---------- Server→client request wire types (roots / sampling / elicitation) ----------
+
+  "roots/list wire types" should "round-trip Root and ListRootsResult" in {
+    roundTrips(Root("file:///work", Some("workspace")))
+    roundTrips(ListRootsResult(List(Root("file:///a"), Root("file:///b", Some("b")))))
+  }
+
+  "sampling wire types" should "round-trip messages, preferences, params and result" in {
+    roundTrips(SamplingMessage(Role.User, TextContent("hello")))
+    roundTrips(
+      ModelPreferences(
+        hints = Some(List(ModelHint(Some("claude")))),
+        costPriority = Some(0.2),
+        intelligencePriority = Some(0.9)
+      )
+    )
+    roundTrips(
+      CreateMessageRequestParams(
+        messages = List(SamplingMessage(Role.User, TextContent("hi"))),
+        maxTokens = 256,
+        modelPreferences = Some(ModelPreferences(hints = Some(List(ModelHint(Some("sonnet")))))),
+        systemPrompt = Some("be terse"),
+        includeContext = Some("thisServer"),
+        temperature = Some(0.7),
+        stopSequences = Some(List("\n\n"))
+      )
+    )
+    roundTrips(
+      CreateMessageResult(Role.Assistant, TextContent("done"), "claude-test", Some("endTurn"))
+    )
+  }
+
+  it should "encode maxTokens (Int) as a bare number" in {
+    CreateMessageRequestParams(
+      messages = List(SamplingMessage(Role.User, TextContent("x"))),
+      maxTokens = 100
+    ).toJson should include("\"maxTokens\":100")
+  }
+
+  "elicitation wire types" should "round-trip params (schema passthrough) and result" in {
+    roundTrips(
+      ElicitRequestParams(
+        message = "Your name?",
+        requestedSchema = Json.Obj(
+          "type" -> Json.Str("object"),
+          "properties" -> Json.Obj("name" -> Json.Obj("type" -> Json.Str("string")))
+        )
+      )
+    )
+    roundTrips(ElicitResult("accept", Some(Map("name" -> Json.Str("Ada")))))
+    roundTrips(ElicitResult("decline"))
+  }
 }

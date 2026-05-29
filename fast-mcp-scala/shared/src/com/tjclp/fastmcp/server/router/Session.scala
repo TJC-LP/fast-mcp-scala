@@ -5,7 +5,7 @@ import zio.json.ast.Json
 
 import com.tjclp.fastmcp.core.LoggingLevel
 import com.tjclp.fastmcp.core.wire.{ClientCapabilities, Implementation}
-import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, RequestId}
+import com.tjclp.fastmcp.jsonrpc.{JsonRpcErrorObject, JsonRpcMessage, McpError, RequestId}
 
 /** Per-connection MCP session state.
   *
@@ -26,6 +26,7 @@ final class Session private (
     private val subscriptionsRef: Ref[Set[String]],
     private val serverRequestCounter: Ref[Long],
     private val inflight: Ref[Map[RequestId, Fiber.Runtime[?, ?]]],
+    private val pendingRef: Ref[Map[RequestId, Promise[McpError, Json]]],
     private val clientInfoRef: Ref[Option[Implementation]],
     private val clientCapabilitiesRef: Ref[Option[ClientCapabilities]],
     val outbound: Queue[JsonRpcMessage]
@@ -74,6 +75,37 @@ final class Session private (
       case None => ZIO.unit
     )
 
+  // --- server-initiated request/response correlation ---
+
+  /** Send a server→client request and await the client's response. Allocates a server id, registers
+    * a pending promise, pushes the request to `outbound`, and resolves when the matching response
+    * arrives (via [[completePending]]) or fails on timeout. The pending entry is always cleaned up
+    * (success / timeout / interrupt).
+    */
+  def sendRequest(method: String, params: Option[Json], timeout: Duration): IO[McpError, Json] =
+    for
+      id <- nextServerRequestId
+      promise <- Promise.make[McpError, Json]
+      _ <- pendingRef.update(_ + (id -> promise))
+      result <-
+        (send(JsonRpcMessage.Request(id, method, params)) *>
+          promise.await.timeoutFail(
+            McpError.internalError(s"Server request '$method' timed out")
+          )(timeout)).ensuring(pendingRef.update(_ - id))
+    yield result
+
+  /** Resolve a pending server→client request with the client's response. No-op if the id is unknown
+    * or already completed (so stray/duplicate responses are harmless).
+    */
+  def completePending(id: RequestId, outcome: Either[JsonRpcErrorObject, Json]): UIO[Unit] =
+    pendingRef.modify(m => (m.get(id), m - id)).flatMap {
+      case None => ZIO.unit
+      case Some(promise) =>
+        outcome match
+          case Right(json) => promise.succeed(json).unit
+          case Left(err) => promise.fail(McpError(err.code, err.message, err.data)).unit
+    }
+
 object Session:
 
   def make(sessionId: String): UIO[Session] =
@@ -84,7 +116,8 @@ object Session:
       subs <- Ref.make(Set.empty[String])
       cnt <- Ref.make(0L)
       inflight <- Ref.make(Map.empty[RequestId, Fiber.Runtime[?, ?]])
+      pending <- Ref.make(Map.empty[RequestId, Promise[McpError, Json]])
       cInfo <- Ref.make(Option.empty[Implementation])
       cCaps <- Ref.make(Option.empty[ClientCapabilities])
       outbound <- Queue.unbounded[JsonRpcMessage]
-    yield new Session(sessionId, pv, ll, init, subs, cnt, inflight, cInfo, cCaps, outbound)
+    yield new Session(sessionId, pv, ll, init, subs, cnt, inflight, pending, cInfo, cCaps, outbound)
