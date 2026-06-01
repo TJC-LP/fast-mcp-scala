@@ -27,8 +27,7 @@ object RouterBuilder:
       completionHandler: Option[CompletionHandler[R]] = None,
       validator: SchemaValidator = SchemaValidator.permissive,
       extraMiddlewares: List[Middleware[R]] = Nil,
-      hooks: ServerHooks[R] = ServerHooks.noop[R],
-      loggingEnabled: Boolean = false
+      hooks: ServerHooks[R] = ServerHooks.noop[R]
   ): McpRouter[R] =
     val tasksOn = settings.tasks.enabled && taskManager.isDefined
 
@@ -40,6 +39,9 @@ object RouterBuilder:
     val hasPrompts = promptManager.listDefinitions().nonEmpty
     val hasCompletion = completionHandler.isDefined
     val exposeTemplates = hasTemplates && settings.exposeTemplatesEndpoint
+    val loggingEnabled = settings.loggingEnabled
+    // Subscribe only matters when resources exist; advertised + wired only when opted in.
+    val resourcesSubscribe = settings.resourcesSubscribe && hasResources
 
     // Which request methods this server will answer — drives capability derivation.
     val methods: Set[String] = Set(Methods.Ping, Methods.Initialize) ++
@@ -50,9 +52,11 @@ object RouterBuilder:
       Option.when(exposeTemplates)(Set(Methods.ResourcesTemplatesList)).getOrElse(Set.empty) ++
       Option.when(hasPrompts)(Set(Methods.PromptsList, Methods.PromptsGet)).getOrElse(Set.empty) ++
       Option.when(hasCompletion)(Set(Methods.CompletionComplete)).getOrElse(Set.empty) ++
-      Option.when(loggingEnabled)(Set(Methods.LoggingSetLevel)).getOrElse(Set.empty)
+      Option.when(loggingEnabled)(Set(Methods.LoggingSetLevel)).getOrElse(Set.empty) ++
+      Option
+        .when(resourcesSubscribe)(Set(Methods.ResourcesSubscribe, Methods.ResourcesUnsubscribe))
+        .getOrElse(Set.empty)
 
-    val resourcesSubscribe = false // subscribe handlers not implemented yet
     val listChanged = false // dynamic list-change notifications not implemented yet
 
     val capabilities =
@@ -85,6 +89,12 @@ object RouterBuilder:
            Map(
              Methods.ResourcesList -> builtins.resourcesList,
              Methods.ResourcesRead -> builtins.resourcesRead
+           )
+         else Map.empty) ++
+        (if resourcesSubscribe then
+           Map(
+             Methods.ResourcesSubscribe -> builtins.resourcesSubscribe,
+             Methods.ResourcesUnsubscribe -> builtins.resourcesUnsubscribe
            )
          else Map.empty) ++
         (if exposeTemplates then

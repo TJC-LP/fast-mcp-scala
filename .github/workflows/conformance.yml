@@ -1,0 +1,54 @@
+name: Conformance
+
+# Runs the official MCP conformance "active" server suite (via `bunx @modelcontextprotocol/conformance`)
+# against the fast-mcp-scala ConformanceServer over streamable HTTP, on both platforms.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  conformance:
+    name: MCP active suite (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [jvm, js]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: coursier/setup-action@v1
+        with:
+          jvm: temurin:21
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache Coursier
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.ivy2/cache
+          key: ${{ runner.os }}-coursier-${{ hashFiles('**/build.mill') }}
+          restore-keys: |
+            ${{ runner.os }}-coursier-
+
+      - name: Cache Mill
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.mill
+          key: ${{ runner.os }}-mill-${{ hashFiles('**/build.mill') }}
+          restore-keys: |
+            ${{ runner.os }}-mill-
+
+      # Boots the server, drives it with the pinned conformance harness, and checks the result against
+      # conformance/baseline-${platform}.yml (both baselines are empty — full active-suite green).
+      - name: Run MCP conformance active suite (${{ matrix.platform }})
+        run: ./scripts/conformance.sh ${{ matrix.platform }}

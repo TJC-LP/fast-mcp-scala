@@ -1,0 +1,7 @@
+# MCP conformance expected-failures baseline — JS (Scala.js / Bun HTTP).
+#
+# The Bun streamable transport streams every server->client message (progress, sampling,
+# elicitation, logging) on each request's own POST SSE response — identical semantics to the JVM
+# transport, reusing the shared Session/router logic. JS passes the entire active suite. No expected
+# failures.
+server: []

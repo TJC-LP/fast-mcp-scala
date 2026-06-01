@@ -51,6 +51,15 @@ case class McpServerSettings(
     stateless: Boolean = false,
     keepAliveInterval: Option[java.time.Duration] = None,
     disallowDelete: Boolean = false,
+    // Advertise the `logging` capability and wire `logging/setLevel`. Off by default (#56 honesty).
+    loggingEnabled: Boolean = false,
+    // Advertise `resources.subscribe` and wire `resources/subscribe` + `resources/unsubscribe`.
+    // Off by default; only takes effect when at least one resource is registered.
+    resourcesSubscribe: Boolean = false,
+    // DNS-rebinding protection (Streamable/stateless HTTP). When `Some`, an HTTP request whose
+    // `Host` (or `Origin`) hostname — port ignored — is not in the set is rejected with 403.
+    // `None` (default) disables host checking, preserving prior behavior.
+    allowedHosts: Option[Set[String]] = None,
     // Experimental MCP Tasks (spec 2025-11-25). Off by default.
     tasks: TaskSettings = TaskSettings()
 )

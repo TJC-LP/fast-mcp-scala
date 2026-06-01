@@ -30,7 +30,8 @@ import com.tjclp.fastmcp.server.router.Session
 open class McpContext private[fastmcp] (
     private[fastmcp] val session: Option[Session] = None,
     private val clientInfoSnapshot: Option[Implementation] = None,
-    private val clientCapabilitiesSnapshot: Option[ClientCapabilities] = None
+    private val clientCapabilitiesSnapshot: Option[ClientCapabilities] = None,
+    private val requestMeta: Option[Map[String, Json]] = None
 ):
 
   /** The connection/session id, if this request arrived over a session-bearing transport. */
@@ -41,6 +42,13 @@ open class McpContext private[fastmcp] (
 
   /** The client's declared capabilities from `initialize`, if known. */
   def getClientCapabilities: Option[ClientCapabilities] = clientCapabilitiesSnapshot
+
+  /** The request's `_meta.progressToken`, if the client supplied one on this request. Echo it back
+    * via [[sendProgress]] so the client correlates progress notifications to its originating call;
+    * the client drops progress whose token doesn't match what it sent.
+    */
+  def progressToken: Option[ProgressToken] =
+    requestMeta.flatMap(_.get("progressToken")).flatMap(_.as[ProgressToken].toOption)
 
   /** Emit a `notifications/message` log to the client, honoring the client's `logging/setLevel`
     * threshold. No-op if no session (e.g. a direct in-process call) or below the set level.
@@ -157,5 +165,6 @@ object McpContext:
   def withSession(
       session: Session,
       clientInfo: Option[Implementation] = None,
-      clientCapabilities: Option[ClientCapabilities] = None
-  ): McpContext = new McpContext(Some(session), clientInfo, clientCapabilities)
+      clientCapabilities: Option[ClientCapabilities] = None,
+      requestMeta: Option[Map[String, Json]] = None
+  ): McpContext = new McpContext(Some(session), clientInfo, clientCapabilities, requestMeta)

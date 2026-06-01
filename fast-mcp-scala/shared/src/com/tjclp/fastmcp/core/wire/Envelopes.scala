@@ -132,6 +132,18 @@ case class ReadResourceResult(
 object ReadResourceResult:
   given JsonCodec[ReadResourceResult] = DeriveJsonCodec.gen[ReadResourceResult]
 
+// ---------- resources/subscribe + resources/unsubscribe ----------
+
+case class SubscribeRequestParams(uri: String, _meta: Option[Map[String, Json]] = None)
+
+object SubscribeRequestParams:
+  given JsonCodec[SubscribeRequestParams] = DeriveJsonCodec.gen[SubscribeRequestParams]
+
+case class UnsubscribeRequestParams(uri: String, _meta: Option[Map[String, Json]] = None)
+
+object UnsubscribeRequestParams:
+  given JsonCodec[UnsubscribeRequestParams] = DeriveJsonCodec.gen[UnsubscribeRequestParams]
+
 // ---------- prompts/list ----------
 
 case class ListPromptsResult(

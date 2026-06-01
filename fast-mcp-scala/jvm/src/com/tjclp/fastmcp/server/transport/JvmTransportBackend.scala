@@ -5,9 +5,11 @@ import java.util.UUID
 
 import zio.*
 import zio.http.*
+import zio.json.*
 import zio.stream.*
 
 import com.tjclp.fastmcp.core.Protocol
+import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError, RequestId}
 import com.tjclp.fastmcp.server.McpServerSettings
 import com.tjclp.fastmcp.server.router.{McpRouter, Session}
 
@@ -100,7 +102,8 @@ object JvmTransportBackend extends TransportBackend:
       env: ZEnvironment[R]
   ): UIO[Routes[Any, Response]] =
     val ep = settings.httpEndpoint.stripPrefix("/")
-    if settings.stateless then ZIO.succeed(statelessRoutes(router, ep, env))
+    val allowedHosts = settings.allowedHosts.getOrElse(Set.empty)
+    if settings.stateless then ZIO.succeed(statelessRoutes(router, ep, env, allowedHosts))
     else
       Ref
         .make(Map.empty[String, Session])
@@ -122,11 +125,12 @@ object JvmTransportBackend extends TransportBackend:
   private def statelessRoutes[R](
       router: McpRouter[R],
       ep: String,
-      env: ZEnvironment[R]
+      env: ZEnvironment[R],
+      allowedHosts: Set[String]
   ): Routes[Any, Response] =
     Routes(
       Method.POST / ep -> handler { (request: Request) =>
-        handleStatelessPost(router, request).provideEnvironment(env)
+        handleStatelessPost(router, request, allowedHosts).provideEnvironment(env)
       },
       Method.GET / ep -> handler((_: Request) =>
         ZIO.succeed(Response.status(Status.MethodNotAllowed))
@@ -141,9 +145,10 @@ object JvmTransportBackend extends TransportBackend:
     */
   private def handleStatelessPost[R](
       router: McpRouter[R],
-      request: Request
+      request: Request,
+      allowedHosts: Set[String]
   ): ZIO[R, Nothing, Response] =
-    postHeaderError(request) match
+    postHeaderError(request, allowedHosts) match
       case Some(err) => ZIO.succeed(err)
       case None => statelessDispatch(router, request)
 
@@ -174,15 +179,16 @@ object JvmTransportBackend extends TransportBackend:
       store: Ref[Map[String, Session]],
       settings: McpServerSettings
   ): Routes[Any, Response] =
+    val allowedHosts = settings.allowedHosts.getOrElse(Set.empty)
     Routes(
       Method.POST / ep -> handler { (request: Request) =>
-        handleStreamablePost(router, store, request).provideEnvironment(env)
+        handleStreamablePost(router, store, request, allowedHosts).provideEnvironment(env)
       },
       Method.GET / ep -> handler { (request: Request) =>
-        handleStreamableGet(store, request)
+        handleStreamableGet(store, request, allowedHosts)
       },
       Method.DELETE / ep -> handler { (request: Request) =>
-        handleStreamableDelete(store, request, settings.disallowDelete)
+        handleStreamableDelete(store, request, settings.disallowDelete, allowedHosts)
       }
     )
 
@@ -199,9 +205,10 @@ object JvmTransportBackend extends TransportBackend:
   private def handleStreamablePost[R](
       router: McpRouter[R],
       store: Ref[Map[String, Session]],
-      request: Request
+      request: Request,
+      allowedHosts: Set[String]
   ): ZIO[R, Nothing, Response] =
-    postHeaderError(request) match
+    postHeaderError(request, allowedHosts) match
       case Some(err) => ZIO.succeed(err)
       case None => streamablePostDispatch(router, store, request)
 
@@ -222,17 +229,73 @@ object JvmTransportBackend extends TransportBackend:
               case None =>
                 ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
               case Some(session) =>
-                MessageLoop
-                  .handleFrame(router, session, body)
-                  .map(toPostResponse(_, session, isNew = false))
+                respondStreamable(router, session, body, isNew = false)
             }
           case None =>
             for
               session <- Session.make(UUID.randomUUID().toString)
               _ <- store.update(_ + (session.sessionId -> session))
-              reply <- MessageLoop.handleFrame(router, session, body)
-            yield toPostResponse(reply, session, isNew = true)
+              resp <- respondStreamable(router, session, body, isNew = true)
+            yield resp
     }
+
+  /** Dispatch one streamable POST frame. A *request* gets an SSE response that streams the
+    * notifications and sub-requests it emits (progress, sampling, elicitation) followed by its
+    * final JSON-RPC reply — one ordered stream, so a fire-and-forget notification can never race
+    * the reply across two HTTP streams. Notifications / client responses produce no reply (`202`);
+    * a parse error returns a single JSON error.
+    */
+  private def respondStreamable[R](
+      router: McpRouter[R],
+      session: Session,
+      body: String,
+      isNew: Boolean
+  ): URIO[R, Response] =
+    body.fromJson[JsonRpcMessage] match
+      case Right(req: JsonRpcMessage.Request) =>
+        streamRequest(router, session, req, isNew)
+      case Right(other) =>
+        router.dispatch(session, other).as(Response.status(Status.Accepted))
+      case Left(parseError) =>
+        val failure: JsonRpcMessage =
+          JsonRpcMessage.Failure(
+            None,
+            McpError.parseError(s"Parse error: $parseError").toErrorObject
+          )
+        ZIO.succeed(withSessionHeader(Response.json(failure.toJson), session, isNew))
+
+  /** Run a request's dispatch with its server→client messages routed to a per-request queue, and
+    * return an SSE response that emits each and ends right after the request's final reply.
+    */
+  private def streamRequest[R](
+      router: McpRouter[R],
+      session: Session,
+      message: JsonRpcMessage.Request,
+      isNew: Boolean
+  ): URIO[R, Response] =
+    val reqId = message.id
+    for
+      reqQueue <- Queue.unbounded[JsonRpcMessage]
+      _ <- session
+        .runWithSink(reqQueue)(router.dispatch(session, message))
+        .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
+        .forkDaemon
+    yield
+      val sse: ZStream[Any, Nothing, ServerSentEvent[String]] =
+        ZStream
+          .fromQueue(reqQueue)
+          .takeUntil(isFinalReply(_, reqId))
+          .map(msg => ServerSentEvent(MessageLoop.encodeOutbound(msg), eventType = Some("message")))
+      withSessionHeader(Response.fromServerSentEvents(sse), session, isNew)
+
+  private def isFinalReply(message: JsonRpcMessage, reqId: RequestId): Boolean =
+    message match
+      case JsonRpcMessage.Success(id, _) => id == reqId
+      case JsonRpcMessage.Failure(Some(id), _) => id == reqId
+      case _ => false
+
+  private def withSessionHeader(resp: Response, session: Session, isNew: Boolean): Response =
+    if isNew then resp.addHeader(Header.Custom(SessionIdHeader, session.sessionId)) else resp
 
   /** GET opens the server→client SSE channel for a session: each message offered to the session's
     * outbound queue is emitted as an SSE `message` event. The stream ends when the session is
@@ -240,9 +303,10 @@ object JvmTransportBackend extends TransportBackend:
     */
   private def handleStreamableGet(
       store: Ref[Map[String, Session]],
-      request: Request
+      request: Request,
+      allowedHosts: Set[String]
   ): ZIO[Any, Nothing, Response] =
-    getHeaderError(request) match
+    getHeaderError(request, allowedHosts) match
       case Some(err) => ZIO.succeed(err)
       case None => streamableGetDispatch(store, request)
 
@@ -275,30 +339,23 @@ object JvmTransportBackend extends TransportBackend:
   private def handleStreamableDelete(
       store: Ref[Map[String, Session]],
       request: Request,
-      disallowDelete: Boolean
+      disallowDelete: Boolean,
+      allowedHosts: Set[String]
   ): ZIO[Any, Nothing, Response] =
-    if disallowDelete then ZIO.succeed(Response.status(Status.MethodNotAllowed))
-    else
-      request.rawHeader(SessionIdHeader) match
-        case None =>
-          ZIO.succeed(
-            errorResponse(Status.BadRequest, s"Session ID required in $SessionIdHeader header")
-          )
-        case Some(id) =>
-          store.modify(sessions => (sessions.get(id), sessions - id)).flatMap {
-            case Some(session) => session.outbound.shutdown.as(Response.status(Status.Ok))
-            case None => ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
-          }
-
-  /** Render a dispatch reply for a streamable POST, echoing the `mcp-session-id` header on the
-    * `initialize` response (the only time `isNew` is true).
-    */
-  private def toPostResponse(reply: Option[String], session: Session, isNew: Boolean): Response =
-    reply match
-      case Some(json) =>
-        val resp = Response.json(json)
-        if isNew then resp.addHeader(Header.Custom(SessionIdHeader, session.sessionId)) else resp
-      case None => Response.status(Status.Accepted)
+    hostError(request, allowedHosts) match
+      case Some(err) => ZIO.succeed(err)
+      case None if disallowDelete => ZIO.succeed(Response.status(Status.MethodNotAllowed))
+      case None =>
+        request.rawHeader(SessionIdHeader) match
+          case None =>
+            ZIO.succeed(
+              errorResponse(Status.BadRequest, s"Session ID required in $SessionIdHeader header")
+            )
+          case Some(id) =>
+            store.modify(sessions => (sessions.get(id), sessions - id)).flatMap {
+              case Some(session) => session.outbound.shutdown.as(Response.status(Status.Ok))
+              case None => ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
+            }
 
   // --- Header validation (validate `Accept` + `mcp-protocol-version`; lenient when absent, so
   // header-less clients still work while clearly-wrong headers are rejected per spec). ---
@@ -316,20 +373,30 @@ object JvmTransportBackend extends TransportBackend:
   /** POST guard: `Accept` (if present) must allow `application/json`; `mcp-protocol-version` (if
     * present) must be supported.
     */
-  private def postHeaderError(req: Request): Option[Response] =
-    if !protocolVersionOk(req) then
-      Some(errorResponse(Status.BadRequest, "Unsupported mcp-protocol-version header"))
-    else if !acceptsAny(req, List("application/json", "application/*")) then
-      Some(errorResponse(Status.NotAcceptable, "Accept must allow application/json"))
-    else None
+  /** Reject (403) when DNS-rebinding protection is on and the request's Host/Origin isn't allowed.
+    */
+  private def hostError(req: Request, allowedHosts: Set[String]): Option[Response] =
+    if HostGuard.isAllowed(req.rawHeader("host"), req.rawHeader("origin"), allowedHosts) then None
+    else Some(errorResponse(Status.Forbidden, "Host/Origin not allowed (DNS-rebinding protection)"))
+
+  private def postHeaderError(req: Request, allowedHosts: Set[String]): Option[Response] =
+    hostError(req, allowedHosts).orElse {
+      if !protocolVersionOk(req) then
+        Some(errorResponse(Status.BadRequest, "Unsupported mcp-protocol-version header"))
+      else if !acceptsAny(req, List("application/json", "application/*")) then
+        Some(errorResponse(Status.NotAcceptable, "Accept must allow application/json"))
+      else None
+    }
 
   /** GET guard (SSE channel): `Accept` (if present) must allow `text/event-stream`. */
-  private def getHeaderError(req: Request): Option[Response] =
-    if !protocolVersionOk(req) then
-      Some(errorResponse(Status.BadRequest, "Unsupported mcp-protocol-version header"))
-    else if !acceptsAny(req, List("text/event-stream", "text/*")) then
-      Some(errorResponse(Status.NotAcceptable, "Accept must allow text/event-stream"))
-    else None
+  private def getHeaderError(req: Request, allowedHosts: Set[String]): Option[Response] =
+    hostError(req, allowedHosts).orElse {
+      if !protocolVersionOk(req) then
+        Some(errorResponse(Status.BadRequest, "Unsupported mcp-protocol-version header"))
+      else if !acceptsAny(req, List("text/event-stream", "text/*")) then
+        Some(errorResponse(Status.NotAcceptable, "Accept must allow text/event-stream"))
+      else None
+    }
 
   private def errorResponse(status: Status, message: String): Response =
     Response.text(message).status(status)

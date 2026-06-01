@@ -4,8 +4,10 @@ package server.transport
 import scala.scalajs.js
 
 import zio.*
+import zio.json.*
 
 import com.tjclp.fastmcp.core.Protocol
+import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError, RequestId}
 import com.tjclp.fastmcp.facades.node.NodeProcess
 import com.tjclp.fastmcp.facades.runtime.{
   Bun,
@@ -26,10 +28,11 @@ import com.tjclp.fastmcp.server.router.{McpRouter, Session}
   * `Runtime[R]` once (`ZIO.runtime[R]`) and bridge each request/line through that runtime via
   * [[ZioJsPromise]].
   *
-  * HTTP: stateless and streamable (durable sessions keyed by the `mcp-session-id` header) are both
-  * supported for request/response. The streamable `GET` SSE *push* channel is not implemented on JS
-  * yet — `GET` returns `405`, which the spec permits for servers that don't offer a server→client
-  * stream. (The JVM backend serves the full SSE channel.)
+  * HTTP: stateless and streamable (durable sessions keyed by the `mcp-session-id` header). Each
+  * streamable POST *request* gets a `text/event-stream` response that carries the notifications and
+  * sub-requests it emits (progress, sampling, elicitation) before its final reply — so
+  * server→client messaging works without a standalone `GET` push channel (`GET` is a spec-allowed
+  * `405`). Same semantics as the JVM backend; only the `Bun.serve` / `ReadableStream` shim differs.
   */
 object JsTransportBackend extends TransportBackend:
 
@@ -128,7 +131,10 @@ object JsTransportBackend extends TransportBackend:
   ): ZIO[R, Throwable, js.Dynamic] =
     if pathOf(req) != settings.httpEndpoint then ZIO.succeed(webResponse(404, "Not Found"))
     else
-      val headerErr = if methodOf(req) == "POST" then postHeaderError(req) else None
+      val allowedHosts = settings.allowedHosts.getOrElse(Set.empty)
+      val headerErr =
+        hostError(req, allowedHosts)
+          .orElse(if methodOf(req) == "POST" then postHeaderError(req) else None)
       headerErr match
         case Some(err) => ZIO.succeed(err)
         case None =>
@@ -166,15 +172,13 @@ object JsTransportBackend extends TransportBackend:
                 case None =>
                   ZIO.succeed(webResponse(404, s"Session not found: $sid"))
                 case Some(session) =>
-                  MessageLoop
-                    .handleFrame(router, session, body)
-                    .map(toPostResponse(_, session, isNew = false))
+                  respondStreamable(router, session, body, isNew = false)
             case None =>
               for
                 session <- Session.make(WebCrypto.randomUUID())
                 _ <- ZIO.succeed { store(session.sessionId) = session }
-                reply <- MessageLoop.handleFrame(router, session, body)
-              yield toPostResponse(reply, session, isNew = true)
+                resp <- respondStreamable(router, session, body, isNew = true)
+              yield resp
         }
 
       case "DELETE" =>
@@ -191,16 +195,78 @@ object JsTransportBackend extends TransportBackend:
                   ZIO.succeed(webResponse(404, s"Session not found: $sid"))
 
       case _ =>
-        // GET (server→client SSE push) is not offered on the JS transport — spec-allowed 405.
-        ZIO.succeed(webResponse(405, "SSE streaming is not supported on the JS transport"))
+        // GET is a no-op 405: every server→client message streams on its request's own POST SSE
+        // response (see respondStreamable), so a standalone GET push channel isn't needed.
+        ZIO.succeed(webResponse(405, "No standalone GET stream; server→client rides the POST SSE"))
 
-  private def toPostResponse(reply: Option[String], session: Session, isNew: Boolean): js.Dynamic =
-    reply match
-      case Some(json) =>
+  /** Dispatch one streamable POST frame. A *request* gets a `text/event-stream` response that
+    * streams the notifications and sub-requests it emits (progress, sampling, elicitation) followed
+    * by the final JSON-RPC reply — one ordered stream, identical semantics to the JVM transport.
+    * Reuses the shared [[Session.runWithSink]] + [[McpRouter.dispatch]]; only the Bun
+    * `ReadableStream` shim is platform-specific. Notifications / client responses get `202`; a
+    * parse error returns JSON.
+    */
+  private def respondStreamable[R](
+      router: McpRouter[R],
+      session: Session,
+      body: String,
+      isNew: Boolean
+  ): ZIO[R, Throwable, js.Dynamic] =
+    body.fromJson[JsonRpcMessage] match
+      case Right(req: JsonRpcMessage.Request) =>
+        for
+          reqQueue <- Queue.unbounded[JsonRpcMessage]
+          _ <- session
+            .runWithSink(reqQueue)(router.dispatch(session, req))
+            .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
+            .forkDaemon
+        yield sseResponse(reqQueue, req.id, session, isNew)
+      case Right(other) =>
+        router.dispatch(session, other).as(webResponse(202, ""))
+      case Left(parseError) =>
+        val failure: JsonRpcMessage =
+          JsonRpcMessage.Failure(
+            None,
+            McpError.parseError(s"Parse error: $parseError").toErrorObject
+          )
         val extra =
           if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String]
-        jsonResponse(json, extra)
-      case None => webResponse(202, "")
+        ZIO.succeed(jsonResponse(failure.toJson, extra))
+
+  /** Build a Bun SSE `Response` whose `ReadableStream` is pull-fed from `reqQueue`: each take emits
+    * one `event: message` frame, and the stream closes right after the request's final reply.
+    */
+  private def sseResponse(
+      reqQueue: Queue[JsonRpcMessage],
+      reqId: RequestId,
+      session: Session,
+      isNew: Boolean
+  ): js.Dynamic =
+    val encoder = js.Dynamic.newInstance(js.Dynamic.global.TextEncoder)()
+    val source = js.Dynamic.literal(
+      pull = js.Any.fromFunction1((controller: js.Dynamic) =>
+        ZioJsPromise.zioToPromise(
+          reqQueue.take.map { msg =>
+            val frame = s"event: message\ndata: ${MessageLoop.encodeOutbound(msg)}\n\n"
+            val _ = controller.enqueue(encoder.encode(frame))
+            if isFinalReply(msg, reqId) then
+              val _ = controller.close()
+          }
+        )
+      )
+    )
+    val stream = js.Dynamic.newInstance(js.Dynamic.global.ReadableStream)(source)
+    val headers =
+      Map("content-type" -> "text/event-stream", "cache-control" -> "no-cache") ++
+        (if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String])
+    val init = js.Dynamic.literal(status = 200, headers = js.Dictionary[String](headers.toSeq*))
+    js.Dynamic.newInstance(js.Dynamic.global.Response)(stream, init)
+
+  private def isFinalReply(message: JsonRpcMessage, reqId: RequestId): Boolean =
+    message match
+      case JsonRpcMessage.Success(id, _) => id == reqId
+      case JsonRpcMessage.Failure(Some(id), _) => id == reqId
+      case _ => false
 
   // -------------------------------------------------------------------------
   // Web Request / Response helpers
@@ -211,6 +277,14 @@ object JsTransportBackend extends TransportBackend:
   /** POST guard: `Accept` (if present) must allow application/json; `mcp-protocol-version` (if
     * present) must be supported. Lenient when headers are absent. Mirrors the JVM transport.
     */
+  /** Reject (403) when DNS-rebinding protection is on and the request's Host/Origin isn't allowed.
+    */
+  private def hostError(req: js.Dynamic, allowedHosts: Set[String]): Option[js.Dynamic] =
+    val host = Option(req.headers.get("host").asInstanceOf[String])
+    val origin = Option(req.headers.get("origin").asInstanceOf[String])
+    if HostGuard.isAllowed(host, origin, allowedHosts) then None
+    else Some(webResponse(403, "Host/Origin not allowed (DNS-rebinding protection)"))
+
   private def postHeaderError(req: js.Dynamic): Option[js.Dynamic] =
     val accept = Option(req.headers.get("accept").asInstanceOf[String]).map(_.toLowerCase)
     val acceptsJson =

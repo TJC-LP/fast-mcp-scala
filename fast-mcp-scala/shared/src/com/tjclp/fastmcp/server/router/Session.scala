@@ -29,7 +29,8 @@ final class Session private (
     private val pendingRef: Ref[Map[RequestId, Promise[McpError, Json]]],
     private val clientInfoRef: Ref[Option[Implementation]],
     private val clientCapabilitiesRef: Ref[Option[ClientCapabilities]],
-    val outbound: Queue[JsonRpcMessage]
+    val outbound: Queue[JsonRpcMessage],
+    private val sinkRef: FiberRef[Option[Queue[JsonRpcMessage]]]
 ):
 
   def protocolVersion: UIO[String] = protocolVersionRef.get
@@ -58,8 +59,23 @@ final class Session private (
   def nextServerRequestId: UIO[RequestId] =
     serverRequestCounter.updateAndGet(_ + 1).map(n => RequestId.StrId(s"srv-$n"))
 
-  /** Push a message to the client over this connection's outbound channel. */
-  def send(message: JsonRpcMessage): UIO[Unit] = outbound.offer(message).unit
+  /** Push a message to the client. Routed to the current request's per-POST SSE sink when one is
+    * active (see [[runWithSink]]), else to the shared outbound channel drained by the GET SSE
+    * stream.
+    */
+  def send(message: JsonRpcMessage): UIO[Unit] =
+    sinkRef.get.flatMap {
+      case Some(q) => q.offer(message).unit
+      case None => outbound.offer(message).unit
+    }
+
+  /** Route server→client messages emitted by `zio` (and its forked children) to `q` instead of the
+    * shared outbound channel. Lets the streamable POST handler stream a request's notifications and
+    * sub-requests (progress, sampling, elicitation) on that request's own SSE response, ordered
+    * before the final reply — eliminating the cross-stream race a GET-only side channel has.
+    */
+  def runWithSink[R, E, A](q: Queue[JsonRpcMessage])(zio: ZIO[R, E, A]): ZIO[R, E, A] =
+    sinkRef.locally(Some(q))(zio)
 
   // --- cancellation registry ---
 
@@ -120,4 +136,18 @@ object Session:
       cInfo <- Ref.make(Option.empty[Implementation])
       cCaps <- Ref.make(Option.empty[ClientCapabilities])
       outbound <- Queue.unbounded[JsonRpcMessage]
-    yield new Session(sessionId, pv, ll, init, subs, cnt, inflight, pending, cInfo, cCaps, outbound)
+      sink = Unsafe.unsafe(implicit u => FiberRef.unsafe.make(Option.empty[Queue[JsonRpcMessage]]))
+    yield new Session(
+      sessionId,
+      pv,
+      ll,
+      init,
+      subs,
+      cnt,
+      inflight,
+      pending,
+      cInfo,
+      cCaps,
+      outbound,
+      sink
+    )

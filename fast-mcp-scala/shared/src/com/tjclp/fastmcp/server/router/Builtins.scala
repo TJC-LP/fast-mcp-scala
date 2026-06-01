@@ -86,7 +86,7 @@ final class Builtins[R](
       args = req.arguments match
         case Some(Json.Obj(fields)) => fields.toMap
         case _ => Map.empty[String, Any]
-      ctx <- contextFor(session)
+      ctx <- contextFor(session, req._meta)
       outcome <- toolManager.callTool(req.name, args, Some(ctx)).either
       json <- outcome match
         case Right(result) => ok(WireMapping.toolResultToWire(result))
@@ -121,6 +121,25 @@ final class Builtins[R](
       mime = resourceManager.getResourceDefinition(req.uri).flatMap(_.mimeType)
       contents = WireMapping.resourceContentsToWire(req.uri, mime, body)
       json <- ok(ReadResourceResult(contents = List(contents)))
+    yield json
+
+  /** `resources/subscribe` — record the client's interest in a URI (returns an empty result).
+    * Registered only when `settings.resourcesSubscribe` is on, so the `resources.subscribe`
+    * capability stays honest. The core does not yet push `notifications/resources/updated`.
+    */
+  val resourcesSubscribe: RequestHandler[R] = (session, params) =>
+    for
+      req <- decodeParams[SubscribeRequestParams](params, "resources/subscribe")
+      _ <- session.subscribe(req.uri)
+      json <- ok(EmptyResult())
+    yield json
+
+  /** `resources/unsubscribe` — drop a previously recorded subscription. */
+  val resourcesUnsubscribe: RequestHandler[R] = (session, params) =>
+    for
+      req <- decodeParams[UnsubscribeRequestParams](params, "resources/unsubscribe")
+      _ <- session.unsubscribe(req.uri)
+      json <- ok(EmptyResult())
     yield json
 
   // ---- prompts ----
@@ -175,8 +194,11 @@ final class Builtins[R](
     * log/progress notifications) and snapshotting the client info/capabilities captured at
     * `initialize` (so handlers can read them synchronously).
     */
-  private def contextFor(session: Session): UIO[McpContext] =
+  private def contextFor(
+      session: Session,
+      requestMeta: Option[Map[String, Json]] = None
+  ): UIO[McpContext] =
     for
       info <- session.clientInfo
       caps <- session.clientCapabilities
-    yield McpContext.withSession(session, info, caps)
+    yield McpContext.withSession(session, info, caps, requestMeta)

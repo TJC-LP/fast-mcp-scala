@@ -23,11 +23,31 @@ the original audit snapshot; current disposition:
   `McpRouter` routes inbound `Success`/`Failure` to the matching request. On top of it, three
   capability-gated `McpContext` methods (2025-11-25 wire shapes): `listRoots` (`roots/list`),
   `createMessage` (`sampling/createMessage`), `elicit` (`elicitation/create`, form mode). Requires a
-  session-bearing bidirectional transport (stdio on both platforms; streamable HTTP on JVM); stateless
-  HTTP / JS HTTP have no server-push channel, so these time out there by design.
+  session-bearing bidirectional transport (stdio on both platforms; streamable HTTP on both — see the
+  conformance note below). Stateless HTTP has no server-push channel by design.
 - ⏳ **Future scope** — DRAFT-2026 extras (sampling `tools`/`toolChoice` + ToolUse/ToolResult content;
   elicitation `url` mode + `notifications/elicitation/complete`; task-augmented server requests), plus OAuth
   and HTTP resumability.
+
+---
+
+## Status — Full MCP conformance (active suite), JVM + JS (2026-06-01)
+
+The native core **passes the official MCP conformance suite** (`@modelcontextprotocol/conformance`,
+`--suite active`, spec 2025-11-25) on **both JVM and JS — 42/42 checks, no baseline**. Reproduce with
+`scripts/conformance.sh [jvm|js]` (drives the harness via `bunx` against the cross-platform
+`examples.conformance.ConformanceServer`); CI runs both in `.github/workflows/conformance.yml`.
+
+Gaps closed to get there (all shared logic, so both platforms benefit):
+
+- `logging/setLevel` + `resources/subscribe`/`unsubscribe` handlers wired with honest capabilities
+  (gated on `McpServerSettings.loggingEnabled` / `resourcesSubscribe`).
+- Inbound `_meta.progressToken` is now reachable from handlers via `McpContext.progressToken`.
+- DNS-rebinding `Origin`/`Host` validation (`McpServerSettings.allowedHosts` + `HostGuard`).
+- **Streamable HTTP now streams each request's notifications + sub-requests (progress / sampling /
+  elicitation) on that request's own POST SSE response** — one ordered stream, on both JVM and JS.
+  This is the spec's streamable model and it makes server→client work over JS HTTP too, resolving the
+  earlier "JS has no server-push" limitation (the standalone `GET` channel is no longer required).
 
 ---
 
