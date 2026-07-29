@@ -37,7 +37,10 @@ case class TaskSettings(
 case class McpServerSettings(
     debug: Boolean = false,
     logLevel: String = "INFO",
-    host: String = "0.0.0.0",
+    // Spec: HTTP servers SHOULD bind to localhost by default (DNS-rebinding surface). Deployments
+    // that need external exposure (e.g. containers) must set this explicitly — 0.5.0 BREAKING
+    // change from the old "0.0.0.0" default.
+    host: String = "127.0.0.1",
     port: Int = 8000,
     httpEndpoint: String = "/mcp",
     warnOnDuplicateResources: Boolean = true,

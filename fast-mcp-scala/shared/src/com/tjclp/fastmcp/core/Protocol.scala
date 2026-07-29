@@ -8,8 +8,10 @@ object Protocol:
   /** The MCP protocol version this implementation targets on the wire. */
   val LatestProtocolVersion: String = "2025-11-25"
 
-  /** Fallback negotiated version per the 2025-11-25 spec — if a client sends a version we don't
-    * recognize, we respond with this and let them decide whether to disconnect.
+  /** Version assumed for HTTP requests that omit the `mcp-protocol-version` header, per the spec's
+    * backwards-compatibility rule (the header postdates 2025-03-26, so header-less clients speak at
+    * most that revision). Note: version *negotiation* on unknown `initialize` versions responds
+    * with [[LatestProtocolVersion]], not this.
     */
   val DefaultNegotiatedProtocolVersion: String = "2025-03-26"
 

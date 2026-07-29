@@ -53,11 +53,14 @@ object JsTransportBackend extends TransportBackend:
       rt <- ZIO.runtime[R]
       session <- Session.make("stdio")
       // Drain server-initiated messages (log/progress notifications) to stdout.
-      _ <- session.outbound.take
+      drainer <- session.outbound.take
         .flatMap(msg => writeLine(MessageLoop.encodeOutbound(msg)))
         .forever
         .forkDaemon
-      _ <- ZIO.async[R, Throwable, Unit](cb => wireStdin(router, session, rt, cb))
+      // stdin EOF completes the async; take the drainer down with it.
+      _ <- ZIO
+        .async[R, Throwable, Unit](cb => wireStdin(router, session, rt, cb))
+        .ensuring(drainer.interrupt)
     yield ()
 
   private def wireStdin[R](
@@ -168,7 +171,10 @@ object JsTransportBackend extends TransportBackend:
       val allowedHosts = settings.allowedHosts.getOrElse(Set.empty)
       val headerErr =
         hostError(req, allowedHosts)
-          .orElse(if methodOf(req) == "POST" then postHeaderError(req) else None)
+          .orElse(
+            if methodOf(req) == "POST" then postHeaderError(req, requireSse = !settings.stateless)
+            else None
+          )
       headerErr match
         case Some(err) => ZIO.succeed(err)
         case None =>
@@ -188,6 +194,8 @@ object JsTransportBackend extends TransportBackend:
             case Right(message) =>
               for
                 session <- Session.make("stateless")
+                // Stateless clients never send initialize — the ephemeral session starts ready.
+                _ <- session.markInitialized
                 reply <- router.dispatch(session, message)
               yield (message, reply) match
                 // Structurally invalid frames (id:null, wrong jsonrpc, ...) are client errors.
@@ -220,13 +228,14 @@ object JsTransportBackend extends TransportBackend:
                     case None =>
                       ZIO.succeed(jsonRpcErrorResponse(404, s"Session not found: $sid"))
                     case Some(session) =>
-                      session.touch *> respondStreamable(router, session, message, isNew = false)
+                      session.touch *>
+                        respondStreamable(router, session, message, isNew = false, settings)
                 case None if MessageLoop.isInitialize(message) =>
                   for
                     sid <- randomId()
                     session <- Session.make(sid)
                     _ <- ZIO.succeed { store(session.sessionId) = session }
-                    resp <- respondStreamable(router, session, message, isNew = true)
+                    resp <- respondStreamable(router, session, message, isNew = true, settings)
                   yield resp
                 case None =>
                   ZIO.succeed(
@@ -270,7 +279,8 @@ object JsTransportBackend extends TransportBackend:
       router: McpRouter[R],
       session: Session,
       message: JsonRpcMessage,
-      isNew: Boolean
+      isNew: Boolean,
+      settings: McpServerSettings
   ): ZIO[R, Throwable, js.Dynamic] =
     message match
       case req: JsonRpcMessage.Request =>
@@ -284,7 +294,7 @@ object JsTransportBackend extends TransportBackend:
             .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
             .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
             .forkDaemon
-        yield sseResponse(reqQueue, req.id, session, isNew, fiber)
+        yield sseResponse(reqQueue, req.id, session, isNew, fiber, settings)
       case other =>
         val extra =
           if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String]
@@ -302,17 +312,25 @@ object JsTransportBackend extends TransportBackend:
       reqId: RequestId,
       session: Session,
       isNew: Boolean,
-      dispatchFiber: Fiber.Runtime[?, ?]
+      dispatchFiber: Fiber.Runtime[?, ?],
+      settings: McpServerSettings
   ): js.Dynamic =
     val encoder = js.Dynamic.newInstance(js.Dynamic.global.TextEncoder)()
+    // Keepalive: when configured, a quiet `take` emits an SSE comment frame instead of blocking
+    // forever, so proxies / idle timeouts don't kill long-running calls.
+    val takeNext: UIO[Option[JsonRpcMessage]] = settings.keepAliveInterval match
+      case None => reqQueue.take.map(Some(_))
+      case Some(interval) => reqQueue.take.timeout(Duration.fromJava(interval))
     val source = js.Dynamic.literal(
       pull = js.Any.fromFunction1((controller: js.Dynamic) =>
         ZioJsPromise.zioToPromise(
-          reqQueue.take.map { msg =>
-            if MessageLoop.isCloseSentinel(msg) then
+          takeNext.map {
+            case None =>
+              val _ = controller.enqueue(encoder.encode(": ping\n\n"))
+            case Some(msg) if MessageLoop.isCloseSentinel(msg) =>
               // Dispatch ended replyless (cancelled): end the stream without emitting a frame.
               val _ = controller.close()
-            else
+            case Some(msg) =>
               val frame = s"event: message\ndata: ${MessageLoop.encodeOutbound(msg)}\n\n"
               val _ = controller.enqueue(encoder.encode(frame))
               if isFinalReply(msg, reqId) then
@@ -356,17 +374,29 @@ object JsTransportBackend extends TransportBackend:
     if HostGuard.isAllowed(host, origin, allowedHosts) then None
     else Some(webResponse(403, "Host/Origin not allowed (DNS-rebinding protection)"))
 
-  private def postHeaderError(req: js.Dynamic): Option[js.Dynamic] =
+  /** POST guard, mirroring the JVM backend: `mcp-protocol-version` must be supported (absent ⇒ the
+    * pre-header default); `Accept` (if present) must allow `application/json` — and on the
+    * streamable transport (`requireSse`) `text/event-stream` too, since request replies stream as
+    * SSE.
+    */
+  private def postHeaderError(req: js.Dynamic, requireSse: Boolean): Option[js.Dynamic] =
     val accept = Option(req.headers.get("accept").asInstanceOf[String]).map(_.toLowerCase)
     val acceptsJson =
       accept.forall(a =>
         a.contains("*/*") || a.contains("application/json") || a.contains("application/*")
       )
-    val versionOk =
+    val acceptsSse =
+      accept.forall(a =>
+        a.contains("*/*") || a.contains("text/event-stream") || a.contains("text/*")
+      )
+    val declaredVersion =
       Option(req.headers.get("mcp-protocol-version").asInstanceOf[String])
-        .forall(Protocol.SupportedProtocolVersions.contains)
-    if !versionOk then Some(webResponse(400, "Unsupported mcp-protocol-version header"))
-    else if !acceptsJson then Some(webResponse(406, "Accept must allow application/json"))
+        .getOrElse(Protocol.DefaultNegotiatedProtocolVersion)
+    if !Protocol.SupportedProtocolVersions.contains(declaredVersion) then
+      Some(jsonRpcErrorResponse(400, "Unsupported mcp-protocol-version header"))
+    else if !acceptsJson then Some(jsonRpcErrorResponse(406, "Accept must allow application/json"))
+    else if requireSse && !acceptsSse then
+      Some(jsonRpcErrorResponse(406, "Accept must allow text/event-stream"))
     else None
 
   private def pathOf(req: js.Dynamic): String =

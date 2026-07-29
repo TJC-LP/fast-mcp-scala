@@ -55,6 +55,10 @@ final class Builtins[R](
       negotiated = negotiateVersion(req.protocolVersion)
       _ <- session.setProtocolVersion(negotiated)
       _ <- session.setClientInfo(req.clientInfo, req.capabilities)
+      // The pre-init gate opens once initialize is answered (not only on notifications/
+      // initialized) — clients routinely issue requests right after the response, and the TS SDK
+      // server accepts them. Re-initialize is lenient: it just renegotiates.
+      _ <- session.markInitialized
       result = InitializeResult(
         protocolVersion = negotiated,
         capabilities = capabilities,

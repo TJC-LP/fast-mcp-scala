@@ -101,6 +101,29 @@ final class McpRouter[R](
       method: String,
       params: Json
   ): URIO[R, Option[JsonRpcMessage]] =
+    session.isInitialized.flatMap { initialized =>
+      // Spec lifecycle: before initialization completes, only initialize and ping are served.
+      // Stateless/ephemeral sessions are created pre-marked by their transports.
+      if !initialized && method != Methods.Initialize && method != Methods.Ping then
+        ZIO.succeed(
+          Some(
+            Failure(
+              Some(id),
+              McpError
+                .invalidRequest(s"Server not initialized — send initialize before '$method'")
+                .toErrorObject
+            )
+          )
+        )
+      else dispatchInitialized(session, id, method, params)
+    }
+
+  private def dispatchInitialized(
+      session: Session,
+      id: RequestId,
+      method: String,
+      params: Json
+  ): URIO[R, Option[JsonRpcMessage]] =
     requestHandlers.get(method) match
       case None =>
         ZIO.succeed(Some(Failure(Some(id), McpError.methodNotFound(method).toErrorObject)))

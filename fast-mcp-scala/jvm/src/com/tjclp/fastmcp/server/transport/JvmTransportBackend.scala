@@ -68,20 +68,23 @@ object JvmTransportBackend extends TransportBackend:
       emit: String => Task[Unit]
   ): ZIO[R, Throwable, Unit] =
     for
-      _ <- session.outbound.take
+      drainer <- session.outbound.take
         .flatMap(msg => emit(MessageLoop.encodeOutbound(msg)))
         .forever
         .forkDaemon
-      _ <- inLines.runForeach { line =>
-        MessageLoop
-          .handleFrame(router, session, line)
-          .flatMap {
-            case Some(reply) => emit(reply)
-            case None => ZIO.unit
-          }
-          .forkDaemon
-          .unit
-      }
+      _ <- inLines
+        .runForeach { line =>
+          MessageLoop
+            .handleFrame(router, session, line)
+            .flatMap {
+              case Some(reply) => emit(reply)
+              case None => ZIO.unit
+            }
+            .forkDaemon
+            .unit
+        }
+        // stdin EOF (or scope interruption) ends the loop; take the drainer down with it.
+        .ensuring(drainer.interrupt)
     yield ()
 
   override def serveHttp[R](
@@ -191,7 +194,7 @@ object JvmTransportBackend extends TransportBackend:
       request: Request,
       allowedHosts: Set[String]
   ): ZIO[R, Nothing, Response] =
-    postHeaderError(request, allowedHosts) match
+    postHeaderError(request, allowedHosts, requireSse = false) match
       case Some(err) => ZIO.succeed(err)
       case None => statelessDispatch(router, request)
 
@@ -210,6 +213,8 @@ object JvmTransportBackend extends TransportBackend:
           case Right(message) =>
             for
               session <- Session.make("stateless")
+              // Stateless clients never send initialize — the ephemeral session starts ready.
+              _ <- session.markInitialized
               reply <- router.dispatch(session, message)
             yield (message, reply) match
               // Structurally invalid frames (id:null, wrong jsonrpc, ...) are client errors.
@@ -231,16 +236,20 @@ object JvmTransportBackend extends TransportBackend:
       store: Ref[Map[String, Session]],
       settings: McpServerSettings
   ): Routes[Any, Response] =
-    val allowedHosts = settings.allowedHosts.getOrElse(Set.empty)
     Routes(
       Method.POST / ep -> handler { (request: Request) =>
-        handleStreamablePost(router, store, request, allowedHosts).provideEnvironment(env)
+        handleStreamablePost(router, store, request, settings).provideEnvironment(env)
       },
       Method.GET / ep -> handler { (request: Request) =>
-        handleStreamableGet(store, request, allowedHosts)
+        handleStreamableGet(store, request, settings)
       },
       Method.DELETE / ep -> handler { (request: Request) =>
-        handleStreamableDelete(store, request, settings.disallowDelete, allowedHosts)
+        handleStreamableDelete(
+          store,
+          request,
+          settings.disallowDelete,
+          settings.allowedHosts.getOrElse(Set.empty)
+        )
       }
     )
 
@@ -258,16 +267,17 @@ object JvmTransportBackend extends TransportBackend:
       router: McpRouter[R],
       store: Ref[Map[String, Session]],
       request: Request,
-      allowedHosts: Set[String]
+      settings: McpServerSettings
   ): ZIO[R, Nothing, Response] =
-    postHeaderError(request, allowedHosts) match
+    postHeaderError(request, settings.allowedHosts.getOrElse(Set.empty), requireSse = true) match
       case Some(err) => ZIO.succeed(err)
-      case None => streamablePostDispatch(router, store, request)
+      case None => streamablePostDispatch(router, store, request, settings)
 
   private def streamablePostDispatch[R](
       router: McpRouter[R],
       store: Ref[Map[String, Session]],
-      request: Request
+      request: Request,
+      settings: McpServerSettings
   ): ZIO[R, Nothing, Response] =
     request.body.asString.either.flatMap {
       case Left(err) =>
@@ -287,14 +297,15 @@ object JvmTransportBackend extends TransportBackend:
                   case None =>
                     ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
                   case Some(session) =>
-                    session.touch *> respondStreamable(router, session, message, isNew = false)
+                    session.touch *>
+                      respondStreamable(router, session, message, isNew = false, settings)
                 }
               case None if MessageLoop.isInitialize(message) =>
                 for
                   id <- randomId()
                   session <- Session.make(id)
                   _ <- store.update(_ + (session.sessionId -> session))
-                  resp <- respondStreamable(router, session, message, isNew = true)
+                  resp <- respondStreamable(router, session, message, isNew = true, settings)
                 yield resp
               case None =>
                 ZIO.succeed(
@@ -315,11 +326,12 @@ object JvmTransportBackend extends TransportBackend:
       router: McpRouter[R],
       session: Session,
       message: JsonRpcMessage,
-      isNew: Boolean
+      isNew: Boolean,
+      settings: McpServerSettings
   ): URIO[R, Response] =
     message match
       case req: JsonRpcMessage.Request =>
-        streamRequest(router, session, req, isNew)
+        streamRequest(router, session, req, isNew, settings)
       case other =>
         router.dispatch(session, other).map {
           // Only structurally-Invalid frames produce a reply here (notifications and inbound
@@ -336,7 +348,8 @@ object JvmTransportBackend extends TransportBackend:
       router: McpRouter[R],
       session: Session,
       message: JsonRpcMessage.Request,
-      isNew: Boolean
+      isNew: Boolean,
+      settings: McpServerSettings
   ): URIO[R, Response] =
     val reqId = message.id
     for
@@ -355,7 +368,24 @@ object JvmTransportBackend extends TransportBackend:
           .takeUntil(msg => isFinalReply(msg, reqId) || MessageLoop.isCloseSentinel(msg))
           .filter(!MessageLoop.isCloseSentinel(_))
           .map(msg => ServerSentEvent(MessageLoop.encodeOutbound(msg), eventType = Some("message")))
-      withSessionHeader(Response.fromServerSentEvents(sse), session, isNew)
+      withSessionHeader(Response.fromServerSentEvents(withKeepAlive(sse, settings)), session, isNew)
+
+  /** Merge a heartbeat into an SSE stream so proxies / idle timeouts don't kill long-quiet
+    * connections. The `ping` event type is ignored by conforming clients (the TS SDK only parses
+    * `message` events); zio-http 3.4.0 has no comment-frame support. Halts with the data stream.
+    */
+  private def withKeepAlive(
+      sse: ZStream[Any, Nothing, ServerSentEvent[String]],
+      settings: McpServerSettings
+  ): ZStream[Any, Nothing, ServerSentEvent[String]] =
+    settings.keepAliveInterval match
+      case None => sse
+      case Some(interval) =>
+        val pings = ZStream.repeatWithSchedule(
+          ServerSentEvent[String]("", eventType = Some("ping")),
+          Schedule.spaced(Duration.fromJava(interval))
+        )
+        sse.mergeHaltLeft(pings)
 
   private def isFinalReply(message: JsonRpcMessage, reqId: RequestId): Boolean =
     message match
@@ -373,15 +403,16 @@ object JvmTransportBackend extends TransportBackend:
   private def handleStreamableGet(
       store: Ref[Map[String, Session]],
       request: Request,
-      allowedHosts: Set[String]
+      settings: McpServerSettings
   ): ZIO[Any, Nothing, Response] =
-    getHeaderError(request, allowedHosts) match
+    getHeaderError(request, settings.allowedHosts.getOrElse(Set.empty)) match
       case Some(err) => ZIO.succeed(err)
-      case None => streamableGetDispatch(store, request)
+      case None => streamableGetDispatch(store, request, settings)
 
   private def streamableGetDispatch(
       store: Ref[Map[String, Session]],
-      request: Request
+      request: Request,
+      settings: McpServerSettings
   ): ZIO[Any, Nothing, Response] =
     request.rawHeader(SessionIdHeader) match
       case None =>
@@ -405,7 +436,7 @@ object JvmTransportBackend extends TransportBackend:
                       ServerSentEvent(MessageLoop.encodeOutbound(msg), eventType = Some("message"))
                     )
                     .ensuring(session.releaseGet)
-                Response.fromServerSentEvents(sse)
+                Response.fromServerSentEvents(withKeepAlive(sse, settings))
             }
         }
 
@@ -443,24 +474,39 @@ object JvmTransportBackend extends TransportBackend:
         val lower = a.toLowerCase
         lower.contains("*/*") || types.exists(lower.contains)
 
-  private def protocolVersionOk(req: Request): Boolean =
-    req.rawHeader("mcp-protocol-version").forall(Protocol.SupportedProtocolVersions.contains)
-
-  /** POST guard: `Accept` (if present) must allow `application/json`; `mcp-protocol-version` (if
-    * present) must be supported.
+  /** `mcp-protocol-version` header validation. Absent ⇒ assume
+    * [[Protocol.DefaultNegotiatedProtocolVersion]] per the spec's backwards-compatibility rule
+    * (clients predating the header speak 2025-03-26); present ⇒ must be a supported version.
     */
+  private def protocolVersionOk(req: Request): Boolean =
+    val declared = req
+      .rawHeader("mcp-protocol-version")
+      .getOrElse(Protocol.DefaultNegotiatedProtocolVersion)
+    Protocol.SupportedProtocolVersions.contains(declared)
+
   /** Reject (403) when DNS-rebinding protection is on and the request's Host/Origin isn't allowed.
     */
   private def hostError(req: Request, allowedHosts: Set[String]): Option[Response] =
     if HostGuard.isAllowed(req.rawHeader("host"), req.rawHeader("origin"), allowedHosts) then None
     else Some(errorResponse(Status.Forbidden, "Host/Origin not allowed (DNS-rebinding protection)"))
 
-  private def postHeaderError(req: Request, allowedHosts: Set[String]): Option[Response] =
+  /** POST guard: `mcp-protocol-version` must be supported (absent ⇒ pre-header default); `Accept`
+    * (if present) must allow `application/json` — and on the streamable transport (`requireSse`)
+    * `text/event-stream` too, since request replies stream as SSE (spec requires clients to accept
+    * both).
+    */
+  private def postHeaderError(
+      req: Request,
+      allowedHosts: Set[String],
+      requireSse: Boolean
+  ): Option[Response] =
     hostError(req, allowedHosts).orElse {
       if !protocolVersionOk(req) then
         Some(errorResponse(Status.BadRequest, "Unsupported mcp-protocol-version header"))
       else if !acceptsAny(req, List("application/json", "application/*")) then
         Some(errorResponse(Status.NotAcceptable, "Accept must allow application/json"))
+      else if requireSse && !acceptsAny(req, List("text/event-stream", "text/*")) then
+        Some(errorResponse(Status.NotAcceptable, "Accept must allow text/event-stream"))
       else None
     }
 

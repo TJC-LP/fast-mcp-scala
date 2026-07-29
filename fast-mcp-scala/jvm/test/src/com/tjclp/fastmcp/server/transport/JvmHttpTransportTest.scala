@@ -40,8 +40,15 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(effect).getOrThrowFiberFailure())
 
   /** Build the HTTP routes for a one-tool server (fresh session store per call). */
-  private def buildRoutes(stateless: Boolean): Routes[Any, Response] =
-    val server = McpServer.typed[Any]("T", "0.1.0", McpServerSettings(stateless = stateless))
+  private def buildRoutes(
+      stateless: Boolean,
+      keepAlive: Option[java.time.Duration] = None
+  ): Routes[Any, Response] =
+    val server = McpServer.typed[Any](
+      "T",
+      "0.1.0",
+      McpServerSettings(stateless = stateless, keepAliveInterval = keepAlive)
+    )
     val _ = server.scanAnnotations[TestServer.type]
     runUnsafe(
       server.buildRouter.flatMap(r =>
@@ -194,6 +201,71 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
         poll <- fiber.poll
       yield poll shouldBe None // still running — the cancel was ignored
     )
+  }
+
+  test("streamable POST requires Accept to allow text/event-stream too (406 otherwise)") {
+    val routes = buildRoutes(stateless = false)
+    val req = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(initFrame))
+      .addHeader(Header.Custom("accept", "application/json"))
+    run(routes, req).status shouldBe Status.NotAcceptable
+
+    // Stateless answers plain JSON, so json-only Accept stays fine there.
+    val statelessRoutes = buildRoutes(stateless = true)
+    run(statelessRoutes, req).status shouldBe Status.Ok
+  }
+
+  test("keepalive pings flow on a quiet GET SSE stream when configured") {
+    val routes =
+      buildRoutes(stateless = false, keepAlive = Some(java.time.Duration.ofMillis(100)))
+    val sid = post(routes, initFrame, None)
+      .rawHeader(SessionIdHeader)
+      .getOrElse(fail("no session id"))
+    val getResp = run(
+      routes,
+      Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid))
+    )
+    val bytes = runUnsafe(
+      getResp.body.asStream
+        .take(64)
+        .runCollect
+        .timeoutFail(new RuntimeException("no keepalive emitted"))(10.seconds)
+    )
+    new String(bytes.toArray, java.nio.charset.StandardCharsets.UTF_8) should include("ping")
+  }
+
+  test("requests before initialize are rejected with -32600; ping is exempt") {
+    val server = McpServer.typed[Any]("Gate", "0.1.0", McpServerSettings())
+    val _ = server.scanAnnotations[TestServer.type]
+    val router = runUnsafe(server.buildRouter)
+    val session = runUnsafe(Session.make("gate"))
+
+    val early = runUnsafe(MessageLoop.handleFrame(router, session, listFrame))
+      .getOrElse(fail("no reply"))
+    early should include("-32600")
+    early should include("initialize")
+
+    val ping = runUnsafe(
+      MessageLoop.handleFrame(router, session, """{"jsonrpc":"2.0","id":9,"method":"ping"}""")
+    ).getOrElse(fail("no ping reply"))
+    ping should include("\"result\"")
+
+    runUnsafe(MessageLoop.handleFrame(router, session, initFrame))
+    val after = runUnsafe(MessageLoop.handleFrame(router, session, listFrame))
+      .getOrElse(fail("no reply after init"))
+    after should include("\"tools\"")
+  }
+
+  test("initialize with an unknown protocol version negotiates to the latest supported") {
+    val server = McpServer.typed[Any]("Neg", "0.1.0", McpServerSettings())
+    val _ = server.scanAnnotations[TestServer.type]
+    val router = runUnsafe(server.buildRouter)
+    val session = runUnsafe(Session.make("neg"))
+    val unknownVersionInit =
+      """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01","capabilities":{},"clientInfo":{"name":"t","version":"1.0"}}}"""
+    val reply = runUnsafe(MessageLoop.handleFrame(router, session, unknownVersionInit))
+      .getOrElse(fail("no reply"))
+    reply should include(s""""protocolVersion":"${Protocol.LatestProtocolVersion}"""")
   }
 
   test("idle streamable sessions are swept; live-GET sessions are exempt") {
