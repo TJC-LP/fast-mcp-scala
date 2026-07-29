@@ -293,6 +293,6 @@ Key dependencies (versions in `build.mill`):
 - ZIO HTTP 3.4.0 - HTTP transport
 - Tapir 1.11.42 - Compile-time JSON Schema derivation
 - mill-bun-plugin 0.2.0 - Scala.js + Bun build integration
-- `@modelcontextprotocol/sdk` 1.29.0 - TS MCP SDK (test-time conformance client only)
+- `@modelcontextprotocol/sdk` 1.29.0 - TS MCP SDK, pinned in the js module's `bunDeps`; consumed only by the `js.test` conformance client (zero production `@JSImport`s)
 - WartRemover 3.5.6 - Code quality
 - ScalaTest 3.2.19 - Testing

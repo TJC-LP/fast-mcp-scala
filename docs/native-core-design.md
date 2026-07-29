@@ -42,7 +42,7 @@ This rewrite removes both SDK dependencies from the production classpath. The TS
 | 1 | Spec target | Default: 2025-11-25 only. Drop pre-2025-06-18 wire support. Need user sign-off. |
 | 2 | JSON Schema validation on `tools/call` | TS SDK enforces; Java SDK enforces from v2.0.0-M1. Options: (a) skip, (b) optional middleware, (c) required. Default proposal: (b) — pull a lightweight validator (`networknt/json-schema-validator` on JVM, `ajv` only at runtime if needed) as opt-in M4 middleware. |
 | 3 | Backwards-compat shims | Default: drop deprecated aliases (`FastMcpServerSettings`) at 0.4.0. Project is pre-1.0; cleaner break is justifiable. |
-| 4 | TS SDK as test dependency | Default: keep `@modelcontextprotocol/sdk` in `bunTestInstall` only. Provides ongoing cross-validation; doesn't bloat production. |
+| 4 | TS SDK as test dependency | RESOLVED: pinned via the js module's `bunDeps` (`@modelcontextprotocol/sdk@1.29.0`) — the bun test workspace links this module's `node_modules`; there is no test-scoped install task in mill-bun-plugin (a `bunTestInstall` never existed). Production boundary is the import graph (zero production `@JSImport`s). |
 
 ## Architecture sketch
 
@@ -148,7 +148,7 @@ The piece that replaces `McpAsyncServer` and TS `Server`:
 Only after M1–M7 are green:
 
 - Delete `mcp-core` + `mcp-json-jackson3` from `build.mill`.
-- Delete `@modelcontextprotocol/sdk` from production `bunInstall` (keep in `bunTestInstall`).
+- Remove `@modelcontextprotocol/sdk` from the production import graph (no production `@JSImport`s); keep it pinned in `bunDeps` for the test-time conformance client (mill-bun-plugin has no test-scoped deps task).
 - Delete `js/src/com/tjclp/fastmcp/facades/server/` tree.
 - Delete `jvm/src/com/tjclp/fastmcp/macros/JacksonConverter.scala`, `JacksonConversionContext.scala`.
 - Collapse `jvm/src/com/tjclp/fastmcp/core/Types.scala` JVM-specific `toJava`/`fromJava` into shared.

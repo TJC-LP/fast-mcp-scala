@@ -226,9 +226,14 @@ object `fast-mcp-scala` extends Module {
     )
 
     override def bunDeps = Task {
-      // TS MCP SDK + Zod are gone from production — native Scala dispatch lives in shared/.
-      // The TS SDK is re-introduced as a test-time client in `js.test` for cross-validation.
-      Seq.empty[String]
+      // The TS MCP SDK is NOT a production dependency — no production source `@JSImport`s it and
+      // the published Maven artifact is unaffected. It is declared (pinned) here because the bun
+      // test workspace links this module's node_modules (the plugin has no test-scoped deps yet):
+      // `js.test`'s conformance client resolves `@modelcontextprotocol/sdk` from it. Without the
+      // pin, Bun's runtime auto-install fetched *latest at test time* — a CI time bomb now that
+      // post-2026-07-28 SDK releases change initialize semantics. Production boundary = the
+      // import graph, enforced by RootImportSurface tests, not node_modules.
+      Seq("@modelcontextprotocol/sdk@1.29.0")
     }
 
     // bunJsEnv is what BunScalaJSTests uses for the Bun process env
