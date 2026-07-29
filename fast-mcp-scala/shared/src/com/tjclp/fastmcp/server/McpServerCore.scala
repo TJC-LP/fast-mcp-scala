@@ -81,7 +81,14 @@ trait McpServerCore[R]:
         ZIO
           .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
           .flatMap(input => contract.handler(input, ctxOpt))
-          .map(contract.encoder.encode),
+          // Carry both renderings while `Out` is still known; the wire layer emits
+          // structuredContent from it only when the tool declares an outputSchema.
+          .map(out =>
+            core.StructuredToolResult(
+              contract.encoder.encode(out),
+              contract.encoder.encodeStructured(out)
+            )
+          ),
       options = options
     )
 
@@ -100,7 +107,14 @@ trait McpServerCore[R]:
         ZIO
           .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
           .flatMap(input => contract.handler(input, ctxOpt))
-          .map(contract.encoder.encode),
+          // Carry both renderings while `Out` is still known; the wire layer emits
+          // structuredContent from it only when the tool declares an outputSchema.
+          .map(out =>
+            core.StructuredToolResult(
+              contract.encoder.encode(out),
+              contract.encoder.encodeStructured(out)
+            )
+          ),
       options = options
     )
 

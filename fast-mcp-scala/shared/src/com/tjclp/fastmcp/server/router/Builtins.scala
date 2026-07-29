@@ -34,7 +34,8 @@ final class Builtins[R](
     resourceManager: ResourceManager[R],
     tasksEnabled: Boolean,
     exposeTemplates: Boolean,
-    completionHandler: Option[CompletionHandler[R]] = None
+    completionHandler: Option[CompletionHandler[R]] = None,
+    hooks: ServerHooks[R] = ServerHooks.noop[R]
 ):
 
   /** Helper: decode `params` into `A`, failing with InvalidParams. */
@@ -93,14 +94,17 @@ final class Builtins[R](
         case Some(_) =>
           ZIO.fail(McpError.invalidParams("tools/call: `arguments` must be a JSON object"))
       ctx <- contextFor(session, req._meta)
+      _ <- hooks.beforeToolCall(req.name, params, session)
       outcome <- toolManager.callTool(req.name, args, Some(ctx)).either
+      outputSchema = toolManager.getToolDefinition(req.name).flatMap(_.outputSchema)
       json <- outcome match
-        case Right(result) => ok(WireMapping.toolResultToWire(result))
+        case Right(result) => ok(WireMapping.toolResultToWire(result, outputSchema))
         // Unknown tool is bad input (protocol error); a handler that threw is a tool-level failure
         // surfaced as an error result (isError = true), per the MCP spec.
         case Left(_: ToolNotFoundError) =>
           ZIO.fail(McpError.invalidParams(s"Unknown tool: ${req.name}"))
         case Left(err) => ok(WireMapping.toolErrorToWire(err))
+      _ <- hooks.afterToolCall(req.name, json, session)
     yield json
 
   // ---- resources ----

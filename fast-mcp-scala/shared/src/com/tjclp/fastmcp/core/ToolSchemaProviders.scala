@@ -24,3 +24,11 @@ object ToolSchemaProviders:
     ToolSchemaProvider.instance(
       ToolInputSchema.unsafeFromJsonString(JsonSchemaMacro.schemaForType[A].spaces2)
     )
+
+  /** Output-schema derivation for `McpTool#withOutputSchema` — same macro, same Tapir scope
+    * requirements as the input derivation above.
+    */
+  inline given [A]: ToolOutputSchemaProvider[A] =
+    ToolOutputSchemaProvider.instance(
+      wire.ToolOutputSchema.unsafeFromJsonString(JsonSchemaMacro.schemaForType[A].spaces2)
+    )

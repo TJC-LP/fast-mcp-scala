@@ -10,6 +10,7 @@ import com.tjclp.fastmcp.core.{
   Message,
   PromptDefinition,
   ResourceDefinition,
+  StructuredToolResult,
   TaskSupport,
   TextContent,
   ToolDefinition,
@@ -69,22 +70,32 @@ object WireMapping:
     */
   def completeResult(result: Json): Json = result
 
-  /** Convert a tool handler's untyped result into a [[CallToolResult]]. Ports the old
-    * `FastMcpServer.transformToolResult`: a `String` becomes one `TextContent`, an `Array[Byte]` a
-    * base64 image, a `Content` / `List[Content]` passes through, and anything else degrades to its
-    * `toString`. Tool *failures* never reach here — those are mapped to `isError = true` separately
-    * at the dispatch boundary.
+  /** Convert a tool handler's untyped result into a [[CallToolResult]]. A typed contract arrives as
+    * a [[StructuredToolResult]] carrying both renderings — its structured form is emitted as
+    * `structuredContent` when (and only when) the tool declares an `outputSchema`, per spec.
+    * Untyped results port the old `FastMcpServer.transformToolResult` coercions: a `String` becomes
+    * one `TextContent`, an `Array[Byte]` a base64 image, a `Content` / `List[Content]` passes
+    * through, and anything else degrades to its `toString`. Tool *failures* never reach here —
+    * those are mapped to `isError = true` separately at the dispatch boundary.
     */
-  def toolResultToWire(result: Any): CallToolResult =
-    val content: List[Content] = result match
-      case s: String => List(TextContent(s))
-      case bytes: Array[Byte] =>
-        List(ImageContent(Base64.getEncoder.encodeToString(bytes), "application/octet-stream"))
-      case c: Content => List(c)
-      case lst: List[?] if lst.forall(_.isInstanceOf[Content]) =>
-        lst.collect { case c: Content => c }
-      case other => List(TextContent(other.toString))
-    CallToolResult(content = content, isError = Some(false))
+  def toolResultToWire(result: Any, outputSchema: Option[ToolOutputSchema]): CallToolResult =
+    result match
+      case StructuredToolResult(content, structured) =>
+        CallToolResult(
+          content = content,
+          structuredContent = structured.filter(_ => outputSchema.isDefined),
+          isError = Some(false)
+        )
+      case other =>
+        val content: List[Content] = other match
+          case s: String => List(TextContent(s))
+          case bytes: Array[Byte] =>
+            List(ImageContent(Base64.getEncoder.encodeToString(bytes), "application/octet-stream"))
+          case c: Content => List(c)
+          case lst: List[?] if lst.forall(_.isInstanceOf[Content]) =>
+            lst.collect { case c: Content => c }
+          case value => List(TextContent(value.toString))
+        CallToolResult(content = content, isError = Some(false))
 
   /** Convert a tool *execution* failure into an error [[CallToolResult]] (`isError = true`) with
     * the message as text content. Per the MCP spec, a handler that throws surfaces as a tool result

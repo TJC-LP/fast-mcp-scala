@@ -71,7 +71,8 @@ object RouterBuilder:
       resourceManager = resourceManager,
       tasksEnabled = tasksOn,
       exposeTemplates = exposeTemplates,
-      completionHandler = completionHandler
+      completionHandler = completionHandler,
+      hooks = hooks
     )
 
     val taskHandlers = taskManager.map(tm => new TaskHandlers[R](tm))
