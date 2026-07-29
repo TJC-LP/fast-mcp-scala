@@ -92,8 +92,48 @@ object JvmTransportBackend extends TransportBackend:
     // so Routes stay `Routes[Any]` — Server.serve then needs only `Server`, avoiding the generic-R
     // HasNoScope constraint. No Unsafe, no runtime capture.
     ZIO.environment[R].flatMap { env =>
-      httpRoutes(router, settings, env).flatMap(routes => serve(routes, settings))
+      val ep = settings.httpEndpoint.stripPrefix("/")
+      if settings.stateless then
+        serve(
+          statelessRoutes(router, ep, env, settings.allowedHosts.getOrElse(Set.empty)),
+          settings
+        )
+      else
+        // The idle-session sweeper is forked here (scoped to the server's lifetime), NOT in
+        // httpRoutes — tests drive httpRoutes directly and must not leak a sweeper fiber each.
+        Ref.make(Map.empty[String, Session]).flatMap { store =>
+          val routes = streamableRoutes(router, ep, env, store, settings)
+          ZIO.scoped {
+            evictIdleSessions(store, settings).forkScoped *> serve(routes, settings)
+          }
+        }
     }
+
+  /** Periodically drop streamable sessions idle past `settings.sessionIdleTimeout` — abandoned
+    * clients would otherwise grow the store forever. Sessions with a live GET stream are exempt
+    * (push-only consumers may never POST). Eviction shuts the outbound queue down; the session's
+    * tasks stay in the TaskManager until their own TTL.
+    */
+  private[fastmcp] def evictIdleSessions(
+      store: Ref[Map[String, Session]],
+      settings: McpServerSettings
+  ): UIO[Unit] =
+    settings.sessionIdleTimeout match
+      case None => ZIO.unit
+      case Some(timeout) =>
+        val timeoutMs = timeout.toMillis
+        val sweep =
+          for
+            now <- ZIO.succeed(java.lang.System.currentTimeMillis())
+            all <- store.get
+            expired <- ZIO.filter(all.values.toList) { s =>
+              (s.lastSeen zip s.hasActiveGet).map((seen, live) => !live && now - seen > timeoutMs)
+            }
+            _ <- store.update(_ -- expired.map(_.sessionId))
+            _ <- ZIO.foreachDiscard(expired)(_.outbound.shutdown)
+          yield ()
+        val interval = Duration.fromMillis(math.max(timeoutMs / 4, 1000L))
+        sweep.repeat(Schedule.spaced(interval)).unit
 
   /** Build the HTTP routes, branching on `settings.stateless` and allocating a fresh session store
     * for the streamable case. Exposed to tests so specs can drive requests through
@@ -247,7 +287,7 @@ object JvmTransportBackend extends TransportBackend:
                   case None =>
                     ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
                   case Some(session) =>
-                    respondStreamable(router, session, message, isNew = false)
+                    session.touch *> respondStreamable(router, session, message, isNew = false)
                 }
               case None if MessageLoop.isInitialize(message) =>
                 for
@@ -345,17 +385,24 @@ object JvmTransportBackend extends TransportBackend:
           errorResponse(Status.BadRequest, s"Session ID required in $SessionIdHeader header")
         )
       case Some(id) =>
-        store.get.map { sessions =>
-          sessions.get(id) match
-            case None => errorResponse(Status.NotFound, s"Session not found: $id")
-            case Some(session) =>
-              val sse: ZStream[Any, Nothing, ServerSentEvent[String]] =
-                ZStream
-                  .fromQueue(session.outbound)
-                  .map(msg =>
-                    ServerSentEvent(MessageLoop.encodeOutbound(msg), eventType = Some("message"))
-                  )
-              Response.fromServerSentEvents(sse)
+        store.get.map(_.get(id)).flatMap {
+          case None => ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
+          case Some(session) =>
+            session.touch *> session.tryAcquireGet.map {
+              case false =>
+                // A live GET already drains this session's outbound queue; a second stream would
+                // round-robin-steal its messages (TS SDK answers 409 too).
+                errorResponse(Status.Conflict, "A GET SSE stream is already open for this session")
+              case true =>
+                val sse: ZStream[Any, Nothing, ServerSentEvent[String]] =
+                  ZStream
+                    .fromQueue(session.outbound)
+                    .map(msg =>
+                      ServerSentEvent(MessageLoop.encodeOutbound(msg), eventType = Some("message"))
+                    )
+                    .ensuring(session.releaseGet)
+                Response.fromServerSentEvents(sse)
+            }
         }
 
   /** DELETE terminates a session: drop it from the store and shut down its outbound queue (which

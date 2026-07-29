@@ -9,6 +9,7 @@ import zio.http.*
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import com.tjclp.fastmcp.server.*
+import com.tjclp.fastmcp.server.router.Session
 import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
 /** Integration tests for the native JVM HTTP transport.
@@ -124,6 +125,35 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val resp = post(routes, "not json", None)
     resp.status shouldBe Status.BadRequest
     bodyOf(resp) should include("-32700")
+  }
+
+  test("streamable: a second concurrent GET on the same session is rejected with 409") {
+    val routes = buildRoutes(stateless = false)
+    val sid = post(routes, initFrame, None)
+      .rawHeader(SessionIdHeader)
+      .getOrElse(fail("no session id"))
+    val get = Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid))
+    run(routes, get).status shouldBe Status.Ok
+    run(routes, get).status shouldBe Status.Conflict
+  }
+
+  test("idle streamable sessions are swept; live-GET sessions are exempt") {
+    val settings = McpServerSettings(sessionIdleTimeout = Some(java.time.Duration.ofMillis(200)))
+    runUnsafe(
+      for
+        idle <- Session.make("idle")
+        live <- Session.make("live")
+        _ <- live.tryAcquireGet
+        store <- Ref.make(Map("idle" -> idle, "live" -> live))
+        sweeper <- JvmTransportBackend.evictIdleSessions(store, settings).fork
+        _ <- (ZIO.sleep(50.millis) *> store.get)
+          .map(m => !m.contains("idle") && m.contains("live"))
+          .repeatUntil(identity)
+          .timeoutFail(new RuntimeException("sweeper did not evict the idle session"))(10.seconds)
+        shutdown <- idle.outbound.isShutdown
+        _ <- sweeper.interrupt
+      yield shutdown shouldBe true
+    )
   }
 
   test("stateless: a single POST initialize returns capabilities without logging") {

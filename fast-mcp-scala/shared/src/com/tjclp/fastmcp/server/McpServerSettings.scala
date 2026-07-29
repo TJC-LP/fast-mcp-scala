@@ -52,6 +52,9 @@ case class McpServerSettings(
     // When false (default), runHttp() uses the streamable transport (sessions + SSE).
     stateless: Boolean = false,
     keepAliveInterval: Option[java.time.Duration] = None,
+    // Streamable HTTP only: evict sessions idle longer than this (no POST/GET/DELETE activity and
+    // no live GET stream). Guards the session store against abandoned clients; `None` disables.
+    sessionIdleTimeout: Option[java.time.Duration] = Some(java.time.Duration.ofMinutes(30)),
     disallowDelete: Boolean = false,
     // Advertise the `logging` capability and wire `logging/setLevel`. Off by default (#56 honesty).
     loggingEnabled: Boolean = false,

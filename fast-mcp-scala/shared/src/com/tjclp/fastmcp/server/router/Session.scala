@@ -30,8 +30,27 @@ final class Session private (
     private val clientInfoRef: Ref[Option[Implementation]],
     private val clientCapabilitiesRef: Ref[Option[ClientCapabilities]],
     val outbound: Queue[JsonRpcMessage],
-    private val sinkRef: FiberRef[Option[Queue[JsonRpcMessage]]]
+    private val sinkRef: FiberRef[Option[Queue[JsonRpcMessage]]],
+    private val lastSeenRef: Ref[Long],
+    private val activeGetRef: Ref[Boolean]
 ):
+
+  /** Millis timestamp of the last client activity (transports touch on every request). Drives idle
+    * eviction of abandoned streamable sessions.
+    */
+  def lastSeen: UIO[Long] = lastSeenRef.get
+
+  def touch: UIO[Unit] =
+    ZIO.succeed(java.lang.System.currentTimeMillis()).flatMap(lastSeenRef.set)
+
+  /** At most one standalone GET SSE stream may drain `outbound` — two would round-robin-steal
+    * messages. `tryAcquireGet` is an atomic test-and-set (false = a stream is already live, answer
+    * 409); the stream's finalizer must call [[releaseGet]]. Sessions with a live GET are exempt
+    * from idle eviction (push-only consumers may never POST).
+    */
+  def tryAcquireGet: UIO[Boolean] = activeGetRef.modify(active => (!active, true))
+  def releaseGet: UIO[Unit] = activeGetRef.set(false)
+  def hasActiveGet: UIO[Boolean] = activeGetRef.get
 
   def protocolVersion: UIO[String] = protocolVersionRef.get
   def setProtocolVersion(v: String): UIO[Unit] = protocolVersionRef.set(v)
@@ -137,6 +156,8 @@ object Session:
       cCaps <- Ref.make(Option.empty[ClientCapabilities])
       outbound <- Queue.unbounded[JsonRpcMessage]
       sink = Unsafe.unsafe(implicit u => FiberRef.unsafe.make(Option.empty[Queue[JsonRpcMessage]]))
+      seen <- Ref.make(java.lang.System.currentTimeMillis())
+      activeGet <- Ref.make(false)
     yield new Session(
       sessionId,
       pv,
@@ -149,5 +170,7 @@ object Session:
       cInfo,
       cCaps,
       outbound,
-      sink
+      sink,
+      seen,
+      activeGet
     )

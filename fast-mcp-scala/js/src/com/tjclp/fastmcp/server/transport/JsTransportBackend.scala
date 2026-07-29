@@ -102,20 +102,51 @@ object JsTransportBackend extends TransportBackend:
       settings: McpServerSettings
   ): ZIO[R, Throwable, Unit] =
     ZIO.runtime[R].flatMap { rt =>
-      ZIO.acquireReleaseWith(ZIO.attempt(startBun(router, rt, settings)))(server =>
+      val store = js.Dictionary.empty[Session]
+      ZIO.acquireReleaseWith(ZIO.attempt(startBun(router, rt, settings, store)))(server =>
         ZIO.succeed(server.stop())
-      )(_ => ZIO.never)
+      )(_ =>
+        // Idle-session sweeper scoped to the server's lifetime (test helpers that call startBun
+        // directly get no sweeper — documented there).
+        ZIO.scoped(evictIdleSessions(store, settings).forkScoped *> ZIO.never)
+      )
     }
 
+  /** Periodically drop streamable sessions idle past `settings.sessionIdleTimeout` (JVM twin:
+    * `JvmTransportBackend.evictIdleSessions`). Bun is single-threaded, so mutating the dictionary
+    * in-place is safe.
+    */
+  private def evictIdleSessions(
+      store: js.Dictionary[Session],
+      settings: McpServerSettings
+  ): UIO[Unit] =
+    settings.sessionIdleTimeout match
+      case None => ZIO.unit
+      case Some(timeout) =>
+        val timeoutMs = timeout.toMillis
+        val sweep =
+          for
+            now <- ZIO.succeed(java.lang.System.currentTimeMillis())
+            expired <- ZIO.filter(store.toList) { case (_, s) =>
+              (s.lastSeen zip s.hasActiveGet).map((seen, live) => !live && now - seen > timeoutMs)
+            }
+            _ <- ZIO.foreachDiscard(expired) { case (sid, s) =>
+              ZIO.succeed(store -= sid) *> s.outbound.shutdown
+            }
+          yield ()
+        val interval = Duration.fromMillis(math.max(timeoutMs / 4, 1000L))
+        sweep.repeat(Schedule.spaced(interval)).unit
+
   /** Start the Bun HTTP listener and return its handle. Used by `serveHttp` (wrapped in
-    * acquire/release) and directly by JS integration tests that want a `stop()`-able handle.
+    * acquire/release, with the idle sweeper running alongside) and directly by JS integration tests
+    * that want a `stop()`-able handle (no sweeper — tests manage session lifetimes).
     */
   def startBun[R](
       router: McpRouter[R],
       runtime: Runtime[R],
-      settings: McpServerSettings
+      settings: McpServerSettings,
+      store: js.Dictionary[Session] = js.Dictionary.empty[Session] // Bun is single-threaded
   ): BunServer =
-    val store = js.Dictionary.empty[Session] // Bun is single-threaded — no concurrent access
     Bun.serve(
       BunServeOptions(
         port = settings.port,
@@ -189,7 +220,7 @@ object JsTransportBackend extends TransportBackend:
                     case None =>
                       ZIO.succeed(jsonRpcErrorResponse(404, s"Session not found: $sid"))
                     case Some(session) =>
-                      respondStreamable(router, session, message, isNew = false)
+                      session.touch *> respondStreamable(router, session, message, isNew = false)
                 case None if MessageLoop.isInitialize(message) =>
                   for
                     sid <- randomId()
