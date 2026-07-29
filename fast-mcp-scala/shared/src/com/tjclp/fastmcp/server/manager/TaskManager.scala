@@ -4,6 +4,7 @@ package server.manager
 import zio.{System as _, Task as _, *}
 
 import core.*
+import jsonrpc.{McpError, McpErrorCarrier}
 import server.TaskSettings
 
 /** Internal representation of a task's mutable state. Held inside the [[TaskManager]]'s [[Ref]];
@@ -192,13 +193,13 @@ class TaskManager[R](settings: TaskSettings, tasksRef: Ref[Map[String, TaskEntry
   /** Block until the task reaches a terminal status, then return the underlying request's result
     * (or fail with the underlying request's error).
     *
-    * For unknown / cross-session tasks, fails with [[NoSuchElementException]] so the dispatch layer
-    * can map to the appropriate JSON-RPC error.
+    * For unknown / cross-session tasks, fails with [[TaskNotFoundError]] (JSON-RPC `-32602`, same
+    * as `tasks/get`).
     */
   def result(taskId: String, sessionId: Option[String]): IO[Throwable, Any] =
     tasksRef.get.flatMap { all =>
       visible(all, taskId, sessionId) match
-        case None => ZIO.fail(new NoSuchElementException(s"Task not found: $taskId"))
+        case None => ZIO.fail(new TaskNotFoundError(taskId))
         case Some(entry) => entry.result.await
     }
 
@@ -267,6 +268,17 @@ final class TaskConcurrencyLimitExceeded(
 ) extends RuntimeException(
       s"Task concurrency limit exceeded for session ${sessionId.getOrElse("(none)")}: limit=$limit"
     )
+    with McpErrorCarrier:
+  // Cap exceeded is a request-rejection (-32602), not a generic server error.
+  def toMcpError: McpError = McpError.invalidParams(getMessage)
+
+/** Unknown / cross-session task id from `tasks/result`. Maps to JSON-RPC `-32602` so it agrees with
+  * `tasks/get`'s "Unknown task" error.
+  */
+final class TaskNotFoundError(val taskId: String)
+    extends RuntimeException(s"Unknown task: $taskId")
+    with McpErrorCarrier:
+  def toMcpError: McpError = McpError.invalidParams(getMessage)
 
 object TaskManager:
 

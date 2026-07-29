@@ -20,6 +20,13 @@ final case class McpError(
 
   def toErrorObject: JsonRpcErrorObject = JsonRpcErrorObject(code, message, data)
 
+/** Domain errors that know their own JSON-RPC representation. [[McpError.fromThrowable]] maps any
+  * carrier via `toMcpError`, so error types can live next to their producers (managers) without
+  * this layer depending on their packages. Wire codes stay centralized in [[ErrorCodes]].
+  */
+trait McpErrorCarrier:
+  def toMcpError: McpError
+
 object McpError:
 
   def parseError(message: String): McpError = McpError(ErrorCodes.ParseError, message)
@@ -44,12 +51,15 @@ object McpError:
   def fromThrowable(err: Throwable): McpError =
     err match
       case e: McpError => e
+      case c: McpErrorCarrier => c.toMcpError
       case _: java.util.concurrent.TimeoutException =>
         McpError.internalError(s"Operation timed out: ${msg(err)}")
       case _: IllegalArgumentException =>
         McpError.invalidParams(s"Invalid argument: ${msg(err)}")
+      // Missing request data (e.g. a required argument key absent on the annotation path) is a
+      // request problem (-32602), not a server fault.
       case _: NoSuchElementException =>
-        McpError(ErrorCodes.ResourceNotFound, s"Not found: ${msg(err)}")
+        McpError.invalidParams(msg(err))
       case _ =>
         McpError.internalError(msg(err))
 

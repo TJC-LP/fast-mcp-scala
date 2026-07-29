@@ -8,6 +8,7 @@ import scala.jdk.CollectionConverters.*
 import zio.*
 
 import core.*
+import jsonrpc.{McpError, McpErrorCarrier}
 import server.*
 
 /** Function type for prompt handlers Takes arguments and returns a list of Messages wrapped in ZIO.
@@ -132,7 +133,9 @@ class PromptManager[R] extends Manager[PromptDefinition]:
 class PromptError(message: String, cause: Option[Throwable] = None)
     extends RuntimeException(message, cause.orNull)
 
-class PromptNotFoundError(message: String) extends PromptError(message)
+class PromptNotFoundError(message: String) extends PromptError(message) with McpErrorCarrier:
+  // Unknown prompt name is bad input, not a server fault.
+  def toMcpError: McpError = McpError.invalidParams(message)
 
 class PromptRegistrationError(message: String, cause: Option[Throwable] = None)
     extends PromptError(message, cause)
@@ -140,4 +143,6 @@ class PromptRegistrationError(message: String, cause: Option[Throwable] = None)
 class PromptExecutionError(message: String, cause: Option[Throwable] = None)
     extends PromptError(message, cause)
 
-class PromptArgumentError(message: String) extends PromptError(message)
+class PromptArgumentError(message: String) extends PromptError(message) with McpErrorCarrier:
+  // Missing/invalid prompt arguments are a request problem (-32602).
+  def toMcpError: McpError = McpError.invalidParams(message)
