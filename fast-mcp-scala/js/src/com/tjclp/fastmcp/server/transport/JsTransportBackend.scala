@@ -6,7 +6,7 @@ import scala.scalajs.js
 import zio.*
 import zio.json.*
 
-import com.tjclp.fastmcp.core.Protocol
+import com.tjclp.fastmcp.core.{ErrorCodes, Protocol}
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError, RequestId}
 import com.tjclp.fastmcp.facades.node.NodeProcess
 import com.tjclp.fastmcp.facades.runtime.{
@@ -150,15 +150,23 @@ object JsTransportBackend extends TransportBackend:
   ): ZIO[R, Throwable, js.Dynamic] =
     methodOf(req) match
       case "POST" =>
-        for
-          body <- readBody(req)
-          session <- Session.make("stateless")
-          reply <- MessageLoop.handleFrame(router, session, body)
-        yield reply match
-          case Some(json) => jsonResponse(json, Map.empty)
-          case None => webResponse(202, "")
+        readBody(req).flatMap { body =>
+          MessageLoop.parseFrame(body) match
+            case Left(parseFailure) =>
+              ZIO.succeed(jsonResponse(parseFailure.toJson, Map.empty, status = 400))
+            case Right(message) =>
+              for
+                session <- Session.make("stateless")
+                reply <- router.dispatch(session, message)
+              yield (message, reply) match
+                // Structurally invalid frames (id:null, wrong jsonrpc, ...) are client errors.
+                case (_: JsonRpcMessage.Invalid, Some(r)) =>
+                  jsonResponse(r.toJson, Map.empty, status = 400)
+                case (_, Some(r)) => jsonResponse(r.toJson, Map.empty)
+                case (_, None) => webResponse(202, "")
+        }
       case _ =>
-        ZIO.succeed(webResponse(405, "Stateless mode only accepts POST"))
+        ZIO.succeed(jsonRpcErrorResponse(405, "Stateless mode only accepts POST"))
 
   private def handleStreamable[R](
       router: McpRouter[R],
@@ -169,39 +177,56 @@ object JsTransportBackend extends TransportBackend:
     methodOf(req) match
       case "POST" =>
         readBody(req).flatMap { body =>
-          sessionIdHeader(req) match
-            case Some(sid) =>
-              store.get(sid) match
+          // Parse BEFORE touching the session store: a malformed or non-initialize body must
+          // never mint a durable session (JVM transport does the same).
+          MessageLoop.parseFrame(body) match
+            case Left(parseFailure) =>
+              ZIO.succeed(jsonResponse(parseFailure.toJson, Map.empty, status = 400))
+            case Right(message) =>
+              sessionIdHeader(req) match
+                case Some(sid) =>
+                  store.get(sid) match
+                    case None =>
+                      ZIO.succeed(jsonRpcErrorResponse(404, s"Session not found: $sid"))
+                    case Some(session) =>
+                      respondStreamable(router, session, message, isNew = false)
+                case None if MessageLoop.isInitialize(message) =>
+                  for
+                    sid <- randomId()
+                    session <- Session.make(sid)
+                    _ <- ZIO.succeed { store(session.sessionId) = session }
+                    resp <- respondStreamable(router, session, message, isNew = true)
+                  yield resp
                 case None =>
-                  ZIO.succeed(webResponse(404, s"Session not found: $sid"))
-                case Some(session) =>
-                  respondStreamable(router, session, body, isNew = false)
-            case None =>
-              for
-                sid <- randomId()
-                session <- Session.make(sid)
-                _ <- ZIO.succeed { store(session.sessionId) = session }
-                resp <- respondStreamable(router, session, body, isNew = true)
-              yield resp
+                  ZIO.succeed(
+                    jsonRpcErrorResponse(
+                      400,
+                      s"$SessionIdHeader header is required (only initialize may open a session)"
+                    )
+                  )
         }
 
       case "DELETE" =>
-        if settings.disallowDelete then ZIO.succeed(webResponse(405, "DELETE disabled"))
+        if settings.disallowDelete then ZIO.succeed(jsonRpcErrorResponse(405, "DELETE disabled"))
         else
           sessionIdHeader(req) match
             case None =>
-              ZIO.succeed(webResponse(400, s"Session ID required in $SessionIdHeader header"))
+              ZIO.succeed(
+                jsonRpcErrorResponse(400, s"Session ID required in $SessionIdHeader header")
+              )
             case Some(sid) =>
               store.get(sid) match
                 case Some(session) =>
                   ZIO.succeed { store -= sid } *> session.outbound.shutdown.as(webResponse(200, ""))
                 case None =>
-                  ZIO.succeed(webResponse(404, s"Session not found: $sid"))
+                  ZIO.succeed(jsonRpcErrorResponse(404, s"Session not found: $sid"))
 
       case _ =>
         // GET is a no-op 405: every server→client message streams on its request's own POST SSE
         // response (see respondStreamable), so a standalone GET push channel isn't needed.
-        ZIO.succeed(webResponse(405, "No standalone GET stream; server→client rides the POST SSE"))
+        ZIO.succeed(
+          jsonRpcErrorResponse(405, "No standalone GET stream; server→client rides the POST SSE")
+        )
 
   /** Dispatch one streamable POST frame. A *request* gets a `text/event-stream` response that
     * streams the notifications and sub-requests it emits (progress, sampling, elicitation) followed
@@ -213,11 +238,11 @@ object JsTransportBackend extends TransportBackend:
   private def respondStreamable[R](
       router: McpRouter[R],
       session: Session,
-      body: String,
+      message: JsonRpcMessage,
       isNew: Boolean
   ): ZIO[R, Throwable, js.Dynamic] =
-    body.fromJson[JsonRpcMessage] match
-      case Right(req: JsonRpcMessage.Request) =>
+    message match
+      case req: JsonRpcMessage.Request =>
         for
           reqQueue <- Queue.unbounded[JsonRpcMessage]
           _ <- session
@@ -225,17 +250,14 @@ object JsTransportBackend extends TransportBackend:
             .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
             .forkDaemon
         yield sseResponse(reqQueue, req.id, session, isNew)
-      case Right(other) =>
-        router.dispatch(session, other).as(webResponse(202, ""))
-      case Left(parseError) =>
-        val failure: JsonRpcMessage =
-          JsonRpcMessage.Failure(
-            None,
-            McpError.parseError(s"Parse error: $parseError").toErrorObject
-          )
+      case other =>
         val extra =
           if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String]
-        ZIO.succeed(jsonResponse(failure.toJson, extra))
+        router.dispatch(session, other).map {
+          // Only structurally-Invalid frames produce a reply here: 400 with the -32600 body.
+          case Some(reply) => jsonResponse(reply.toJson, extra, status = 400)
+          case None => webResponse(202, "")
+        }
 
   /** Build a Bun SSE `Response` whose `ReadableStream` is pull-fed from `reqQueue`: each take emits
     * one `event: message` frame, and the stream closes right after the request's final reply.
@@ -312,8 +334,19 @@ object JsTransportBackend extends TransportBackend:
   private def readBody(req: js.Dynamic): ZIO[Any, Throwable, String] =
     ZioJsPromise.fromJsPromise(req.text().asInstanceOf[js.Promise[String]])
 
-  private def jsonResponse(body: String, extraHeaders: Map[String, String]): js.Dynamic =
-    webResponse(200, body, Map("content-type" -> "application/json") ++ extraHeaders)
+  private def jsonResponse(
+      body: String,
+      extraHeaders: Map[String, String],
+      status: Int = 200
+  ): js.Dynamic =
+    webResponse(status, body, Map("content-type" -> "application/json") ++ extraHeaders)
+
+  /** Transport-level rejection as a JSON-RPC error body (mirrors the JVM `errorResponse`). */
+  private def jsonRpcErrorResponse(status: Int, message: String): js.Dynamic =
+    val code = if status == 404 then ErrorCodes.SessionNotFound else ErrorCodes.TransportError
+    val failure: JsonRpcMessage =
+      JsonRpcMessage.Failure(None, McpError(code, message).toErrorObject)
+    jsonResponse(failure.toJson, Map.empty, status = status)
 
   private def webResponse(
       status: Int,

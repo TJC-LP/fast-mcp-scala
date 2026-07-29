@@ -8,7 +8,7 @@ import zio.http.*
 import zio.json.*
 import zio.stream.*
 
-import com.tjclp.fastmcp.core.Protocol
+import com.tjclp.fastmcp.core.{ErrorCodes, Protocol}
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError, RequestId}
 import com.tjclp.fastmcp.server.McpServerSettings
 import com.tjclp.fastmcp.server.router.{McpRouter, Session}
@@ -164,11 +164,20 @@ object JvmTransportBackend extends TransportBackend:
         body <- request.body.asString.mapError(e =>
           Option(e.getMessage).getOrElse("body read error")
         )
-        session <- Session.make("stateless")
-        reply <- MessageLoop.handleFrame(router, session, body)
-      yield reply match
-        case Some(json) => Response.json(json)
-        case None => Response.status(Status.Accepted)
+        resp <- MessageLoop.parseFrame(body) match
+          case Left(parseFailure) =>
+            ZIO.succeed(Response.json(parseFailure.toJson).status(Status.BadRequest))
+          case Right(message) =>
+            for
+              session <- Session.make("stateless")
+              reply <- router.dispatch(session, message)
+            yield (message, reply) match
+              // Structurally invalid frames (id:null, wrong jsonrpc, ...) are client errors.
+              case (_: JsonRpcMessage.Invalid, Some(r)) =>
+                Response.json(r.toJson).status(Status.BadRequest)
+              case (_, Some(r)) => Response.json(r.toJson)
+              case (_, None) => Response.status(Status.Accepted)
+      yield resp
     effect.catchAll(msg => ZIO.succeed(errorResponse(Status.BadRequest, msg)))
 
   // ---------------------------------------------------------------------------
@@ -226,21 +235,34 @@ object JvmTransportBackend extends TransportBackend:
           errorResponse(Status.BadRequest, Option(err.getMessage).getOrElse("body read error"))
         )
       case Right(body) =>
-        request.rawHeader(SessionIdHeader) match
-          case Some(id) =>
-            store.get.map(_.get(id)).flatMap {
+        // Parse BEFORE touching the session store: a malformed or non-initialize body must never
+        // mint a durable session (it used to — an unauthenticated memory leak).
+        MessageLoop.parseFrame(body) match
+          case Left(parseFailure) =>
+            ZIO.succeed(Response.json(parseFailure.toJson).status(Status.BadRequest))
+          case Right(message) =>
+            request.rawHeader(SessionIdHeader) match
+              case Some(id) =>
+                store.get.map(_.get(id)).flatMap {
+                  case None =>
+                    ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
+                  case Some(session) =>
+                    respondStreamable(router, session, message, isNew = false)
+                }
+              case None if MessageLoop.isInitialize(message) =>
+                for
+                  id <- randomId()
+                  session <- Session.make(id)
+                  _ <- store.update(_ + (session.sessionId -> session))
+                  resp <- respondStreamable(router, session, message, isNew = true)
+                yield resp
               case None =>
-                ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
-              case Some(session) =>
-                respondStreamable(router, session, body, isNew = false)
-            }
-          case None =>
-            for
-              id <- randomId()
-              session <- Session.make(id)
-              _ <- store.update(_ + (session.sessionId -> session))
-              resp <- respondStreamable(router, session, body, isNew = true)
-            yield resp
+                ZIO.succeed(
+                  errorResponse(
+                    Status.BadRequest,
+                    s"$SessionIdHeader header is required (only initialize may open a session)"
+                  )
+                )
     }
 
   /** Dispatch one streamable POST frame. A *request* gets an SSE response that streams the
@@ -252,21 +274,20 @@ object JvmTransportBackend extends TransportBackend:
   private def respondStreamable[R](
       router: McpRouter[R],
       session: Session,
-      body: String,
+      message: JsonRpcMessage,
       isNew: Boolean
   ): URIO[R, Response] =
-    body.fromJson[JsonRpcMessage] match
-      case Right(req: JsonRpcMessage.Request) =>
+    message match
+      case req: JsonRpcMessage.Request =>
         streamRequest(router, session, req, isNew)
-      case Right(other) =>
-        router.dispatch(session, other).as(Response.status(Status.Accepted))
-      case Left(parseError) =>
-        val failure: JsonRpcMessage =
-          JsonRpcMessage.Failure(
-            None,
-            McpError.parseError(s"Parse error: $parseError").toErrorObject
-          )
-        ZIO.succeed(withSessionHeader(Response.json(failure.toJson), session, isNew))
+      case other =>
+        router.dispatch(session, other).map {
+          // Only structurally-Invalid frames produce a reply here (notifications and inbound
+          // responses are fire-and-forget): answer 400 with the router's -32600 body.
+          case Some(reply) =>
+            withSessionHeader(Response.json(reply.toJson).status(Status.BadRequest), session, isNew)
+          case None => Response.status(Status.Accepted)
+        }
 
   /** Run a request's dispatch with its server→client messages routed to a per-request queue, and
     * return an SSE response that emits each and ends right after the request's final reply.
@@ -402,8 +423,15 @@ object JvmTransportBackend extends TransportBackend:
       else None
     }
 
+  /** Transport-level rejection as a JSON-RPC error body (TS SDK parity — clients surface
+    * `error.message` uniformly instead of sniffing text/plain bodies).
+    */
   private def errorResponse(status: Status, message: String): Response =
-    Response.text(message).status(status)
+    val code =
+      if status == Status.NotFound then ErrorCodes.SessionNotFound else ErrorCodes.TransportError
+    val failure: JsonRpcMessage =
+      JsonRpcMessage.Failure(None, McpError(code, message).toErrorObject)
+    Response.json(failure.toJson).status(status)
 
   private def writeLine(line: String): Task[Unit] =
     ZIO.attempt {

@@ -103,6 +103,29 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     post(routes, listFrame, Some("does-not-exist")).status shouldBe Status.NotFound
   }
 
+  test("streamable: headerless non-initialize POST is 400 and mints no session") {
+    val routes = buildRoutes(stateless = false)
+    val resp = post(routes, listFrame, None)
+    resp.status shouldBe Status.BadRequest
+    resp.rawHeader(SessionIdHeader) shouldBe None
+    bodyOf(resp) should include(SessionIdHeader)
+  }
+
+  test("streamable: malformed JSON POST is 400 with a -32700 body and mints no session") {
+    val routes = buildRoutes(stateless = false)
+    val resp = post(routes, """{"jsonrpc":"2.0", broken""", None)
+    resp.status shouldBe Status.BadRequest
+    resp.rawHeader(SessionIdHeader) shouldBe None
+    bodyOf(resp) should include("-32700")
+  }
+
+  test("stateless: malformed JSON POST is 400 with a -32700 body") {
+    val routes = buildRoutes(stateless = true)
+    val resp = post(routes, "not json", None)
+    resp.status shouldBe Status.BadRequest
+    bodyOf(resp) should include("-32700")
+  }
+
   test("stateless: a single POST initialize returns capabilities without logging") {
     val routes = buildRoutes(stateless = true)
     val resp = post(routes, initFrame, None)

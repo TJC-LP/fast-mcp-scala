@@ -150,6 +150,59 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     }
   }
 
+  it should "reject malformed JSON with 400 and a -32700 body" in {
+    serverReady.flatMap { _ =>
+      httpFetch(
+        "/mcp",
+        js.Dynamic.literal(
+          method = "POST",
+          headers = js.Dictionary(
+            "content-type" -> "application/json",
+            "accept" -> "application/json, text/event-stream"
+          ),
+          body = "not json"
+        )
+      ).flatMap { resp =>
+        fromJsPromise(resp.text().asInstanceOf[js.Promise[String]]).map { body =>
+          resp.status.asInstanceOf[Int] shouldBe 400
+          body should include("-32700")
+        }
+      }
+    }
+  }
+
+  "runHttp (streamable minting)" should "400 a headerless non-initialize POST without minting" in {
+    val mintPort = 38919
+    val mintServer = com.tjclp.fastmcp.server.McpServer(
+      "JsHttpMintServer",
+      "0.1.0",
+      McpServerSettings(
+        host = "127.0.0.1",
+        port = mintPort,
+        httpEndpoint = "/mcp",
+        stateless = false
+      )
+    )
+    val mintBunServer = mintServer.startStatefulHttp()
+    val init = js.Dynamic.literal(
+      method = "POST",
+      headers = js.Dictionary(
+        "content-type" -> "application/json",
+        "accept" -> "application/json, text/event-stream"
+      ),
+      body = """{"jsonrpc":"2.0","id":9,"method":"tools/list"}"""
+    )
+    val done = fromJsPromise(
+      js.Dynamic.global
+        .fetch(s"http://127.0.0.1:$mintPort/mcp", init)
+        .asInstanceOf[js.Promise[js.Dynamic]]
+    ).map { resp =>
+      resp.status.asInstanceOf[Int] shouldBe 400
+      Option(resp.headers.get("mcp-session-id").asInstanceOf[String]) shouldBe None
+    }
+    done.andThen { case _ => mintBunServer.stop() }
+  }
+
   "runHttp (stateful tasks)" should "handle tasks/list without params" in {
     val taskPort = 38918
     val taskServer = com.tjclp.fastmcp.server.McpServer(

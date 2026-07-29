@@ -38,6 +38,11 @@ object ErrorCodes:
   val ResourceNotFound: Int = -32002
   val UrlElicitationRequired: Int = -32042
 
+  // Implementation-defined transport-level codes (JSON-RPC server-error range; TS SDK parity for
+  // HTTP-layer rejections that never reach the router).
+  val TransportError: Int = -32000
+  val SessionNotFound: Int = -32001
+
 /** Opaque pagination cursor. Wire shape is a string; treating it as opaque keeps cursor
   * production/consumption sites from leaking encoding choices.
   */

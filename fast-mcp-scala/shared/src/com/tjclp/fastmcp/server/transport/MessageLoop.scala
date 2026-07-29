@@ -5,7 +5,7 @@ import zio.json.*
 
 import com.tjclp.fastmcp.jsonrpc.*
 import com.tjclp.fastmcp.jsonrpc.JsonRpcMessage.*
-import com.tjclp.fastmcp.server.router.{McpRouter, Session}
+import com.tjclp.fastmcp.server.router.{McpRouter, Methods, Session}
 
 /** Platform-neutral wire ↔ dispatch bridge. Both the JVM and JS transports reduce to "get bytes,
   * call [[handleFrame]], write bytes" — all parsing, dispatch, and error framing lives here so the
@@ -24,14 +24,31 @@ object MessageLoop:
       session: Session,
       frame: String
   ): URIO[R, Option[String]] =
-    frame.fromJson[JsonRpcMessage] match
+    parseFrame(frame) match
       case Right(message) =>
         router.dispatch(session, message).map(_.map(_.toJson))
-      case Left(parseError) =>
-        // Per JSON-RPC, a parse error gets an error response with a null id.
-        val failure: JsonRpcMessage =
-          Failure(None, McpError.parseError(s"Parse error: $parseError").toErrorObject)
-        ZIO.some(failure.toJson)
+      case Left(parseFailure) =>
+        ZIO.some(parseFailure.toJson)
+
+  /** Parse one frame. `Left` carries the ready-to-send JSON-RPC parse-error response (null id, per
+    * JSON-RPC). HTTP transports parse *before* touching session state so a malformed body can never
+    * mint a session; stdio just feeds both arms to the writer.
+    */
+  def parseFrame(frame: String): Either[JsonRpcMessage, JsonRpcMessage] =
+    frame
+      .fromJson[JsonRpcMessage]
+      .left
+      .map(parseError =>
+        Failure(None, McpError.parseError(s"Parse error: $parseError").toErrorObject)
+      )
+
+  /** True for the `initialize` request — the only frame allowed to mint a streamable HTTP session
+    * (spec: non-initialize requests without a session id are rejected with 400).
+    */
+  def isInitialize(message: JsonRpcMessage): Boolean =
+    message match
+      case Request(_, Methods.Initialize, _) => true
+      case _ => false
 
   /** Serialize a server-initiated outbound message (log notification, progress, sampling/elicit
     * request) drained from [[Session.outbound]].
