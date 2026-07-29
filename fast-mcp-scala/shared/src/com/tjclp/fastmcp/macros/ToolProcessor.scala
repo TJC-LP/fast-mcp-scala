@@ -10,9 +10,8 @@ import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.manager.*
 
 /** Cross-platform `@Tool` annotation processor. Emits a registration expression targeting the
-  * shared [[McpServerCore]] trait — platform-specific codec / schema details are resolved through
-  * given instances (`JacksonConverter` on JVM, `ZioJsonMcpDecoder` on JS, both satisfying
-  * [[com.tjclp.fastmcp.core.McpDecoder]]).
+  * shared [[McpServerCore]] trait — argument decoding resolves through the shared zio-json
+  * derivation (`McpDecoders` over `DefaultDecodeContext`), identical on JVM and Scala.js.
   */
 private[macros] object ToolProcessor extends AnnotationProcessorBase:
 
@@ -167,7 +166,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       report.errorAndAbort(
         s"@Tool '$methodName' requires ZIO environment '${rMethodRepr.show}' but the server's " +
           s"environment type is '${rServerRepr.show}', which does not provide it. " +
-          s"Construct the server as FastMcpServer[${rServerRepr.show} & ${rMethodRepr.show}] " +
+          s"Construct the server as McpServer.typed[${rServerRepr.show} & ${rMethodRepr.show}] " +
           s"(or wider), or remove the environment requirement from the method body."
       )
 

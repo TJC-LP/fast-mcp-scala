@@ -11,9 +11,10 @@ import zio.*
 
 /** Bidirectional bridge between ZIO effects and JavaScript Promises.
   *
-  * Used by the Scala.js MCP runtime to:
-  *   - turn ZIO handlers into `js.Promise`s the TS SDK can `await`
-  *   - adapt incoming `js.Promise` results (from TS SDK facades) into ZIO effects
+  * Used by the Scala.js transport to:
+  *   - turn ZIO effects into `js.Promise`s the Bun/Web platform APIs `await` (`Bun.serve` fetch,
+  *     `ReadableStream` pull/cancel)
+  *   - adapt incoming `js.Promise` results (`fetch`, `Request.text()`) into ZIO effects
   */
 object ZioJsPromise:
 
@@ -26,7 +27,7 @@ object ZioJsPromise:
     zioToPromise[Any, A](Runtime.default)(effect)
 
   /** Run a `ZIO[R, Throwable, A]` on the supplied runtime and expose the result as a
-    * `js.Promise[A]`. Used by the JS server to thread the runtime captured at `runHttp[R]` /
+    * `js.Promise[A]`. Used by the JS transport to thread the runtime captured at `runHttp[R]` /
     * `runStdio[R]` entry into each handler invocation, so user-supplied layers reach the effects
     * that need them.
     */

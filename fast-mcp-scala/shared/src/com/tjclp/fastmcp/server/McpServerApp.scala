@@ -36,8 +36,8 @@ object SelfScan:
   * `templateResources` lists to compose annotation scanning with typed contracts.
   *
   * The default `McpServerApp` flow pins `R = Any`, so annotated methods must return effects that
-  * don't depend on a ZIO environment. For layer-aware servers, build a `FastMcpServer[R]` directly
-  * and call `runHttp().provide(...)`.
+  * don't depend on a ZIO environment. For layer-aware servers, build an `McpServer.typed[R]`
+  * directly and call `runHttp().provide(...)`.
   *
   * @tparam T
   *   transport marker ([[Transport.Stdio]] or [[Transport.Http]])

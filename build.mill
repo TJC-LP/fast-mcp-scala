@@ -185,8 +185,8 @@ object `fast-mcp-scala` extends Module {
     }
   }
 
-  // Scala.js backend — wraps the TS MCP SDK server on Bun to provide a real cross-platform
-  // MCP server runtime. Cross-published to Maven Central as `com.tjclp:fast-mcp-scala_sjs1_3`.
+  // Scala.js target — Bun transport adapters (Bun.serve + Node stdio) over the native MCP core
+  // in shared/. Cross-published to Maven Central as `com.tjclp:fast-mcp-scala_sjs1_3`.
   object js extends BunScalaJSModule with BunPublishModule with ScalafmtModule with FastMCPPublishingBase {
     def scalaVersion = scala3Version
 

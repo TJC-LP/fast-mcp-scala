@@ -28,7 +28,7 @@ type Http = Transport.Http
   * [[McpServerCore]].
   *
   * `core: McpServerCore[Any]` because this trait is part of the default `McpServerApp` flow; users
-  * needing layer-aware servers call `runHttp()` directly on a typed `FastMcpServer[R]` instead.
+  * needing layer-aware servers call `runHttp()` directly on an `McpServer.typed[R]` instead.
   */
 trait TransportRunner[T <: Transport]:
   def run(core: McpServerCore[Any]): ZIO[Any, Throwable, Unit]

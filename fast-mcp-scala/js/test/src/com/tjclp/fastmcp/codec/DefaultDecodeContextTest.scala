@@ -6,7 +6,7 @@ import zio.json.*
 
 import com.tjclp.fastmcp.core.{Content, ImageContent, McpDecoder, McpEncoder}
 
-class JsMcpDecodeContextTest extends AnyFunSuite:
+class DefaultDecodeContextTest extends AnyFunSuite:
 
   import McpDecoders.given
 
@@ -16,7 +16,7 @@ class JsMcpDecodeContextTest extends AnyFunSuite:
 
   private val ctx = DefaultDecodeContext.default
 
-  test("writeValueAsString round-trips a Scala Map via js.JSON") {
+  test("writeValueAsString round-trips a Scala Map via zio-json") {
     val map = Map("a" -> 2, "b" -> 3)
     val json = ctx.writeValueAsString(map)
     val parsed = ctx.parseJsonObject("x", json)

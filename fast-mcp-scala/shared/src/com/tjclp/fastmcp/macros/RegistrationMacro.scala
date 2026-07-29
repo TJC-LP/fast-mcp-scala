@@ -8,8 +8,8 @@ import com.tjclp.fastmcp.server.McpServerCore
 
 /** Cross-platform entry point for annotation scanning. Works against the shared `McpServerCore[R]`
   * trait so JVM and Scala.js share a single implementation — platform-specific code resolves
-  * through the usual given / implicit instances (`JacksonConverter` on JVM, `ZioJsonMcpDecoder` on
-  * JS).
+  * through the usual given / implicit instances (the shared zio-json `McpDecoders` derivation on
+  * both platforms).
   *
   * The server's `R` flows into each per-method registration so Scala's normal type-checker enforces
   * that every annotated method's ZIO requirement is a subtype of (or equal to) `R`. If you write

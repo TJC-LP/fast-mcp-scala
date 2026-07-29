@@ -526,7 +526,7 @@ private[macros] object MacroUtils:
     *
     * `ZIO` returns are accepted for any environment `R`. The annotation processors emit handlers
     * typed at `ContextualToolHandler[R]` so the surrounding server's `R` (set at construction time
-    * via `FastMcpServer[R](...)`) is checked by Scala's normal type system against each method's
+    * via `McpServer.typed[R](...)`) is checked by Scala's normal type system against each method's
     * requirement. Providing the layer happens at `server.runHttp[R]().provide(...)`.
     */
   private[macros] def detectEffectShape(using quotes: Quotes)(

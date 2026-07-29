@@ -13,7 +13,7 @@ Both paths converge on the same `McpServer` trait and support `@Param` metadata 
 
 **Build tool**: Mill 1.1.5 (configured in `.mill-version`)
 **Scala**: 3.8.3
-**Plugins**: mill-bun-plugin 0.2.0 (Scala.js + Bun integration)
+**Plugins**: mill-bun-plugin 0.2.1 (Scala.js + Bun integration)
 
 ### Common Commands
 
@@ -42,39 +42,37 @@ fast-mcp-scala/
 ├── build.mill                 # Mill build definition
 ├── .mill-version              # Mill version (1.1.5)
 ├── fast-mcp-scala/
-│   ├── shared/src/            # Platform-independent code (JVM + JS)
+│   ├── shared/src/            # Platform-independent code (JVM + JS) — the native MCP core
 │   │   └── com/tjclp/fastmcp/
 │   │       ├── core/
 │   │       │   ├── Annotations.scala    # @Tool, @Param, @Resource, @Prompt
 │   │       │   ├── Types.scala          # ToolDefinition, Content, ToolInputSchema, etc.
-│   │       │   └── Contracts.scala      # McpTool, McpPrompt, McpDecoder, McpEncoder
+│   │       │   ├── Contracts.scala      # McpTool, McpPrompt, McpDecoder, McpEncoder
+│   │       │   ├── Protocol.scala       # protocol versions + JSON-RPC error codes
+│   │       │   ├── Tasks.scala          # MCP Tasks wire types (spec 2025-11-25)
+│   │       │   └── wire/                # 2025-11-25 wire shapes (capabilities, tools, ...)
+│   │       ├── jsonrpc/                 # JSON-RPC 2.0 envelope + McpError
+│   │       ├── codec/                   # DefaultDecodeContext + McpDecoders (zio-json)
+│   │       ├── macros/                  # scanAnnotations + @Tool/@Resource/@Prompt processors
 │   │       ├── runtime/                 # RefResolver
+│   │       ├── examples/                # cross-platform ConformanceServer
 │   │       └── server/
-│   │           ├── McpServerCore.scala  # McpServerCore trait (abstract API)
-│   │           ├── McpContext.scala     # Platform-independent context base
+│   │           ├── McpServer.scala      # THE server class (both platforms)
+│   │           ├── McpServerCore.scala  # abstract API the macros target
+│   │           ├── McpContext.scala     # request context incl. server→client requests
 │   │           ├── McpServerSettings.scala
-│   │           └── manager/            # ToolManager, PromptManager, ResourceManager
+│   │           ├── manager/             # Tool/Prompt/Resource/Task managers
+│   │           ├── router/              # McpRouter, Builtins, Session, middleware
+│   │           └── transport/           # TransportBackend seam, MessageLoop, HostGuard
 │   ├── jvm/
 │   │   ├── src/               # JVM-specific code
 │   │   │   └── com/tjclp/fastmcp/
-│   │   │       ├── core/Types.scala         # TypeConversions (toJava extensions, private[fastmcp])
-│   │   │       ├── macros/                  # JVM-side macro/runtime support
-│   │   │       │   ├── ToolProcessor.scala
-│   │   │       │   ├── ResourceProcessor.scala
-│   │   │       │   ├── PromptProcessor.scala
-│   │   │       │   ├── RegistrationMacro.scala  # scanAnnotations entry point
-│   │   │       │   ├── JsonSchemaMacro.scala
-│   │   │       │   ├── JacksonConverter.scala   # extends McpDecoder (bridges to shared)
-│   │   │       │   └── JacksonConversionContext.scala  # extends McpDecodeContext
-│   │   │       ├── server/
-│   │   │       │   ├── FastMcpServer.scala      # JVM implementation (extends McpServerCore)
-│   │   │       │   ├── McpContext.scala         # JvmMcpContext (private[fastmcp])
-│   │   │       │   ├── McpServerBuilders.scala  # McpServer companion (factory methods)
-│   │   │       │   └── transport/
+│   │   │       ├── macros/                  # JsonSchemaMacro, MacroUtils, schema/ (Tapir-backed)
+│   │   │       ├── server/transport/JvmTransportBackend.scala  # ZIO HTTP + System.in/out
 │   │   │       └── examples/
 │   │   └── test/src/          # JVM test sources
 │   └── js/                    # Scala.js code (Bun-first runtime)
-│       ├── src/               # JsMcpServer, TS SDK facades, Bun runtime, examples
+│       ├── src/               # JsTransportBackend (Bun.serve + Node stdio), facades, examples
 │       └── test/src/          # Conformance, HTTP, codec, contract surface tests
 ```
 
@@ -98,8 +96,8 @@ object MyServer extends ZIOAppDefault:
 #### ZIO environment-aware handlers
 
 Annotated methods may also return `ZIO[R, E, A]` with `R ≠ Any`. Construct the server with the
-matching environment type (`McpServer.typed[R]("name")` or `FastMcpServer.typed[R]("name")`) and
-provide the layer at the server boundary via `.provide(...)`:
+matching environment type (`McpServer.typed[R]("name")`) and provide the layer at the server
+boundary via `.provide(...)`:
 
 ```scala
 object MyServer extends ZIOAppDefault:
@@ -120,9 +118,11 @@ error pointing at the mismatched handler.
 ### Typed Contract Path (cross-platform)
 
 ```scala
+import sttp.tapir.generic.auto.*   // enables ToolSchemaProvider derivation
+
 case class AddArgs(@Param("First number") a: Int, @Param("Second number") b: Int)
 
-val addTool = McpTool.derived[AddArgs, Int](
+val addTool = McpTool[AddArgs, Int](
   name = "add",
   description = Some("Add two numbers")
 ) { args => ZIO.succeed(args.a + args.b) }
@@ -131,11 +131,14 @@ val addTool = McpTool.derived[AddArgs, Int](
 server.tool(addTool)
 ```
 
+`.withOutputSchema` (given a `JsonEncoder` for `Out`) additionally advertises a derived
+`outputSchema` on `tools/list` and emits conforming `structuredContent` on every call.
+
 ### When to Use Which
 
 | | Annotations | Typed Contracts |
 |---|---|---|
-| Platform | JVM only | JVM + Scala.js |
+| Platform | JVM + Scala.js | JVM + Scala.js |
 | Boilerplate | Zero (macro-driven) | Minimal (case class + builder) |
 | Schema | Auto from method signature | Auto from case class via `ToolSchemaProvider` on JVM and JS |
 | `@Param` | On method parameters | On case class fields |
@@ -168,7 +171,7 @@ server.tool(addTool)
 ### Transports
 
 - **Stdio** (`runStdio()`) — stdin/stdout, used by MCP clients
-- **HTTP** (`runHttp()`) — streamable (sessions + SSE) by default, set `stateless = true` for stateless
+- **HTTP** (`runHttp()`) — streamable (sessions + per-request SSE, GET push channel on JVM, DELETE termination) by default; set `stateless = true` for stateless. Binds `127.0.0.1` by default (set `host = "0.0.0.0"` for containers); only `initialize` mints a session; idle sessions evict after `sessionIdleTimeout`; `allowedHosts` enables the DNS-rebinding guard; `keepAliveInterval` enables SSE heartbeats
 
 ### Tasks (experimental, off by default)
 
@@ -199,10 +202,16 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
 
 `taskSupport` values: `"forbidden"` (default — no tasks), `"optional"` (clients may augment with a task), `"required"` (clients must — bare calls return `-32601`).
 
-**Transport limitations**:
+**Transport policy** (both platforms):
 
-- Tasks dispatch is native **router middleware** (no transport-layer special-casing) on both platforms.
-- **JVM** and **JS**: Tasks require `runHttp()` with `stateless = false` (the default streamable transport) — a task's create→poll lifecycle needs the durable session that only the streamable transport keeps. stdio and stateless HTTP have no per-session task store to poll.
+- Tasks dispatch is native **router middleware** (no transport-layer special-casing).
+- Tasks work on any transport whose session outlives a single request: **streamable HTTP**
+  (`runHttp()`, the default) and **stdio** (one durable session per process).
+- **Stateless HTTP does not support tasks** — every client would share one task namespace — so
+  `tasks.enabled` with `stateless = true` fails fast at startup (`IllegalStateException` from
+  `buildRouter`).
+- Task ids come from the platform CSPRNG; a task that outlives its TTL is interrupted (not
+  orphaned); terminal results stay pollable until the TTL sweeps the entry.
 
 The `tasks` capability is advertised on `initialize` only when `settings.tasks.enabled` is true. The `execution.taskSupport` field is injected on `tools/list` entries that opt in.
 
@@ -246,15 +255,20 @@ Key test classes:
 - `ToolProcessorTest` - Integration tests for @Tool processing
 - `JsonSchemaMacroTest` - Schema generation tests
 - `TypedContractsTest` - Typed contract mounting tests
-- `ZioHttpStatelessTransportTest` - HTTP transport integration tests
-- `ZioHttpStreamableTransportProviderTest` - SSE transport tests
-- `ConformanceTest` (JS) - 17 cross-platform conformance tests against AnnotatedServer
-- `JsServerConformanceTest` (JS) - pure-JS in-memory conformance against `JsMcpServer`
-- `JsServerHttpTest` (JS) - Bun HTTP routing coverage for `runHttp()`
+- `JvmHttpTransportTest` - HTTP transport integration (sessions, 400s, 409, keepalive, eviction)
+- `TaskHttpTransportTest` - the full MCP Tasks lifecycle over streamable HTTP
+- `StdioLoopLifecycleTest` - stdin-EOF / interruption contracts for the stdio loop
+- `JsonRpcEnvelopeTest` / `McpErrorMappingTest` - envelope discrimination + wire error codes
+- `WireCodecRoundTripTest` - wire-type codec round-trips (2025-11-25 shapes)
+- `StructuredOutputTest` - outputSchema + structuredContent + ServerHooks
+- `ConformanceGapsTest` / `ParityFixesTest` - regression nets for closed spec gaps
+- `ConformanceTest` (JS) - 17 cross-platform conformance tests against AnnotatedServer (real TS SDK client over stdio)
+- `JsServerHttpTest` (JS) - Bun HTTP routing, session lifecycle, HostGuard coverage
 
 ## CI/CD
 
 - **CI** (`.github/workflows/ci.yml`): Runs on PRs and main pushes, tests on JDK 17, 21, 24
+- **Conformance** (`.github/workflows/conformance.yml`): official `@modelcontextprotocol/conformance` suite against both platforms — 42/42, with expected-failure baselines at `conformance/baseline-{jvm,js}.yml` kept EMPTY (any regression fails the gate). Run locally via `scripts/conformance.sh {jvm|js}`.
 - **Release** (`.github/workflows/release.yml`): Triggered by `v*` tags, publishes to Maven Central
 
 ## Common Tasks
@@ -292,7 +306,7 @@ Key dependencies (versions in `build.mill`):
 - ZIO JSON 0.7.44 - JSON codecs (shared)
 - ZIO HTTP 3.4.0 - HTTP transport
 - Tapir 1.11.42 - Compile-time JSON Schema derivation
-- mill-bun-plugin 0.2.0 - Scala.js + Bun build integration
+- mill-bun-plugin 0.2.1 - Scala.js + Bun build integration
 - `@modelcontextprotocol/sdk` 1.29.0 - TS MCP SDK, pinned in the js module's `bunDeps`; consumed only by the `js.test` conformance client (zero production `@JSImport`s)
 - WartRemover 3.5.6 - Code quality
 - ScalaTest 3.2.19 - Testing

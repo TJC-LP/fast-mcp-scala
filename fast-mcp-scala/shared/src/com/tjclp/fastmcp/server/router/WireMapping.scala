@@ -73,10 +73,10 @@ object WireMapping:
   /** Convert a tool handler's untyped result into a [[CallToolResult]]. A typed contract arrives as
     * a [[StructuredToolResult]] carrying both renderings — its structured form is emitted as
     * `structuredContent` when (and only when) the tool declares an `outputSchema`, per spec.
-    * Untyped results port the old `FastMcpServer.transformToolResult` coercions: a `String` becomes
-    * one `TextContent`, an `Array[Byte]` a base64 image, a `Content` / `List[Content]` passes
-    * through, and anything else degrades to its `toString`. Tool *failures* never reach here —
-    * those are mapped to `isError = true` separately at the dispatch boundary.
+    * Untyped results keep the long-standing coercions: a `String` becomes one `TextContent`, an
+    * `Array[Byte]` a base64 image, a `Content` / `List[Content]` passes through, and anything else
+    * degrades to its `toString`. Tool *failures* never reach here — those are mapped to `isError =
+    * true` separately at the dispatch boundary.
     */
   def toolResultToWire(result: Any, outputSchema: Option[ToolOutputSchema]): CallToolResult =
     result match

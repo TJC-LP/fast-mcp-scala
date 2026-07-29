@@ -10,11 +10,10 @@ import com.tjclp.fastmcp.server.McpContext
 
 /** Platform-neutral low-level decode context used by [[McpDecoder]] implementations.
   *
-  * The JVM supplies a Jackson 3 backed implementation (`JacksonConversionContext`); Scala.js can
-  * plug in a different one without changing the public decoder contract.
+  * One shared implementation serves both platforms (`DefaultDecodeContext`, zio-json backed).
   *
   * Most users never touch this — it's the bridge that lets `McpDecoder[T]` implementations convert
-  * raw JSON-RPC argument values (typically `Map[String, Any]` on the JVM) into typed Scala values.
+  * raw JSON-RPC argument values into typed Scala values.
   */
 trait McpDecodeContext:
   def convertValue[T: ClassTag](name: String, rawValue: Any): T
@@ -25,9 +24,9 @@ trait McpDecodeContext:
 /** Public typed decoder used by the shared contract layer to translate incoming MCP arguments into
   * a case-class shape.
   *
-  * Most users get one of these for free: the JVM's `JacksonConverter` derivation produces an
-  * `McpDecoder[T]` for any case class whose fields Jackson 3 can handle natively. Implement
-  * manually only when the default derivation can't express your wire format.
+  * Most users get one of these for free: the shared zio-json derivation (`McpDecoders`) produces an
+  * `McpDecoder[T]` for any type with a `given JsonDecoder[T]`. Implement manually only when the
+  * default derivation can't express your wire format.
   *
   * @tparam T
   *   the target Scala type produced from the decoded argument

@@ -9,9 +9,9 @@ import com.tjclp.fastmcp.{*, given}
   * return plain values (or `ZIO` / `Either[Throwable, _]` / `Try` — the `ToHandlerEffect` typeclass
   * lifts them).
   *
-  * The same typed contracts compile unchanged on Scala.js — on the JVM they mount onto the Java MCP
-  * SDK backend, on JS onto the TS SDK backend. Put the definitions in a cross-platform module and
-  * share them.
+  * The same typed contracts compile unchanged on Scala.js — one shared native core serves both
+  * platforms; only the `TransportBackend` differs. Put the definitions in a cross-platform module
+  * and share them.
   */
 object ContractServer extends McpServerApp[Stdio, ContractServer.type]:
 

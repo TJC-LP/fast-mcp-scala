@@ -117,15 +117,11 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
   def getStaticResourceHandler(uri: String): Option[ResourceHandler[R]] =
     Option(staticResources.get(uri)).map(_._2)
 
-  /** Alias used by FastMcpServer */
+  /** Alias for [[getStaticResourceHandler]] (kept for tests / direct manager access). */
   def getResourceHandler(uri: String): Option[ResourceHandler[R]] = getStaticResourceHandler(uri)
 
   def getTemplateResourceHandler(uriPattern: String): Option[ResourceTemplateHandler[R]] =
     Option(templateResources.get(uriPattern)).map(_._2)
-
-  /** Alias used by FastMcpServer */
-  def getTemplateHandler(uriPattern: String): Option[ResourceTemplateHandler[R]] =
-    getTemplateResourceHandler(uriPattern)
 
   def getResourceDefinition(uri: String): Option[ResourceDefinition] =
     Option(staticResources.get(uri)).map(_._1)

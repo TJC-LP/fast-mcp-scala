@@ -17,9 +17,9 @@ import com.tjclp.fastmcp.facades.runtime.BunServer
 import com.tjclp.fastmcp.server.TaskSettings
 import com.tjclp.fastmcp.server.transport.{startStatefulHttp, startStatelessHttp}
 
-/** Exercises `JsMcpServer.runHttp()` end-to-end over Bun's HTTP server. Uses the global `fetch`
-  * API to POST a JSON-RPC initialize + tools/list pair against the running server. No TS SDK
-  * client involvement — just a raw HTTP wire check.
+/** Exercises the shared `McpServer` over `JsTransportBackend`'s Bun HTTP listener (stateless +
+  * stateful) using the global `fetch` API. No TS SDK client involvement — just a raw HTTP wire
+  * check.
   */
 class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAll:
 

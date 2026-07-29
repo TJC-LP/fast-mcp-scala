@@ -70,6 +70,15 @@ Gaps closed to get there (all shared logic, so both platforms benefit):
 - **Minor gaps: 8 medium-severity issues** degrade feature coverage but do not block core functionality
 - **Status**: Stage D feature-complete on wire types; server-initiated request infrastructure missing (stage D blocker)
 
+> **Post-resolution status (2026-07-29, PR #60):** every high-severity blocker and all eight
+> medium-severity issues below are **CLOSED** — server-initiated request correlation
+> (roots/sampling incl. tools+toolChoice/elicitation incl. URL mode), the validation seam,
+> Icon.sizes/theme, PromptArgument.title, Accept/Content-Type/protocol-version validation,
+> completion/complete, resources/subscribe+unsubscribe, Tool.outputSchema (now with a
+> structuredContent producer), and -32002 resource-not-found emission. The counts and per-row
+> verdicts below are the original audit snapshot; row-level CLOSED marks were added where the
+> resolution landed. Conformance: 42/42 on both platforms.
+
 #### For Spec Version **DRAFT-2026** (TS SDK baseline):
 - **Completeness: ~22%** (parity + partial on DRAFT-2026 features)
 - **Stage E infrastructure entirely absent**: sampling/createMessage, elicitation/create, roots/list, server resumability, OAuth
@@ -112,7 +121,7 @@ Gaps closed to get there (all shared logic, so both platforms benefit):
 5. **Tool.title populated only from annotations, not top-level** (~S effort)
 6. **prompts/list and tools/list pagination cursor ignored** (~S effort)
 7. **tasks/result augments related-task metadata (TS SDK spec bug, not Scala bug)** (compliance note)
-8. **JSON-RPC error code ResourceNotFound unused** (benign)
+8. **JSON-RPC error code ResourceNotFound unused** (benign) — ✅ CLOSED: now emitted with data.uri
 
 ---
 
@@ -300,20 +309,20 @@ Gaps closed to get there (all shared logic, so both platforms benefit):
 |---------|------|----|----|---------|-----|-------|
 | Stdio framing (NDJSON) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Both JSON+newline |
 | Streamable HTTP POST (request/response + SSE notifications) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Both support stateful POST |
-| Streamable HTTP GET (SSE server→client push) | 2025-11-25 | ✓ | ⚠ PARTIAL | ⚠ PARTIAL | — | TS: supports; Scala JVM: supports; Scala JS: 405 (by-design) |
+| Streamable HTTP GET (SSE server→client push) | 2025-11-25 | ✓ | ⚠ PARTIAL | ⚠ PARTIAL | — | TS: supports; Scala JVM: supports (single stream, keepalives); Scala JS: 405 (by-design — per-request POST SSE carries server→client) |
 | Streamable HTTP DELETE (session cleanup) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Both validate session, remove, shutdown queue |
 | mcp-session-id header (generation + echo) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Both mint UUID on initialize; echo on response |
 | Stateless HTTP mode (POST request/response, no SSE) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Both branch on config flag |
 | HTTP status: 400 Bad Request | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Parse errors, missing session, invalid body |
 | HTTP status: 404 Not Found | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Unknown session ID |
 | HTTP status: 405 Method Not Allowed | 2025-11-25 | ✓ | ⚠ PARTIAL | ⚠ PARTIAL | L | TS: includes Allow header; Scala: returns 405 without header |
-| HTTP status: 406 Not Acceptable | 2025-11-25 | ✓ | ✗ | ✗ MISSING | M | TS: validates Accept header; Scala: no validation |
-| HTTP status: 415 Unsupported Media Type | 2025-11-25 | ✓ | ✗ | ✗ MISSING | M | TS: validates Content-Type; Scala: no validation |
-| mcp-protocol-version header validation | 2025-11-25 | ✓ | ✗ | ✗ MISSING | M | TS: validates on all non-init requests; Scala: absent |
+| HTTP status: 406 Not Acceptable | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Accept validated on POST (json + SSE on streamable) and GET. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
+| HTTP status: 415 Unsupported Media Type | 2025-11-25 | ✓ | ⚠ PARTIAL | ⚠ PARTIAL | L | Malformed bodies answer 400 with a -32700 JSON-RPC body; explicit 415 for wrong Content-Type remains open |
+| mcp-protocol-version header validation | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Validated on all requests; absent header ⇒ 2025-03-26 assumed. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
 | SSE server→client stream | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Both drain outbound queue as message events |
-| Accept header validation (POST + GET) | 2025-11-25 | ✓ | ✗ | ✗ MISSING | M | Spec-required; Scala omitted |
+| Accept header validation (POST + GET) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Streamable POST requires json + text/event-stream; GET requires SSE. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
 | Content-Type header validation (POST) | 2025-11-25 | ✓ | ✗ | ✗ MISSING | M | Spec-required for application/json |
-| Conflict detection (409 on duplicate SSE stream) | 2025-11-25 | ✓ | ⚠ PARTIAL | ⚠ PARTIAL | L | TS: explicit 409; Scala: prevents by design, no 409 |
+| Conflict detection (409 on duplicate SSE stream) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Second GET per session answers 409 (atomic acquire). **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
 
 ### J. Server-Initiated Requests & Response Correlation (Stage D Blocker)
 
@@ -321,10 +330,10 @@ Gaps closed to get there (all shared logic, so both platforms benefit):
 |---------|------|----|----|---------|-----|-------|
 | nextServerRequestId counter (allocate IDs for server requests) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | TS: messageId; Scala: nextServerRequestId |
 | In-flight request map (track pending requests) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | TS: _onresponse map; Scala: inflight Ref[Map] |
-| Response correlation plumbing (route Success/Failure to pending handler) | 2025-11-25 | ✓ | ✗ | ✗ MISSING | H | **CRITICAL BLOCKER**: Scala McpRouter:86 silently discards Success/Failure |
-| roots/list request initiation | 2025-11-25 | ✓ | ✗ | ✗ MISSING | H | No ListRootsRequest types; no request method |
-| sampling/createMessage request initiation | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | No CreateMessageRequestParams; no request method |
-| elicitation/create request initiation | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | No ElicitRequestFormParams/URLParams; no request method |
+| Response correlation plumbing (route Success/Failure to pending handler) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Session.sendRequest/completePending. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
+| roots/list request initiation | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | McpContext.listRoots. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
+| sampling/createMessage request initiation | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | McpContext.createMessage incl. tools/toolChoice. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
+| elicitation/create request initiation | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | McpContext.elicit (form) + elicitUrl (URL mode). **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
 | Task-augmented sampling/elicitation (DRAFT-2026) | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | Schema present; no enforcement middleware |
 
 ### K. DRAFT-2026 Features (Out of Current Scope)
@@ -332,7 +341,7 @@ Gaps closed to get there (all shared logic, so both platforms benefit):
 | Feature | Spec | TS | Ours | Verdict | Sev | Notes |
 |---------|------|----|----|---------|-----|-------|
 | EventStore for resumability | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | No message replay infrastructure |
-| Last-Event-ID header + event ID tracking in SSE | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | Scala GET stream lacks event IDs |
+| Last-Event-ID header + event ID tracking in SSE | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | — | Never implemented — see the 2026-07-28 spec note below (feature removed); per-request POST SSE is the delivery model |
 | Priming event for resumability | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | No empty-data SSE event with id/retry |
 | TransportSendOptions.resumptionToken | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | Send signature does not support resumption options |
 | Retry interval hint (optional retryInterval config) | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | L | No config; not emitted in SSE |
@@ -342,13 +351,13 @@ Gaps closed to get there (all shared logic, so both platforms benefit):
 | WWW-Authenticate Bearer challenge parsing | pre-2025 | ✓ | ✗ | ✗ MISSING | H | TS: extractWWWAuthenticateParams; Scala: absent |
 | Bearer token verification middleware | pre-2025 | ✓ | ✗ | ✗ MISSING | H | TS: Express requireBearerAuth; Scala: absent |
 | Protected Resource Metadata endpoint (RFC 9728) | pre-2025 | ✓ | ✗ | ✗ MISSING | H | TS: mcpAuthMetadataRouter; Scala: absent |
-| Sampling/createMessage request with ToolChoice | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | Capability flag only; no request types |
-| ModelPreferences (hints, cost/speed/intelligence priority) | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | M | No wire types |
+| Sampling/createMessage request with ToolChoice | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | CreateMessageRequestParams.tools/toolChoice + ToolChoice wire type. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
+| ModelPreferences (hints, cost/speed/intelligence priority) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | ModelHint + ModelPreferences wire types, round-trip tested. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
 | ToolUseContent (tool call in sampling result) | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | Not in Content ADT |
 | ToolResultContent (tool result in sampling) | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | Not in Content ADT |
-| elicitation form mode (ElicitRequestFormParams) | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | No request types |
-| elicitation url mode (ElicitRequestURLParams) | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | No request types; blocks OAuth flows |
-| ElicitResult (action, content) | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | No response type |
+| elicitation form mode (ElicitRequestFormParams) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | ElicitRequestParams + McpContext.elicit. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
+| elicitation url mode (ElicitRequestURLParams) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | ElicitRequestUrlParams + elicitUrl + -32042 requiredError. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
+| ElicitResult (action, content) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | ElicitResult wire type. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
 | notifications/elicitation/complete | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | M | No notification handler |
 | Client-side task augmentation (sampling/elicitation with tasks) | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | Schema present; enforcement absent |
 | HTTP resumability + EventStore side-channel queue | DRAFT-2026 | ✓ | ✗ | ✗ MISSING | H | MVP tasks/result returns result only |
@@ -358,13 +367,30 @@ Gaps closed to get there (all shared logic, so both platforms benefit):
 | Feature | Spec | Scala Design | Notes |
 |---------|------|------|-------|
 | ToolAnnotations.returnDirect | N/A | ✓ present | Pre-spec extension; retained for internal use but unused |
-| JSON-RPC error code ResourceNotFound (-32002) | N/A | ✓ defined | Non-standard MCP code added; never returned (benign) |
+| JSON-RPC error code ResourceNotFound (-32002) | 2025-11-25 | ✓ emitted | Unknown resources/read URIs answer -32002 with data.uri. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
 | Honest capability derivation (issue #56) | 2025-11-25 | ✓ derives from handlers | TS test harness uses explicit config; Scala derives at runtime |
-| JS TransportBackend GET returns 405 | Spec-permitted | ✓ by-design | SSE streaming not offered on single-threaded JS; spec-compliant |
-| Scala Icon.sizes as single string | N/A | Legacy | Pre-spec implementation; pending fix |
+| JS TransportBackend GET returns 405 | Spec-permitted | ✓ by-design | Standalone GET push channel not offered on JS; per-request POST SSE carries all server→client traffic (spec-compliant; 2026-07-28 removes the GET endpoint entirely) |
+| Scala Icon.sizes as single string | 2025-11-25 | ✓ fixed | Now Option[List[String]] + theme. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
 | Cursor pagination MVP (all results in one page) | 2025-11-25 | ⚠ scoped MVP | Cursor param accepted but pagination not implemented; acceptable for MVP |
 
 ---
+
+## 2026-07-28 spec note (read before executing the roadmap)
+
+The MCP **2026-07-28** revision (released 2026-07-28) removes or deprecates several features this
+audit tracked as gaps. Do **NOT** build toward these rows — they are now **OBSOLETE**:
+
+- **SSE resumability family** (§K: EventStore, `Last-Event-ID` + event ids, priming event,
+  `resumptionToken`, retry interval; the HTTP resumability side-channel row): **removed** by
+  SEP-2575 — a broken stream is re-issued as a new request. Never having implemented these turned
+  out to be the right call.
+- **`notifications/elicitation/complete`** (§K): **removed** — under the 2026 Multi Round-Trip
+  Request pattern the client learns the outcome by retrying the original request.
+- **Roots, Sampling, Logging** (§§F/J rows): **deprecated** in 2026-07-28 (12-month window,
+  SEP-2577). Keep the 2025-11-25 implementations working; do not extend them.
+- Related renumbering when 2026 support lands: resource-not-found `-32002` → `-32602`; sessions,
+  the GET endpoint, `initialize`, and `ping` become legacy-version surface. See
+  `docs/native-core-design.md` § "Next: spec 2026-07-28".
 
 ## Remediation Roadmap
 

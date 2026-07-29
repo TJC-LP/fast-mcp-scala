@@ -44,7 +44,8 @@ private final case class TaskEntry(
   *     atomically when the fiber finishes,
   *   - blocks `tasks/result` waiters via a [[Promise]] until the task reaches a terminal status,
   *   - interrupts the fiber on `tasks/cancel`,
-  *   - schedules TTL-based cleanup on a separate daemon fiber.
+  *   - schedules TTL-based cleanup on a separate daemon fiber (expiry interrupts still-running work
+  *     — an expired task never lingers as an invisible fiber).
   *
   * Session isolation: tasks created with a `sessionId` are only visible to that session. A `None`
   * `sessionId` means session-less — visible to all callers. Every transport supplies a session id:

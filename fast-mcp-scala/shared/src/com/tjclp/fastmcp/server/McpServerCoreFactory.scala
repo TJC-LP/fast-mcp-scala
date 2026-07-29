@@ -1,14 +1,12 @@
 package com.tjclp.fastmcp
 package server
 
-/** Platform-neutral factory for [[McpServerCore]]. Each backend supplies a `given` instance — on
-  * the JVM it builds a `FastMcpServer`, on Scala.js a `JsMcpServer`. Users don't interact with this
-  * directly; the sugar trait [[McpServer]] and the `McpServer(...)` apply on each platform's
-  * builders file both route through it.
+/** Platform-neutral factory for [[McpServerCore]]. ONE `given` instance exists, defined in the
+  * shared [[McpServer]] companion (it needs only a `TransportBackend` in scope); the sugar trait
+  * [[McpServerApp]] routes through it. Users don't interact with this directly.
   *
   * Returns `McpServerCore[Any]` because this is the default, layer-free server. Users who need `R
-  * != Any` build a `FastMcpServer[R]` (or `JsMcpServer[R]`) directly via the platform's typed
-  * factory.
+  * != Any` build an `McpServer.typed[R]` directly.
   */
 trait McpServerCoreFactory:
   def build(name: String, version: String, settings: McpServerSettings): McpServerCore[Any]
