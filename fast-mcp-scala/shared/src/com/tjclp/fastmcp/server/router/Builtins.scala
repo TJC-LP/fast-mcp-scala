@@ -83,9 +83,11 @@ final class Builtins[R](
   val toolsCall: RequestHandler[R] = (session, params) =>
     for
       req <- decodeParams[CallToolRequestParams](params, "tools/call")
-      args = req.arguments match
-        case Some(Json.Obj(fields)) => fields.toMap
-        case _ => Map.empty[String, Any]
+      args <- req.arguments match
+        case Some(Json.Obj(fields)) => ZIO.succeed(fields.toMap: Map[String, Any])
+        case None => ZIO.succeed(Map.empty[String, Any])
+        case Some(_) =>
+          ZIO.fail(McpError.invalidParams("tools/call: `arguments` must be a JSON object"))
       ctx <- contextFor(session, req._meta)
       outcome <- toolManager.callTool(req.name, args, Some(ctx)).either
       json <- outcome match

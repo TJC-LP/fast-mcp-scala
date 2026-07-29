@@ -91,6 +91,9 @@ final class McpRouter[R](
         session.completePending(id, Left(error)).as(None)
       case Failure(None, _) =>
         ZIO.none
+      case Invalid(id, reason) =>
+        // Structurally invalid frame: answer -32600 with the offender's id (null when unknown).
+        ZIO.some(Failure(id, McpError.invalidRequest(s"Invalid Request: $reason").toErrorObject))
 
   private def dispatchRequest(
       session: Session,
@@ -110,7 +113,7 @@ final class McpRouter[R](
           _ <- session.clearInflight(id)
           resp <- exit match
             case Exit.Success(result) =>
-              ZIO.succeed(Some(Success(id, result)))
+              ZIO.succeed(Some(Success(id, WireMapping.completeResult(result))))
             case Exit.Failure(cause) =>
               cause.failureOption match
                 case Some(err) =>

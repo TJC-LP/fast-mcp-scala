@@ -62,6 +62,13 @@ object WireMapping:
   def promptToWire(d: PromptDefinition): Prompt =
     Prompt(name = d.name, description = d.description, arguments = d.arguments)
 
+  /** Single construction point for every outbound `result` payload (called by the router when it
+    * wraps a handler's JSON into a [[com.tjclp.fastmcp.jsonrpc.JsonRpcMessage.Success]]). A no-op
+    * today; the 2026-07-28 revision requires `resultType: "complete"` on every result — inject it
+    * here when the router grows multi-version support.
+    */
+  def completeResult(result: Json): Json = result
+
   /** Convert a tool handler's untyped result into a [[CallToolResult]]. Ports the old
     * `FastMcpServer.transformToolResult`: a `String` becomes one `TextContent`, an `Array[Byte]` a
     * base64 image, a `Content` / `List[Content]` passes through, and anything else degrades to its

@@ -60,6 +60,14 @@ object JsonRpcMessage:
   /** An error response. `id` is optional: a parse error before the id is known carries `null`. */
   case class Failure(id: Option[RequestId], error: JsonRpcErrorObject) extends JsonRpcMessage
 
+  /** A parseable JSON object that violates JSON-RPC 2.0 structure (`id: null` on a request, wrong
+    * or missing `jsonrpc`, non-string `method`, fractional id, none of method/result/error). Never
+    * sent by this implementation — it exists so the dispatch layer can answer `-32600 Invalid
+    * Request` with the offender's id echoed, instead of misclassifying (a null-id request used to
+    * decode as a droppable [[Notification]]) or degrading to `-32700`.
+    */
+  case class Invalid(id: Option[RequestId], reason: String) extends JsonRpcMessage
+
   private val V = Protocol.JsonRpcVersion
 
   given JsonEncoder[JsonRpcMessage] = JsonEncoder[Json].contramap { msg =>
@@ -75,29 +83,46 @@ object JsonRpcMessage:
       case Failure(id, error) =>
         val idJson = id.flatMap(_.toJsonAST.toOption).getOrElse(Json.Null)
         base ++ List("id" -> idJson, "error" -> error.toJsonAST.toOption.get)
+      case Invalid(id, reason) =>
+        // Outbound Invalid is a programming error, but the encoder must stay total: render it as
+        // the -32600 error response it represents.
+        val idJson = id.flatMap(_.toJsonAST.toOption).getOrElse(Json.Null)
+        val err = JsonRpcErrorObject(-32600, s"Invalid Request: $reason")
+        base ++ List("id" -> idJson, "error" -> err.toJsonAST.toOption.get)
     Json.Obj(fields*)
   }
 
   given JsonDecoder[JsonRpcMessage] = JsonDecoder[Json].mapOrFail {
     case Json.Obj(fields) =>
       val m = fields.toMap
-      val hasId = m.contains("id") && m.get("id").exists(_ != Json.Null)
-      (m.get("method"), m.get("result"), m.get("error")) match
-        case (Some(Json.Str(method)), _, _) =>
-          val params = m.get("params")
-          if hasId then m("id").as[RequestId].map(Request(_, method, params))
-          else Right(Notification(method, params))
-        case (_, Some(result), _) =>
-          m.get("id")
-            .toRight("JSON-RPC success response missing `id`")
-            .flatMap(_.as[RequestId])
-            .map(Success(_, result))
-        case (_, _, Some(err)) =>
-          val idOpt =
-            if hasId then m("id").as[RequestId].toOption else None
-          err.as[JsonRpcErrorObject].map(Failure(idOpt, _))
-        case _ =>
-          Left("Not a valid JSON-RPC message: missing `method`, `result`, and `error`")
+      val idField = m.get("id")
+      // Best-effort id for echoing back on -32600 (null / fractional ids echo as null).
+      val idOpt = idField.filter(_ != Json.Null).flatMap(_.as[RequestId].toOption)
+      def invalid(reason: String): Right[String, JsonRpcMessage] = Right(Invalid(idOpt, reason))
+      if !m.get("jsonrpc").contains(Json.Str(V)) then
+        invalid(s"""missing or invalid `jsonrpc` version (expected "$V")""")
+      else
+        (m.get("method"), m.get("result"), m.get("error")) match
+          case (Some(Json.Str(method)), _, _) =>
+            val params = m.get("params")
+            idField match
+              case None => Right(Notification(method, params))
+              case Some(Json.Null) => invalid("request `id` must not be null")
+              case Some(rawId) =>
+                rawId.as[RequestId] match
+                  case Right(id) => Right(Request(id, method, params))
+                  case Left(reason) => invalid(reason)
+          case (Some(_), _, _) =>
+            invalid("`method` must be a string")
+          case (_, Some(result), _) =>
+            m.get("id")
+              .toRight("JSON-RPC success response missing `id`")
+              .flatMap(_.as[RequestId])
+              .map(Success(_, result))
+          case (_, _, Some(err)) =>
+            err.as[JsonRpcErrorObject].map(Failure(idOpt, _))
+          case _ =>
+            invalid("missing `method`, `result`, and `error`")
     case other => Left(s"JSON-RPC message must be a JSON object, got: $other")
   }
 
