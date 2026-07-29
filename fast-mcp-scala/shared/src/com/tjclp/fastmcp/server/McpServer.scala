@@ -106,7 +106,8 @@ final class McpServer[R](
     */
   private[fastmcp] def buildRouter: UIO[McpRouter[R]] =
     val taskMgr: UIO[Option[TaskManager[R]]] =
-      if settings.tasks.enabled then TaskManager.make[R](settings.tasks).map(Some(_))
+      if settings.tasks.enabled then
+        TaskManager.make[R](settings.tasks, backend.randomId()).map(Some(_))
       else ZIO.none
     taskMgr.map { tm =>
       RouterBuilder.build[R](

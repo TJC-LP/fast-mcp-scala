@@ -56,7 +56,11 @@ private final case class TaskEntry(
   *   `executionRuntime` (the runtime captured at `runHttp[R]()` entry), so the forked daemon fiber
   *   inherits `R` automatically and discharges it at fiber start.
   */
-class TaskManager[R](settings: TaskSettings, tasksRef: Ref[Map[String, TaskEntry]]):
+class TaskManager[R](
+    settings: TaskSettings,
+    tasksRef: Ref[Map[String, TaskEntry]],
+    newId: UIO[String]
+):
 
   /** Create a task wrapping `run`. Returns immediately with a [[CreateTaskResult]]; the underlying
     * effect executes on a background daemon fiber.
@@ -84,7 +88,7 @@ class TaskManager[R](settings: TaskSettings, tasksRef: Ref[Map[String, TaskEntry
       onStatusChange: Task => UIO[Unit]
   ): ZIO[R, Throwable, CreateTaskResult] =
     for
-      taskId <- ZIO.succeed(TaskManager.newTaskId())
+      taskId <- newId
       promise <- Promise.make[Throwable, Any]
       start <- Promise.make[Nothing, Unit]
       nowMs <- ZIO.succeed(System.currentTimeMillis())
@@ -282,34 +286,15 @@ final class TaskNotFoundError(val taskId: String)
 
 object TaskManager:
 
-  /** Allocate a new manager with empty state. */
-  def make[R](settings: TaskSettings): UIO[TaskManager[R]] =
-    Ref.make(Map.empty[String, TaskEntry]).map(new TaskManager[R](settings, _))
-
-  /** Synchronous constructor for non-ZIO call sites (e.g., the JS server's lazy initializer).
-    * Internally identical to [[make]].
+  /** Allocate a new manager with empty state. `newId` supplies task ids; production passes the
+    * platform backend's CSPRNG (`TransportBackend.randomId()`) because task ids are bearer handles
+    * and shared code has no `SecureRandom`.
     */
-  def makeUnsafe[R](settings: TaskSettings): TaskManager[R] =
+  def make[R](settings: TaskSettings, newId: UIO[String]): UIO[TaskManager[R]] =
+    Ref.make(Map.empty[String, TaskEntry]).map(new TaskManager[R](settings, _, newId))
+
+  /** Synchronous constructor for non-ZIO call sites (tests). Internally identical to [[make]]. */
+  def makeUnsafe[R](settings: TaskSettings, newId: UIO[String]): TaskManager[R] =
     Unsafe.unsafe { implicit unsafe =>
-      new TaskManager[R](settings, Ref.unsafe.make(Map.empty[String, TaskEntry]))
+      new TaskManager[R](settings, Ref.unsafe.make(Map.empty[String, TaskEntry]), newId)
     }
-
-  /** Cross-platform UUIDv4 generator. We can't use `java.util.UUID.randomUUID()` because Scala.js
-    * doesn't ship it; `scala.util.Random` is available on both targets and gives us enough entropy
-    * for task IDs (the spec only requires "cryptographically secure" when no auth context is
-    * available, which is a transport-level concern).
-    */
-  private[manager] def newTaskId(): String =
-    val bytes = new Array[Byte](16)
-    scala.util.Random.nextBytes(bytes)
-    bytes(6) = ((bytes(6) & 0x0f) | 0x40).toByte // version 4
-    bytes(8) = ((bytes(8) & 0x3f) | 0x80).toByte // variant 1 (RFC 4122)
-    val sb = new StringBuilder(36)
-    var i = 0
-    while i < 16 do
-      if i == 4 || i == 6 || i == 8 || i == 10 then sb.append('-')
-      val byte = bytes(i) & 0xff
-      sb.append(Integer.toHexString((byte >> 4) & 0x0f))
-      sb.append(Integer.toHexString(byte & 0x0f))
-      i += 1
-    sb.toString

@@ -36,6 +36,9 @@ import com.tjclp.fastmcp.server.router.{McpRouter, Session}
   */
 object JsTransportBackend extends TransportBackend:
 
+  /** UUID v4 via Web Crypto (`crypto.randomUUID`) — the JS runtime's CSPRNG. */
+  override def randomId(): UIO[String] = ZIO.succeed(WebCrypto.randomUUID())
+
   private val SessionIdHeader = "mcp-session-id"
 
   // -------------------------------------------------------------------------
@@ -175,7 +178,8 @@ object JsTransportBackend extends TransportBackend:
                   respondStreamable(router, session, body, isNew = false)
             case None =>
               for
-                session <- Session.make(WebCrypto.randomUUID())
+                sid <- randomId()
+                session <- Session.make(sid)
                 _ <- ZIO.succeed { store(session.sessionId) = session }
                 resp <- respondStreamable(router, session, body, isNew = true)
               yield resp

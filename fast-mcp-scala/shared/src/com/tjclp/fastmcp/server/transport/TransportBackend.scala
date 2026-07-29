@@ -26,5 +26,12 @@ trait TransportBackend:
     */
   def serveHttp[R](router: McpRouter[R], settings: McpServerSettings): ZIO[R, Throwable, Unit]
 
+  /** Cryptographically-secure random identifier (UUID v4 string). Session and task ids are bearer
+    * handles, so they must be unguessable. Lives on the backend because shared code has no CSPRNG:
+    * the JVM uses `java.util.UUID` (SecureRandom), JS uses Web Crypto — Scala.js's
+    * `UUID.randomUUID` stub needs a `SecureRandom` the runtime doesn't provide.
+    */
+  def randomId(): UIO[String]
+
 object TransportBackend:
   def apply(using backend: TransportBackend): TransportBackend = backend

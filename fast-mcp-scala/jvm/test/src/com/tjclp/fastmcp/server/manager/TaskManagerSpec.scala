@@ -28,7 +28,8 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
         maxTtlMs = 86_400_000L,
         pollIntervalMs = 5_000L,
         maxConcurrentPerSession = maxConcurrent
-      )
+      ),
+      newId = ZIO.succeed(java.util.UUID.randomUUID().toString)
     )
 
   "create" should "return a CreateTaskResult in Working status" in {
@@ -189,7 +190,8 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
         maxTtlMs = 5_000L,
         pollIntervalMs = 100L,
         maxConcurrentPerSession = 4
-      )
+      ),
+      newId = ZIO.succeed(java.util.UUID.randomUUID().toString)
     )
     val effect: ZIO[Any, Throwable, Any] = ZIO.succeed(())
     val createResult = runUnsafe(

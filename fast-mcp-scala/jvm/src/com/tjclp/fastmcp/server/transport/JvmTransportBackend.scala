@@ -25,6 +25,9 @@ import com.tjclp.fastmcp.server.router.{McpRouter, Session}
   */
 object JvmTransportBackend extends TransportBackend:
 
+  /** UUID v4 via `java.util.UUID` (SecureRandom-backed). */
+  override def randomId(): UIO[String] = ZIO.succeed(UUID.randomUUID().toString)
+
   /** Spec header carrying the streamable-HTTP session id (echoed on the `initialize` response). */
   private val SessionIdHeader = "mcp-session-id"
 
@@ -233,7 +236,8 @@ object JvmTransportBackend extends TransportBackend:
             }
           case None =>
             for
-              session <- Session.make(UUID.randomUUID().toString)
+              id <- randomId()
+              session <- Session.make(id)
               _ <- store.update(_ + (session.sessionId -> session))
               resp <- respondStreamable(router, session, body, isNew = true)
             yield resp
