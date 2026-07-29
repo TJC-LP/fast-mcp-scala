@@ -42,12 +42,17 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
   /** Build the HTTP routes for a one-tool server (fresh session store per call). */
   private def buildRoutes(
       stateless: Boolean,
-      keepAlive: Option[java.time.Duration] = None
+      keepAlive: Option[java.time.Duration] = None,
+      allowedHosts: Option[Set[String]] = None
   ): Routes[Any, Response] =
     val server = McpServer.typed[Any](
       "T",
       "0.1.0",
-      McpServerSettings(stateless = stateless, keepAliveInterval = keepAlive)
+      McpServerSettings(
+        stateless = stateless,
+        keepAliveInterval = keepAlive,
+        allowedHosts = allowedHosts
+      )
     )
     val _ = server.scanAnnotations[TestServer.type]
     runUnsafe(
@@ -266,6 +271,27 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val reply = runUnsafe(MessageLoop.handleFrame(router, session, unknownVersionInit))
       .getOrElse(fail("no reply"))
     reply should include(s""""protocolVersion":"${Protocol.LatestProtocolVersion}"""")
+  }
+
+  test("HostGuard rejects foreign Host/Origin with 403 at the route level") {
+    val routes =
+      buildRoutes(stateless = false, allowedHosts = Some(Set("localhost", "127.0.0.1")))
+    val evilPost = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(initFrame))
+      .addHeader(Header.Custom("host", "evil.example.com"))
+    run(routes, evilPost).status shouldBe Status.Forbidden
+
+    val evilGet = Request
+      .get(URL(Path.root / "mcp"))
+      .addHeader(Header.Custom("host", "evil.example.com"))
+      .addHeader(Header.Custom(SessionIdHeader, "whatever"))
+    run(routes, evilGet).status shouldBe Status.Forbidden
+
+    // Allowed host proceeds to normal processing (mints a session on initialize).
+    val okPost = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(initFrame))
+      .addHeader(Header.Custom("host", "127.0.0.1:8000"))
+    run(routes, okPost).status shouldBe Status.Ok
   }
 
   test("idle streamable sessions are swept; live-GET sessions are exempt") {

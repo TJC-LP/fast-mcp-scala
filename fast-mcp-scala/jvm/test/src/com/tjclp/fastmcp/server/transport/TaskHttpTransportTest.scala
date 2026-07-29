@@ -1,0 +1,235 @@
+package com.tjclp.fastmcp
+package server.transport
+
+import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.matchers.should.Matchers
+import zio.*
+import zio.http.*
+
+import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.macros.RegistrationMacro.*
+import com.tjclp.fastmcp.server.*
+import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
+
+/** The task lifecycle over streamable HTTP, end to end through the in-memory routes harness —
+  * successor to the deleted `TaskAugmentedHttpTransportTest`. Covers capability advertisement,
+  * per-tool `execution.taskSupport` negotiation (both `-32601` rejections), create → poll →
+  * result, error/multi-content preservation through a task, cancellation, the per-session
+  * concurrency cap, unknown-task codes (`-32602` — 0.4.0 parity, regressed pre-C1), and
+  * cross-session isolation.
+  */
+class TaskHttpTransportTest extends AnyFunSuite with Matchers:
+
+  object TaskServer:
+    @Tool(name = Some("slow"), description = Some("Completes after a beat"), taskSupport = Some("optional"))
+    def slow(): ZIO[Any, Throwable, String] = ZIO.sleep(200.millis).as("slow done")
+
+    @Tool(name = Some("must-task"), description = Some("Requires task augmentation"), taskSupport = Some("required"))
+    def mustTask(): String = "must done"
+
+    @Tool(name = Some("plain"), description = Some("No task support"))
+    def plain(): String = "plain done"
+
+    @Tool(name = Some("rich-content"), description = Some("Multi-content result"), taskSupport = Some("optional"))
+    def richContent(): List[Content] = List(TextContent("a"), TextContent("b"))
+
+    @Tool(name = Some("broken-task"), description = Some("Always throws"), taskSupport = Some("optional"))
+    def brokenTask(): String = throw new RuntimeException("task boom")
+
+    @Tool(name = Some("blocky"), description = Some("Long-running"), taskSupport = Some("optional"))
+    def blocky(): ZIO[Any, Throwable, String] = ZIO.sleep(2.seconds).as("blocky")
+
+  private val SessionIdHeader = "mcp-session-id"
+
+  private val initFrame =
+    """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1.0"}}}"""
+
+  private def runUnsafe[A](effect: ZIO[Any, Throwable, A]): A =
+    Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(effect).getOrThrowFiberFailure())
+
+  private def buildRoutes(maxConcurrent: Int = 64): Routes[Any, Response] =
+    val server = McpServer.typed[Any](
+      "TaskT",
+      "0.1.0",
+      McpServerSettings(
+        tasks = TaskSettings(
+          enabled = true,
+          pollIntervalMs = 50,
+          maxConcurrentPerSession = maxConcurrent
+        )
+      )
+    )
+    val _ = server.scanAnnotations[TaskServer.type]
+    runUnsafe(
+      server.buildRouter.flatMap(r =>
+        JvmTransportBackend.httpRoutes(r, server.settings, ZEnvironment.empty)
+      )
+    )
+
+  private def run(routes: Routes[Any, Response], req: Request): Response =
+    runUnsafe(ZIO.scoped(routes.runZIO(req)))
+
+  private def post(routes: Routes[Any, Response], body: String, sid: Option[String]): Response =
+    val base = Request.post(URL(Path.root / "mcp"), Body.fromString(body))
+    val req = sid.fold(base)(s => base.addHeader(Header.Custom(SessionIdHeader, s)))
+    run(routes, req)
+
+  private def bodyOf(resp: Response): String = runUnsafe(resp.body.asString)
+
+  private def initSession(routes: Routes[Any, Response]): String =
+    post(routes, initFrame, None)
+      .rawHeader(SessionIdHeader)
+      .getOrElse(fail("initialize did not return a session id"))
+
+  private val TaskIdPattern = """"taskId":"([^"]+)"""".r
+
+  private def extractTaskId(body: String): String =
+    TaskIdPattern.findFirstMatchIn(body).map(_.group(1)).getOrElse(fail(s"no taskId in: $body"))
+
+  private def augmentedCall(id: Int, tool: String): String =
+    s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"$tool","arguments":{},"task":{"ttl":60000}}}"""
+
+  private def tasksGet(id: Int, taskId: String): String =
+    s"""{"jsonrpc":"2.0","id":$id,"method":"tasks/get","params":{"taskId":"$taskId"}}"""
+
+  private def tasksResult(id: Int, taskId: String): String =
+    s"""{"jsonrpc":"2.0","id":$id,"method":"tasks/result","params":{"taskId":"$taskId"}}"""
+
+  private def tasksCancel(id: Int, taskId: String): String =
+    s"""{"jsonrpc":"2.0","id":$id,"method":"tasks/cancel","params":{"taskId":"$taskId"}}"""
+
+  /** Poll tasks/get until the body reports the wanted status (bounded by a hard timeout). */
+  private def pollUntil(
+      routes: Routes[Any, Response],
+      sid: String,
+      taskId: String,
+      status: String
+  ): String =
+    runUnsafe(
+      (ZIO.sleep(50.millis) *> ZIO.attempt(bodyOf(post(routes, tasksGet(90, taskId), Some(sid)))))
+        .repeatUntil(_.contains(s""""status":"$status""""))
+        .timeoutFail(new RuntimeException(s"task $taskId never reached $status"))(15.seconds)
+    )
+
+  test("initialize advertises the tasks capability when enabled") {
+    val routes = buildRoutes()
+    val body = bodyOf(post(routes, initFrame, None))
+    body should include(""""tasks"""")
+  }
+
+  test("tools/list carries execution.taskSupport for opted-in tools and omits it for plain") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    val list = bodyOf(post(routes, """{"jsonrpc":"2.0","id":2,"method":"tools/list"}""", Some(sid)))
+    list should include(""""taskSupport":"optional"""")
+    list should include(""""taskSupport":"required"""")
+    // Objects in the tools array start with "name"; the plain tool's segment must carry no
+    // execution block.
+    val plainSegment = list
+      .split("\"name\":")
+      .find(_.startsWith("\"plain\""))
+      .getOrElse(fail("plain tool missing from tools/list"))
+    plainSegment should not include "taskSupport"
+  }
+
+  test("task-augmented call returns an immediate CreateTaskResult (working, ttl, pollInterval)") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    val created = bodyOf(post(routes, augmentedCall(3, "slow"), Some(sid)))
+    created should include(""""status":"working"""")
+    created should include(""""ttl":60000""")
+    created should include(""""pollInterval":50""")
+    extractTaskId(created) should not be empty
+  }
+
+  test("bare call on a required-task tool is rejected -32601") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    val body = bodyOf(
+      post(
+        routes,
+        """{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"must-task","arguments":{}}}""",
+        Some(sid)
+      )
+    )
+    body should include(""""code":-32601""")
+    body should include("requires task augmentation")
+  }
+
+  test("task-augmented call on a non-task tool is rejected -32601") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    val body = bodyOf(post(routes, augmentedCall(5, "plain"), Some(sid)))
+    body should include(""""code":-32601""")
+    body should include("does not support task augmentation")
+  }
+
+  test("create -> poll -> result: the task completes and yields the original result") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    val taskId = extractTaskId(bodyOf(post(routes, augmentedCall(6, "slow"), Some(sid))))
+    pollUntil(routes, sid, taskId, "completed")
+    val result = bodyOf(post(routes, tasksResult(7, taskId), Some(sid)))
+    result should include("slow done")
+  }
+
+  test("tasks/get and tasks/result answer -32602 for unknown ids (0.4.0 parity)") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    val get = bodyOf(post(routes, tasksGet(8, "nope"), Some(sid)))
+    get should include(""""code":-32602""")
+    get should include("Unknown task")
+    val res = bodyOf(post(routes, tasksResult(9, "nope"), Some(sid)))
+    res should include(""""code":-32602""")
+  }
+
+  test("a throwing tool completes its task with an isError result, message preserved") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    val taskId = extractTaskId(bodyOf(post(routes, augmentedCall(10, "broken-task"), Some(sid))))
+    pollUntil(routes, sid, taskId, "completed")
+    val result = bodyOf(post(routes, tasksResult(11, taskId), Some(sid)))
+    result should include(""""isError":true""")
+    result should include("task boom")
+  }
+
+  test("multi-content results survive the task round-trip") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    val taskId = extractTaskId(bodyOf(post(routes, augmentedCall(12, "rich-content"), Some(sid))))
+    pollUntil(routes, sid, taskId, "completed")
+    val result = bodyOf(post(routes, tasksResult(13, taskId), Some(sid)))
+    result should include(""""text":"a"""")
+    result should include(""""text":"b"""")
+  }
+
+  test("per-session concurrency cap rejects the overflow create with -32602 (0.4.0 parity)") {
+    val routes = buildRoutes(maxConcurrent = 2)
+    val sid = initSession(routes)
+    extractTaskId(bodyOf(post(routes, augmentedCall(14, "blocky"), Some(sid))))
+    extractTaskId(bodyOf(post(routes, augmentedCall(15, "blocky"), Some(sid))))
+    val third = bodyOf(post(routes, augmentedCall(16, "blocky"), Some(sid)))
+    third should include(""""code":-32602""")
+    third should include("concurrency limit")
+  }
+
+  test("tasks/cancel interrupts a running task; cancelling a terminal task is -32602") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    val taskId = extractTaskId(bodyOf(post(routes, augmentedCall(17, "blocky"), Some(sid))))
+    val cancelled = bodyOf(post(routes, tasksCancel(18, taskId), Some(sid)))
+    cancelled should include(""""status":"cancelled"""")
+    val again = bodyOf(post(routes, tasksCancel(19, taskId), Some(sid)))
+    again should include(""""code":-32602""")
+    again should include("terminal")
+  }
+
+  test("tasks are session-scoped: another session cannot see them") {
+    val routes = buildRoutes()
+    val sid1 = initSession(routes)
+    val taskId = extractTaskId(bodyOf(post(routes, augmentedCall(20, "slow"), Some(sid1))))
+    val sid2 = initSession(routes)
+    val stolen = bodyOf(post(routes, tasksGet(21, taskId), Some(sid2)))
+    stolen should include(""""code":-32602""")
+    stolen should include("Unknown task")
+  }

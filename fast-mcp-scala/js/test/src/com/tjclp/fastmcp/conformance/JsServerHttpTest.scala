@@ -171,6 +171,85 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     }
   }
 
+  "HostGuard on Bun" should "reject a foreign Origin with 403 when allowedHosts is set" in {
+    val guardPort = 38920
+    val guardServer = com.tjclp.fastmcp.server.McpServer(
+      "JsHttpGuardServer",
+      "0.1.0",
+      McpServerSettings(
+        host = "127.0.0.1",
+        port = guardPort,
+        httpEndpoint = "/mcp",
+        stateless = true,
+        allowedHosts = Some(Set("127.0.0.1", "localhost"))
+      )
+    )
+    val guardBunServer = guardServer.startStatelessHttp()
+    val init = js.Dynamic.literal(
+      method = "POST",
+      headers = js.Dictionary(
+        "content-type" -> "application/json",
+        "accept" -> "application/json, text/event-stream",
+        "origin" -> "http://evil.example.com"
+      ),
+      body = """{"jsonrpc":"2.0","id":1,"method":"tools/list"}"""
+    )
+    val done = fromJsPromise(
+      js.Dynamic.global
+        .fetch(s"http://127.0.0.1:$guardPort/mcp", init)
+        .asInstanceOf[js.Promise[js.Dynamic]]
+    ).map(resp => resp.status.asInstanceOf[Int] shouldBe 403)
+    done.andThen { case _ => guardBunServer.stop() }
+  }
+
+  "streamable session lifecycle on Bun" should "mint, reuse, DELETE, then 404" in {
+    val lifePort = 38921
+    val lifeServer = com.tjclp.fastmcp.server.McpServer(
+      "JsHttpLifecycleServer",
+      "0.1.0",
+      McpServerSettings(
+        host = "127.0.0.1",
+        port = lifePort,
+        httpEndpoint = "/mcp",
+        stateless = false
+      )
+    )
+    val lifeBunServer = lifeServer.startStatefulHttp()
+
+    def send(method: String, body: Option[String], sid: Option[String]): Future[js.Dynamic] =
+      val headers = js.Dictionary[String](
+        "content-type" -> "application/json",
+        "accept" -> "application/json, text/event-stream"
+      )
+      sid.foreach(s => headers("mcp-session-id") = s)
+      val init = body match
+        case Some(b) => js.Dynamic.literal(method = method, headers = headers, body = b)
+        case None => js.Dynamic.literal(method = method, headers = headers)
+      fromJsPromise(
+        js.Dynamic.global
+          .fetch(s"http://127.0.0.1:$lifePort/mcp", init)
+          .asInstanceOf[js.Promise[js.Dynamic]]
+      )
+
+    val initBody =
+      """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1.0"}}}"""
+    val listBody = """{"jsonrpc":"2.0","id":2,"method":"tools/list"}"""
+
+    val done = for
+      initResp <- send("POST", Some(initBody), None)
+      sid = initResp.headers.get("mcp-session-id").asInstanceOf[String]
+      list <- send("POST", Some(listBody), Some(sid))
+      del <- send("DELETE", None, Some(sid))
+      after <- send("POST", Some(listBody), Some(sid))
+    yield
+      initResp.status.asInstanceOf[Int] shouldBe 200
+      list.status.asInstanceOf[Int] shouldBe 200
+      del.status.asInstanceOf[Int] shouldBe 200
+      after.status.asInstanceOf[Int] shouldBe 404
+
+    done.andThen { case _ => lifeBunServer.stop() }
+  }
+
   "runHttp (streamable minting)" should "400 a headerless non-initialize POST without minting" in {
     val mintPort = 38919
     val mintServer = com.tjclp.fastmcp.server.McpServer(
