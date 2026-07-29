@@ -122,6 +122,33 @@ class ServerRequestTest extends AnyFunSuite with Matchers:
     out shouldBe Right(result)
   }
 
+  test("elicitUrl emits URL-mode elicitation/create with mode and elicitationId on the wire") {
+    val router = freshRouter
+    val session = runUnsafe(Session.make("elicit-url"))
+    val ctx = McpContext.withSession(session, clientCapabilities = Some(fullCaps))
+    val params = ElicitRequestUrlParams(
+      message = "Complete sign-in in your browser",
+      url = "https://example.com/auth",
+      elicitationId = "elic-1"
+    )
+    val result = ElicitResult("accept")
+    val (sent, out) = roundTrip(
+      router,
+      session,
+      ctx.elicitUrl(params),
+      id => JsonRpcMessage.Success(id, ast(result))
+    )
+    sent match
+      case JsonRpcMessage.Request(_, method, ps) =>
+        method shouldBe "elicitation/create"
+        val wire = ps.map(_.toString).getOrElse("")
+        wire should include(""""mode":"url"""")
+        wire should include(""""elicitationId":"elic-1"""")
+        ps.flatMap(_.as[ElicitRequestUrlParams].toOption) shouldBe Some(params)
+      case other => fail(s"expected Request, got $other")
+    out shouldBe Right(result)
+  }
+
   // ---------- error/edge paths ----------
 
   test("a Failure response fails the pending request with the mapped McpError") {

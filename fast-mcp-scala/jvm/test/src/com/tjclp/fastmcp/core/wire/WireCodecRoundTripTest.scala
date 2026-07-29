@@ -181,6 +181,34 @@ class WireCodecRoundTripTest extends AnyFlatSpec with Matchers {
 
   // ---------- Tasks (audit) ----------
 
+  "elicitation wire types" should "round-trip both modes with the right discriminators" in {
+    val form = ElicitRequestParams("Name?", Json.Obj("type" -> Json.Str("object")))
+    form.toJson should not include "mode" // absent decodes as form (pre-mode compatibility)
+    roundTrips(form)
+
+    val url = ElicitRequestUrlParams("Sign in", "https://example.com/auth", "elic-9")
+    url.toJson should include("\"mode\":\"url\"")
+    url.toJson should include("\"elicitationId\":\"elic-9\"")
+    roundTrips(url)
+
+    val err = ElicitRequestUrlParams.requiredError(List(url))
+    err.code shouldBe com.tjclp.fastmcp.core.ErrorCodes.UrlElicitationRequired
+    err.data.map(_.toString).getOrElse("") should include("elicitations")
+  }
+
+  "sampling tools/toolChoice" should "round-trip on CreateMessageRequestParams" in {
+    val params = CreateMessageRequestParams(
+      messages = List(SamplingMessage(Role.User, TextContent("hi"))),
+      maxTokens = 10,
+      tools = Some(List(Tool(name = "search", inputSchema = ToolInputSchema.default))),
+      toolChoice = Some(ToolChoice(Some("required")))
+    )
+    val json = params.toJson
+    json should include("\"toolChoice\":{\"mode\":\"required\"}")
+    json should include("\"tools\":[")
+    roundTrips(params)
+  }
+
   "Task.ttl" should "encode None as an explicit null (spec: present-and-nullable)" in {
     val task = com.tjclp.fastmcp.core.Task(
       taskId = "t1",

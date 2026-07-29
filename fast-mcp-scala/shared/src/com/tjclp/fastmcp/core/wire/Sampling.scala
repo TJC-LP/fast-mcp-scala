@@ -35,8 +35,17 @@ case class ModelPreferences(
 object ModelPreferences:
   given JsonCodec[ModelPreferences] = DeriveJsonCodec.gen[ModelPreferences]
 
-/** Params for the server-initiated `sampling/createMessage` request (2025-11-25 fields; the
-  * DRAFT-2026 `tools`/`toolChoice` fields are deferred).
+/** Controls tool usage in sampling requests (2025-11-25): `mode` is `"auto"` (default) |
+  * `"required"` | `"none"`.
+  */
+case class ToolChoice(mode: Option[String] = None)
+
+object ToolChoice:
+  given JsonCodec[ToolChoice] = DeriveJsonCodec.gen[ToolChoice]
+
+/** Params for the server-initiated `sampling/createMessage` request (2025-11-25). `tools` /
+  * `toolChoice` require the client to have declared `sampling.tools` in its capabilities — the
+  * client MUST error otherwise.
   */
 case class CreateMessageRequestParams(
     messages: List[SamplingMessage],
@@ -47,6 +56,8 @@ case class CreateMessageRequestParams(
     temperature: Option[Double] = None,
     stopSequences: Option[List[String]] = None,
     metadata: Option[Json] = None,
+    tools: Option[List[Tool]] = None,
+    toolChoice: Option[ToolChoice] = None,
     _meta: Option[Map[String, Json]] = None
 )
 

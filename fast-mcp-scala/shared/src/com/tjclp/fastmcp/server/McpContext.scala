@@ -11,6 +11,7 @@ import com.tjclp.fastmcp.core.wire.{
   CreateMessageRequestParams,
   CreateMessageResult,
   ElicitRequestParams,
+  ElicitRequestUrlParams,
   ElicitResult,
   Implementation,
   ListRootsResult,
@@ -129,6 +130,20 @@ open class McpContext private[fastmcp] (
     */
   def elicit(
       params: ElicitRequestParams,
+      timeout: Duration = McpContext.DefaultRequestTimeout
+  ): IO[McpError, ElicitResult] =
+    requireCapability("elicitation", _.elicitation.isDefined) *>
+      sendRequest("elicitation/create", Some(encode(params)), timeout)
+        .flatMap(decodeResult[ElicitResult]("elicitation/create"))
+
+  /** `elicitation/create` (URL mode, 2025-11-25) — ask the client to send the user to a URL for an
+    * out-of-band interaction. The result's `action` reports accept/decline/cancel of the
+    * navigation; completion of the interaction itself is correlated by `params.elicitationId` (e.g.
+    * a tool can fail with `ElicitRequestUrlParams.requiredError` until it's done). Requires the
+    * `elicitation` capability.
+    */
+  def elicitUrl(
+      params: ElicitRequestUrlParams,
       timeout: Duration = McpContext.DefaultRequestTimeout
   ): IO[McpError, ElicitResult] =
     requireCapability("elicitation", _.elicitation.isDefined) *>
