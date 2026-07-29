@@ -24,6 +24,9 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     @Tool(name = Some("add"), description = Some("Add two numbers"))
     def add(@Param("a") a: Int, @Param("b") b: Int): Int = a + b
 
+    @Tool(name = Some("slow"), description = Some("Sleeps forever (cancellation target)"))
+    def slow(): ZIO[Any, Throwable, String] = ZIO.sleep(30.seconds).as("done")
+
   private val SessionIdHeader = "mcp-session-id"
 
   private val initFrame =
@@ -135,6 +138,62 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val get = Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid))
     run(routes, get).status shouldBe Status.Ok
     run(routes, get).status shouldBe Status.Conflict
+  }
+
+  test("streamable: notifications/cancelled ends the request's SSE stream without a reply") {
+    val routes = buildRoutes(stateless = false)
+    val sid = post(routes, initFrame, None)
+      .rawHeader(SessionIdHeader)
+      .getOrElse(fail("no session id"))
+    val slowFrame =
+      """{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slow","arguments":{}}}"""
+    val cancelFrame =
+      """{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"""
+
+    val (cancelStatus, body) = runUnsafe(
+      for
+        // Drain the slow call's SSE body in a fiber — it only completes when the stream closes.
+        bodyFiber <- ZIO
+          .scoped(
+            routes.runZIO(
+              Request
+                .post(URL(Path.root / "mcp"), Body.fromString(slowFrame))
+                .addHeader(Header.Custom(SessionIdHeader, sid))
+            )
+          )
+          .flatMap(_.body.asString)
+          .fork
+        _ <- ZIO.sleep(300.millis) // let the dispatch start
+        cancelResp <- ZIO.scoped(
+          routes.runZIO(
+            Request
+              .post(URL(Path.root / "mcp"), Body.fromString(cancelFrame))
+              .addHeader(Header.Custom(SessionIdHeader, sid))
+          )
+        )
+        body <- bodyFiber.join
+          .timeoutFail(new RuntimeException("cancelled stream never closed"))(10.seconds)
+      yield (cancelResp.status, body)
+    )
+    cancelStatus shouldBe Status.Accepted
+    body should not include "done"
+    body should not include "$fastmcp/internal/close"
+  }
+
+  test("cancelInflight ignores the initialize request (spec: MUST NOT be cancelled)") {
+    runUnsafe(
+      for
+        session <- Session.make("no-cancel-init")
+        fiber <- ZIO.never.fork
+        _ <- session.trackInflight(
+          com.tjclp.fastmcp.jsonrpc.RequestId.NumId(1),
+          "initialize",
+          fiber
+        )
+        _ <- session.cancelInflight(com.tjclp.fastmcp.jsonrpc.RequestId.NumId(1))
+        poll <- fiber.poll
+      yield poll shouldBe None // still running — the cancel was ignored
+    )
   }
 
   test("idle streamable sessions are swept; live-GET sessions are exempt") {

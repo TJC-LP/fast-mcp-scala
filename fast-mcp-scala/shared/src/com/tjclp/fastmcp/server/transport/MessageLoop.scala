@@ -54,3 +54,15 @@ object MessageLoop:
     * request) drained from [[Session.outbound]].
     */
   def encodeOutbound(message: JsonRpcMessage): String = message.toJson
+
+  /** Internal frame offered to a per-request SSE queue when its dispatch ends without a final reply
+    * — a `notifications/cancelled` interruption emits no response, and the stream's
+    * `takeUntil(isFinalReply)` would otherwise hold the HTTP connection open forever. Offered by
+    * the transports' `ensuring` on the dispatch fiber and filtered out of the stream; only
+    * per-request queues ever carry it (stdio's outbound path cannot see it).
+    */
+  private[fastmcp] val CloseSentinel: JsonRpcMessage =
+    Notification("$fastmcp/internal/close", None)
+
+  private[fastmcp] def isCloseSentinel(message: JsonRpcMessage): Boolean =
+    message == CloseSentinel

@@ -341,15 +341,19 @@ object JvmTransportBackend extends TransportBackend:
     val reqId = message.id
     for
       reqQueue <- Queue.unbounded[JsonRpcMessage]
+      // `ensuring` (uninterruptible) offers the close sentinel after the dispatch delivers its
+      // reply — or after it is cancelled / dies replyless — so the SSE stream below always ends.
       _ <- session
         .runWithSink(reqQueue)(router.dispatch(session, message))
         .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
+        .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
         .forkDaemon
     yield
       val sse: ZStream[Any, Nothing, ServerSentEvent[String]] =
         ZStream
           .fromQueue(reqQueue)
-          .takeUntil(isFinalReply(_, reqId))
+          .takeUntil(msg => isFinalReply(msg, reqId) || MessageLoop.isCloseSentinel(msg))
+          .filter(!MessageLoop.isCloseSentinel(_))
           .map(msg => ServerSentEvent(MessageLoop.encodeOutbound(msg), eventType = Some("message")))
       withSessionHeader(Response.fromServerSentEvents(sse), session, isNew)
 

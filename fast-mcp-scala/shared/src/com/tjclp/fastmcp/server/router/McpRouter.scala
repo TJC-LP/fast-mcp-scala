@@ -108,9 +108,9 @@ final class McpRouter[R](
         val pipeline = Middleware.chain(middlewares, method, handler)
         for
           fiber <- pipeline(session, params).fork
-          _ <- session.trackInflight(id, fiber)
-          exit <- fiber.await
-          _ <- session.clearInflight(id)
+          _ <- session.trackInflight(id, method, fiber)
+          // `ensuring` so an interrupted dispatch can't leave a stale registry entry behind.
+          exit <- fiber.await.ensuring(session.clearInflight(id))
           resp <- exit match
             case Exit.Success(result) =>
               ZIO.succeed(Some(Success(id, WireMapping.completeResult(result))))

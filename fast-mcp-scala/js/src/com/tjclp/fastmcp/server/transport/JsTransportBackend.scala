@@ -276,11 +276,15 @@ object JsTransportBackend extends TransportBackend:
       case req: JsonRpcMessage.Request =>
         for
           reqQueue <- Queue.unbounded[JsonRpcMessage]
-          _ <- session
+          // `ensuring` offers the close sentinel when dispatch ends replyless (cancellation) so
+          // the SSE stream terminates; the bound fiber lets the stream's `cancel` hook interrupt
+          // the dispatch when the client disconnects mid-request.
+          fiber <- session
             .runWithSink(reqQueue)(router.dispatch(session, req))
             .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
+            .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
             .forkDaemon
-        yield sseResponse(reqQueue, req.id, session, isNew)
+        yield sseResponse(reqQueue, req.id, session, isNew, fiber)
       case other =>
         val extra =
           if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String]
@@ -297,19 +301,29 @@ object JsTransportBackend extends TransportBackend:
       reqQueue: Queue[JsonRpcMessage],
       reqId: RequestId,
       session: Session,
-      isNew: Boolean
+      isNew: Boolean,
+      dispatchFiber: Fiber.Runtime[?, ?]
   ): js.Dynamic =
     val encoder = js.Dynamic.newInstance(js.Dynamic.global.TextEncoder)()
     val source = js.Dynamic.literal(
       pull = js.Any.fromFunction1((controller: js.Dynamic) =>
         ZioJsPromise.zioToPromise(
           reqQueue.take.map { msg =>
-            val frame = s"event: message\ndata: ${MessageLoop.encodeOutbound(msg)}\n\n"
-            val _ = controller.enqueue(encoder.encode(frame))
-            if isFinalReply(msg, reqId) then
+            if MessageLoop.isCloseSentinel(msg) then
+              // Dispatch ended replyless (cancelled): end the stream without emitting a frame.
               val _ = controller.close()
+            else
+              val frame = s"event: message\ndata: ${MessageLoop.encodeOutbound(msg)}\n\n"
+              val _ = controller.enqueue(encoder.encode(frame))
+              if isFinalReply(msg, reqId) then
+                val _ = controller.close()
           }
         )
+      ),
+      // Client disconnected mid-request: interrupt the dispatch and drop the queue, otherwise the
+      // pending `take` leaks a fiber per aborted request.
+      cancel = js.Any.fromFunction1((_: js.Any) =>
+        ZioJsPromise.zioToPromise(dispatchFiber.interrupt *> reqQueue.shutdown)
       )
     )
     val stream = js.Dynamic.newInstance(js.Dynamic.global.ReadableStream)(source)

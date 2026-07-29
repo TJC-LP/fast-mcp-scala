@@ -25,7 +25,7 @@ final class Session private (
     private val initializedRef: Ref[Boolean],
     private val subscriptionsRef: Ref[Set[String]],
     private val serverRequestCounter: Ref[Long],
-    private val inflight: Ref[Map[RequestId, Fiber.Runtime[?, ?]]],
+    private val inflight: Ref[Map[RequestId, (String, Fiber.Runtime[?, ?])]],
     private val pendingRef: Ref[Map[RequestId, Promise[McpError, Json]]],
     private val clientInfoRef: Ref[Option[Implementation]],
     private val clientCapabilitiesRef: Ref[Option[ClientCapabilities]],
@@ -98,15 +98,18 @@ final class Session private (
 
   // --- cancellation registry ---
 
-  def trackInflight(id: RequestId, fiber: Fiber.Runtime[?, ?]): UIO[Unit] =
-    inflight.update(_ + (id -> fiber))
+  def trackInflight(id: RequestId, method: String, fiber: Fiber.Runtime[?, ?]): UIO[Unit] =
+    inflight.update(_ + (id -> (method, fiber)))
 
   def clearInflight(id: RequestId): UIO[Unit] = inflight.update(_ - id)
 
-  /** Interrupt the in-flight fiber for `id`, if any (drives `notifications/cancelled`). */
+  /** Interrupt the in-flight fiber for `id`, if any (drives `notifications/cancelled`). The
+    * `initialize` request is exempt — the spec forbids cancelling it.
+    */
   def cancelInflight(id: RequestId): UIO[Unit] =
     inflight.get.flatMap(_.get(id) match
-      case Some(fiber) => fiber.interrupt.unit *> clearInflight(id)
+      case Some((Methods.Initialize, _)) => ZIO.unit
+      case Some((_, fiber)) => fiber.interrupt.unit *> clearInflight(id)
       case None => ZIO.unit
     )
 
@@ -150,7 +153,7 @@ object Session:
       init <- Ref.make(false)
       subs <- Ref.make(Set.empty[String])
       cnt <- Ref.make(0L)
-      inflight <- Ref.make(Map.empty[RequestId, Fiber.Runtime[?, ?]])
+      inflight <- Ref.make(Map.empty[RequestId, (String, Fiber.Runtime[?, ?])])
       pending <- Ref.make(Map.empty[RequestId, Promise[McpError, Json]])
       cInfo <- Ref.make(Option.empty[Implementation])
       cCaps <- Ref.make(Option.empty[ClientCapabilities])
