@@ -47,9 +47,9 @@ private final case class TaskEntry(
   *   - schedules TTL-based cleanup on a separate daemon fiber.
   *
   * Session isolation: tasks created with a `sessionId` are only visible to that session. A `None`
-  * `sessionId` means session-less (single-user / stdio-style) — visible to all callers. The HTTP
-  * transport supplies a session ID; the stdio transport doesn't (and stdio doesn't support tasks
-  * anyway, since the Java SDK owns dispatch there).
+  * `sessionId` means session-less — visible to all callers. Every transport supplies a session id:
+  * streamable HTTP mints one per `initialize`, and stdio uses a single durable `"stdio"` session
+  * (one process, one client), which is what makes tasks work over stdio.
   *
   * @tparam R
   *   the ZIO environment the wrapped effect may require. `tm.create(...)` runs inside the server's
@@ -260,7 +260,16 @@ class TaskManager[R](
     yield ()
 
   private def scheduleEviction(taskId: String, ttlMs: Long): UIO[Unit] =
-    ZIO.sleep(Duration.fromMillis(ttlMs)) *> tasksRef.update(_.removed(taskId))
+    ZIO.sleep(Duration.fromMillis(ttlMs)) *>
+      tasksRef
+        .modify(all => (all.get(taskId), all.removed(taskId)))
+        .flatMap {
+          // A task that outlives its TTL while still working must not keep running invisibly:
+          // interrupt it. recordTerminal (the fiber's release) then no-ops against the removed
+          // entry, and nobody can be awaiting the promise — the entry is already unreachable.
+          case Some(entry) if !entry.status.isTerminal => entry.fiber.interrupt.unit
+          case _ => ZIO.unit
+        }
 
 /** Raised by [[TaskManager.create]] when the calling session is already running
   * `settings.maxConcurrentPerSession` tasks. Dispatch layers catch this and surface a

@@ -134,6 +134,10 @@ final class TaskHandlers[R](taskManager: TaskManager[R]):
   val list: RequestHandler[R] = (session, params) =>
     for
       req <- decodeParams[TaskListParams](params, "tasks/list")
+      // Single-page MVP: we never issue cursors, so any supplied cursor is stale or invalid.
+      _ <- ZIO
+        .fail(McpError.invalidParams(s"tasks/list: unknown cursor: ${req.cursor.getOrElse("")}"))
+        .when(req.cursor.isDefined)
       result <- taskManager.list(Some(session.sessionId), req.cursor)
       json <- ok(result)
     yield json

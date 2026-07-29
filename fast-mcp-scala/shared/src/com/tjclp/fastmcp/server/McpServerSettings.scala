@@ -7,8 +7,10 @@ import com.tjclp.fastmcp.core.Tasks
   * Off by default: the spec marks Tasks as experimental and the wire format may evolve. Enabling
   * this advertises the `tasks` capability and starts honoring `params.task` on `tools/call`.
   *
-  * Tasks are only supported on the Streamable HTTP transport (`runHttp()` with `stateless = false`)
-  * — stdio and stateless HTTP delegate dispatch to the Java SDK, which has no tasks code yet.
+  * Tasks need a transport whose session outlives a single request so the create→poll lifecycle
+  * works: streamable HTTP (`runHttp()`, the default) and stdio (one durable session per process)
+  * both qualify. Stateless HTTP does not — every client would share one task namespace — so
+  * enabling tasks with `stateless = true` fails fast at startup.
   *
   * @param enabled
   *   Master switch. When false, `tasks` capability is not advertised and `params.task` is ignored.
@@ -19,7 +21,7 @@ import com.tjclp.fastmcp.core.Tasks
   * @param pollIntervalMs
   *   `pollInterval` value advertised back to clients in `tasks/get` responses.
   * @param maxConcurrentPerSession
-  *   Resource cap; additional task creations beyond this fail with an internal error.
+  *   Resource cap; additional task creations beyond this are rejected with `-32602`.
   */
 case class TaskSettings(
     enabled: Boolean = false,

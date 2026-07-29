@@ -103,13 +103,28 @@ final class McpServer[R](
 
   /** Build the immutable router from the (now-populated) managers + settings. Allocates a
     * [[TaskManager]] only when tasks are enabled.
+    *
+    * Fails fast on `tasks.enabled && stateless`: stateless HTTP gives every request the same
+    * session id, so one shared task namespace would let any client read or cancel another client's
+    * tasks. (The guard lives here — not in `runHttp` — so platform entry points that build the
+    * router directly are covered too.)
     */
-  private[fastmcp] def buildRouter: UIO[McpRouter[R]] =
+  private[fastmcp] def buildRouter: IO[Throwable, McpRouter[R]] =
+    val statelessTasksGuard =
+      ZIO
+        .fail(
+          new IllegalStateException(
+            "MCP Tasks (settings.tasks.enabled) require a session-durable transport: stateless " +
+              "HTTP shares one session across all clients, so tasks would leak between them. " +
+              "Disable tasks or set stateless = false (streamable HTTP and stdio both work)."
+          )
+        )
+        .when(settings.tasks.enabled && settings.stateless)
     val taskMgr: UIO[Option[TaskManager[R]]] =
       if settings.tasks.enabled then
         TaskManager.make[R](settings.tasks, backend.randomId()).map(Some(_))
       else ZIO.none
-    taskMgr.map { tm =>
+    statelessTasksGuard *> taskMgr.map { tm =>
       RouterBuilder.build[R](
         serverInfo = Implementation(name = name, version = version),
         instructions = None,

@@ -99,7 +99,9 @@ case class Task(
     statusMessage: Option[String] = None,
     createdAt: String,
     lastUpdatedAt: String,
-    ttl: Option[Long] = None,
+    // 2025-11-25 TaskSchema requires `ttl` present-and-nullable (`number | null`), so a None must
+    // encode as an explicit null rather than an omitted key.
+    @jsonExplicitNull ttl: Option[Long] = None,
     pollInterval: Option[Long] = None
 )
 

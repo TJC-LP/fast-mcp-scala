@@ -204,4 +204,47 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     )
     createResult.task.ttl shouldBe Some(5_000L)
   }
+
+  "TTL eviction" should "remove the entry and interrupt still-running work" in {
+    val tm = newManager()
+    val interrupted = runUnsafe(Ref.make(false))
+    val created = runUnsafe(
+      tm.create(
+        sessionId = Some("evict"),
+        requestedTtlMs = Some(150L),
+        run = ZIO.never.onInterrupt(interrupted.set(true)),
+        onStatusChange = _ => ZIO.unit
+      )
+    )
+    val taskId = created.task.taskId
+    runUnsafe(
+      (ZIO.sleep(25.millis) *> (tm.get(taskId, Some("evict")).map(_.isEmpty) zip interrupted.get))
+        .repeatUntil { case (gone, wasInterrupted) => gone && wasInterrupted }
+        .timeoutFail(new RuntimeException("TTL eviction did not remove + interrupt the task"))(
+          10.seconds
+        )
+    )
+  }
+
+  it should "leave terminal tasks to age out without interrupting anything" in {
+    val tm = newManager()
+    val created = runUnsafe(
+      tm.create(
+        sessionId = Some("done"),
+        requestedTtlMs = Some(150L),
+        run = ZIO.succeed("ok"),
+        onStatusChange = _ => ZIO.unit
+      )
+    )
+    val taskId = created.task.taskId
+    // Completed result stays pollable until the TTL sweeps the entry.
+    runUnsafe(tm.result(taskId, Some("done"))) shouldBe "ok"
+    runUnsafe(
+      (ZIO.sleep(25.millis) *> tm.get(taskId, Some("done")).map(_.isEmpty))
+        .repeatUntil(identity)
+        .timeoutFail(new RuntimeException("TTL eviction did not remove the terminal task"))(
+          10.seconds
+        )
+    )
+  }
 }

@@ -181,6 +181,19 @@ class WireCodecRoundTripTest extends AnyFlatSpec with Matchers {
 
   // ---------- Tasks (audit) ----------
 
+  "Task.ttl" should "encode None as an explicit null (spec: present-and-nullable)" in {
+    val task = com.tjclp.fastmcp.core.Task(
+      taskId = "t1",
+      status = com.tjclp.fastmcp.core.TaskStatus.Working,
+      createdAt = "2026-01-01T00:00:00Z",
+      lastUpdatedAt = "2026-01-01T00:00:00Z",
+      ttl = None,
+      pollInterval = Some(100L)
+    )
+    task.toJson should include("\"ttl\":null")
+    roundTrips(task)
+  }
+
   "TaskSupport" should "round-trip the three spec values" in {
     TaskSupport.values.foreach(ts => roundTrips(ts))
     TaskSupport.Required.toJson shouldBe "\"required\""
