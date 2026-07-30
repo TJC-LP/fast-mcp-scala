@@ -116,11 +116,15 @@ final class Builtins[R](
       .map(WireMapping.resourceToWire)
     ok(ListResourcesResult(resources = resources))
 
+  /** Answered whenever resources exist — clients probe it unconditionally and treat `-32601` as an
+    * error. Actual template listing stays behind `exposeTemplatesEndpoint`: when off, clients
+    * derive templates from `{}` URIs and this returns an empty page.
+    */
   val resourcesTemplatesList: RequestHandler[R] = (_, _) =>
-    val templates = resourceManager
-      .listDefinitions()
-      .filter(_.isTemplate)
-      .map(WireMapping.templateToWire)
+    val templates =
+      if exposeTemplates then
+        resourceManager.listDefinitions().filter(_.isTemplate).map(WireMapping.templateToWire)
+      else List.empty
     ok(ListResourceTemplatesResult(resourceTemplates = templates))
 
   val resourcesRead: RequestHandler[R] = (session, params) =>

@@ -49,7 +49,10 @@ object RouterBuilder:
       Option
         .when(hasResources)(Set(Methods.ResourcesList, Methods.ResourcesRead))
         .getOrElse(Set.empty) ++
-      Option.when(exposeTemplates)(Set(Methods.ResourcesTemplatesList)).getOrElse(Set.empty) ++
+      // templates/list is part of the `resources` capability — clients (e.g. MCP Inspector) probe
+      // it unconditionally, and -32601 renders as an error. Register it whenever resources exist;
+      // whether actual templates are LISTED stays behind `exposeTemplatesEndpoint` (Builtins).
+      Option.when(hasResources)(Set(Methods.ResourcesTemplatesList)).getOrElse(Set.empty) ++
       Option.when(hasPrompts)(Set(Methods.PromptsList, Methods.PromptsGet)).getOrElse(Set.empty) ++
       Option.when(hasCompletion)(Set(Methods.CompletionComplete)).getOrElse(Set.empty) ++
       Option.when(loggingEnabled)(Set(Methods.LoggingSetLevel)).getOrElse(Set.empty) ++
@@ -98,8 +101,7 @@ object RouterBuilder:
              Methods.ResourcesUnsubscribe -> builtins.resourcesUnsubscribe
            )
          else Map.empty) ++
-        (if exposeTemplates then
-           Map(Methods.ResourcesTemplatesList -> builtins.resourcesTemplatesList)
+        (if hasResources then Map(Methods.ResourcesTemplatesList -> builtins.resourcesTemplatesList)
          else Map.empty) ++
         (if hasPrompts then
            Map(

@@ -101,3 +101,24 @@ class ConformanceGapsTest extends AnyFunSuite with Matchers:
     init should not include "logging"
     init should not include "subscribe"
   }
+
+  // Found dogfooding with MCP Inspector: it probes resources/templates/list unconditionally and
+  // renders -32601 as an error. templates/list is part of the `resources` capability, so any
+  // resource-bearing server must answer it — empty when exposeTemplatesEndpoint is off.
+  test("resources/templates/list answers (empty) when resources exist, even with templates hidden") {
+    val server = McpServer("TemplatesProbeServer")
+    runUnsafe(server.resource(McpStaticResource("test://x", name = Some("x"))("body")))
+    val router = runUnsafe(server.buildRouter)
+    val session = runUnsafe(Session.make("templates-probe"))
+    runUnsafe(MessageLoop.handleFrame(router, session, initFrame))
+
+    val reply = runUnsafe(
+      MessageLoop.handleFrame(
+        router,
+        session,
+        """{"jsonrpc":"2.0","id":5,"method":"resources/templates/list"}"""
+      )
+    ).getOrElse(fail("no reply"))
+    reply should not include "-32601"
+    reply should include(""""resourceTemplates":[]""")
+  }

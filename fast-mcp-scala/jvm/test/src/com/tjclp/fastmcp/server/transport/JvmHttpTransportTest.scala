@@ -74,6 +74,14 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
 
   private def bodyOf(resp: Response): String = runUnsafe(resp.body.asString)
 
+  /** Initialize and return the minted session id, draining the SSE body first — a compliant
+    * client awaits the initialize response; grabbing only the header races the pre-init gate.
+    */
+  private def initSid(routes: Routes[Any, Response]): String =
+    val resp = post(routes, initFrame, None)
+    val _ = bodyOf(resp)
+    resp.rawHeader(SessionIdHeader).getOrElse(fail("no session id"))
+
   test("streamable: initialize mints a session id, reused for tools/call, then deleted") {
     val routes = buildRoutes(stateless = false)
 
@@ -103,9 +111,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
 
   test("streamable: GET opens an SSE channel for a known session") {
     val routes = buildRoutes(stateless = false)
-    val sid = post(routes, initFrame, None)
-      .rawHeader(SessionIdHeader)
-      .getOrElse(fail("no session id"))
+    val sid = initSid(routes)
 
     // Don't read the SSE body (it blocks on the outbound queue) — assert status + content-type.
     val getResp =
@@ -144,9 +150,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
 
   test("streamable: a second concurrent GET on the same session is rejected with 409") {
     val routes = buildRoutes(stateless = false)
-    val sid = post(routes, initFrame, None)
-      .rawHeader(SessionIdHeader)
-      .getOrElse(fail("no session id"))
+    val sid = initSid(routes)
     val get = Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid))
     run(routes, get).status shouldBe Status.Ok
     run(routes, get).status shouldBe Status.Conflict
@@ -154,9 +158,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
 
   test("streamable: notifications/cancelled ends the request's SSE stream without a reply") {
     val routes = buildRoutes(stateless = false)
-    val sid = post(routes, initFrame, None)
-      .rawHeader(SessionIdHeader)
-      .getOrElse(fail("no session id"))
+    val sid = initSid(routes)
     val slowFrame =
       """{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slow","arguments":{}}}"""
     val cancelFrame =
@@ -223,9 +225,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
   test("keepalive pings flow on a quiet GET SSE stream when configured") {
     val routes =
       buildRoutes(stateless = false, keepAlive = Some(java.time.Duration.ofMillis(100)))
-    val sid = post(routes, initFrame, None)
-      .rawHeader(SessionIdHeader)
-      .getOrElse(fail("no session id"))
+    val sid = initSid(routes)
     val getResp = run(
       routes,
       Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid))

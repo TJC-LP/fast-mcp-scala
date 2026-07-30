@@ -77,7 +77,12 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
   private def bodyOf(resp: Response): String = runUnsafe(resp.body.asString)
 
   private def initSession(routes: Routes[Any, Response]): String =
-    post(routes, initFrame, None)
+    val resp = post(routes, initFrame, None)
+    // Drain the SSE body like a compliant client awaiting the initialize RESPONSE — the session
+    // header arrives with the streaming response while dispatch is still running, and firing the
+    // next request off the header alone races the pre-init gate (flaked under load).
+    val _ = bodyOf(resp)
+    resp
       .rawHeader(SessionIdHeader)
       .getOrElse(fail("initialize did not return a session id"))
 
