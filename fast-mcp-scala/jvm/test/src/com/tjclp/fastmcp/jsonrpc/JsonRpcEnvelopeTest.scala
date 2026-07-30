@@ -82,6 +82,50 @@ class JsonRpcEnvelopeTest extends AnyFunSuite with Matchers:
     reply should include(""""id":null""")
   }
 
+  test("2026-07-28-flavored traffic degrades gracefully (posture until TJC-1844)") {
+    val server = McpServer("ForwardCompatServer")
+    runUnsafe(
+      server.tool(
+        McpTool[NoArgs, String](name = "echo", description = Some("echo"))(_ => ZIO.succeed("ok"))
+      )
+    )
+    val router = runUnsafe(server.buildRouter)
+    val session = runUnsafe(Session.make("fc-2026"))
+
+    // A transitional 2026 client still sends initialize; we negotiate down to our latest.
+    val init = runUnsafe(
+      MessageLoop.handleFrame(
+        router,
+        session,
+        """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"future","version":"1.0"}}}"""
+      )
+    ).getOrElse(fail("no init reply"))
+    init should include(""""protocolVersion":"2025-11-25"""")
+
+    // The 2026 discovery probe is a clean unknown-method, which 2026 clients treat as
+    // "pre-2026 server" and fall back.
+    val discover = runUnsafe(
+      MessageLoop.handleFrame(
+        router,
+        session,
+        """{"jsonrpc":"2.0","id":2,"method":"server/discover"}"""
+      )
+    ).getOrElse(fail("no discover reply"))
+    discover should include("-32601")
+
+    // 2026 per-request _meta handshake keys are tolerated and ignored; the resultType-less reply
+    // is valid for 2026 clients (they MUST treat it as "complete").
+    val call = runUnsafe(
+      MessageLoop.handleFrame(
+        router,
+        session,
+        """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"extensions":{}},"io.modelcontextprotocol/clientInfo":{"name":"future","version":"1.0"}}}}"""
+      )
+    ).getOrElse(fail("no call reply"))
+    call should include(""""result"""")
+    call should include("ok")
+  }
+
   test("tools/call with non-object arguments answers -32602") {
     val server = McpServer("EnvelopeServer2")
     runUnsafe(
