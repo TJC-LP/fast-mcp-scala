@@ -7,16 +7,16 @@ import org.scalatest.funsuite.AnyFunSuite
 import zio.{Task as ZioTask, *}
 
 import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.macros.JacksonConverter.given
 import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
 import com.tjclp.fastmcp.server.*
+import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
 /** Verifies that `@Tool` / `@Resource` / `@Prompt` macros honor effect-shaped return types (ZIO,
   * Try, Either[Throwable, _]) instead of stringifying the unexecuted effect — issue #50.
   */
 class EffectReturnTest extends AnyFunSuite:
 
-  private def runTool(server: FastMcpServer[Any], name: String, args: Map[String, Any]): Any =
+  private def runTool(server: McpServer[Any], name: String, args: Map[String, Any]): Any =
     Unsafe.unsafe { implicit unsafe =>
       Runtime.default.unsafe
         .run(server.toolManager.callTool(name, args, None))
@@ -24,7 +24,7 @@ class EffectReturnTest extends AnyFunSuite:
     }
 
   private def runToolExit(
-      server: FastMcpServer[Any],
+      server: McpServer[Any],
       name: String,
       args: Map[String, Any]
   ): Exit[Throwable, Any] =
@@ -33,7 +33,7 @@ class EffectReturnTest extends AnyFunSuite:
     }
 
   test("@Tool returning UIO[Int] executes the effect (issue #50 repro)") {
-    val server = new FastMcpServer[Any]("EffectReturnUio", "0.1.0")
+    val server = new McpServer[Any]("EffectReturnUio", "0.1.0")
     server.scanAnnotations[EffectReturnTest.type]
 
     val result = runTool(server, "addZio", Map("a" -> 3, "b" -> 4))
@@ -42,7 +42,7 @@ class EffectReturnTest extends AnyFunSuite:
   }
 
   test("@Tool returning Task[String] executes and returns the value") {
-    val server = new FastMcpServer[Any]("EffectReturnTask", "0.1.0")
+    val server = new McpServer[Any]("EffectReturnTask", "0.1.0")
     server.scanAnnotations[EffectReturnTest.type]
 
     val result = runTool(server, "shoutZio", Map("text" -> "hello"))
@@ -50,7 +50,7 @@ class EffectReturnTest extends AnyFunSuite:
   }
 
   test("@Tool returning failed Task surfaces the Throwable") {
-    val server = new FastMcpServer[Any]("EffectReturnTaskFail", "0.1.0")
+    val server = new McpServer[Any]("EffectReturnTaskFail", "0.1.0")
     server.scanAnnotations[EffectReturnTest.type]
 
     val exit = runToolExit(server, "boomZio", Map.empty)
@@ -64,7 +64,7 @@ class EffectReturnTest extends AnyFunSuite:
   }
 
   test("@Tool returning IO[String, Int] wraps non-Throwable failures in RuntimeException") {
-    val server = new FastMcpServer[Any]("EffectReturnIo", "0.1.0")
+    val server = new McpServer[Any]("EffectReturnIo", "0.1.0")
     server.scanAnnotations[EffectReturnTest.type]
 
     val exit = runToolExit(server, "divideIo", Map("a" -> 10, "b" -> 0))
@@ -75,7 +75,7 @@ class EffectReturnTest extends AnyFunSuite:
   }
 
   test("@Tool returning Try[Int] success returns the value") {
-    val server = new FastMcpServer[Any]("EffectReturnTry", "0.1.0")
+    val server = new McpServer[Any]("EffectReturnTry", "0.1.0")
     server.scanAnnotations[EffectReturnTest.type]
 
     val result = runTool(server, "addTry", Map("a" -> 2, "b" -> 5))
@@ -83,7 +83,7 @@ class EffectReturnTest extends AnyFunSuite:
   }
 
   test("@Tool returning Try[Int] failure surfaces the Throwable") {
-    val server = new FastMcpServer[Any]("EffectReturnTryFail", "0.1.0")
+    val server = new McpServer[Any]("EffectReturnTryFail", "0.1.0")
     server.scanAnnotations[EffectReturnTest.type]
 
     val exit = runToolExit(server, "addTry", Map("a" -> -1, "b" -> 0))
@@ -93,7 +93,7 @@ class EffectReturnTest extends AnyFunSuite:
   }
 
   test("@Tool returning Either[Throwable, Int] success returns the value") {
-    val server = new FastMcpServer[Any]("EffectReturnEither", "0.1.0")
+    val server = new McpServer[Any]("EffectReturnEither", "0.1.0")
     server.scanAnnotations[EffectReturnTest.type]
 
     val result = runTool(server, "addEither", Map("a" -> 8, "b" -> 9))
@@ -101,7 +101,7 @@ class EffectReturnTest extends AnyFunSuite:
   }
 
   test("@Tool returning Either[Throwable, Int] Left surfaces the Throwable") {
-    val server = new FastMcpServer[Any]("EffectReturnEitherFail", "0.1.0")
+    val server = new McpServer[Any]("EffectReturnEitherFail", "0.1.0")
     server.scanAnnotations[EffectReturnTest.type]
 
     val exit = runToolExit(server, "addEither", Map("a" -> -1, "b" -> -1))
@@ -111,7 +111,7 @@ class EffectReturnTest extends AnyFunSuite:
   }
 
   test("@Resource returning UIO[String] executes the effect") {
-    val server = new FastMcpServer[Any]("EffectReturnResource", "0.1.0")
+    val server = new McpServer[Any]("EffectReturnResource", "0.1.0")
     server.scanAnnotations[EffectReturnTest.type]
 
     val result = Unsafe.unsafe { implicit unsafe =>
@@ -123,7 +123,7 @@ class EffectReturnTest extends AnyFunSuite:
   }
 
   test("@Prompt returning UIO[List[Message]] executes the effect") {
-    val server = new FastMcpServer[Any]("EffectReturnPrompt", "0.1.0")
+    val server = new McpServer[Any]("EffectReturnPrompt", "0.1.0")
     server.scanAnnotations[EffectReturnTest.type]
 
     val result = Unsafe.unsafe { implicit unsafe =>

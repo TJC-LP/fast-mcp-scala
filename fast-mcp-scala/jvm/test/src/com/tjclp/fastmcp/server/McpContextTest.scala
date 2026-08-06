@@ -3,41 +3,25 @@ package com.tjclp.fastmcp.server
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.tjclp.fastmcp.core.wire.{ClientCapabilities, Implementation, SamplingCapability}
+
+/** Unit tests for the native, platform-neutral `McpContext`. */
 class McpContextTest extends AnyFunSuite with Matchers {
-  test("McpContext() compatibility constructor should create an empty JVM context") {
-    val context = McpContext()
 
-    context.javaExchange shouldBe None
-    context.transportContext shouldBe None
-  }
-
-  test("getClientCapabilities should return None when javaExchange is None") {
-    val context = new JvmMcpContext()
-
-    assert(context.getClientCapabilities.isEmpty)
-  }
-
-  test("getClientInfo should return None when javaExchange is None") {
-    val context = new JvmMcpContext()
-
-    assert(context.getClientInfo.isEmpty)
-  }
-
-  test("getClientCapabilities should return None for base McpContext") {
+  test("McpContext.empty exposes no session, client info, or capabilities") {
     val context = McpContext.empty
 
-    assert(context.getClientCapabilities.isEmpty)
+    context.sessionId shouldBe None
+    context.getClientInfo shouldBe None
+    context.getClientCapabilities shouldBe None
   }
 
-  test("copy should preserve McpContext JVM compatibility shape") {
-    val context = McpContext()
-    val copied = context.copy()
+  test("a context snapshots the client info / capabilities it is built with") {
+    val info = Implementation("client", "1.0.0")
+    val caps = ClientCapabilities(sampling = Some(SamplingCapability()))
+    val context = new McpContext(None, Some(info), Some(caps))
 
-    copied.javaExchange shouldBe None
-    copied.transportContext shouldBe None
+    context.getClientInfo shouldBe Some(info)
+    context.getClientCapabilities shouldBe Some(caps)
   }
-
-  // Note: We're skipping the tests with mocked exchange instances due to
-  // compatibility issues with Mockito on Java 23. Those tests were validating
-  // that the methods correctly delegated to the underlying exchange.
 }

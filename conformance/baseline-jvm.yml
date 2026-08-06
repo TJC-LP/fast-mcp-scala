@@ -1,0 +1,6 @@
+# MCP conformance expected-failures baseline — JVM (streamable HTTP).
+#
+# The JVM transport passes the ENTIRE active server suite (spec 2025-11-25), including the
+# server->client scenarios (sampling / elicitation / progress / logging) which stream on each
+# request's own SSE response. No expected failures.
+server: []

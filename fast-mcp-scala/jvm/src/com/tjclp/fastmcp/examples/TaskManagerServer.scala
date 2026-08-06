@@ -8,18 +8,17 @@ import scala.collection.mutable
 
 import sttp.tapir.*
 import sttp.tapir.generic.auto.*
+import zio.json.*
 
 import com.tjclp.fastmcp.*
-import com.tjclp.fastmcp.macros.*
-import com.tjclp.fastmcp.macros.JacksonConverter.given
 
 /** Domain-shaped MCP server — a task tracker with nested case classes, Scala 3 enums, Java
   * `LocalDateTime`, and mutable in-memory state.
   *
   * This example is the most realistic one in the set. It shows:
-  *   - **Custom Jackson converters** — `JacksonConverter.fromPartialFunction` for `LocalDateTime`,
-  *     `DeriveJacksonConverter.derived` for the domain case classes. Everything Jackson-3 natively
-  *     supports (primitives, enums, collections, `Option`) needs no custom converter.
+  *   - **zio-json codecs** — one `DeriveJsonCodec.gen` per domain type. `LocalDateTime` and Scala 3
+  *     enums are handled by zio-json natively (no custom converter), and the native-core decode
+  *     path (`MapToFunctionMacro` → `McpDecoder` → zio-json) picks them up automatically.
   *   - **MCP tool hints** — read-only tools (`listTasks`, `searchTasks`, `getTaskStats`) are marked
   *     so clients can call them without confirmation; `updateTask` advertises idempotency; all
   *     tools declare whether they touch an open world (none do — state is in-memory).
@@ -69,17 +68,14 @@ object TaskManagerServer extends McpServerApp[Stdio, TaskManagerServer.type]:
       overdue: Int
   )
 
-  // Custom JacksonConverter for LocalDateTime
-  given JacksonConverter[LocalDateTime] = JacksonConverter.fromPartialFunction[LocalDateTime] {
-    case str: String => LocalDateTime.parse(str)
-  }
-
-  // Derive converters for our domain models
-  given JacksonConverter[Task] = DeriveJacksonConverter.derived[Task]
-  given JacksonConverter[TaskFilter] = DeriveJacksonConverter.derived[TaskFilter]
-  given JacksonConverter[TaskUpdate] = DeriveJacksonConverter.derived[TaskUpdate]
-  given JacksonConverter[TaskStats] = DeriveJacksonConverter.derived[TaskStats]
-  // Enums use the default converter
+  // zio-json codecs for the domain models. LocalDateTime + Scala 3 enums are handled by zio-json
+  // natively, so no custom converters are needed.
+  given JsonCodec[TaskStatus] = DeriveJsonCodec.gen[TaskStatus]
+  given JsonCodec[Priority] = DeriveJsonCodec.gen[Priority]
+  given JsonCodec[Task] = DeriveJsonCodec.gen[Task]
+  given JsonCodec[TaskFilter] = DeriveJsonCodec.gen[TaskFilter]
+  given JsonCodec[TaskUpdate] = DeriveJsonCodec.gen[TaskUpdate]
+  given JsonCodec[TaskStats] = DeriveJsonCodec.gen[TaskStats]
 
   // In-memory task storage
   private val tasks = mutable.Map[String, Task]()

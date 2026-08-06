@@ -3,6 +3,8 @@ package com.tjclp.fastmcp.core
 import zio.json.*
 import zio.json.ast.Json
 
+import com.tjclp.fastmcp.core.wire.{Annotations, Icon, ResourceContents, ToolOutputSchema}
+
 // --- Tool Annotations (MCP behavioral hints for clients) ---
 
 case class ToolAnnotations(
@@ -13,6 +15,9 @@ case class ToolAnnotations(
     openWorldHint: Option[Boolean] = None,
     returnDirect: Option[Boolean] = None
 )
+
+object ToolAnnotations:
+  given JsonCodec[ToolAnnotations] = DeriveJsonCodec.gen[ToolAnnotations]
 
 // --- Tool Related Types ---
 
@@ -47,6 +52,17 @@ object ToolInputSchema:
   def fromAst(schema: Json): ToolInputSchema =
     schema.toJson
 
+  /** Wire codec: on the JSON-RPC wire `inputSchema` is an embedded JSON Schema *object*, never a
+    * string. We store it as an opaque string, so encode = parse-string-to-AST and decode =
+    * serialize-AST-to-string. Inside this companion the opacity is transparent.
+    */
+  given JsonCodec[ToolInputSchema] = JsonCodec(
+    JsonEncoder[Json].contramap[ToolInputSchema] { s =>
+      s.fromJson[Json].getOrElse(Json.Obj())
+    },
+    JsonDecoder[Json].map[ToolInputSchema](_.toJson)
+  )
+
 extension (schema: ToolInputSchema)
   def toJsonString: String = schema
 
@@ -70,7 +86,8 @@ case class ToolDefinition(
     tags: List[String] = List.empty,
     timeoutMillis: Option[Long] = None,
     annotations: Option[ToolAnnotations] = None,
-    taskSupport: Option[TaskSupport] = None
+    taskSupport: Option[TaskSupport] = None,
+    outputSchema: Option[ToolOutputSchema] = None
 ):
 
   /** Effective task-support resolution: `None` (unspecified) is treated as
@@ -83,7 +100,8 @@ case class ToolDefinition(
 case class PromptArgument(
     name: String,
     description: Option[String],
-    required: Boolean = false
+    required: Boolean = false,
+    title: Option[String] = None
 )
 
 object PromptArgument:
@@ -95,53 +113,7 @@ case class PromptDefinition(
     arguments: Option[List[PromptArgument]]
 )
 
-// --- Content Types ---
-
-@jsonDiscriminator("type")
-sealed trait Content(@scala.annotation.unused `type`: String)
-
-object Content:
-  given JsonCodec[Content] = DeriveJsonCodec.gen[Content]
-
-case class TextContent(
-    text: String,
-    audience: Option[List[Role]] = None,
-    priority: Option[Double] = None
-) extends Content("text")
-
-object TextContent:
-  given JsonCodec[TextContent] = DeriveJsonCodec.gen[TextContent]
-
-case class ImageContent(
-    data: String,
-    mimeType: String,
-    audience: Option[List[Role]] = None,
-    priority: Option[Double] = None
-) extends Content("image")
-
-object ImageContent:
-  given JsonCodec[ImageContent] = DeriveJsonCodec.gen[ImageContent]
-
-case class EmbeddedResourceContent(
-    uri: String,
-    mimeType: String,
-    text: Option[String] = None,
-    blob: Option[String] = None
-)
-
-object EmbeddedResourceContent:
-  given JsonCodec[EmbeddedResourceContent] = DeriveJsonCodec.gen[EmbeddedResourceContent]
-
-case class EmbeddedResource(
-    resource: EmbeddedResourceContent,
-    audience: Option[List[Role]] = None,
-    priority: Option[Double] = None
-) extends Content("resource")
-
-object EmbeddedResource:
-  given JsonCodec[EmbeddedResource] = DeriveJsonCodec.gen[EmbeddedResource]
-
-// --- Message Types ---
+// --- Role (used by Content, Annotations, Message) ---
 
 enum Role:
   case User, Assistant
@@ -156,6 +128,94 @@ object Role:
     },
     _.toString.toLowerCase
   )
+
+// --- Content ADT (MCP 2025-11-25) ---
+//
+// Wire shape per spec: discriminated by `"type"` field. Variants:
+//   "text"          → TextContent
+//   "image"         → ImageContent
+//   "audio"         → AudioContent
+//   "resource_link" → ResourceLink (a Resource embedded as content with a `type` tag)
+//   "resource"      → EmbeddedResource (full resource contents inline)
+//
+// Each variant carries optional [[Annotations]] (audience/priority/lastModified) and `_meta`.
+// `_meta` is `Option[Map[String, Json]]` so absent ≠ null on the wire.
+//
+// IMPORTANT: zio-json's `@jsonDiscriminator` keys off each subtype's `@jsonHint`, NOT the
+// `extends Content("text")` constructor arg (that arg is inert for serialization). Without the
+// hints the wire tag would be the class name (`TextContent`) instead of the spec value (`text`).
+// In the previous Jackson/Java-SDK architecture this codec never touched the wire, so the bug was
+// latent; native dispatch makes it live.
+
+@jsonDiscriminator("type")
+sealed trait Content(@scala.annotation.unused `type`: String)
+
+object Content:
+  given JsonCodec[Content] = DeriveJsonCodec.gen[Content]
+
+@jsonHint("text")
+case class TextContent(
+    text: String,
+    annotations: Option[Annotations] = None,
+    _meta: Option[Map[String, Json]] = None
+) extends Content("text")
+
+object TextContent:
+  given JsonCodec[TextContent] = DeriveJsonCodec.gen[TextContent]
+
+@jsonHint("image")
+case class ImageContent(
+    data: String,
+    mimeType: String,
+    annotations: Option[Annotations] = None,
+    _meta: Option[Map[String, Json]] = None
+) extends Content("image")
+
+object ImageContent:
+  given JsonCodec[ImageContent] = DeriveJsonCodec.gen[ImageContent]
+
+@jsonHint("audio")
+case class AudioContent(
+    data: String,
+    mimeType: String,
+    annotations: Option[Annotations] = None,
+    _meta: Option[Map[String, Json]] = None
+) extends Content("audio")
+
+object AudioContent:
+  given JsonCodec[AudioContent] = DeriveJsonCodec.gen[AudioContent]
+
+/** A resource the server can read, included inline as content. Per spec 2025-11-25 §Content, this
+  * is a `Resource` plus a `type: "resource_link"` discriminator. Wire shape matches the full
+  * [[Resource]] fields.
+  */
+@jsonHint("resource_link")
+case class ResourceLink(
+    uri: String,
+    name: String,
+    title: Option[String] = None,
+    description: Option[String] = None,
+    mimeType: Option[String] = None,
+    annotations: Option[Annotations] = None,
+    size: Option[Long] = None,
+    icons: Option[List[Icon]] = None,
+    _meta: Option[Map[String, Json]] = None
+) extends Content("resource_link")
+
+object ResourceLink:
+  given JsonCodec[ResourceLink] = DeriveJsonCodec.gen[ResourceLink]
+
+@jsonHint("resource")
+case class EmbeddedResource(
+    resource: ResourceContents,
+    annotations: Option[Annotations] = None,
+    _meta: Option[Map[String, Json]] = None
+) extends Content("resource")
+
+object EmbeddedResource:
+  given JsonCodec[EmbeddedResource] = DeriveJsonCodec.gen[EmbeddedResource]
+
+// --- Message Types ---
 
 case class Message(
     role: Role,

@@ -15,7 +15,7 @@ No `override def run`, no `import zio.*`, no ceremony. Two complementary registr
 - `@Tool` / `@Resource` / `@Prompt` annotations + `scanAnnotations[T]` for a zero-boilerplate, macro-driven experience (JVM + Scala.js/Bun)
 - `McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource` for first-class, testable, cross-platform contract values — handlers return plain values, `ZIO`, `Either[Throwable, _]`, or `Try` via the `ToHandlerEffect` typeclass
 
-Built on **ZIO 2**, **Tapir**-derived schemas, **Jackson 3** (JVM) / **zio-json** (JS), the official **Java MCP SDK 1.1.1**, and the official **TS MCP SDK 1.29.0**. Transport is a phantom type parameter — `McpServerApp[Stdio, Self.type]` or `McpServerApp[Http, Self.type]` — with compile-time runner dispatch.
+Built on **ZIO 2**, **Tapir**-derived schemas, and **zio-json** on both platforms. The whole MCP protocol layer — JSON-RPC, wire types, router, transports — is **native pure Scala 3** in `shared/`; there is no vendored SDK (the official TS SDK appears only as a test-time conformance client). Transport is a phantom type parameter — `McpServerApp[Stdio, Self.type]` or `McpServerApp[Http, Self.type]` — with compile-time runner dispatch.
 
 ## Contents
 
@@ -28,8 +28,8 @@ Built on **ZIO 2**, **Tapir**-derived schemas, **Jackson 3** (JVM) / **zio-json*
 - [Prompts](#prompts)
 - [Context (`McpContext`)](#context-mcpcontext)
 - [Transports](#transports)
-- [Customizing decoding (Jackson 3)](#customizing-decoding-jackson-3)
-- [Two backends, one API](#two-backends-one-api)
+- [Customizing decoding (zio-json)](#customizing-decoding-zio-json)
+- [One core, two transports](#one-core-two-transports)
 - [Spec coverage](#spec-coverage)
 - [Running examples](#running-examples)
 - [Claude Desktop integration](#claude-desktop-integration)
@@ -38,11 +38,11 @@ Built on **ZIO 2**, **Tapir**-derived schemas, **Jackson 3** (JVM) / **zio-json*
 ## Installation
 
 ```scala 3 ignore
-// JVM — Java SDK-backed runtime with annotations, derived schemas, HTTP + stdio transports.
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.4.0"
+// JVM — native Scala MCP core with annotations, derived schemas, HTTP + stdio transports.
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.5.0"
 
-// Scala.js — TS SDK-backed runtime on Bun/Node + the same annotation and typed-contract APIs.
-libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "0.4.0"
+// Scala.js — the same native core on Bun (Bun.serve + Node stdio), same annotation and typed-contract APIs.
+libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "0.5.0"
 ```
 
 Built against Scala 3.8.3. JVM requires JDK 17+. Scala.js artifact is published for `sjs1_3` (Scala.js 1.x); runs on Bun (first-class) and Node 18+.
@@ -53,7 +53,7 @@ A single-file server with one tool — the same code lives in [`HelloWorld.scala
 
 ```scala 3 raw
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala:0.4.0
+//> using dep com.tjclp::fast-mcp-scala:0.5.0
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.{*, given}
@@ -227,12 +227,17 @@ Need lower-level control? Skip the sugar trait and construct directly — `val s
 
 | Setting | Default | Description |
 |---|---|---|
-| `host` | `0.0.0.0` | Bind address |
+| `host` | `127.0.0.1` | Bind address (**changed in 0.5.0** from `0.0.0.0` per the spec's bind-localhost guidance; set `"0.0.0.0"` explicitly for containers / external exposure) |
 | `port` | `8000` | Listen port |
 | `httpEndpoint` | `/mcp` | JSON-RPC endpoint path |
 | `stateless` | `false` | Disable sessions and SSE |
+| `sessionIdleTimeout` | `30 minutes` | Evict streamable sessions with no client activity (live GET streams are exempt); `None` disables |
+| `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies don't kill long calls |
+| `allowedHosts` | `None` | DNS-rebinding guard: reject requests whose `Host`/`Origin` isn't in the set (403) |
+| `loggingEnabled` | `false` | Advertise `logging` and wire `logging/setLevel` |
+| `resourcesSubscribe` | `false` | Advertise `resources.subscribe` and wire subscribe/unsubscribe |
 
-Curl recipes for both modes are in [`HttpServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/HttpServer.scala).
+On the streamable transport, POST requests must send `Accept: application/json, text/event-stream` (replies stream as SSE) and only `initialize` may open a session — header-less non-initialize requests get `400`. Curl recipes are in [`HttpServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/HttpServer.scala).
 
 ## Tasks (experimental, off by default)
 
@@ -263,56 +268,72 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
 
 `taskSupport` values: `"forbidden"` (default), `"optional"` (clients may augment), `"required"` (clients must — bare calls return `-32601`).
 
-**Transport limitations**: Tasks are dispatched inside fast-mcp-scala's own ZIO HTTP transport because the upstream Java MCP SDK 1.1.1 doesn't yet implement them. As a result:
+**Transport policy**: Tasks are native router middleware (no transport special-casing), so they work on any transport whose session outlives a single request:
 
-- **JVM**: works on `runHttp()` with `stateless = false` (the default streamable transport). `runStdio()` and stateless HTTP fail-fast at startup if `tasks.enabled` is true.
-- **JS / Bun**: works on both stateful and stateless `runHttp()`. `runStdio()` fails fast.
+- **Streamable HTTP** (`runHttp()`, the default) and **stdio** both support tasks, on JVM and Bun alike.
+- **Stateless HTTP** does not — every client would share one task namespace — so `tasks.enabled` with `stateless = true` fails fast at startup with `IllegalStateException`.
 
-When enabled, the `tasks` capability is advertised at `initialize` and each opt-in tool surfaces `execution.taskSupport` on `tools/list`.
+Task ids come from the platform CSPRNG, a task that outlives its TTL is interrupted (not orphaned), and terminal results stay pollable until the TTL sweeps them. When enabled, the `tasks` capability is advertised at `initialize` and each opt-in tool surfaces `execution.taskSupport` on `tools/list`.
 
-## Customizing decoding (Jackson 3)
+## Customizing decoding (zio-json)
 
-fast-mcp-scala uses Jackson 3 to turn raw JSON-RPC arguments into Scala values. Primitives, Scala enums, case classes, `Option`, `List`, `Map`, and `java.time` types work out of the box — no configuration required.
+fast-mcp-scala decodes raw JSON-RPC arguments into Scala values with **zio-json** on both platforms (`codec/McpDecoders.scala` over the shared `DefaultDecodeContext`). Primitives, Scala 3 enums, case classes, `Option`, `List`, and `Map` work out of the box.
 
-For custom wire formats, supply a `given JacksonConverter[T]`:
+For anything else — including `java.time` types, which no longer decode for free now that Jackson is gone — supply a `given JsonDecoder[T]`; the shared derivation turns it into the `McpDecoder[T]` the contract layer needs:
 
 ```scala 3 raw
 import java.time.LocalDateTime
+import zio.json.*
 
-given JacksonConverter[LocalDateTime] = JacksonConverter.fromPartialFunction[LocalDateTime] {
-  case s: String => LocalDateTime.parse(s)
-}
+given JsonDecoder[LocalDateTime] =
+  JsonDecoder[String].mapOrFail(s =>
+    scala.util.Try(LocalDateTime.parse(s)).toEither.left.map(_.getMessage)
+  )
 
-given JacksonConverter[Task] = DeriveJacksonConverter.derived[Task]
+case class Task(title: String, due: LocalDateTime) derives JsonDecoder
 ```
 
-The handler receives a `JacksonConversionContext` (not a raw Jackson mapper) — see [`docs/jackson-converter-enhancements.md`](docs/jackson-converter-enhancements.md) for the detailed API.
+Implement `McpDecoder[T]` directly only when the wire format can't be expressed as a `JsonDecoder`.
 
-## Two backends, one API
+## One core, two transports
 
-fast-mcp-scala is a single library with two real runtime backends — JVM and Scala.js/Bun — behind the same shared abstract API:
+fast-mcp-scala is a single native MCP implementation. The entire protocol layer — JSON-RPC envelope, wire types, router, built-in handlers, middleware, the Tasks state machine — lives in `shared/`; each platform contributes only a `TransportBackend`:
 
 ```
-         shared/src/                (platform-neutral Scala 3)
-  ┌──────────────────────────────────────────────────────────┐
-  │  annotations  │  typed contracts  │  Tool/Prompt/Resource │
-  │  (@Tool, ...)│ (McpTool, McpPrompt)│  managers + McpContext│
-  │  McpServerApp │  scanAnnotations  │  TransportRunner      │
-  │  (sugar trait)│  (shared macros)  │  ToHandlerEffect      │
-  └──────────┬─────────────────────────────┬─────────────────┘
-             │                             │
-       jvm/src/ (FastMcpServer)      js/src/ (JsMcpServer)
-       wraps Java MCP SDK            wraps TS MCP SDK via
-       (mcp-core 1.1.1)              Scala.js facades, runs on Bun
+                   ┌──────────────────────────────────────┐
+                   │  user code: @Tool / typed contracts  │
+                   └─────────────────┬────────────────────┘
+                                     ▼
+                   ┌──────────────────────────────────────┐
+                   │  McpServer  [shared/]                │
+                   └─────────────────┬────────────────────┘
+                                     │ register(tool|resource|prompt)
+                                     ▼
+                   ┌──────────────────────────────────────┐
+                   │  McpRouter  [shared/]                │
+                   │  ├─ handler map (capability source)  │
+                   │  ├─ Session (per connection)         │
+                   │  ├─ middleware (validation / tasks)  │
+                   │  └─ built-ins, registered only when  │
+                   │     their backing content is wired   │
+                   └─────────────────┬────────────────────┘
+                                     │ TransportBackend (the platform seam)
+              ┌──────────────────────┼──────────────────────┐
+              ▼                      ▼                      ▼
+    ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+    │  stdio (NDJSON) │    │  HTTP stateless │    │ HTTP streamable │
+    │  ZIO Stream /   │    │  ZIO HTTP /     │    │ ZIO HTTP /      │
+    │  Node stdin     │    │  Bun.serve      │    │ Bun.serve + SSE │
+    └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
-`McpServerApp[T, Self]` is the declarative entry point on both targets; the concrete backend resolves via the `McpServerCoreFactory` given (`FastMcpServer` on JVM, `JsMcpServer` on JS). Typed contracts (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) compile and mount unchanged on both.
+Capabilities are **derived from the registered handler map** — a capability is advertised only when its handler is actually wired, so the server can never over-advertise (the root cause of #56 is gone by construction). `McpServerApp[T, Self]` is the declarative entry point on both targets; typed contracts (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) compile and mount unchanged on both.
 
-**What the Scala.js backend gives you**:
+**What the Scala.js target gives you**:
 
-- A real MCP **server runtime** on Bun, wrapping the official `@modelcontextprotocol/sdk` — stdio (`runStdio`) and Streamable HTTP (`runHttp`) transports, with stateful (session + SSE) and stateless (JSON-response-only) modes.
-- AJV-based schema validation of tool arguments, matching the JVM server's behaviour.
-- `JsMcpContext` extension methods (`getClientInfo`, `getClientCapabilities`, `getSessionId`) for handlers that need client-session details.
+- The same native MCP **server runtime** on Bun — stdio (`runStdio`, Node stdin) and Streamable HTTP (`runHttp`, `Bun.serve`), with stateful (session + per-request SSE) and stateless (JSON-response-only) modes.
+- Pluggable tool-argument validation via the shared `Validation.scala` seam (permissive by default on both platforms).
+- The shared `McpContext` — `getClientInfo`, `getClientCapabilities`, `progressToken`, `sendLogMessage`, `sendProgress`, `listRoots`, `createMessage`, `elicit`, `elicitUrl` — identical on JVM and JS.
 
 **Current platform parity**:
 
@@ -323,20 +344,21 @@ fast-mcp-scala is a single library with two real runtime backends — JVM and Sc
 | Typed contracts (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) | ✅ | ✅ |
 | `ToolSchemaProvider[A]` auto-derivation from `@Param` | ✅ via Tapir | ✅ via Tapir |
 | `ToHandlerEffect[F]` — plain values / ZIO / Either / Try | ✅ | ✅ |
-| Stdio transport | ✅ (Java SDK) | ✅ (TS SDK) |
-| Streamable HTTP — stateful (sessions + SSE) | ✅ (ZIO HTTP) | ✅ (Bun.serve + Web-Standard transport) |
+| Stdio transport | ✅ (native) | ✅ (native) |
+| Streamable HTTP — stateful (sessions + per-request SSE) | ✅ (ZIO HTTP) | ✅ (Bun.serve) |
 | Streamable HTTP — stateless | ✅ | ✅ |
-| Custom decoders | ✅ `JacksonConverter` | ✅ `given JsonDecoder[T] → McpDecoder[T]` via zio-json |
+| Standalone GET SSE push channel | ✅ | 405 (per-request SSE covers server→client) |
+| Custom decoders | ✅ `given JsonDecoder[T] → McpDecoder[T]` | ✅ same (shared zio-json path) |
 
-Node / Deno parity for the HTTP listener is a follow-up; the same `WebStandardStreamableHTTPServerTransport` works across runtimes, only the `Bun.serve(...)` entry point is Bun-specific today.
+Node / Deno parity for the HTTP listener is a follow-up; only the `Bun.serve(...)` entry point is Bun-specific today.
 
-Proof: the conformance suite at [`JsServerConformanceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/JsServerConformanceTest.scala) stands up a `JsMcpServer` in-process and drives every MCP operation through the official TS SDK client via `InMemoryTransport`; [`JsServerHttpTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/JsServerHttpTest.scala) verifies the Bun HTTP routing; [`ConformanceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/ConformanceTest.scala) runs a JS client against the JVM server for cross-backend parity.
+Proof: the official **MCP conformance suite** runs against both platforms in CI ([`scripts/conformance.sh`](scripts/conformance.sh) + [`.github/workflows/conformance.yml`](.github/workflows/conformance.yml)) at **42/42** with zero expected failures; [`ConformanceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/ConformanceTest.scala) additionally drives the official TS SDK client against the JVM server over stdio, and [`JsServerHttpTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/JsServerHttpTest.scala) verifies the Bun HTTP routing.
 
 ### Running on Bun
 
 ```scala 3 raw
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala_sjs1:0.4.0
+//> using dep com.tjclp::fast-mcp-scala_sjs1:0.5.0
 
 import com.tjclp.fastmcp.{*, given}
 
@@ -345,7 +367,7 @@ object HelloBun extends McpServerApp[Stdio, HelloBun.type]:
   def add(@Param("First operand") a: Int, @Param("Second operand") b: Int): Int = a + b
 ```
 
-Same shape as the JVM — the `McpServerApp` trait picks up the Scala.js `McpServerCoreFactory` given and builds a `JsMcpServer` under the hood. For typed contracts on Scala.js, `McpTool[...]` now auto-generates the input schema as well; import `sttp.tapir.generic.auto.*` at the call site the same way you do on the JVM.
+Same shape as the JVM — the `McpServerApp` trait picks up the shared `McpServerCoreFactory` given and builds the one shared `McpServer` over the Bun `TransportBackend`. For typed contracts on Scala.js, `McpTool[...]` auto-generates the input schema as well; import `sttp.tapir.generic.auto.*` at the call site the same way you do on the JVM.
 
 Link with `./mill fast-mcp-scala.js.fastLinkJS`, then `bun run out/fast-mcp-scala/js/fastLinkJS.dest/main.js`. See [`HelloWorldJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HelloWorldJs.scala) and [`HttpServerJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HttpServerJs.scala) for runnable references.
 
@@ -356,18 +378,25 @@ fast-mcp-scala implements a focused subset of the [MCP specification](https://mo
 | Capability | Status |
 |---|---|
 | Tools (list, call) + Tool Annotations/hints | ✅ |
+| Structured tool output (`outputSchema` + `structuredContent` via `.withOutputSchema`) | ✅ |
 | Static resources & resource templates | ✅ |
 | Prompts with arguments | ✅ |
-| `McpContext` (client info, capabilities) | ✅ |
+| `McpContext` (client info, capabilities, progress token) | ✅ |
 | Stdio transport | ✅ |
-| Streamable HTTP transport (sessions + SSE) | ✅ |
+| Streamable HTTP transport (sessions + per-request SSE) | ✅ |
 | Stateless HTTP transport | ✅ |
-| Progress notifications | ❌ (not yet) |
-| Sampling | ❌ (not yet) |
-| Elicitation | ❌ (not yet) |
-| Completion | ❌ (not yet) |
-| Resource subscriptions | ❌ (not yet) |
-| Log level control | ❌ (not yet) |
+| Progress notifications | ✅ |
+| Sampling (`createMessage`, incl. `tools`/`toolChoice`) | ✅ |
+| Elicitation (form + URL modes) | ✅ |
+| Roots (`listRoots`) | ✅ |
+| Completion (`completion/complete`) | ✅ |
+| Resource subscriptions (`resources/subscribe`) | ✅ (opt-in) |
+| Log level control (`logging/setLevel`) | ✅ (opt-in) |
+| Cancellation (`notifications/cancelled`) | ✅ |
+| Tasks (spec 2025-11-25, experimental) | ✅ (opt-in) |
+| DNS-rebinding protection (`allowedHosts`) | ✅ (opt-in) |
+| Header validation (`Accept`, `mcp-protocol-version`) | ✅ |
+| Session idle eviction + SSE keepalives | ✅ |
 
 See the [CHANGELOG](CHANGELOG.md) for release-by-release changes.
 
@@ -380,7 +409,7 @@ See the [CHANGELOG](CHANGELOG.md) for release-by-release changes.
 | `HelloWorld.scala` | Minimum viable server — one tool, stdio |
 | `AnnotatedServer.scala` | Flagship annotation path — tools, hints, `@Param` features, resources, prompts |
 | `ContractServer.scala` | Typed contracts as first-class values; cross-platform story |
-| `TaskManagerServer.scala` | Realistic domain server — custom Jackson converters, hints across a CRUD-style surface |
+| `TaskManagerServer.scala` | Realistic domain server — custom decoders, hints across a CRUD-style surface |
 | `ContextEchoServer.scala` | `McpContext` introspection inside a tool handler |
 | `HttpServer.scala` | HTTP transport (Streamable default, Stateless via a flag) with curl recipes |
 
@@ -413,7 +442,7 @@ Add to `claude_desktop_config.json`:
       "command": "scala-cli",
       "args": [
         "-e",
-        "//> using dep com.tjclp::fast-mcp-scala:0.4.0",
+        "//> using dep com.tjclp::fast-mcp-scala:0.5.0",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]
@@ -451,14 +480,14 @@ For architectural detail, see [`docs/architecture.md`](docs/architecture.md).
 After `publishLocal`:
 
 ```scala 3 ignore
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.4.0"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.5.0"
 ```
 
 Or with Mill:
 
 ```scala 3 ignore
 def ivyDeps = Agg(
-  ivy"com.tjclp::fast-mcp-scala:0.4.0"
+  ivy"com.tjclp::fast-mcp-scala:0.5.0"
 )
 ```
 

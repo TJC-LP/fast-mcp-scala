@@ -64,7 +64,7 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
       report.errorAndAbort(
         s"@Prompt '$methodName' requires ZIO environment '${rMethodRepr.show}' but the server's " +
           s"environment type is '${rServerRepr.show}', which does not provide it. " +
-          s"Construct the server as FastMcpServer[${rServerRepr.show} & ${rMethodRepr.show}] " +
+          s"Construct the server as McpServer.typed[${rServerRepr.show} & ${rMethodRepr.show}] " +
           s"(or wider), or remove the environment requirement from the method body."
       )
 

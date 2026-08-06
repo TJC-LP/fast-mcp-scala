@@ -27,7 +27,8 @@ class TypesJsonCodecTest extends AnyFlatSpec with Matchers {
   }
 
   "TextContent JsonCodec" should "round‑trip TextContent" in {
-    val original = TextContent("hello", Some(List(Role.User)), Some(1.2))
+    val original =
+      TextContent("hello", Some(wire.Annotations(audience = Some(List(Role.User)), priority = Some(1.2))))
     val json = original.toJson
     val decoded = json.fromJson[TextContent]
 
@@ -43,8 +44,8 @@ class TypesJsonCodecTest extends AnyFlatSpec with Matchers {
   }
 
   "EmbeddedResource JsonCodec" should "round‑trip EmbeddedResource" in {
-    val erc = EmbeddedResourceContent("/uri", "text/plain", text = Some("body"), blob = None)
-    val original = EmbeddedResource(erc, None, None)
+    val contents = wire.TextResourceContents(uri = "/uri", text = "body", mimeType = Some("text/plain"))
+    val original = EmbeddedResource(contents, None, None)
     val json = original.toJson
     val decoded = json.fromJson[EmbeddedResource]
 

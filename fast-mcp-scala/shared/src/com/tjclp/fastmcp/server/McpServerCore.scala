@@ -13,13 +13,13 @@ import com.tjclp.fastmcp.server.manager.ToolRegistrationOptions
 /** Platform-independent MCP server API.
   *
   * This is the trait that macros (`scanAnnotations`, `@Tool`, `@Resource`, `@Prompt`) target. Users
-  * write against this API; the JVM backend (`FastMcpServer`) and JS backend (`JsMcpServer`)
-  * delegate to their respective runtime implementations.
+  * write against this API; the single shared [[McpServer]] implements it, with platform differences
+  * confined to the `TransportBackend` given.
   *
   * @tparam R
   *   the ZIO environment the server provides to all handlers. The default `McpServer("name")`
-  *   factory pins `R = Any`; for layer-aware servers use `FastMcpServer[Client]("name")` (or
-  *   `McpServer.typed[Client]`) and supply the layer via `server.runHttp().provide(...)`.
+  *   factory pins `R = Any`; for layer-aware servers use `McpServer.typed[Client]("name")` and
+  *   supply the layer via `server.runHttp().provide(...)`.
   *
   * Handler-accepting methods carry an `[R1 >: R]` bound: any handler whose environment is wider
   * than or equal to the server's `R` is acceptable. Concretely, a handler returning `ZIO[Client,
@@ -28,7 +28,8 @@ import com.tjclp.fastmcp.server.manager.ToolRegistrationOptions
   */
 trait McpServerCore[R]:
 
-  /** Platform-specific decode context used by typed contract mounting. */
+  /** Decode context used by typed contract mounting (the shared zio-json `DefaultDecodeContext`).
+    */
   protected def decodeContext: McpDecodeContext
 
   // --- Tool registration ---
@@ -81,7 +82,14 @@ trait McpServerCore[R]:
         ZIO
           .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
           .flatMap(input => contract.handler(input, ctxOpt))
-          .map(contract.encoder.encode),
+          // Carry both renderings while `Out` is still known; the wire layer emits
+          // structuredContent from it only when the tool declares an outputSchema.
+          .map(out =>
+            core.StructuredToolResult(
+              contract.encoder.encode(out),
+              contract.encoder.encodeStructured(out)
+            )
+          ),
       options = options
     )
 
@@ -100,7 +108,14 @@ trait McpServerCore[R]:
         ZIO
           .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
           .flatMap(input => contract.handler(input, ctxOpt))
-          .map(contract.encoder.encode),
+          // Carry both renderings while `Out` is still known; the wire layer emits
+          // structuredContent from it only when the tool declares an outputSchema.
+          .map(out =>
+            core.StructuredToolResult(
+              contract.encoder.encode(out),
+              contract.encoder.encodeStructured(out)
+            )
+          ),
       options = options
     )
 

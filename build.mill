@@ -20,11 +20,9 @@ object Versions {
   val zio = "2.1.20"
   val zioSchema = "1.7.4"
   val zioJson = "0.7.44"
-  val jackson3 = "3.0.3"
   val tapir = "1.11.42"
   val jsonSchemaCirce = "0.11.10"
   val zioHttp = "3.4.0"
-  val mcpSdk = "1.1.1"
   val scalaTest = "3.2.19"
   val scalaCheck = "1.18.1"
 }
@@ -93,7 +91,7 @@ trait FastMCPPublishingBase extends PublishModule {
 
   /** Version derived from PUBLISH_VERSION env var (set by CI), or SNAPSHOT for local dev */
   override def publishVersion: T[String] =
-    sys.env.getOrElse("PUBLISH_VERSION", "0.4.0")
+    sys.env.getOrElse("PUBLISH_VERSION", "0.5.0-SNAPSHOT")
 
   override def pomSettings: T[PomSettings] = PomSettings(
     description = artifactDescription,
@@ -164,18 +162,13 @@ object `fast-mcp-scala` extends Module {
       mvn"dev.zio::zio-schema:${Versions.zioSchema}",
       mvn"dev.zio::zio-schema-json:${Versions.zioSchema}",
       mvn"dev.zio::zio-schema-derivation:${Versions.zioSchema}",
-      // Jackson 3 for macro/runtime conversion internals
-      mvn"tools.jackson.core:jackson-databind:${Versions.jackson3}",
       // Tapir
       mvn"com.softwaremill.sttp.tapir::tapir-core:${Versions.tapir}",
       mvn"com.softwaremill.sttp.tapir::tapir-apispec-docs:${Versions.tapir}",
       mvn"com.softwaremill.sttp.tapir::tapir-json-circe:${Versions.tapir}",
       mvn"com.softwaremill.sttp.apispec::jsonschema-circe:${Versions.jsonSchemaCirce}",
-      // ZIO HTTP for stateless HTTP transport
-      mvn"dev.zio::zio-http:${Versions.zioHttp}",
-      // MCP SDK (Java library - split into core + jackson3 as the default runtime binding)
-      mvn"io.modelcontextprotocol.sdk:mcp-core:${Versions.mcpSdk}",
-      mvn"io.modelcontextprotocol.sdk:mcp-json-jackson3:${Versions.mcpSdk}"
+      // ZIO HTTP for HTTP transports (stateless + streamable)
+      mvn"dev.zio::zio-http:${Versions.zioHttp}"
     )
 
     override def mainClass = Some("fastmcp.FastMCPMain")
@@ -192,8 +185,8 @@ object `fast-mcp-scala` extends Module {
     }
   }
 
-  // Scala.js backend — wraps the TS MCP SDK server on Bun to provide a real cross-platform
-  // MCP server runtime. Cross-published to Maven Central as `com.tjclp:fast-mcp-scala_sjs1_3`.
+  // Scala.js target — Bun transport adapters (Bun.serve + Node stdio) over the native MCP core
+  // in shared/. Cross-published to Maven Central as `com.tjclp:fast-mcp-scala_sjs1_3`.
   object js extends BunScalaJSModule with BunPublishModule with ScalafmtModule with FastMCPPublishingBase {
     def scalaVersion = scala3Version
 
@@ -233,7 +226,14 @@ object `fast-mcp-scala` extends Module {
     )
 
     override def bunDeps = Task {
-      Seq(bun"@modelcontextprotocol/sdk@1.29.0", bun"zod@4.3.6", bun"zod-to-json-schema@3.25.1")
+      // The TS MCP SDK is NOT a production dependency — no production source `@JSImport`s it and
+      // the published Maven artifact is unaffected. It is declared (pinned) here because the bun
+      // test workspace links this module's node_modules (the plugin has no test-scoped deps yet):
+      // `js.test`'s conformance client resolves `@modelcontextprotocol/sdk` from it. Without the
+      // pin, Bun's runtime auto-install fetched *latest at test time* — a CI time bomb now that
+      // post-2026-07-28 SDK releases change initialize semantics. Production boundary = the
+      // import graph, enforced by RootImportSurface tests, not node_modules.
+      Seq("@modelcontextprotocol/sdk@1.29.0")
     }
 
     // bunJsEnv is what BunScalaJSTests uses for the Bun process env

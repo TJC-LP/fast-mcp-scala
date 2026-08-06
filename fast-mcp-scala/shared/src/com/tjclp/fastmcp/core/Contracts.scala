@@ -10,11 +10,10 @@ import com.tjclp.fastmcp.server.McpContext
 
 /** Platform-neutral low-level decode context used by [[McpDecoder]] implementations.
   *
-  * The JVM supplies a Jackson 3 backed implementation (`JacksonConversionContext`); Scala.js can
-  * plug in a different one without changing the public decoder contract.
+  * One shared implementation serves both platforms (`DefaultDecodeContext`, zio-json backed).
   *
   * Most users never touch this — it's the bridge that lets `McpDecoder[T]` implementations convert
-  * raw JSON-RPC argument values (typically `Map[String, Any]` on the JVM) into typed Scala values.
+  * raw JSON-RPC argument values into typed Scala values.
   */
 trait McpDecodeContext:
   def convertValue[T: ClassTag](name: String, rawValue: Any): T
@@ -25,9 +24,9 @@ trait McpDecodeContext:
 /** Public typed decoder used by the shared contract layer to translate incoming MCP arguments into
   * a case-class shape.
   *
-  * Most users get one of these for free: the JVM's `JacksonConverter` derivation produces an
-  * `McpDecoder[T]` for any case class whose fields Jackson 3 can handle natively. Implement
-  * manually only when the default derivation can't express your wire format.
+  * Most users get one of these for free: the shared zio-json derivation (`McpDecoders`) produces an
+  * `McpDecoder[T]` for any type with a `given JsonDecoder[T]`. Implement manually only when the
+  * default derivation can't express your wire format.
   *
   * @tparam T
   *   the target Scala type produced from the decoded argument
@@ -65,11 +64,28 @@ object McpDecoder:
 trait McpEncoder[-A]:
   def encode(value: A): List[Content]
 
+  /** Structured (JSON AST) form of the result, feeding `CallToolResult.structuredContent`. `None`
+    * by default; the zio-json fallback overrides it with the value's AST. Only reaches the wire
+    * when the tool declares an `outputSchema` (see `WireMapping.toolResultToWire`).
+    */
+  def encodeStructured(value: A): Option[zio.json.ast.Json] = None
+
   def contramap[B](f: B => A): McpEncoder[B] =
     val self = this
     new McpEncoder[B]:
       def encode(value: B): List[Content] =
         self.encode(f(value))
+      override def encodeStructured(value: B): Option[zio.json.ast.Json] =
+        self.encodeStructured(f(value))
+
+/** A tool handler result carrying both renderings: `content` always (text fallback included), and
+  * `structured` when the encoder can produce a JSON AST. Produced at typed-contract mount time —
+  * where `Out` is still known — and consumed by `WireMapping.toolResultToWire`.
+  */
+final case class StructuredToolResult(
+    content: List[Content],
+    structured: Option[zio.json.ast.Json]
+)
 
 trait McpEncoderLowPriority:
 
@@ -77,6 +93,9 @@ trait McpEncoderLowPriority:
 
     def encode(value: A): List[Content] =
       List(TextContent(value.toJson))
+
+    override def encodeStructured(value: A): Option[zio.json.ast.Json] =
+      value.toJsonAST.toOption
 
 object McpEncoder extends McpEncoderLowPriority:
   def apply[A](using encoder: McpEncoder[A]): McpEncoder[A] = encoder
@@ -156,6 +175,21 @@ object ToolSchemaProvider:
   def instance[A](schema: ToolInputSchema): ToolSchemaProvider[A] =
     new ToolSchemaProvider[A]:
       val inputSchema: ToolInputSchema = schema
+
+/** Output-schema twin of [[ToolSchemaProvider]]: derives the `outputSchema` a tool advertises on
+  * `tools/list` from its `Out` type (same Tapir-backed macro, both platforms). Opt-in via
+  * `McpTool#withOutputSchema` — a tool that declares an output schema also emits conforming
+  * `structuredContent` on every call (spec MUST).
+  */
+trait ToolOutputSchemaProvider[A]:
+  def outputSchema: wire.ToolOutputSchema
+
+object ToolOutputSchemaProvider:
+  def apply[A](using provider: ToolOutputSchemaProvider[A]): ToolOutputSchemaProvider[A] = provider
+
+  def instance[A](schema: wire.ToolOutputSchema): ToolOutputSchemaProvider[A] =
+    new ToolOutputSchemaProvider[A]:
+      val outputSchema: wire.ToolOutputSchema = schema
 
 /** Witness that a handler result type coerces into `String | Array[Byte]` — the MCP resource body
   * shape. Users rarely see this: built-in givens cover `String` and `Array[Byte]`. Useful for the
@@ -248,6 +282,14 @@ final case class McpTool[In, Out] private (
   def withTaskSupport(value: TaskSupport): McpTool[In, Out] =
     copy(definition = definition.copy(taskSupport = Some(value)))
 
+  /** Advertise a derived `outputSchema` on `tools/list` and emit conforming `structuredContent` on
+    * every call (the spec requires the two together). Needs an `Out` the schema macro can derive —
+    * same Tapir path as input schemas — and an encoder with a structured form (any zio-json
+    * `JsonEncoder` qualifies).
+    */
+  def withOutputSchema(using provider: ToolOutputSchemaProvider[Out]): McpTool[In, Out] =
+    copy(definition = definition.copy(outputSchema = Some(provider.outputSchema)))
+
 object McpTool:
 
   /** Environment-aware typed tool contract. Use `McpTool[In, Out, R](...)` to construct one; the
@@ -264,6 +306,12 @@ object McpTool:
     /** Opt this tool into experimental MCP Tasks. */
     def withTaskSupport(value: TaskSupport): WithEnv[In, Out, R] =
       copy(definition = definition.copy(taskSupport = Some(value)))
+
+    /** Advertise a derived `outputSchema` and emit conforming `structuredContent` (see
+      * [[McpTool.withOutputSchema]]).
+      */
+    def withOutputSchema(using provider: ToolOutputSchemaProvider[Out]): WithEnv[In, Out, R] =
+      copy(definition = definition.copy(outputSchema = Some(provider.outputSchema)))
 
   /** Builder produced by [[apply]] — holds the `ToolDefinition` and captures `In`/`Out` so the
     * handler call site can infer the effect type `F` from the lambda's return.

@@ -9,7 +9,7 @@ object ContextAwareTool:
 
   @Tool(name = Some("context-aware-tool"))
   def contextAwareTool(message: String, ctx: McpContext): String = {
-    val clientName = ctx.getClientInfo.map(_.name()).getOrElse("Unknown")
+    val clientName = ctx.getClientInfo.map(_.name).getOrElse("Unknown")
     s"Message: $message, Client: $clientName"
   }
 end ContextAwareTool

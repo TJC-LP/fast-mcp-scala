@@ -7,10 +7,9 @@ import zio.*
 import zio.json.*
 
 import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.core.TypeConversions.*
-import com.tjclp.fastmcp.macros.JacksonConverter.given
 import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
 import com.tjclp.fastmcp.server.*
+import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
 /** Integration test for Tool annotation and processor This tests the full workflow of tool
   * annotation processing
@@ -128,7 +127,7 @@ class ToolProcessorTest extends AnyFunSuite {
 
   // Test MCP Tool Annotations propagate through macro
   test("@Tool annotation with MCP tool annotations should propagate to ToolDefinition") {
-    val annotTestServer = new FastMcpServer[Any]("AnnotTestServer", "0.1.0")
+    val annotTestServer = new McpServer[Any]("AnnotTestServer", "0.1.0")
     annotTestServer.scanAnnotations[ToolAnnotationsTestTools.type]
 
     // Tool with annotations
@@ -150,19 +149,12 @@ class ToolProcessorTest extends AnyFunSuite {
       noHintsTool.get.annotations.isEmpty,
       "annotations should be None when no hints specified"
     )
-
-    // Verify Java SDK Tool has annotations set
-    val javaTool = readOnlyTool.get.toJava
-    assert(javaTool.title() == "Read Only Tool")
-    assert(javaTool.annotations() != null)
-    assert(javaTool.annotations().readOnlyHint() == java.lang.Boolean.TRUE)
-    assert(javaTool.annotations().destructiveHint() == java.lang.Boolean.FALSE)
   }
 
   // Test @Param annotation with all fields (description, examples, required, schema)
   test("@Param annotation with all fields generates correct schema") {
     // Create a separate server for this test to avoid interference
-    val paramTestServer = new FastMcpServer[Any]("ParamTestServer", "0.1.0")
+    val paramTestServer = new McpServer[Any]("ParamTestServer", "0.1.0")
     paramTestServer.scanAnnotations[ParamMetadataTestTools.type]
 
     // Get the tool definition
@@ -195,7 +187,7 @@ class ToolProcessorTest extends AnyFunSuite {
 
   // Test @Param annotation with custom schema override
   test("@Param annotation with schema override replaces property definition") {
-    val schemaTestServer = new FastMcpServer[Any]("SchemaTestServer", "0.1.0")
+    val schemaTestServer = new McpServer[Any]("SchemaTestServer", "0.1.0")
     schemaTestServer.scanAnnotations[CustomSchemaTestTools.type]
 
     val toolDef = schemaTestServer.toolManager.getToolDefinition("custom-schema-test")
@@ -219,7 +211,7 @@ class ToolProcessorTest extends AnyFunSuite {
   */
 object ToolProcessorTest {
   // Create a test server for tool registration
-  val server = new FastMcpServer[Any]("TestServer", "0.1.0")
+  val server = new McpServer[Any]("TestServer", "0.1.0")
 
   // Schema for the enum
   given Schema[Operation] = Schema.derivedEnumeration.defaultStringBased

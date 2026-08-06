@@ -8,6 +8,7 @@ import zio.*
 import zio.json.*
 
 import com.tjclp.fastmcp.{given, *}
+import com.tjclp.fastmcp.core.StructuredToolResult
 
 class TypedContractsTest extends AnyFunSuite with Matchers:
 
@@ -63,8 +64,9 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
     )
 
     result match
-      case List(TextContent(text, _, _)) =>
+      case StructuredToolResult(List(TextContent(text, _, _)), structured) =>
         text shouldBe """{"sum":7}"""
+        structured.map(_.toString) shouldBe Some("""{"sum":7}""")
       case other =>
         fail(s"Unexpected typed tool result: $other")
   }
@@ -92,7 +94,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
       )
     )
 
-    result shouldBe List(TextContent("5:ctx"))
+    result shouldBe StructuredToolResult(List(TextContent("5:ctx")), None)
   }
 
   test("typed prompt and resource contracts mount through the existing managers") {
@@ -178,7 +180,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
   }
 
   test("environment typed tool contracts accept no-env ZIO handlers") {
-    val server = FastMcpServer.typed[Ref[Int]]("TypedNoEnvZioServer", "0.1.0")
+    val server = McpServer.typed[Ref[Int]]("TypedNoEnvZioServer", "0.1.0")
     val contract =
       McpTool[AddArgs, AddResult, Ref[Int]](
         name = "typed-no-env-zio",
@@ -194,7 +196,10 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
       yield out).provideLayer(ZLayer.fromZIO(Ref.make(0)))
     )
 
-    result shouldBe List(TextContent("""{"sum":7}"""))
+    result shouldBe StructuredToolResult(
+      List(TextContent("""{"sum":7}""")),
+      Some(zio.json.ast.Json.Obj("sum" -> zio.json.ast.Json.Num(7)))
+    )
   }
 
   test("typed request schemas include @Param metadata on fields and nested fields") {

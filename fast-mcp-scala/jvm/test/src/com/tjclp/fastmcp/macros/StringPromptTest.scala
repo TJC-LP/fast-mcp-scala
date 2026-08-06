@@ -5,7 +5,8 @@ import org.scalatest.matchers.should.Matchers
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
-import com.tjclp.fastmcp.server.FastMcpServer
+import com.tjclp.fastmcp.server.McpServer
+import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
 /** Tests that a prompt returning a String is properly converted to a List with a single User
   * message.
@@ -25,7 +26,7 @@ class StringPromptTest extends AnyFlatSpec with Matchers {
 
   "String prompt processor" should "convert string returns to List with one User message" in {
     // Create server and register prompts
-    val server = FastMcpServer("TestServer", "0.1.0")
+    val server = McpServer("TestServer", "0.1.0")
     server.scanAnnotations[TestPrompts.type]
 
     // Get the prompt result for string prompt

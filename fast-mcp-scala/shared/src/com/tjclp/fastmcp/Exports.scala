@@ -4,9 +4,9 @@ export core.{
   toAst,
   toJsonString,
   AsResourceBody,
+  AudioContent,
   Content,
   EmbeddedResource,
-  EmbeddedResourceContent,
   ImageContent,
   McpCodec,
   McpDecodeContext,
@@ -24,6 +24,7 @@ export core.{
   Resource,
   ResourceArgument,
   ResourceDefinition,
+  ResourceLink,
   Role,
   TextContent,
   ToHandlerEffect,
@@ -36,10 +37,14 @@ export core.{
 }
 export core.McpEncoder.given
 export core.ToHandlerEffect.given
+// Native-core shared codec + schema derivation (one copy for both platforms).
+export core.ToolSchemaProviders.given
+export codec.McpDecoders.given
+export macros.RegistrationMacro.*
 export server.{
-  FastMcpServerSettings,
   Http,
   McpContext,
+  McpServer,
   McpServerApp,
   McpServerCore,
   McpServerCoreFactory,
@@ -48,3 +53,4 @@ export server.{
   Transport,
   TransportRunner
 }
+export server.McpServer.given

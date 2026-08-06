@@ -8,6 +8,7 @@ import scala.util.matching.Regex
 import zio.*
 
 import com.tjclp.fastmcp.core.ResourceDefinition
+import com.tjclp.fastmcp.jsonrpc.{McpError, McpErrorCarrier}
 import com.tjclp.fastmcp.server.McpContext
 
 /** Function type for resource handlers.
@@ -116,15 +117,11 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
   def getStaticResourceHandler(uri: String): Option[ResourceHandler[R]] =
     Option(staticResources.get(uri)).map(_._2)
 
-  /** Alias used by FastMcpServer */
+  /** Alias for [[getStaticResourceHandler]] (kept for tests / direct manager access). */
   def getResourceHandler(uri: String): Option[ResourceHandler[R]] = getStaticResourceHandler(uri)
 
   def getTemplateResourceHandler(uriPattern: String): Option[ResourceTemplateHandler[R]] =
     Option(templateResources.get(uriPattern)).map(_._2)
-
-  /** Alias used by FastMcpServer */
-  def getTemplateHandler(uriPattern: String): Option[ResourceTemplateHandler[R]] =
-    getTemplateResourceHandler(uriPattern)
 
   def getResourceDefinition(uri: String): Option[ResourceDefinition] =
     Option(staticResources.get(uri)).map(_._1)
@@ -178,7 +175,7 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
                 )
               )
           case None =>
-            ZIO.fail(new ResourceNotFoundError(s"Resource '$uri' not found"))
+            ZIO.fail(new ResourceNotFoundError(uri))
 
 end ResourceManager
 
@@ -208,7 +205,11 @@ case class ResourceTemplatePattern(pattern: String):
 class ResourceError(message: String, cause: Option[Throwable] = None)
     extends RuntimeException(message, cause.orNull)
 
-class ResourceNotFoundError(message: String) extends ResourceError(message)
+/** Unknown resource URI. Carries the URI so the wire error can include `data.uri` per spec. */
+class ResourceNotFoundError(val uri: String)
+    extends ResourceError(s"Resource '$uri' not found")
+    with McpErrorCarrier:
+  def toMcpError: McpError = McpError.resourceNotFound(uri)
 
 class ResourceRegistrationError(message: String, cause: Option[Throwable] = None)
     extends ResourceError(message, cause)
