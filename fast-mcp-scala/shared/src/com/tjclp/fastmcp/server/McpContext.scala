@@ -185,12 +185,14 @@ open class McpContext private[fastmcp] (
       requireCapability(
         "sampling.tools",
         _.sampling.flatMap(_.tools).isDefined,
-        Some(Json.Obj("sampling" -> Json.Obj("tools" -> Json.Obj())))
+        Some(Json.Obj("sampling" -> Json.Obj("tools" -> Json.Obj()))),
+        legacyCheck = Some(_.sampling.isDefined)
       ).when(params.tools.isDefined || params.toolChoice.isDefined).unit *>
       requireCapability(
         "sampling.context",
         _.sampling.flatMap(_.context).isDefined,
-        Some(Json.Obj("sampling" -> Json.Obj("context" -> Json.Obj())))
+        Some(Json.Obj("sampling" -> Json.Obj("context" -> Json.Obj()))),
+        legacyCheck = Some(_.sampling.isDefined)
       ).when(params.includeContext.exists(_ != "none")).unit *>
       sendRequest("sampling/createMessage", Some(encode(params)), timeout)
         .flatMap(decodeResult[CreateMessageResult]("sampling/createMessage"))
@@ -208,7 +210,8 @@ open class McpContext private[fastmcp] (
 
   /** `elicitation/create` URL mode. Modern MRTR omits the removed `elicitationId`; applications
     * that need cross-retry correlation carry an integrity-protected identifier in request state.
-    * The optional field remains encoded only for the legacy adapter.
+    * The optional field remains encoded only for the legacy adapter, which also keeps accepting a
+    * bare `elicitation: {}` declaration (the `url` sub-capability is a 2026-07-28 shape).
     */
   def elicitUrl(
       params: ElicitRequestUrlParams,
@@ -217,7 +220,8 @@ open class McpContext private[fastmcp] (
     requireCapability(
       "elicitation.url",
       _.elicitation.flatMap(_.url).isDefined,
-      Some(Json.Obj("elicitation" -> Json.Obj("url" -> Json.Obj())))
+      Some(Json.Obj("elicitation" -> Json.Obj("url" -> Json.Obj()))),
+      legacyCheck = Some(_.elicitation.isDefined)
     ) *>
       sendRequest(
         "elicitation/create",
@@ -227,27 +231,32 @@ open class McpContext private[fastmcp] (
       )
         .flatMap(decodeResult[ElicitResult]("elicitation/create"))
 
+  /** Fail unless the client declared the capability `check` looks for. The predicate is picked by
+    * era first: 2026-07-28 sub-capability requirements must not retroactively break legacy clients
+    * that declared only the base capability (pass the pre-2026 predicate as `legacyCheck`).
+    * Failures are era-shaped too: -32021 with `requiredCapabilities` on the modern path, -32600 on
+    * the legacy one. No session means legacy semantics (fixtures and direct in-process calls).
+    */
   private def requireCapability(
       name: String,
       check: ClientCapabilities => Boolean,
-      requiredCapabilities: Option[Json] = None
+      requiredCapabilities: Option[Json] = None,
+      legacyCheck: Option[ClientCapabilities => Boolean] = None
   ): IO[McpError, Unit] =
-    if clientCapabilitiesSnapshot.exists(check) then ZIO.unit
-    else
-      session match
-        case Some(s) =>
-          s.currentRequestContext.flatMap {
-            case Some(_) =>
-              ZIO.fail(
-                McpError.missingRequiredClientCapability(
-                  requiredCapabilities.getOrElse(Json.Obj(name -> Json.Obj()))
-                )
-              )
-            case None =>
-              ZIO.fail(McpError.invalidRequest(s"client did not declare the '$name' capability"))
-          }
-        case None =>
-          ZIO.fail(McpError.invalidRequest(s"client did not declare the '$name' capability"))
+    def evaluate(modern: Boolean): IO[McpError, Unit] =
+      val effective = if modern then check else legacyCheck.getOrElse(check)
+      if clientCapabilitiesSnapshot.exists(effective) then ZIO.unit
+      else if modern then
+        ZIO.fail(
+          McpError.missingRequiredClientCapability(
+            requiredCapabilities.getOrElse(Json.Obj(name -> Json.Obj()))
+          )
+        )
+      else ZIO.fail(McpError.invalidRequest(s"client did not declare the '$name' capability"))
+
+    session match
+      case Some(s) => s.currentRequestContext.flatMap(ctx => evaluate(ctx.isDefined))
+      case None => evaluate(modern = false)
 
   private def encode[A: JsonEncoder](a: A): Json = a.toJsonAST.getOrElse(Json.Obj())
 

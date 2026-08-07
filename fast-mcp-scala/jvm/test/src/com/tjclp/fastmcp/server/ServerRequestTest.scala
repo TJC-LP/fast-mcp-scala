@@ -26,10 +26,12 @@ class ServerRequestTest extends AnyFunSuite with Matchers:
   private def runUnsafe[A](effect: ZIO[Any, Throwable, A]): A =
     Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(effect).getOrThrowFiberFailure())
 
+  // Deliberately bare (no 2026 sub-capabilities): this whole suite exercises the legacy path,
+  // where a 0.5.0-era `elicitation: {}` / `sampling: {}` declaration must keep working.
   private val fullCaps = ClientCapabilities(
     roots = Some(RootsCapability()),
     sampling = Some(SamplingCapability()),
-    elicitation = Some(ElicitationCapability(url = Some(Json.Obj())))
+    elicitation = Some(ElicitationCapability())
   )
 
   private def freshRouter: McpRouter[Any] =
@@ -118,6 +120,28 @@ class ServerRequestTest extends AnyFunSuite with Matchers:
       case JsonRpcMessage.Request(_, method, ps) =>
         method shouldBe "elicitation/create"
         ps.flatMap(_.as[ElicitRequestParams].toOption) shouldBe Some(params)
+      case other => fail(s"expected Request, got $other")
+    out shouldBe Right(result)
+  }
+
+  test("createMessage with tools params passes on a legacy bare sampling capability") {
+    val router = freshRouter
+    val session = runUnsafe(Session.make("sampling-tools-legacy"))
+    val ctx = McpContext.withSession(session, clientCapabilities = Some(fullCaps))
+    val params = CreateMessageRequestParams(
+      messages = List(SamplingMessage(Role.User, TextContent("hello"))),
+      maxTokens = 100,
+      tools = Some(Nil)
+    )
+    val result = CreateMessageResult(Role.Assistant, TextContent("hi"), "claude-test", None)
+    val (sent, out) = roundTrip(
+      router,
+      session,
+      ctx.createMessage(params),
+      id => JsonRpcMessage.Success(id, ast(result))
+    )
+    sent match
+      case JsonRpcMessage.Request(_, method, _) => method shouldBe "sampling/createMessage"
       case other => fail(s"expected Request, got $other")
     out shouldBe Right(result)
   }

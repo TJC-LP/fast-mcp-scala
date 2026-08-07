@@ -9,6 +9,7 @@ import sttp.tapir.generic.auto.*
 
 import com.tjclp.fastmcp.{given, *}
 import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.core.wire.ElicitRequestUrlParams
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, RequestId}
 import com.tjclp.fastmcp.server.router.Session
 import com.tjclp.fastmcp.server.transport.MessageLoop
@@ -171,6 +172,31 @@ class Protocol20260728Test extends AnyFunSuite with Matchers:
     // Trip 3: both answers present — each branch must receive the answer to ITS question.
     val trip3 = call(3, List(k1 -> s"answer-$q1", k2 -> s"answer-$q2"))
     trip3 should include("first=answer-first;second=answer-second")
+  }
+
+  test("modern elicitUrl without the url sub-capability fails -32021 (legacy bare form passes)") {
+    val server = McpServer("ModernElicitUrl", "0.9.0")
+    runUnsafe(
+      server.tool(
+        McpTool[RootsArgs, String](name = "open-url").contextual { (_, context) =>
+          context.get
+            .elicitUrl(ElicitRequestUrlParams("visit", "https://example.com"))
+            .as("opened")
+        }
+      )
+    )
+    val router = runUnsafe(server.buildRouter)
+    val session = runUnsafe(Session.make("modern-elicit-url"))
+    // The client declares bare elicitation (no url sub-capability) — enough for legacy, not 2026.
+    val bareElicitationMeta =
+      """"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"elicitation":{}}}"""
+    val response = frame(
+      router,
+      session,
+      s"""{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"open-url","arguments":{},$bareElicitationMeta}}"""
+    )
+    response should include(""""code":-32021""")
+    response should include(""""requiredCapabilities":{"elicitation":{"url":{}}}""")
   }
 
   test("modern requests enforce capabilities and reject removed core methods") {
