@@ -417,6 +417,8 @@ object JvmTransportBackend extends TransportBackend:
         .takeUntil(msg => isFinalReply(msg, reqId) || MessageLoop.isCloseSentinel(msg))
         .filter(!MessageLoop.isCloseSentinel(_))
         .map(msg => ServerSentEvent(MessageLoop.encodeOutbound(msg), eventType = Some("message")))
+        // Runs on the normal end of stream too, not just client abort. Task fibers are safe: they
+        // are forked under Session.runWithoutSink (TaskRouting), so they never hold this queue.
         .ensuring(dispatchFiber.interrupt *> reqQueue.shutdown)
     val response = Response.fromServerSentEvents(withKeepAlive(sse, settings))
     val unbuffered =

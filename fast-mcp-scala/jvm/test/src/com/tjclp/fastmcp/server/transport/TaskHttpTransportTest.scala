@@ -5,6 +5,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import zio.*
 import zio.http.*
+import zio.json.*
+import zio.json.ast.Json
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
@@ -39,6 +41,25 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     @Tool(name = Some("blocky"), description = Some("Long-running"), taskSupport = Some("optional"))
     def blocky(): ZIO[Any, Throwable, String] = ZIO.sleep(2.seconds).as("blocky")
 
+  case class ChattyArgs(msg: Option[String] = None)
+  given JsonDecoder[ChattyArgs] = DeriveJsonDecoder.gen[ChattyArgs]
+
+  /** Sends progress + a log AFTER its creating POST's SSE stream has closed — the regression net
+    * for the per-request queue shutdown interrupting task fibers that inherited it as their sink.
+    */
+  private val chattyTool = McpTool
+    .withSchema[ChattyArgs, String](
+      name = "chatty",
+      inputSchema = ToolInputSchema.unsafeFromJsonString("""{"type":"object","properties":{}}"""),
+      description = Some("Emits progress and a log mid-task")
+    )
+    .contextual { (_, ctx) =>
+      ZIO.sleep(400.millis) *>
+        ctx.get.sendProgress(ProgressToken.StringToken("t"), 0.5) *>
+        ctx.get.sendLogMessage(LoggingLevel.Info, Json.Str("mid-task")).as("chatty done")
+    }
+    .withTaskSupport(TaskSupport.Optional)
+
   private val SessionIdHeader = "mcp-session-id"
 
   private val initFrame =
@@ -65,9 +86,10 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     )
     val _ = server.scanAnnotations[TaskServer.type]
     runUnsafe(
-      server.buildRouter.flatMap(r =>
-        JvmTransportBackend.httpRoutes(r, server.settings, ZEnvironment.empty)
-      )
+      server.tool(chattyTool) *>
+        server.buildRouter.flatMap(r =>
+          JvmTransportBackend.httpRoutes(r, server.settings, ZEnvironment.empty)
+        )
     )
 
   private def run(routes: Routes[Any, Response], req: Request): Response =
@@ -284,6 +306,18 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
       )
     )
     modern should include(""""resultType":"task"""")
+  }
+
+  test("a task that emits progress and a log after its POST stream closes still completes") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    // bodyOf drains the SSE response, which ends the stream and fires its finalizer
+    // (dispatch interrupt + request-queue shutdown) while the task is still sleeping.
+    val created = bodyOf(post(routes, augmentedCall(50, "chatty"), Some(sid)))
+    val taskId = extractTaskId(created)
+    pollUntil(routes, sid, taskId, "completed")
+    val result = bodyOf(post(routes, tasksResult(51, taskId), Some(sid)))
+    result should include("chatty done")
   }
 
   test("bearer tasks are invisible to legacy sessions (list, result, cancel)") {

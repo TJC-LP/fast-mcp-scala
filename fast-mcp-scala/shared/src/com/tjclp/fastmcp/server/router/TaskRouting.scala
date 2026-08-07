@@ -81,12 +81,16 @@ final class TaskMiddleware[R](
               )
             )
           case (true, TaskSupport.Optional | TaskSupport.Required) =>
-            taskManager
-              .create(
-                sessionId = Some(session.sessionId),
-                requestedTtlMs = ttl,
-                run = next(session, params),
-                onStatusChange = task => session.send(statusNotification(task))
+            // runWithoutSink: the task fiber (forked inside create) outlives this POST, whose
+            // sink queue is shut down when the SSE response ends — sends must go to outbound.
+            session
+              .runWithoutSink(
+                taskManager.create(
+                  sessionId = Some(session.sessionId),
+                  requestedTtlMs = ttl,
+                  run = next(session, params),
+                  onStatusChange = task => session.send(statusNotification(task))
+                )
               )
               .mapBoth(
                 McpError.fromThrowable,
@@ -129,12 +133,17 @@ final class TaskMiddleware[R](
               )
             case TaskSupport.Optional if !clientSupportsTasks => next(session, params)
             case TaskSupport.Optional | TaskSupport.Required =>
-              taskManager
-                .create(
-                  sessionId = None,
-                  requestedTtlMs = None,
-                  run = next(session, params),
-                  onStatusChange = _ => ZIO.unit
+              // runWithoutSink for the same reason as the legacy branch: the ephemeral modern
+              // session's outbound is never drained, but an offer to a live unbounded queue is
+              // harmless and GC'd with the task — unlike an offer to a shutdown sink queue.
+              session
+                .runWithoutSink(
+                  taskManager.create(
+                    sessionId = None,
+                    requestedTtlMs = None,
+                    run = next(session, params),
+                    onStatusChange = _ => ZIO.unit
+                  )
                 )
                 .mapBoth(
                   McpError.fromThrowable,

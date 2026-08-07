@@ -102,6 +102,15 @@ final class Session private (
   def runWithSink[R, E, A](q: Queue[JsonRpcMessage])(zio: ZIO[R, E, A]): ZIO[R, E, A] =
     sinkRef.locally(Some(q))(zio)
 
+  /** Run `zio` — and, crucially, anything it forks — with pushes routed to the shared outbound
+    * channel even when the caller sits inside a per-POST sink scope ([[runWithSink]]). Task fibers
+    * outlive their creating POST; that POST's queue is shut down when its SSE stream ends, and an
+    * offer to a shutdown queue interrupts the offering fiber — which would cancel the task itself.
+    * Status/progress/log messages from a task belong on the shared channel anyway.
+    */
+  def runWithoutSink[R, E, A](zio: ZIO[R, E, A]): ZIO[R, E, A] =
+    sinkRef.locally(None)(zio)
+
   /** Bind stateless per-request metadata to the handler fiber and all of its children. */
   def runWithRequest[R, E, A](
       id: RequestId,
