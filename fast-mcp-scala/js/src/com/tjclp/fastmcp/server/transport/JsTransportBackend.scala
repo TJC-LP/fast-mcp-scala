@@ -177,11 +177,12 @@ object JsTransportBackend extends TransportBackend:
       headerErr match
         case Some(err) => ZIO.succeed(err)
         case None =>
-          if settings.stateless then handleStateless(router, req)
+          if settings.stateless then handleStateless(router, settings, req)
           else handleStreamable(router, settings, store, req)
 
   private def handleStateless[R](
       router: McpRouter[R],
+      settings: McpServerSettings,
       req: js.Dynamic
   ): ZIO[R, Throwable, js.Dynamic] =
     methodOf(req) match
@@ -191,8 +192,7 @@ object JsTransportBackend extends TransportBackend:
             case Left(parseFailure) =>
               ZIO.succeed(jsonResponse(parseFailure.toJson, Map.empty, status = 400))
             case Right(message) =>
-              if isModernRequest(req, message) then
-                modernPost(router, req, message, McpServerSettings(stateless = true))
+              if isModernRequest(req, message) then modernPost(router, req, message, settings)
               else
                 for
                   session <- Session.make("stateless", supportsTasks = false)

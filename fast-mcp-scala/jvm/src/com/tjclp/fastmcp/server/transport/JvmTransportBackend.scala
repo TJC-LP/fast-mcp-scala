@@ -94,11 +94,7 @@ object JvmTransportBackend extends TransportBackend:
     // HasNoScope constraint. No Unsafe, no runtime capture.
     ZIO.environment[R].flatMap { env =>
       val ep = settings.httpEndpoint.stripPrefix("/")
-      if settings.stateless then
-        serve(
-          statelessRoutes(router, ep, env, settings.allowedHosts.getOrElse(Set.empty)),
-          settings
-        )
+      if settings.stateless then serve(statelessRoutes(router, env, settings), settings)
       else
         // The idle-session sweeper is forked here (scoped to the server's lifetime), NOT in
         // httpRoutes — tests drive httpRoutes directly and must not leak a sweeper fiber each.
@@ -146,8 +142,7 @@ object JvmTransportBackend extends TransportBackend:
       env: ZEnvironment[R]
   ): UIO[Routes[Any, Response]] =
     val ep = settings.httpEndpoint.stripPrefix("/")
-    val allowedHosts = settings.allowedHosts.getOrElse(Set.empty)
-    if settings.stateless then ZIO.succeed(statelessRoutes(router, ep, env, allowedHosts))
+    if settings.stateless then ZIO.succeed(statelessRoutes(router, env, settings))
     else
       Ref
         .make(Map.empty[String, Session])
@@ -168,13 +163,13 @@ object JvmTransportBackend extends TransportBackend:
 
   private def statelessRoutes[R](
       router: McpRouter[R],
-      ep: String,
       env: ZEnvironment[R],
-      allowedHosts: Set[String]
+      settings: McpServerSettings
   ): Routes[Any, Response] =
+    val ep = settings.httpEndpoint.stripPrefix("/")
     Routes(
       Method.POST / ep -> handler { (request: Request) =>
-        handleStatelessPost(router, request, allowedHosts).provideEnvironment(env)
+        handleStatelessPost(router, request, settings).provideEnvironment(env)
       },
       Method.GET / ep -> handler((_: Request) =>
         ZIO.succeed(Response.status(Status.MethodNotAllowed))
@@ -190,10 +185,9 @@ object JvmTransportBackend extends TransportBackend:
   private def handleStatelessPost[R](
       router: McpRouter[R],
       request: Request,
-      allowedHosts: Set[String],
-      settings: McpServerSettings = McpServerSettings(stateless = true)
+      settings: McpServerSettings
   ): ZIO[R, Nothing, Response] =
-    postHeaderError(request, allowedHosts, requireSse = false) match
+    postHeaderError(request, settings.allowedHosts.getOrElse(Set.empty), requireSse = false) match
       case Some(err) => ZIO.succeed(err)
       case None => statelessDispatch(router, request, settings)
 

@@ -31,6 +31,13 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     def needsRoots(ctx: McpContext): ZIO[Any, Throwable, String] =
       ctx.listRoots().as("roots received")
 
+    @Tool(name = Some("slow-progress"), description = Some("Reports progress, then sleeps"))
+    def slowProgress(ctx: McpContext): ZIO[Any, Throwable, String] =
+      // The early notification opens the SSE stream (modern POSTs hold the response until the
+      // first queued message); the long sleep then leaves the stream quiet for keepalives.
+      ZIO.foreachDiscard(ctx.progressToken)(t => ctx.sendProgress(t, 0.5)) *>
+        ZIO.sleep(30.seconds).as("done")
+
   private val SessionIdHeader = "mcp-session-id"
 
   private val initFrame =
@@ -290,6 +297,24 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
         .timeoutFail(new RuntimeException("no keepalive emitted"))(10.seconds)
     )
     new String(bytes.toArray, java.nio.charset.StandardCharsets.UTF_8) should include("ping")
+  }
+
+  test("stateless modern POST SSE emits keepalive pings when configured") {
+    val routes =
+      buildRoutes(stateless = true, keepAlive = Some(java.time.Duration.ofMillis(100)))
+    val frame =
+      """{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"slow-progress","arguments":{},"_meta":{"progressToken":"kp","io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+    val resp = modernPost(routes, frame, "tools/call", Some("slow-progress"))
+    resp.status shouldBe Status.Ok
+    val seen = runUnsafe(
+      resp.body.asStream
+        .via(zio.stream.ZPipeline.utf8Decode)
+        .scan("")(_ + _)
+        .takeUntil(_.contains("ping"))
+        .runLast
+        .timeoutFail(new RuntimeException("no keepalive on the modern POST SSE"))(10.seconds)
+    )
+    seen.getOrElse("") should include("ping")
   }
 
   test("requests before initialize are rejected with -32600; ping is exempt") {

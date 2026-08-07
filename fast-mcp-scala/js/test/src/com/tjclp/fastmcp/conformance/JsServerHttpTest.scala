@@ -421,6 +421,75 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     done.andThen { case _ => taskBunServer.stop() }
   }
 
+  "runHttp (stateless keepalive)" should "emit pings on a quiet modern POST SSE stream" in {
+    val kaPort = 38923
+    val server = com.tjclp.fastmcp.server.McpServer(
+      "JsHttpKeepaliveServer",
+      "0.1.0",
+      McpServerSettings(
+        host = "127.0.0.1",
+        port = kaPort,
+        httpEndpoint = "/mcp",
+        stateless = true,
+        keepAliveInterval = Some(java.time.Duration.ofMillis(50))
+      )
+    )
+    val slowProgressTool = McpTool
+      .withSchema[PingArgs, String](
+        name = "slow-progress",
+        inputSchema = pingSchema,
+        description = Some("Reports progress, then sleeps")
+      )
+      .contextual { (_, ctx) =>
+        // The early notification opens the SSE stream; the sleep leaves it quiet for pings.
+        ZIO.foreachDiscard(ctx.get.progressToken)(t => ctx.get.sendProgress(t, 0.5)) *>
+          ZIO.sleep(30.seconds).as("done")
+      }
+
+    def readUntilPing(reader: js.Dynamic, acc: String, remaining: Int): Future[String] =
+      if acc.contains("ping") || remaining <= 0 then Future.successful(acc)
+      else
+        fromJsPromise(reader.read().asInstanceOf[js.Promise[js.Dynamic]]).flatMap { chunk =>
+          if chunk.done.asInstanceOf[Boolean] then Future.successful(acc)
+          else
+            val piece = js.Dynamic
+              .newInstance(js.Dynamic.global.TextDecoder)()
+              .decode(chunk.value)
+              .asInstanceOf[String]
+            readUntilPing(reader, acc + piece, remaining - 1)
+        }
+
+    runZio(server.tool(slowProgressTool).unit).flatMap { _ =>
+      val bun = server.startStatelessHttp()
+      val checked = for
+        resp <- fromJsPromise(
+          js.Dynamic.global
+            .fetch(
+              s"http://127.0.0.1:$kaPort/mcp",
+              js.Dynamic.literal(
+                method = "POST",
+                headers = js.Dictionary(
+                  "content-type" -> "application/json",
+                  "accept" -> "application/json, text/event-stream",
+                  "mcp-protocol-version" -> "2026-07-28",
+                  "mcp-method" -> "tools/call",
+                  "mcp-name" -> "slow-progress"
+                ),
+                body =
+                  """{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow-progress","arguments":{"msg":"hi"},"_meta":{"progressToken":"kp","io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+              )
+            )
+            .asInstanceOf[js.Promise[js.Dynamic]]
+        )
+        reader = resp.body.getReader()
+        seen <- readUntilPing(reader, "", remaining = 40)
+      yield
+        val _ = reader.cancel()
+        seen should include("ping")
+      checked.andThen { case _ => bun.stop() }
+    }
+  }
+
   "runHttp (stateless tasks)" should "refuse legacy task augmentation on the shared stateless session" in {
     val statelessTaskPort = 38922
     val server = com.tjclp.fastmcp.server.McpServer(
