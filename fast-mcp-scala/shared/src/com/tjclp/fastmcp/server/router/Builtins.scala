@@ -11,6 +11,7 @@ import com.tjclp.fastmcp.server.{CompletionHandler, McpContext}
 import com.tjclp.fastmcp.server.manager.{
   PromptManager,
   ResourceManager,
+  ResourceNotFoundError,
   ToolManager,
   ToolNotFoundError
 }
@@ -29,6 +30,7 @@ final class Builtins[R](
     serverInfo: Implementation,
     instructions: Option[String],
     capabilities: ServerCapabilities,
+    modernCapabilities: ServerCapabilities,
     toolManager: ToolManager[R],
     promptManager: PromptManager[R],
     resourceManager: ResourceManager[R],
@@ -45,6 +47,15 @@ final class Builtins[R](
   /** Helper: render any encodable result to JSON. */
   private def ok[A: JsonEncoder](value: A): UIO[Json] =
     ZIO.succeed(value.toJsonAST.getOrElse(Json.Obj()))
+
+  val discover: RequestHandler[R] = (_, _) =>
+    ok(
+      DiscoverResult(
+        supportedVersions = Protocol.SupportedProtocolVersions,
+        capabilities = modernCapabilities,
+        instructions = instructions
+      )
+    )
 
   // ---- lifecycle ----
 
@@ -76,14 +87,19 @@ final class Builtins[R](
     * latest. (The client disconnects if it can't accept our choice.)
     */
   private def negotiateVersion(clientVersion: String): String =
-    if Protocol.SupportedProtocolVersions.contains(clientVersion) then clientVersion
-    else Protocol.LatestProtocolVersion
+    if Protocol.LegacyProtocolVersions.contains(clientVersion) then clientVersion
+    else Protocol.LegacyProtocolVersions.head
 
   // ---- tools ----
 
-  val toolsList: RequestHandler[R] = (_, _) =>
-    val tools = toolManager.listDefinitions().map(WireMapping.toolToWire(_, tasksEnabled))
-    ok(ListToolsResult(tools = tools))
+  val toolsList: RequestHandler[R] = (session, _) =>
+    session.currentRequestContext.flatMap { modern =>
+      val tools = toolManager
+        .listDefinitions()
+        .sortBy(_.name)
+        .map(WireMapping.toolToWire(_, tasksEnabled && modern.isEmpty))
+      ok(ListToolsResult(tools = tools))
+    }
 
   val toolsCall: RequestHandler[R] = (session, params) =>
     for
@@ -94,15 +110,21 @@ final class Builtins[R](
         case Some(_) =>
           ZIO.fail(McpError.invalidParams("tools/call: `arguments` must be a JSON object"))
       ctx <- contextFor(session, req._meta)
+      modern <- session.currentRequestContext.map(_.isDefined)
       _ <- hooks.beforeToolCall(req.name, params, session)
       outcome <- toolManager.callTool(req.name, args, Some(ctx)).either
       outputSchema = toolManager.getToolDefinition(req.name).flatMap(_.outputSchema)
       json <- outcome match
         case Right(result) => ok(WireMapping.toolResultToWire(result, outputSchema))
-        // Unknown tool is bad input (protocol error); a handler that threw is a tool-level failure
-        // surfaced as an error result (isError = true), per the MCP spec.
+        case Left(err) if McpError.inputRequiredResult(err).isDefined =>
+          ZIO.succeed(McpError.inputRequiredResult(err).get)
+        // Unknown tool is bad input (protocol error) in both eras. Modern (2026-07-28): a
+        // handler-raised McpError is a protocol error by contract — -32021 in particular must
+        // escape to the HTTP 400 mapping. Legacy keeps the 0.5.0 in-band contract: every handler
+        // failure, McpError included, surfaces as isError:true so the model can self-correct.
         case Left(_: ToolNotFoundError) =>
           ZIO.fail(McpError.invalidParams(s"Unknown tool: ${req.name}"))
+        case Left(err: McpError) if modern => ZIO.fail(err)
         case Left(err) => ok(WireMapping.toolErrorToWire(err))
       _ <- hooks.afterToolCall(req.name, json, session)
     yield json
@@ -113,6 +135,7 @@ final class Builtins[R](
     val resources = resourceManager
       .listDefinitions()
       .filterNot(_.isTemplate)
+      .sortBy(_.uri)
       .map(WireMapping.resourceToWire)
     ok(ListResourcesResult(resources = resources))
 
@@ -123,7 +146,11 @@ final class Builtins[R](
   val resourcesTemplatesList: RequestHandler[R] = (_, _) =>
     val templates =
       if exposeTemplates then
-        resourceManager.listDefinitions().filter(_.isTemplate).map(WireMapping.templateToWire)
+        resourceManager
+          .listDefinitions()
+          .filter(_.isTemplate)
+          .sortBy(_.uri)
+          .map(WireMapping.templateToWire)
       else List.empty
     ok(ListResourceTemplatesResult(resourceTemplates = templates))
 
@@ -131,7 +158,15 @@ final class Builtins[R](
     for
       req <- decodeParams[ReadResourceRequestParams](params, "resources/read")
       ctx <- contextFor(session)
-      body <- resourceManager.readResource(req.uri, Some(ctx)).mapError(McpError.fromThrowable)
+      modern <- session.currentRequestContext.map(_.isDefined)
+      body <- resourceManager
+        .readResource(req.uri, Some(ctx))
+        .mapError {
+          // 2026-07-28 folded resource misses into -32602; legacy sessions keep the reserved
+          // -32002 their spec revisions promise. The manager is era-blind, so re-code here.
+          case e: ResourceNotFoundError if !modern => McpError.legacyResourceNotFound(e.uri)
+          case other => McpError.fromThrowable(other)
+        }
       mime = resourceManager.getResourceDefinition(req.uri).flatMap(_.mimeType)
       contents = WireMapping.resourceContentsToWire(req.uri, mime, body)
       json <- ok(ReadResourceResult(contents = List(contents)))
@@ -159,8 +194,48 @@ final class Builtins[R](
   // ---- prompts ----
 
   val promptsList: RequestHandler[R] = (_, _) =>
-    val prompts = promptManager.listDefinitions().map(WireMapping.promptToWire)
+    val prompts = promptManager.listDefinitions().sortBy(_.name).map(WireMapping.promptToWire)
     ok(ListPromptsResult(prompts = prompts))
+
+  // ---- subscriptions ----
+
+  val subscriptionsListen: RequestHandler[R] = (session, params) =>
+    for
+      req <- decodeParams[SubscriptionsListenRequestParams](params, "subscriptions/listen")
+      requestId <- session.currentRequestId.someOrFail(
+        McpError.internalError("subscriptions/listen is missing its request id")
+      )
+      subscriptionId = requestId.toJsonAST.getOrElse(Json.Null)
+      requested = req.notifications
+      supportsResourceSubscriptions = modernCapabilities.resources
+        .flatMap(_.subscribe)
+        .contains(true)
+      agreed = SubscriptionFilter(
+        toolsListChanged = requested.toolsListChanged.filter(_ => false),
+        promptsListChanged = requested.promptsListChanged.filter(_ => false),
+        resourcesListChanged = requested.resourcesListChanged.filter(_ => false),
+        resourceSubscriptions = requested.resourceSubscriptions
+          .filter(_ => supportsResourceSubscriptions)
+          .map(
+            _.filter(uri =>
+              resourceManager.getResourceDefinition(uri).isDefined ||
+                resourceManager.findMatchingTemplate(uri).isDefined
+            )
+          )
+          .filter(_.nonEmpty)
+      )
+      notificationParams = SubscriptionsAcknowledgedNotificationParams(
+        notifications = agreed,
+        _meta = Some(Map("io.modelcontextprotocol/subscriptionId" -> subscriptionId))
+      )
+      _ <- session.send(
+        com.tjclp.fastmcp.jsonrpc.JsonRpcMessage.Notification(
+          NotificationMethods.SubscriptionsAcknowledged,
+          notificationParams.toJsonAST.toOption
+        )
+      )
+      result <- ZIO.never
+    yield result
 
   val promptsGet: RequestHandler[R] = (session, params) =>
     for
@@ -213,6 +288,13 @@ final class Builtins[R](
       requestMeta: Option[Map[String, Json]] = None
   ): UIO[McpContext] =
     for
-      info <- session.clientInfo
-      caps <- session.clientCapabilities
-    yield McpContext.withSession(session, info, caps, requestMeta)
+      modern <- session.currentRequestContext
+      legacyInfo <- session.clientInfo
+      legacyCaps <- session.clientCapabilities
+    yield McpContext.withSession(
+      session,
+      modern.flatMap(_.clientInfo).orElse(legacyInfo),
+      modern.map(_.clientCapabilities).orElse(legacyCaps),
+      requestMeta.orElse(modern.map(_.meta)),
+      modern.flatMap(_.requestState)
+    )

@@ -2,6 +2,7 @@ package com.tjclp.fastmcp.server.router
 
 import java.util.Base64
 
+import zio.json.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.core.{
@@ -68,7 +69,28 @@ object WireMapping:
     * today; the 2026-07-28 revision requires `resultType: "complete"` on every result — inject it
     * here when the router grows multi-version support.
     */
-  def completeResult(result: Json): Json = result
+  def completeResult(result: Json, serverInfo: Implementation, modern: Boolean): Json =
+    if !modern then
+      result match
+        case Json.Obj(values) =>
+          Json.Obj(values.filterNot((name, _) => name == "ttlMs" || name == "cacheScope")*)
+        case other => other
+    else
+      val fields = result match
+        case Json.Obj(values) => values.toMap
+        case other => Map("value" -> other)
+      val meta = fields.get("_meta") match
+        case Some(Json.Obj(values)) => values.toMap
+        case _ => Map.empty[String, Json]
+      val serverInfoJson = serverInfo.toJsonAST.getOrElse(Json.Obj())
+      Json.Obj(
+        (fields ++ Map(
+          "resultType" -> fields.getOrElse("resultType", Json.Str("complete")),
+          "_meta" -> Json.Obj(
+            (meta + ("io.modelcontextprotocol/serverInfo" -> serverInfoJson)).toList*
+          )
+        )).toList*
+      )
 
   /** Convert a tool handler's untyped result into a [[CallToolResult]]. A typed contract arrives as
     * a [[StructuredToolResult]] carrying both renderings — its structured form is emitted as

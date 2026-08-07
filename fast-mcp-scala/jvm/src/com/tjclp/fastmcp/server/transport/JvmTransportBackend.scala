@@ -17,18 +17,16 @@ import com.tjclp.fastmcp.server.router.{McpRouter, Session}
   * `Unsafe`, no runtime capture, no Mono: the native router is ZIO, so `R` flows straight through
   * `Server.serve` and the user's `.provide(...)`.
   *
-  * `serveHttp` branches on `settings.stateless`:
-  *   - **stateless** — one ephemeral [[Session]] per POST, single JSON reply, no SSE, no DELETE.
-  *   - **streamable** (default) — durable sessions keyed by the `mcp-session-id` header, a `GET`
-  *     SSE channel draining each session's outbound queue (server→client push), and `DELETE` to
-  *     terminate. This is the transport MCP Tasks run on (sessions persist across create→poll).
+  * MCP 2026-07-28 always uses one ephemeral request context per POST and an optional request-scoped
+  * SSE response. `settings.stateless` selects whether the older initialize/session/ GET/DELETE
+  * compatibility adapter is sessionless or durable; it does not make modern calls stateful.
   */
 object JvmTransportBackend extends TransportBackend:
 
   /** UUID v4 via `java.util.UUID` (SecureRandom-backed). */
   override def randomId(): UIO[String] = ZIO.succeed(UUID.randomUUID().toString)
 
-  /** Spec header carrying the streamable-HTTP session id (echoed on the `initialize` response). */
+  /** Compatibility header for initialization-based Streamable HTTP revisions. */
   private val SessionIdHeader = "mcp-session-id"
 
   override def serveStdio[R](
@@ -96,11 +94,7 @@ object JvmTransportBackend extends TransportBackend:
     // HasNoScope constraint. No Unsafe, no runtime capture.
     ZIO.environment[R].flatMap { env =>
       val ep = settings.httpEndpoint.stripPrefix("/")
-      if settings.stateless then
-        serve(
-          statelessRoutes(router, ep, env, settings.allowedHosts.getOrElse(Set.empty)),
-          settings
-        )
+      if settings.stateless then serve(statelessRoutes(router, env, settings), settings)
       else
         // The idle-session sweeper is forked here (scoped to the server's lifetime), NOT in
         // httpRoutes — tests drive httpRoutes directly and must not leak a sweeper fiber each.
@@ -148,8 +142,7 @@ object JvmTransportBackend extends TransportBackend:
       env: ZEnvironment[R]
   ): UIO[Routes[Any, Response]] =
     val ep = settings.httpEndpoint.stripPrefix("/")
-    val allowedHosts = settings.allowedHosts.getOrElse(Set.empty)
-    if settings.stateless then ZIO.succeed(statelessRoutes(router, ep, env, allowedHosts))
+    if settings.stateless then ZIO.succeed(statelessRoutes(router, env, settings))
     else
       Ref
         .make(Map.empty[String, Session])
@@ -170,13 +163,13 @@ object JvmTransportBackend extends TransportBackend:
 
   private def statelessRoutes[R](
       router: McpRouter[R],
-      ep: String,
       env: ZEnvironment[R],
-      allowedHosts: Set[String]
+      settings: McpServerSettings
   ): Routes[Any, Response] =
+    val ep = settings.httpEndpoint.stripPrefix("/")
     Routes(
       Method.POST / ep -> handler { (request: Request) =>
-        handleStatelessPost(router, request, allowedHosts).provideEnvironment(env)
+        handleStatelessPost(router, request, settings).provideEnvironment(env)
       },
       Method.GET / ep -> handler((_: Request) =>
         ZIO.succeed(Response.status(Status.MethodNotAllowed))
@@ -192,15 +185,16 @@ object JvmTransportBackend extends TransportBackend:
   private def handleStatelessPost[R](
       router: McpRouter[R],
       request: Request,
-      allowedHosts: Set[String]
+      settings: McpServerSettings
   ): ZIO[R, Nothing, Response] =
-    postHeaderError(request, allowedHosts, requireSse = false) match
+    postHeaderError(request, settings.allowedHosts.getOrElse(Set.empty), requireSse = false) match
       case Some(err) => ZIO.succeed(err)
-      case None => statelessDispatch(router, request)
+      case None => statelessDispatch(router, request, settings)
 
   private def statelessDispatch[R](
       router: McpRouter[R],
-      request: Request
+      request: Request,
+      settings: McpServerSettings
   ): ZIO[R, Nothing, Response] =
     val effect =
       for
@@ -211,17 +205,18 @@ object JvmTransportBackend extends TransportBackend:
           case Left(parseFailure) =>
             ZIO.succeed(Response.json(parseFailure.toJson).status(Status.BadRequest))
           case Right(message) =>
-            for
-              session <- Session.make("stateless")
-              // Stateless clients never send initialize — the ephemeral session starts ready.
-              _ <- session.markInitialized
-              reply <- router.dispatch(session, message)
-            yield (message, reply) match
-              // Structurally invalid frames (id:null, wrong jsonrpc, ...) are client errors.
-              case (_: JsonRpcMessage.Invalid, Some(r)) =>
-                Response.json(r.toJson).status(Status.BadRequest)
-              case (_, Some(r)) => Response.json(r.toJson)
-              case (_, None) => Response.status(Status.Accepted)
+            if isModernRequest(request, message) then modernPost(router, request, message, settings)
+            else
+              for
+                session <- Session.make("stateless", supportsTasks = false)
+                // Legacy stateless compatibility mode starts ready without a handshake.
+                _ <- session.markInitialized
+                reply <- router.dispatch(session, message)
+              yield (message, reply) match
+                case (_: JsonRpcMessage.Invalid, Some(r)) =>
+                  Response.json(r.toJson).status(Status.BadRequest)
+                case (_, Some(r)) => Response.json(r.toJson)
+                case (_, None) => Response.status(Status.Accepted)
       yield resp
     effect.catchAll(msg => ZIO.succeed(errorResponse(Status.BadRequest, msg)))
 
@@ -291,29 +286,31 @@ object JvmTransportBackend extends TransportBackend:
           case Left(parseFailure) =>
             ZIO.succeed(Response.json(parseFailure.toJson).status(Status.BadRequest))
           case Right(message) =>
-            request.rawHeader(SessionIdHeader) match
-              case Some(id) =>
-                store.get.map(_.get(id)).flatMap {
-                  case None =>
-                    ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
-                  case Some(session) =>
-                    session.touch *>
-                      respondStreamable(router, session, message, isNew = false, settings)
-                }
-              case None if MessageLoop.isInitialize(message) =>
-                for
-                  id <- randomId()
-                  session <- Session.make(id)
-                  _ <- store.update(_ + (session.sessionId -> session))
-                  resp <- respondStreamable(router, session, message, isNew = true, settings)
-                yield resp
-              case None =>
-                ZIO.succeed(
-                  errorResponse(
-                    Status.BadRequest,
-                    s"$SessionIdHeader header is required (only initialize may open a session)"
+            if isModernRequest(request, message) then modernPost(router, request, message, settings)
+            else
+              request.rawHeader(SessionIdHeader) match
+                case Some(id) =>
+                  store.get.map(_.get(id)).flatMap {
+                    case None =>
+                      ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
+                    case Some(session) =>
+                      session.touch *>
+                        respondStreamable(router, session, message, isNew = false, settings)
+                  }
+                case None if MessageLoop.isInitialize(message) =>
+                  for
+                    id <- randomId()
+                    session <- Session.make(id)
+                    _ <- store.update(_ + (session.sessionId -> session))
+                    resp <- respondStreamable(router, session, message, isNew = true, settings)
+                  yield resp
+                case None =>
+                  ZIO.succeed(
+                    errorResponse(
+                      Status.BadRequest,
+                      s"$SessionIdHeader header is required (only initialize may open a session)"
+                    )
                   )
-                )
     }
 
   /** Dispatch one streamable POST frame. A *request* gets an SSE response that streams the
@@ -349,26 +346,155 @@ object JvmTransportBackend extends TransportBackend:
       session: Session,
       message: JsonRpcMessage.Request,
       isNew: Boolean,
-      settings: McpServerSettings
+      settings: McpServerSettings,
+      modern: Boolean = false
   ): URIO[R, Response] =
     val reqId = message.id
     for
       reqQueue <- Queue.unbounded[JsonRpcMessage]
       // `ensuring` (uninterruptible) offers the close sentinel after the dispatch delivers its
       // reply — or after it is cancelled / dies replyless — so the SSE stream below always ends.
-      _ <- session
+      dispatchFiber <- session
         .runWithSink(reqQueue)(router.dispatch(session, message))
         .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
         .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
         .forkDaemon
-    yield
-      val sse: ZStream[Any, Nothing, ServerSentEvent[String]] =
-        ZStream
-          .fromQueue(reqQueue)
-          .takeUntil(msg => isFinalReply(msg, reqId) || MessageLoop.isCloseSentinel(msg))
-          .filter(!MessageLoop.isCloseSentinel(_))
-          .map(msg => ServerSentEvent(MessageLoop.encodeOutbound(msg), eventType = Some("message")))
-      withSessionHeader(Response.fromServerSentEvents(withKeepAlive(sse, settings)), session, isNew)
+      response <-
+        if modern then
+          reqQueue.take.onInterrupt(dispatchFiber.interrupt *> reqQueue.shutdown).flatMap { first =>
+            modernErrorStatus(first) match
+              case Some(status) =>
+                (dispatchFiber.interrupt *> reqQueue.shutdown).as(
+                  Response.json(first.toJson).status(status)
+                )
+              case None =>
+                ZIO.succeed(
+                  requestSseResponse(
+                    reqQueue,
+                    reqId,
+                    session,
+                    isNew,
+                    dispatchFiber,
+                    settings,
+                    modern = true,
+                    initial = List(first)
+                  )
+                )
+          }
+        else
+          ZIO.succeed(
+            requestSseResponse(
+              reqQueue,
+              reqId,
+              session,
+              isNew,
+              dispatchFiber,
+              settings,
+              modern = false
+            )
+          )
+    yield response
+
+  private def requestSseResponse(
+      reqQueue: Queue[JsonRpcMessage],
+      reqId: RequestId,
+      session: Session,
+      isNew: Boolean,
+      dispatchFiber: Fiber.Runtime[?, ?],
+      settings: McpServerSettings,
+      modern: Boolean,
+      initial: List[JsonRpcMessage] = Nil
+  ): Response =
+    val messages = ZStream.fromIterable(initial) ++ ZStream.fromQueue(reqQueue)
+    val sse: ZStream[Any, Nothing, ServerSentEvent[String]] =
+      messages
+        .takeUntil(msg => isFinalReply(msg, reqId) || MessageLoop.isCloseSentinel(msg))
+        .filter(!MessageLoop.isCloseSentinel(_))
+        .map(msg => ServerSentEvent(MessageLoop.encodeOutbound(msg), eventType = Some("message")))
+        // Runs on the normal end of stream too, not just client abort. Task fibers are safe: they
+        // are forked under Session.runWithoutSink (TaskRouting), so they never hold this queue.
+        .ensuring(dispatchFiber.interrupt *> reqQueue.shutdown)
+    val response = Response.fromServerSentEvents(withKeepAlive(sse, settings))
+    val unbuffered =
+      if modern then response.addHeader(Header.Custom("X-Accel-Buffering", "no")) else response
+    withSessionHeader(unbuffered, session, isNew)
+
+  private def modernErrorStatus(message: JsonRpcMessage): Option[Status] =
+    ModernHttpValidation.errorStatus(message).map(Status.fromInt)
+
+  /** Dispatch a 2026-07-28 request without consulting or mutating the legacy session store. */
+  private def modernPost[R](
+      router: McpRouter[R],
+      request: Request,
+      message: JsonRpcMessage,
+      settings: McpServerSettings
+  ): URIO[R, Response] =
+    message match
+      case req: JsonRpcMessage.Request =>
+        validateModernRequest(router, request, req) match
+          case Left((status, error)) =>
+            val failure: JsonRpcMessage =
+              JsonRpcMessage.Failure(Some(req.id), error.toErrorObject)
+            ZIO.succeed(
+              Response
+                .json(failure.toJson)
+                .status(status)
+            )
+          case Right(_) =>
+            Session.make(s"request-${req.id.toString}").flatMap { session =>
+              streamRequest(router, session, req, isNew = false, settings, modern = true)
+            }
+      case _: JsonRpcMessage.Invalid =>
+        val failure: JsonRpcMessage = JsonRpcMessage.Failure(
+          None,
+          McpError.invalidRequest("Invalid Request").toErrorObject
+        )
+        ZIO.succeed(
+          Response
+            .json(failure.toJson)
+            .status(Status.BadRequest)
+        )
+      case notification: JsonRpcMessage.Notification =>
+        validateModernNotification(router, request, notification) match
+          case Left((status, error)) =>
+            val failure: JsonRpcMessage = JsonRpcMessage.Failure(None, error.toErrorObject)
+            ZIO.succeed(Response.json(failure.toJson).status(status))
+          case Right(_) =>
+            Session
+              .make("notification")
+              .flatMap(session => router.dispatch(session, notification))
+              .as(Response.status(Status.Accepted))
+      case _ =>
+        val failure: JsonRpcMessage = JsonRpcMessage.Failure(
+          None,
+          McpError
+            .invalidRequest("HTTP POST bodies must be JSON-RPC requests or notifications")
+            .toErrorObject
+        )
+        ZIO.succeed(Response.json(failure.toJson).status(Status.BadRequest))
+
+  private def validateModernNotification[R](
+      router: McpRouter[R],
+      request: Request,
+      notification: JsonRpcMessage.Notification
+  ): Either[(Status, McpError), Unit] =
+    ModernHttpValidation
+      .validateNotification(router, notification, name => request.rawHeader(name))
+      .left
+      .map((code, err) => (Status.fromInt(code), err))
+
+  private def validateModernRequest[R](
+      router: McpRouter[R],
+      request: Request,
+      rpc: JsonRpcMessage.Request
+  ): Either[(Status, McpError), Unit] =
+    ModernHttpValidation
+      .validateRequest(router, rpc, name => request.rawHeader(name))
+      .left
+      .map((code, err) => (Status.fromInt(code), err))
+
+  private def isModernRequest(request: Request, message: JsonRpcMessage): Boolean =
+    ModernHttpValidation.isModern(name => request.rawHeader(name), message)
 
   /** Merge a heartbeat into an SSE stream so proxies / idle timeouts don't kill long-quiet
     * connections. The `ping` event type is ignored by conforming clients (the TS SDK only parses
@@ -405,9 +531,15 @@ object JvmTransportBackend extends TransportBackend:
       request: Request,
       settings: McpServerSettings
   ): ZIO[Any, Nothing, Response] =
-    getHeaderError(request, settings.allowedHosts.getOrElse(Set.empty)) match
+    val allowedHosts = settings.allowedHosts.getOrElse(Set.empty)
+    hostError(request, allowedHosts) match
       case Some(err) => ZIO.succeed(err)
-      case None => streamableGetDispatch(store, request, settings)
+      case None if request.rawHeader("mcp-protocol-version").exists(Protocol.isStatelessVersion) =>
+        ZIO.succeed(Response.status(Status.MethodNotAllowed))
+      case None =>
+        getHeaderError(request, allowedHosts) match
+          case Some(err) => ZIO.succeed(err)
+          case None => streamableGetDispatch(store, request, settings)
 
   private def streamableGetDispatch(
       store: Ref[Map[String, Session]],
@@ -416,9 +548,7 @@ object JvmTransportBackend extends TransportBackend:
   ): ZIO[Any, Nothing, Response] =
     request.rawHeader(SessionIdHeader) match
       case None =>
-        ZIO.succeed(
-          errorResponse(Status.BadRequest, s"Session ID required in $SessionIdHeader header")
-        )
+        ZIO.succeed(Response.status(Status.MethodNotAllowed))
       case Some(id) =>
         store.get.map(_.get(id)).flatMap {
           case None => ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
@@ -451,13 +581,13 @@ object JvmTransportBackend extends TransportBackend:
   ): ZIO[Any, Nothing, Response] =
     hostError(request, allowedHosts) match
       case Some(err) => ZIO.succeed(err)
+      case None if request.rawHeader("mcp-protocol-version").exists(Protocol.isStatelessVersion) =>
+        ZIO.succeed(Response.status(Status.MethodNotAllowed))
       case None if disallowDelete => ZIO.succeed(Response.status(Status.MethodNotAllowed))
       case None =>
         request.rawHeader(SessionIdHeader) match
           case None =>
-            ZIO.succeed(
-              errorResponse(Status.BadRequest, s"Session ID required in $SessionIdHeader header")
-            )
+            ZIO.succeed(Response.status(Status.MethodNotAllowed))
           case Some(id) =>
             store.modify(sessions => (sessions.get(id), sessions - id)).flatMap {
               case Some(session) => session.outbound.shutdown.as(Response.status(Status.Ok))
@@ -501,9 +631,7 @@ object JvmTransportBackend extends TransportBackend:
       requireSse: Boolean
   ): Option[Response] =
     hostError(req, allowedHosts).orElse {
-      if !protocolVersionOk(req) then
-        Some(errorResponse(Status.BadRequest, "Unsupported mcp-protocol-version header"))
-      else if !acceptsAny(req, List("application/json", "application/*")) then
+      if !acceptsAny(req, List("application/json", "application/*")) then
         Some(errorResponse(Status.NotAcceptable, "Accept must allow application/json"))
       else if requireSse && !acceptsAny(req, List("text/event-stream", "text/*")) then
         Some(errorResponse(Status.NotAcceptable, "Accept must allow text/event-stream"))

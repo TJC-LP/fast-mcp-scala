@@ -27,6 +27,17 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     @Tool(name = Some("slow"), description = Some("Sleeps forever (cancellation target)"))
     def slow(): ZIO[Any, Throwable, String] = ZIO.sleep(30.seconds).as("done")
 
+    @Tool(name = Some("needs-roots"), description = Some("Requires the roots capability"))
+    def needsRoots(ctx: McpContext): ZIO[Any, Throwable, String] =
+      ctx.listRoots().as("roots received")
+
+    @Tool(name = Some("slow-progress"), description = Some("Reports progress, then sleeps"))
+    def slowProgress(ctx: McpContext): ZIO[Any, Throwable, String] =
+      // The early notification opens the SSE stream (modern POSTs hold the response until the
+      // first queued message); the long sleep then leaves the stream quiet for keepalives.
+      ZIO.foreachDiscard(ctx.progressToken)(t => ctx.sendProgress(t, 0.5)) *>
+        ZIO.sleep(30.seconds).as("done")
+
   private val SessionIdHeader = "mcp-session-id"
 
   private val initFrame =
@@ -35,6 +46,10 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{"a":40,"b":2}}}"""
   private val listFrame =
     """{"jsonrpc":"2.0","id":3,"method":"tools/list"}"""
+  private val modernDiscoverFrame =
+    """{"jsonrpc":"2.0","id":10,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"http-test","version":"1.0"}}}}"""
+  private val modernCallFrame =
+    """{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"add","arguments":{"a":40,"b":2},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
 
   private def runUnsafe[A](effect: ZIO[Any, Throwable, A]): A =
     Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(effect).getOrThrowFiberFailure())
@@ -73,6 +88,25 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     run(routes, req)
 
   private def bodyOf(resp: Response): String = runUnsafe(resp.body.asString)
+
+  private def modernPost(
+      routes: Routes[Any, Response],
+      body: String,
+      method: String,
+      name: Option[String] = None,
+      sessionId: Option[String] = None
+  ): Response =
+    val base = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(body))
+      .addHeader(Header.Custom("content-type", "application/json"))
+      .addHeader(Header.Custom("accept", "application/json, text/event-stream"))
+      .addHeader(Header.Custom("mcp-protocol-version", "2026-07-28"))
+      .addHeader(Header.Custom("mcp-method", method))
+    val named = name.fold(base)(value => base.addHeader(Header.Custom("mcp-name", value)))
+    val request = sessionId.fold(named)(value =>
+      named.addHeader(Header.Custom(SessionIdHeader, value))
+    )
+    run(routes, request)
 
   /** Initialize and return the minted session id, draining the SSE body first — a compliant
     * client awaits the initialize response; grabbing only the header races the pre-init gate.
@@ -118,6 +152,32 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
       run(routes, Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid)))
     getResp.status shouldBe Status.Ok
     getResp.rawHeader("content-type").getOrElse("") should include("text/event-stream")
+  }
+
+  test("streamable: modern GET and DELETE ignore a legacy session id") {
+    val routes = buildRoutes(stateless = false)
+    val sid = initSid(routes)
+    val modernHeaders = List(
+      Header.Custom(SessionIdHeader, sid),
+      Header.Custom("mcp-protocol-version", "2026-07-28")
+    )
+
+    val getResp = run(
+      routes,
+      modernHeaders.foldLeft(Request.get(URL(Path.root / "mcp")))((req, header) =>
+        req.addHeader(header)
+      )
+    )
+    getResp.status shouldBe Status.MethodNotAllowed
+
+    val deleteResp = run(
+      routes,
+      modernHeaders.foldLeft(Request.delete(URL(Path.root / "mcp")))((req, header) =>
+        req.addHeader(header)
+      )
+    )
+    deleteResp.status shouldBe Status.MethodNotAllowed
+    bodyOf(post(routes, listFrame, Some(sid))) should include("tools")
   }
 
   test("streamable: unknown session id is rejected with 404") {
@@ -239,6 +299,44 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     new String(bytes.toArray, java.nio.charset.StandardCharsets.UTF_8) should include("ping")
   }
 
+  test("POST with a bogus mcp-protocol-version header and a legacy body answers -32022") {
+    val routes = buildRoutes(stateless = true)
+    // No _meta in the body: only the unknown header routes this to the modern path, so the
+    // version must be judged before _meta decoding or the client gets a misleading -32602.
+    val req = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(listFrame))
+      .addHeader(Header.Custom("content-type", "application/json"))
+      .addHeader(Header.Custom("accept", "application/json, text/event-stream"))
+      .addHeader(Header.Custom("mcp-protocol-version", "2099-01-01"))
+      .addHeader(Header.Custom("mcp-method", "tools/list"))
+    val resp = run(routes, req)
+    resp.status shouldBe Status.BadRequest
+    val body = bodyOf(resp)
+    body should include(""""code":-32022""")
+    body should include(""""supported":["2026-07-28"]""")
+    body should include(""""requested":"2099-01-01"""")
+    body should not include "-32602"
+    body should not include "_meta"
+  }
+
+  test("stateless modern POST SSE emits keepalive pings when configured") {
+    val routes =
+      buildRoutes(stateless = true, keepAlive = Some(java.time.Duration.ofMillis(100)))
+    val frame =
+      """{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"slow-progress","arguments":{},"_meta":{"progressToken":"kp","io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+    val resp = modernPost(routes, frame, "tools/call", Some("slow-progress"))
+    resp.status shouldBe Status.Ok
+    val seen = runUnsafe(
+      resp.body.asStream
+        .via(zio.stream.ZPipeline.utf8Decode)
+        .scan("")(_ + _)
+        .takeUntil(_.contains("ping"))
+        .runLast
+        .timeoutFail(new RuntimeException("no keepalive on the modern POST SSE"))(10.seconds)
+    )
+    seen.getOrElse("") should include("ping")
+  }
+
   test("requests before initialize are rejected with -32600; ping is exempt") {
     val server = McpServer.typed[Any]("Gate", "0.1.0", McpServerSettings())
     val _ = server.scanAnnotations[TestServer.type]
@@ -261,7 +359,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     after should include("\"tools\"")
   }
 
-  test("initialize with an unknown protocol version negotiates to the latest supported") {
+  test("legacy initialize with an unknown version negotiates to the latest legacy revision") {
     val server = McpServer.typed[Any]("Neg", "0.1.0", McpServerSettings())
     val _ = server.scanAnnotations[TestServer.type]
     val router = runUnsafe(server.buildRouter)
@@ -270,7 +368,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
       """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01","capabilities":{},"clientInfo":{"name":"t","version":"1.0"}}}"""
     val reply = runUnsafe(MessageLoop.handleFrame(router, session, unknownVersionInit))
       .getOrElse(fail("no reply"))
-    reply should include(s""""protocolVersion":"${Protocol.LatestProtocolVersion}"""")
+    reply should include(s""""protocolVersion":"${Protocol.LegacyProtocolVersions.head}"""")
   }
 
   test("HostGuard rejects foreign Host/Origin with 403 at the route level") {
@@ -335,10 +433,67 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     run(routes, req).status shouldBe Status.NotAcceptable
   }
 
+  test("modern POST is stateless, typed, and ignores legacy session headers") {
+    val routes = buildRoutes(stateless = false)
+    val response = modernPost(
+      routes,
+      modernDiscoverFrame,
+      "server/discover",
+      sessionId = Some("legacy-session-must-be-ignored")
+    )
+    response.status shouldBe Status.Ok
+    response.rawHeader(SessionIdHeader) shouldBe None
+    response.rawHeader("x-accel-buffering") shouldBe Some("no")
+    val body = bodyOf(response)
+    body should include(""""resultType":"complete"""")
+    body should include(""""supportedVersions":["2026-07-28"""")
+  }
+
+  test("modern POST requires matching Mcp-Method and Mcp-Name headers") {
+    val routes = buildRoutes(stateless = false)
+    val missingMethod = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(modernDiscoverFrame))
+      .addHeader(Header.Custom("content-type", "application/json"))
+      .addHeader(Header.Custom("accept", "application/json, text/event-stream"))
+      .addHeader(Header.Custom("mcp-protocol-version", "2026-07-28"))
+    val missingResponse = run(routes, missingMethod)
+    missingResponse.status shouldBe Status.BadRequest
+    bodyOf(missingResponse) should include("-32020")
+
+    val nameMismatch = modernPost(routes, modernCallFrame, "tools/call", Some("subtract"))
+    nameMismatch.status shouldBe Status.BadRequest
+    bodyOf(nameMismatch) should include("-32020")
+
+    val valid = modernPost(routes, modernCallFrame, "tools/call", Some("add"))
+    valid.status shouldBe Status.Ok
+    bodyOf(valid) should include("42")
+  }
+
+  test("streamable endpoint returns 405 for a modern-style GET without a legacy session") {
+    val routes = buildRoutes(stateless = false)
+    run(routes, Request.get(URL(Path.root / "mcp"))).status shouldBe Status.MethodNotAllowed
+  }
+
+  test("modern capability failures use HTTP 400 with -32021") {
+    val routes = buildRoutes(stateless = false)
+    val frame =
+      """{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"needs-roots","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+    val response = modernPost(routes, frame, "tools/call", Some("needs-roots"))
+    response.status shouldBe Status.BadRequest
+    bodyOf(response) should include("-32021")
+  }
+
   test("POST with an unsupported mcp-protocol-version is rejected (400)") {
     val routes = buildRoutes(stateless = true)
+    val frame =
+      """{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2099-01-01","io.modelcontextprotocol/clientCapabilities":{}}}}"""
     val req = Request
-      .post(URL(Path.root / "mcp"), Body.fromString(initFrame))
-      .addHeader(Header.Custom("mcp-protocol-version", "1999-01-01"))
-    run(routes, req).status shouldBe Status.BadRequest
+      .post(URL(Path.root / "mcp"), Body.fromString(frame))
+      .addHeader(Header.Custom("content-type", "application/json"))
+      .addHeader(Header.Custom("accept", "application/json, text/event-stream"))
+      .addHeader(Header.Custom("mcp-protocol-version", "2099-01-01"))
+      .addHeader(Header.Custom("mcp-method", "server/discover"))
+    val response = run(routes, req)
+    response.status shouldBe Status.BadRequest
+    bodyOf(response) should include("-32022")
   }

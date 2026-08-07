@@ -212,7 +212,7 @@ object MyServer extends McpServerApp[Stdio, MyServer.type]:
 
 ### HTTP (for remote clients, load balancers, test harnesses)
 
-Flip to `Http` and override `settings` to tune the listener. `runHttp()` serves the full MCP Streamable HTTP spec: `POST /mcp` for JSON-RPC, the `mcp-session-id` header for session tracking, and SSE streams for long-running calls.
+Flip to `Http` and override `settings` to tune the listener. For MCP **2026-07-28**, `runHttp()` accepts one stateless JSON-RPC message per `POST /mcp`; a request may receive a request-scoped SSE stream for progress, logging, subscriptions, and its final response. Protocol sessions, `Mcp-Session-Id`, the standalone GET stream, SSE replay, and HTTP DELETE are not used by the modern path.
 
 ```scala 3 raw
 object MyHttpServer extends McpServerApp[Http, MyHttpServer.type]:
@@ -221,7 +221,7 @@ object MyHttpServer extends McpServerApp[Http, MyHttpServer.type]:
   @Tool(...) def hello(name: String): String = s"Hello, $name!"
 ```
 
-Toggle `stateless = true` on `McpServerSettings` for request/response-only mode (no sessions, no SSE), useful behind load balancers.
+`stateless` now controls only the initialization-era compatibility adapter. Modern requests are stateless regardless of the flag. Leaving it `false` (the default) permits older clients to fall back to the former initialize/session/GET/DELETE flow; setting it `true` disables that legacy session store.
 
 Need lower-level control? Skip the sugar trait and construct directly — `val server = McpServer("name", "0.1.0")` returns the platform-appropriate server, and you can call `.tool(...)` / `.runHttp()` yourself inside your own `ZIOAppDefault`.
 
@@ -230,18 +230,18 @@ Need lower-level control? Skip the sugar trait and construct directly — `val s
 | `host` | `127.0.0.1` | Bind address (**changed in 0.5.0** from `0.0.0.0` per the spec's bind-localhost guidance; set `"0.0.0.0"` explicitly for containers / external exposure) |
 | `port` | `8000` | Listen port |
 | `httpEndpoint` | `/mcp` | JSON-RPC endpoint path |
-| `stateless` | `false` | Disable sessions and SSE |
-| `sessionIdleTimeout` | `30 minutes` | Evict streamable sessions with no client activity (live GET streams are exempt); `None` disables |
+| `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless |
+| `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity (live legacy GET streams are exempt); `None` disables |
 | `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies don't kill long calls |
 | `allowedHosts` | `None` | DNS-rebinding guard: reject requests whose `Host`/`Origin` isn't in the set (403) |
-| `loggingEnabled` | `false` | Advertise `logging` and wire `logging/setLevel` |
-| `resourcesSubscribe` | `false` | Advertise `resources.subscribe` and wire subscribe/unsubscribe |
+| `loggingEnabled` | `false` | Advertise logging; use per-request `_meta` levels in 2026 and `logging/setLevel` for legacy clients |
+| `resourcesSubscribe` | `false` | Enable legacy `resources/subscribe`; modern clients use `subscriptions/listen` |
 
-On the streamable transport, POST requests must send `Accept: application/json, text/event-stream` (replies stream as SSE) and only `initialize` may open a session — header-less non-initialize requests get `400`. Curl recipes are in [`HttpServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/HttpServer.scala).
+Modern POST requests must include `Content-Type: application/json`, an `Accept` header listing both JSON and SSE, `MCP-Protocol-Version: 2026-07-28`, and `Mcp-Method`; tool calls, resource reads, and prompt gets also require `Mcp-Name`. The protocol version and client capabilities are repeated in every request's `params._meta`. Header/body mismatches return HTTP 400 with `-32020`; unsupported versions return `-32022`; unknown request methods return HTTP 404 with `-32601`. The complete wire-behavior and review matrix is in the [2026-07-28 upgrade guide](docs/2026-07-28-upgrade.md).
 
 ## Tasks (experimental, off by default)
 
-MCP Tasks (spec **2025-11-25**) wrap long-running `tools/call` invocations in a durable, polled state machine. Clients send `params.task: {ttl}`, get a `CreateTaskResult` immediately, and then poll `tasks/get` / `tasks/list` / `tasks/cancel` / `tasks/result` until completion. Useful for LLM batch jobs, expensive computation, and integrations with external job APIs that would otherwise time out under request/response.
+MCP Tasks are now the official **`io.modelcontextprotocol/tasks` extension**. A client declares the extension in its per-request capabilities; the server may then return a flat `resultType: "task"` bearer handle without per-call augmentation. Clients poll `tasks/get`, cancel with `tasks/cancel`, and use `tasks/update` only when a task is waiting for input. `tasks/list`, `tasks/result`, and `params.task` belong to the 2025-11-25 compatibility adapter and are rejected on modern requests.
 
 Enable per server (off by default — the spec marks Tasks experimental):
 
@@ -266,14 +266,11 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   .withTaskSupport(TaskSupport.Optional)
 ```
 
-`taskSupport` values: `"forbidden"` (default), `"optional"` (clients may augment), `"required"` (clients must — bare calls return `-32601`).
+`taskSupport` remains the server-side policy: `"forbidden"` (default) always runs synchronously; `"optional"` may return a task when the client supports the extension; `"required"` requires the extension and otherwise returns `-32021`. Modern `tools/list` does not expose the removed `execution.taskSupport` field; legacy clients still see and use it.
 
-**Transport policy**: Tasks are native router middleware (no transport special-casing), so they work on any transport whose session outlives a single request:
+**Transport policy**: modern task IDs are bearer handles, so task creation and polling work over stdio and both HTTP settings on JVM and Bun. Keep them secret and enforce authorization around the MCP endpoint: possession of an ID grants access to that task. Legacy task IDs remain scoped to their initialized session.
 
-- **Streamable HTTP** (`runHttp()`, the default) and **stdio** both support tasks, on JVM and Bun alike.
-- **Stateless HTTP** does not — every client would share one task namespace — so `tasks.enabled` with `stateless = true` fails fast at startup with `IllegalStateException`.
-
-Task ids come from the platform CSPRNG, a task that outlives its TTL is interrupted (not orphaned), and terminal results stay pollable until the TTL sweeps them. When enabled, the `tasks` capability is advertised at `initialize` and each opt-in tool surfaces `execution.taskSupport` on `tools/list`.
+Task IDs come from the platform CSPRNG, a task that outlives its TTL is interrupted (not orphaned), and terminal results stay pollable until the TTL sweeps them. The current server creates working/completed/failed/cancelled tool tasks; it implements `tasks/update` validation but does not yet suspend a task in `input_required`, and task-status notifications are not emitted. The extension remains off by default.
 
 ## Customizing decoding (zio-json)
 
@@ -312,7 +309,8 @@ fast-mcp-scala is a single native MCP implementation. The entire protocol layer 
                    ┌──────────────────────────────────────┐
                    │  McpRouter  [shared/]                │
                    │  ├─ handler map (capability source)  │
-                   │  ├─ Session (per connection)         │
+                   │  ├─ RequestContext (per call)        │
+                   │  ├─ Session (stdio / legacy queues)  │
                    │  ├─ middleware (validation / tasks)  │
                    │  └─ built-ins, registered only when  │
                    │     their backing content is wired   │
@@ -331,9 +329,9 @@ Capabilities are **derived from the registered handler map** — a capability is
 
 **What the Scala.js target gives you**:
 
-- The same native MCP **server runtime** on Bun — stdio (`runStdio`, Node stdin) and Streamable HTTP (`runHttp`, `Bun.serve`), with stateful (session + per-request SSE) and stateless (JSON-response-only) modes.
+- The same native MCP **server runtime** on Bun — stdio (`runStdio`, Node stdin) and modern stateless Streamable HTTP (`runHttp`, `Bun.serve`), plus the version-selected legacy session adapter.
 - Pluggable tool-argument validation via the shared `Validation.scala` seam (permissive by default on both platforms).
-- The shared `McpContext` — `getClientInfo`, `getClientCapabilities`, `progressToken`, `sendLogMessage`, `sendProgress`, `listRoots`, `createMessage`, `elicit`, `elicitUrl` — identical on JVM and JS.
+- The shared `McpContext` — client info/capabilities, request/trace metadata, progress/logging, and MRTR-backed Roots/Sampling/Elicitation — identical on JVM and JS.
 
 **Current platform parity**:
 
@@ -373,7 +371,7 @@ Link with `./mill fast-mcp-scala.js.fastLinkJS`, then `bun run out/fast-mcp-scal
 
 ## Spec coverage
 
-fast-mcp-scala implements a focused subset of the [MCP specification](https://modelcontextprotocol.io/specification/):
+The native path targets **MCP 2026-07-28** and retains an initialization-based adapter for the older versions listed by `Protocol.LegacyProtocolVersions`:
 
 | Capability | Status |
 |---|---|
@@ -381,22 +379,23 @@ fast-mcp-scala implements a focused subset of the [MCP specification](https://mo
 | Structured tool output (`outputSchema` + `structuredContent` via `.withOutputSchema`) | ✅ |
 | Static resources & resource templates | ✅ |
 | Prompts with arguments | ✅ |
-| `McpContext` (client info, capabilities, progress token) | ✅ |
+| Stateless per-request metadata + `server/discover` | ✅ |
+| Required `resultType` + cache hints | ✅ |
+| `McpContext` (client info, capabilities, progress, trace metadata) | ✅ |
 | Stdio transport | ✅ |
-| Streamable HTTP transport (sessions + per-request SSE) | ✅ |
-| Stateless HTTP transport | ✅ |
+| Streamable HTTP (stateless POST + request-scoped SSE) | ✅ |
+| Legacy initialize/session/GET/DELETE HTTP adapter | ✅ |
+| `Mcp-Method`, `Mcp-Name`, and `x-mcp-header` validation | ✅ |
 | Progress notifications | ✅ |
-| Sampling (`createMessage`, incl. `tools`/`toolChoice`) | ✅ |
-| Elicitation (form + URL modes) | ✅ |
-| Roots (`listRoots`) | ✅ |
+| MRTR for Roots, Sampling, and Elicitation | ✅ |
 | Completion (`completion/complete`) | ✅ |
-| Resource subscriptions (`resources/subscribe`) | ✅ (opt-in) |
-| Log level control (`logging/setLevel`) | ✅ (opt-in) |
+| `subscriptions/listen` handshake and stream lifecycle | ✅; no dynamic change publishers yet |
+| Per-request log level | ✅ (opt-in) |
+| Deprecated Roots, Sampling, Logging legacy surfaces | ✅ (compatibility only) |
 | Cancellation (`notifications/cancelled`) | ✅ |
-| Tasks (spec 2025-11-25, experimental) | ✅ (opt-in) |
+| Tasks extension | ✅ (opt-in; no task `input_required` production yet) |
 | DNS-rebinding protection (`allowedHosts`) | ✅ (opt-in) |
-| Header validation (`Accept`, `mcp-protocol-version`) | ✅ |
-| Session idle eviction + SSE keepalives | ✅ |
+| Legacy session idle eviction + SSE keepalives | ✅ |
 
 See the [CHANGELOG](CHANGELOG.md) for release-by-release changes.
 

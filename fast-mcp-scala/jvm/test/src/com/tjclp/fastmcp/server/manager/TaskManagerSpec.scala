@@ -165,6 +165,30 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     val _ = runUnsafe(gate.succeed(()))
   }
 
+  it should "hide bearer tasks from legacy sessions and session tasks from bearer callers" in {
+    val tm = newManager()
+    val gate = runUnsafe(Promise.make[Nothing, Unit])
+    val never: ZIO[Any, Throwable, Any] = gate.await
+    val bearer = runUnsafe(
+      tm.create(sessionId = None, requestedTtlMs = None, run = never, _ => ZIO.unit)
+    )
+    val bearerId = bearer.task.taskId
+    // Bearer task is invisible to any legacy protocol session...
+    runUnsafe(tm.get(bearerId, Some("alice"))) shouldBe None
+    runUnsafe(tm.list(Some("alice"), None)).tasks shouldBe Nil
+    runUnsafe(tm.cancel(bearerId, Some("alice"))).isLeft shouldBe true
+    // ...but stays fully visible to bearer-scope (modern) callers.
+    runUnsafe(tm.get(bearerId, None)).isDefined shouldBe true
+
+    val owned = runUnsafe(
+      tm.create(sessionId = Some("alice"), requestedTtlMs = None, run = never, _ => ZIO.unit)
+    )
+    // Mirror case: a session-bound task is invisible to bearer-scope callers.
+    runUnsafe(tm.get(owned.task.taskId, None)) shouldBe None
+    // Cleanup
+    val _ = runUnsafe(gate.succeed(()))
+  }
+
   "list" should "return all tasks for the calling session" in {
     val tm = newManager()
     val effect: ZIO[Any, Throwable, Any] = ZIO.succeed(())

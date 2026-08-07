@@ -15,7 +15,7 @@ import com.tjclp.fastmcp.core.wire.{
 }
 
 /** Cross-platform MCP "everything" server mirroring the conformance harness's reference
-  * `everything-server.ts` ACTIVE surface (spec 2025-11-25). One source of truth registered
+  * `everything-server.ts` legacy ACTIVE surface (spec 2025-11-25). One source of truth registered
   * identically on JVM and JS; the thin platform mains (`ConformanceServerJvm` /
   * `ConformanceServerJs`) just build an [[McpServer]] and `runHttp()`.
   *

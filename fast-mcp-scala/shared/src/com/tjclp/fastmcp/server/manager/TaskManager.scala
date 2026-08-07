@@ -7,6 +7,11 @@ import core.*
 import jsonrpc.{McpError, McpErrorCarrier}
 import server.TaskSettings
 
+private[fastmcp] final case class TaskSnapshot(
+    task: Task,
+    outcome: Option[Exit[Throwable, Any]]
+)
+
 /** Internal representation of a task's mutable state. Held inside the [[TaskManager]]'s [[Ref]];
   * never escapes the manager.
   */
@@ -47,10 +52,11 @@ private final case class TaskEntry(
   *   - schedules TTL-based cleanup on a separate daemon fiber (expiry interrupts still-running work
   *     — an expired task never lingers as an invisible fiber).
   *
-  * Session isolation: tasks created with a `sessionId` are only visible to that session. A `None`
-  * `sessionId` means session-less — visible to all callers. Every transport supplies a session id:
-  * streamable HTTP mints one per `initialize`, and stdio uses a single durable `"stdio"` session
-  * (one process, one client), which is what makes tasks work over stdio.
+  * Session isolation: legacy tasks created with a `sessionId` are visible only to that initialized
+  * session. A `None` owner is a modern bearer task, visible only to bearer-scope (modern) callers
+  * that present its high-entropy ID — legacy protocol sessions never see bearer tasks, and
+  * bearer-scope callers never see session-bound tasks. Authorization beyond that belongs at the MCP
+  * endpoint boundary.
   *
   * @tparam R
   *   the ZIO environment the wrapped effect may require. `tm.create(...)` runs inside the server's
@@ -142,6 +148,19 @@ class TaskManager[R](
   def get(taskId: String, sessionId: Option[String]): UIO[Option[Task]] =
     tasksRef.get.map(visible(_, taskId, sessionId).map(_.toTask))
 
+  /** Non-blocking detailed view used by the 2026 Tasks extension. */
+  private[fastmcp] def snapshot(
+      taskId: String,
+      sessionId: Option[String]
+  ): UIO[Option[TaskSnapshot]] =
+    tasksRef.get.flatMap { all =>
+      visible(all, taskId, sessionId) match
+        case None => ZIO.none
+        case Some(entry) if entry.status.isTerminal =>
+          entry.result.await.exit.map(outcome => Some(TaskSnapshot(entry.toTask, Some(outcome))))
+        case Some(entry) => ZIO.some(TaskSnapshot(entry.toTask, None))
+    }
+
   /** List all tasks visible to `sessionId`, in `createdAt` descending order.
     *
     * Pagination is best-effort: we return everything in a single page (no cursor returned) for the
@@ -212,8 +231,10 @@ class TaskManager[R](
 
   private def sessionVisible(entry: TaskEntry, sessionId: Option[String]): Boolean =
     (entry.sessionId, sessionId) match
-      case (None, _) => true // session-less tasks are visible to all
-      case (Some(_), None) => false // session-bound task with no caller session → reject
+      case (None, None) =>
+        true // bearer task, bearer-scope (modern) caller: the id is the credential
+      case (None, Some(_)) => false // bearer task hidden from legacy protocol sessions
+      case (Some(_), None) => false // session-bound task hidden from bearer-scope callers
       case (Some(a), Some(b)) => a == b
 
   private def visible(

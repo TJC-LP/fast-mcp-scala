@@ -18,10 +18,12 @@ import com.tjclp.fastmcp.server.transport.MessageLoop
 import com.tjclp.fastmcp.server.{McpServer, McpServerSettings, TaskSettings}
 
 /** Pins the JSON-RPC codes produced at the dispatch boundary for every domain error
-  * ([[McpErrorCarrier]]), both at the `fromThrowable` unit level and through the router. Regression
-  * coverage for the review findings: unknown resource was -32603 (not -32002 + `data.uri`), unknown
-  * prompt was -32603, `tasks/result` unknown id was -32002, and the task concurrency cap was
-  * -32603 (0.4.0 returned -32602 for both task cases).
+  * ([[McpErrorCarrier]]), both at the `fromThrowable` unit level and through the router. Resource
+  * misses are era-split: the 2026-07-28 path uses Invalid Params (-32602) per that revision, while
+  * legacy sessions retain the reserved -32002 their revisions promise (both keep `data.uri`) —
+  * historically the code moved -32603 → -32002 → -32602 before the split. Unknown prompt was
+  * -32603, `tasks/result` unknown id was -32002, and the task concurrency cap was -32603 (0.4.0
+  * returned -32602 for both task cases).
   */
 class McpErrorMappingTest extends AnyFunSuite with Matchers:
 
@@ -35,9 +37,10 @@ class McpErrorMappingTest extends AnyFunSuite with Matchers:
 
   // ---- fromThrowable unit mappings ----
 
-  test("ResourceNotFoundError maps to -32002 with data.uri") {
+  test("ResourceNotFoundError maps to -32602 with data.uri") {
+    // toMcpError is era-blind; the -32002 legacy re-code happens at the router seam (below).
     val err = McpError.fromThrowable(new ResourceNotFoundError("res://missing"))
-    err.code shouldBe ErrorCodes.ResourceNotFound
+    err.code shouldBe ErrorCodes.InvalidParams
     err.message should include("res://missing")
     err.data.map(_.toString).getOrElse("") should include("res://missing")
   }
@@ -81,7 +84,7 @@ class McpErrorMappingTest extends AnyFunSuite with Matchers:
 
   // ---- router-level: the codes actually reach the wire ----
 
-  test("resources/read with unknown URI answers -32002 and data.uri") {
+  test("resources/read with unknown URI answers the reserved -32002 on legacy sessions") {
     val server = McpServer("ErrServer")
     runUnsafe(server.resource(McpStaticResource("test://x", name = Some("x"))("body")))
     val router = runUnsafe(server.buildRouter)
@@ -95,8 +98,26 @@ class McpErrorMappingTest extends AnyFunSuite with Matchers:
         """{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"test://nope"}}"""
       )
     ).getOrElse(fail("no reply"))
-    reply should include(s""""code":${ErrorCodes.ResourceNotFound}""")
+    reply should include(""""code":-32002""")
     reply should include(""""uri":"test://nope"""")
+  }
+
+  test("resources/read with unknown URI answers -32602 on the 2026-07-28 path") {
+    val server = McpServer("ErrServerModern")
+    runUnsafe(server.resource(McpStaticResource("test://x", name = Some("x"))("body")))
+    val router = runUnsafe(server.buildRouter)
+    val session = runUnsafe(Session.make("err-modern"))
+
+    val reply = runUnsafe(
+      MessageLoop.handleFrame(
+        router,
+        session,
+        """{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"test://nope","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+      )
+    ).getOrElse(fail("no reply"))
+    reply should include(""""code":-32602""")
+    reply should include(""""uri":"test://nope"""")
+    reply should not include "-32002"
   }
 
   test("prompts/get with unknown name or missing required argument answers -32602") {
@@ -133,6 +154,65 @@ class McpErrorMappingTest extends AnyFunSuite with Matchers:
     ).getOrElse(fail("no reply"))
     missingArg should include(s""""code":${ErrorCodes.InvalidParams}""")
     missingArg should include("Missing required arguments")
+  }
+
+  test("legacy tools/call: a handler-raised McpError stays in-band as isError:true") {
+    val server = McpServer("ErrServer4")
+    runUnsafe(
+      server.tool(
+        McpTool.withSchema[GreetArgs, String](
+          name = "domain-error",
+          inputSchema =
+            ToolInputSchema.unsafeFromJsonString("""{"type":"object","properties":{}}"""),
+          description = Some("Raises an McpError as a domain failure")
+        )(_ => throw McpError.invalidParams("domain failure"))
+      )
+    )
+    val router = runUnsafe(server.buildRouter)
+    val session = runUnsafe(Session.make("err4"))
+    runUnsafe(MessageLoop.handleFrame(router, session, initFrame))
+
+    val reply = runUnsafe(
+      MessageLoop.handleFrame(
+        router,
+        session,
+        """{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"domain-error","arguments":{"name":"x"}}}"""
+      )
+    ).getOrElse(fail("no reply"))
+    reply should include(""""isError":true""")
+    reply should include("domain failure")
+    reply should not include """"error":{"""
+  }
+
+  test("legacy tools/call: a capability-gate failure inside the handler is in-band, not -32600") {
+    val server = McpServer("ErrServer5")
+    runUnsafe(
+      server.tool(
+        McpTool
+          .withSchema[GreetArgs, String](
+            name = "needs-roots",
+            inputSchema =
+              ToolInputSchema.unsafeFromJsonString("""{"type":"object","properties":{}}"""),
+            description = Some("Requires the roots capability")
+          )
+          .contextual((_, ctx) => ctx.get.listRoots().as("roots received"))
+      )
+    )
+    val router = runUnsafe(server.buildRouter)
+    val session = runUnsafe(Session.make("err5"))
+    // initFrame declares no capabilities, so the handler's requireCapability("roots") fails.
+    runUnsafe(MessageLoop.handleFrame(router, session, initFrame))
+
+    val reply = runUnsafe(
+      MessageLoop.handleFrame(
+        router,
+        session,
+        """{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"needs-roots","arguments":{"name":"x"}}}"""
+      )
+    ).getOrElse(fail("no reply"))
+    reply should include(""""isError":true""")
+    reply should include("roots")
+    reply should not include """"error":{"""
   }
 
   test("tasks/result with unknown id answers -32602") {

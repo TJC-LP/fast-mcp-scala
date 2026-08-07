@@ -205,11 +205,13 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
 **Transport policy** (both platforms):
 
 - Tasks dispatch is native **router middleware** (no transport-layer special-casing).
-- Tasks work on any transport whose session outlives a single request: **streamable HTTP**
-  (`runHttp()`, the default) and **stdio** (one durable session per process).
-- **Stateless HTTP does not support tasks** — every client would share one task namespace — so
-  `tasks.enabled` with `stateless = true` fails fast at startup (`IllegalStateException` from
-  `buildRouter`).
+- Modern 2026-07-28 **bearer tasks work on every transport**, including stateless HTTP; bearer
+  tasks are invisible to legacy protocol sessions (and vice versa).
+- The **legacy task surface** (`params.task`, `tasks/get|list|cancel|result`) works on any
+  transport whose session outlives a single request: **streamable HTTP** (`runHttp()`, the
+  default) and **stdio** (one durable session per process). On the **stateless legacy adapter**
+  all clients share one session identity, so legacy task requests there are rejected at runtime
+  with `-32601`.
 - Task ids come from the platform CSPRNG; a task that outlives its TTL is interrupted (not
   orphaned); terminal results stay pollable until the TTL sweeps the entry.
 

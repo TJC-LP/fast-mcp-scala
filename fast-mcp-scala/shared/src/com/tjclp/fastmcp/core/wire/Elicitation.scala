@@ -24,14 +24,14 @@ case class ElicitRequestParams(
 object ElicitRequestParams:
   given JsonCodec[ElicitRequestParams] = DeriveJsonCodec.gen[ElicitRequestParams]
 
-/** Params for the server-initiated `elicitation/create` request, URL mode (2025-11-25): the client
-  * navigates the user to `url` to complete an out-of-band interaction. `elicitationId` is a
-  * server-minted opaque correlation id (unique per server).
+/** Params for an `elicitation/create` URL-mode input request. `elicitationId` is retained for the
+  * 2025-11-25 compatibility adapter and omitted from modern MRTR requests; modern servers encode
+  * any retry correlation in `requestState`.
   */
 case class ElicitRequestUrlParams(
     message: String,
     url: String,
-    elicitationId: String,
+    elicitationId: Option[String] = None,
     mode: String = "url",
     _meta: Option[Map[String, Json]] = None
 )
@@ -39,10 +39,14 @@ case class ElicitRequestUrlParams(
 object ElicitRequestUrlParams:
   given JsonCodec[ElicitRequestUrlParams] = DeriveJsonCodec.gen[ElicitRequestUrlParams]
 
-  /** The `-32042 URL elicitation required` protocol error, carrying the pending elicitation(s) in
-    * `data.elicitations` (TS SDK `UrlElicitationRequiredError` shape). A tool raises it to tell the
-    * client: complete these out-of-band interactions, then retry.
+  /** Source-compatible legacy constructor. The identifier is omitted on 2026 MRTR requests. */
+  def apply(message: String, url: String, elicitationId: String): ElicitRequestUrlParams =
+    new ElicitRequestUrlParams(message, url, Some(elicitationId))
+
+  /** Legacy `-32042 URL elicitation required` error. Modern handlers use `McpContext.elicitUrl` and
+    * MRTR instead.
     */
+  @deprecated("Use McpContext.elicitUrl/MRTR for MCP 2026-07-28", "1.0.0-RC1")
   def requiredError(
       elicitations: List[ElicitRequestUrlParams],
       message: String = "URL elicitation required"

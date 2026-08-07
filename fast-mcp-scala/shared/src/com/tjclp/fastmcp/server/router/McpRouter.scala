@@ -8,9 +8,11 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.wire.*
 import com.tjclp.fastmcp.jsonrpc.*
 import com.tjclp.fastmcp.jsonrpc.JsonRpcMessage.*
+import com.tjclp.fastmcp.server.transport.HttpHeaderValidation
 
 /** Canonical MCP request method names. */
 object Methods:
+  val ServerDiscover = "server/discover"
   val Initialize = "initialize"
   val Ping = "ping"
   val ToolsList = "tools/list"
@@ -24,6 +26,7 @@ object Methods:
   val PromptsGet = "prompts/get"
   val CompletionComplete = "completion/complete"
   val LoggingSetLevel = "logging/setLevel"
+  val SubscriptionsListen = "subscriptions/listen"
 
 /** The MCP dispatcher — the native-Scala replacement for the Java SDK's `McpAsyncServer` and the TS
   * SDK's `Server`.
@@ -34,8 +37,8 @@ object Methods:
   *     the middleware chain (validation → tasks → handler → error mapping),
   *   - maps handler `McpError`s to JSON-RPC error responses; unknown methods → `-32601`,
   *   - forks each request so an incoming `notifications/cancelled` can interrupt it by id,
-  *   - **derives [[ServerCapabilities]] from which handlers are registered** — `logging` is
-  *     advertised iff a `logging/setLevel` handler is wired, which fixes issue #56 by construction.
+  *   - **derives [[ServerCapabilities]] from which handlers are registered** and renders separate
+  *     modern-discovery and legacy-initialize capability shapes.
   *
   * @param requestHandlers
   *   terminal handlers keyed by method
@@ -46,17 +49,19 @@ object Methods:
   * @param hooks
   *   observability hooks
   * @param tasksEnabled
-  *   whether the `tasks` capability is advertised
+  *   whether legacy Tasks and the modern Tasks extension are advertised
   * @param resourcesSubscribe
-  *   advertise `resources.subscribe`
+  *   advertise legacy `resources.subscribe`
   * @param listChanged
   *   advertise `listChanged` on tools/resources/prompts
   */
 final class McpRouter[R](
+    serverInfo: Implementation,
     requestHandlers: Map[String, RequestHandler[R]],
     notificationHandlers: Map[String, NotificationHandler[R]],
     middlewares: List[Middleware[R]],
     hooks: ServerHooks[R],
+    toolInputSchemas: Map[String, Json],
     tasksEnabled: Boolean,
     resourcesSubscribe: Boolean,
     listChanged: Boolean
@@ -72,6 +77,27 @@ final class McpRouter[R](
       resourcesSubscribe,
       listChanged
     )
+
+  /** The 2026 discovery surface advertises Tasks only through the official extension map. The
+    * legacy initialize adapter continues to expose the former top-level field to old clients.
+    */
+  val modernCapabilities: ServerCapabilities =
+    McpRouter.toModernCapabilities(capabilities, tasksEnabled)
+
+  def hasModernMethod(method: String): Boolean =
+    requestHandlers.contains(method) && !removedFromStateless.contains(method)
+
+  def validateHttpHeaders(
+      request: JsonRpcMessage.Request,
+      header: String => Option[String]
+  ): Either[McpError, Unit] =
+    HttpHeaderValidation.validate(request, header, toolInputSchemas)
+
+  def validateHttpMethod(
+      method: String,
+      header: String => Option[String]
+  ): Either[McpError, Unit] =
+    HttpHeaderValidation.validateMethod(method, header)
 
   /** Dispatch one inbound message. Never fails — handler errors become JSON-RPC error responses.
     * Returns `Some(response)` for requests, `None` for notifications and cancelled requests.
@@ -101,28 +127,92 @@ final class McpRouter[R](
       method: String,
       params: Json
   ): URIO[R, Option[JsonRpcMessage]] =
-    session.isInitialized.flatMap { initialized =>
-      // Spec lifecycle: before initialization completes, only initialize and ping are served.
-      // Stateless/ephemeral sessions are created pre-marked by their transports.
-      if !initialized && method != Methods.Initialize && method != Methods.Ping then
+    RequestContext.declaredProtocolVersion(params) match
+      case Some(_) => dispatchStateless(session, id, method, params)
+      case None if modernOnlyMethods.contains(method) =>
+        // Method identity beats session state: -32601 is the truthful answer whether or not the
+        // legacy session initialized, mirroring removedFromStateless on the modern direction.
         ZIO.succeed(
-          Some(
-            Failure(
-              Some(id),
-              McpError
-                .invalidRequest(s"Server not initialized — send initialize before '$method'")
-                .toErrorObject
+          Some(Failure(Some(id), McpError.methodNotFound(method).toErrorObject))
+        )
+      case None =>
+        session.isInitialized.flatMap { initialized =>
+          // Compatibility adapter for MCP <= 2025-11-25.
+          if !initialized && method != Methods.Initialize && method != Methods.Ping then
+            ZIO.succeed(
+              Some(
+                Failure(
+                  Some(id),
+                  McpError
+                    .invalidRequest(s"Server not initialized — send initialize before '$method'")
+                    .toErrorObject
+                )
+              )
             )
+          else dispatchInitialized(session, id, method, params, modern = false)
+        }
+
+  private val removedFromStateless: Set[String] = Set(
+    Methods.Initialize,
+    Methods.Ping,
+    Methods.LoggingSetLevel,
+    Methods.ResourcesSubscribe,
+    Methods.ResourcesUnsubscribe,
+    Tasks.MethodTasksList,
+    Tasks.MethodTasksResult
+  )
+
+  /** Methods that exist only on the 2026-07-28 stateless path — the mirror of
+    * [[removedFromStateless]]: legacy sessions get -32601, never a bogus success (server/discover)
+    * or a misleading -32603 (subscriptions/listen).
+    */
+  private val modernOnlyMethods: Set[String] = Set(
+    Methods.ServerDiscover,
+    Methods.SubscriptionsListen,
+    Tasks.MethodTasksUpdate
+  )
+
+  private val mrtrMethods: Set[String] = Set(
+    Methods.ToolsCall,
+    Methods.ResourcesRead,
+    Methods.PromptsGet
+  )
+
+  private def dispatchStateless(
+      session: Session,
+      id: RequestId,
+      method: String,
+      params: Json
+  ): URIO[R, Option[JsonRpcMessage]] =
+    RequestContext.decode(params) match
+      case Left(err) => ZIO.some(Failure(Some(id), err.toErrorObject))
+      case Right(context) if context.protocolVersion != Protocol.LatestProtocolVersion =>
+        ZIO.some(
+          Failure(
+            Some(id),
+            McpError
+              .unsupportedProtocolVersion(
+                context.protocolVersion,
+                List(Protocol.LatestProtocolVersion)
+              )
+              .toErrorObject
           )
         )
-      else dispatchInitialized(session, id, method, params)
-    }
+      case Right(_) if removedFromStateless.contains(method) =>
+        ZIO.some(Failure(Some(id), McpError.methodNotFound(method).toErrorObject))
+      case Right(context) =>
+        val effectiveContext =
+          if modernCapabilities.logging.isDefined then context else context.copy(logLevel = None)
+        session.runWithRequest(id, effectiveContext)(
+          dispatchInitialized(session, id, method, params, modern = true)
+        )
 
   private def dispatchInitialized(
       session: Session,
       id: RequestId,
       method: String,
-      params: Json
+      params: Json,
+      modern: Boolean
   ): URIO[R, Option[JsonRpcMessage]] =
     requestHandlers.get(method) match
       case None =>
@@ -132,13 +222,39 @@ final class McpRouter[R](
         for
           fiber <- pipeline(session, params).fork
           _ <- session.trackInflight(id, method, fiber)
-          // `ensuring` so an interrupted dispatch can't leave a stale registry entry behind.
-          exit <- fiber.await.ensuring(session.clearInflight(id))
+          // Interrupt the handler explicitly when its request-scoped response stream closes. A
+          // long-lived subscriptions/listen handler otherwise outlives the dispatch fiber and
+          // leaves a stale registry entry behind.
+          exit <- fiber.await
+            .onInterrupt(fiber.interrupt.unit)
+            .ensuring(session.clearInflight(id))
           resp <- exit match
             case Exit.Success(result) =>
-              ZIO.succeed(Some(Success(id, WireMapping.completeResult(result))))
+              ZIO.succeed(Some(Success(id, WireMapping.completeResult(result, serverInfo, modern))))
             case Exit.Failure(cause) =>
               cause.failureOption match
+                case Some(err)
+                    if modern && mrtrMethods.contains(method) &&
+                      McpError.inputRequiredResult(err).isDefined =>
+                  ZIO.succeed(
+                    Some(
+                      Success(
+                        id,
+                        WireMapping.completeResult(
+                          McpError.inputRequiredResult(err).get,
+                          serverInfo,
+                          modern = true
+                        )
+                      )
+                    )
+                  )
+                case Some(err) if modern && McpError.inputRequiredResult(err).isDefined =>
+                  val unsupported = McpError.internalError(
+                    s"$method cannot return an input_required result"
+                  )
+                  hooks
+                    .onError(method, unsupported, session)
+                    .as(Some(Failure(Some(id), unsupported.toErrorObject)))
                 case Some(err) =>
                   hooks.onError(method, err, session).as(Some(Failure(Some(id), err.toErrorObject)))
                 case None =>
@@ -169,9 +285,21 @@ final class McpRouter[R](
 
 object McpRouter:
 
-  /** Derive [[ServerCapabilities]] from the set of registered request-method names plus settings.
-    * Shared by the router instance and the `initialize` built-in so both report identical caps. The
-    * crux of issue #56: `logging` appears only when `logging/setLevel` is registered.
+  def toModernCapabilities(
+      capabilities: ServerCapabilities,
+      tasksEnabled: Boolean
+  ): ServerCapabilities =
+    capabilities.copy(
+      tasks = None,
+      resources = capabilities.resources.map(_.copy(subscribe = None)),
+      extensions =
+        if tasksEnabled then
+          Some(capabilities.extensions.getOrElse(Map.empty) + (Tasks.ExtensionId -> Json.Obj()))
+        else capabilities.extensions
+    )
+
+  /** Derive the compatibility capability superset from registered methods plus settings. Modern
+    * discovery transforms removed fields into their extension-era representation.
     */
   def deriveCapabilities(
       methods: Set[String],

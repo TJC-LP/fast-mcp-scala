@@ -21,16 +21,57 @@ import com.tjclp.fastmcp.core.{Content, Cursor, TaskParams}
 // ---------- Common ----------
 
 /** Params common to paginated list requests (`tools/list`, `resources/list`, etc.). */
-case class PaginatedRequestParams(cursor: Option[Cursor] = None)
+case class PaginatedRequestParams(
+    cursor: Option[Cursor] = None,
+    _meta: Option[Map[String, Json]] = None
+)
 
 object PaginatedRequestParams:
   given JsonCodec[PaginatedRequestParams] = DeriveJsonCodec.gen[PaginatedRequestParams]
 
-/** An empty result — the spec's `EmptyResult`, used by `ping` and `logging/setLevel`. */
+/** An empty result, used by modern acknowledgements and legacy ping/log-level methods. */
 case class EmptyResult(_meta: Option[Map[String, Json]] = None)
 
 object EmptyResult:
   given JsonCodec[EmptyResult] = DeriveJsonCodec.gen[EmptyResult]
+
+enum CacheScope:
+  case Public, Private
+
+object CacheScope:
+
+  given JsonCodec[CacheScope] = JsonCodec.string.transformOrFail(
+    {
+      case "public" => Right(CacheScope.Public)
+      case "private" => Right(CacheScope.Private)
+      case other => Left(s"Invalid cache scope: $other")
+    },
+    {
+      case CacheScope.Public => "public"
+      case CacheScope.Private => "private"
+    }
+  )
+
+/** Conservative cache defaults: immediately stale and private to the current authorization context.
+  * Applications can safely add more permissive caching in a future settings surface.
+  */
+object CacheHints:
+  val TtlMs: Long = 0L
+  val Scope: CacheScope = CacheScope.Private
+
+// ---------- server/discover ----------
+
+case class DiscoverResult(
+    supportedVersions: List[String],
+    capabilities: ServerCapabilities,
+    instructions: Option[String] = None,
+    ttlMs: Long = CacheHints.TtlMs,
+    cacheScope: CacheScope = CacheHints.Scope,
+    _meta: Option[Map[String, Json]] = None
+)
+
+object DiscoverResult:
+  given JsonCodec[DiscoverResult] = DeriveJsonCodec.gen[DiscoverResult]
 
 // ---------- initialize ----------
 
@@ -59,6 +100,8 @@ object InitializeResult:
 case class ListToolsResult(
     tools: List[Tool],
     nextCursor: Option[Cursor] = None,
+    ttlMs: Long = CacheHints.TtlMs,
+    cacheScope: CacheScope = CacheHints.Scope,
     _meta: Option[Map[String, Json]] = None
 )
 
@@ -75,6 +118,8 @@ case class CallToolRequestParams(
     name: String,
     arguments: Option[Json] = None,
     task: Option[TaskParams] = None,
+    inputResponses: Option[Map[String, Json]] = None,
+    requestState: Option[String] = None,
     _meta: Option[Map[String, Json]] = None
 )
 
@@ -100,6 +145,8 @@ object CallToolResult:
 case class ListResourcesResult(
     resources: List[Resource],
     nextCursor: Option[Cursor] = None,
+    ttlMs: Long = CacheHints.TtlMs,
+    cacheScope: CacheScope = CacheHints.Scope,
     _meta: Option[Map[String, Json]] = None
 )
 
@@ -111,6 +158,8 @@ object ListResourcesResult:
 case class ListResourceTemplatesResult(
     resourceTemplates: List[ResourceTemplate],
     nextCursor: Option[Cursor] = None,
+    ttlMs: Long = CacheHints.TtlMs,
+    cacheScope: CacheScope = CacheHints.Scope,
     _meta: Option[Map[String, Json]] = None
 )
 
@@ -119,13 +168,20 @@ object ListResourceTemplatesResult:
 
 // ---------- resources/read ----------
 
-case class ReadResourceRequestParams(uri: String, _meta: Option[Map[String, Json]] = None)
+case class ReadResourceRequestParams(
+    uri: String,
+    inputResponses: Option[Map[String, Json]] = None,
+    requestState: Option[String] = None,
+    _meta: Option[Map[String, Json]] = None
+)
 
 object ReadResourceRequestParams:
   given JsonCodec[ReadResourceRequestParams] = DeriveJsonCodec.gen[ReadResourceRequestParams]
 
 case class ReadResourceResult(
     contents: List[ResourceContents],
+    ttlMs: Long = CacheHints.TtlMs,
+    cacheScope: CacheScope = CacheHints.Scope,
     _meta: Option[Map[String, Json]] = None
 )
 
@@ -149,6 +205,8 @@ object UnsubscribeRequestParams:
 case class ListPromptsResult(
     prompts: List[Prompt],
     nextCursor: Option[Cursor] = None,
+    ttlMs: Long = CacheHints.TtlMs,
+    cacheScope: CacheScope = CacheHints.Scope,
     _meta: Option[Map[String, Json]] = None
 )
 
@@ -160,6 +218,8 @@ object ListPromptsResult:
 case class GetPromptRequestParams(
     name: String,
     arguments: Option[Map[String, String]] = None,
+    inputResponses: Option[Map[String, Json]] = None,
+    requestState: Option[String] = None,
     _meta: Option[Map[String, Json]] = None
 )
 
@@ -238,3 +298,35 @@ case class CompleteResult(
 
 object CompleteResult:
   given JsonCodec[CompleteResult] = DeriveJsonCodec.gen[CompleteResult]
+
+// ---------- subscriptions/listen ----------
+
+case class SubscriptionFilter(
+    toolsListChanged: Option[Boolean] = None,
+    promptsListChanged: Option[Boolean] = None,
+    resourcesListChanged: Option[Boolean] = None,
+    resourceSubscriptions: Option[List[String]] = None
+)
+
+object SubscriptionFilter:
+  given JsonCodec[SubscriptionFilter] = DeriveJsonCodec.gen[SubscriptionFilter]
+
+case class SubscriptionsListenRequestParams(
+    notifications: SubscriptionFilter,
+    _meta: Option[Map[String, Json]] = None
+)
+
+object SubscriptionsListenRequestParams:
+
+  given JsonCodec[SubscriptionsListenRequestParams] =
+    DeriveJsonCodec.gen[SubscriptionsListenRequestParams]
+
+case class SubscriptionsAcknowledgedNotificationParams(
+    notifications: SubscriptionFilter,
+    _meta: Option[Map[String, Json]] = None
+)
+
+object SubscriptionsAcknowledgedNotificationParams:
+
+  given JsonCodec[SubscriptionsAcknowledgedNotificationParams] =
+    DeriveJsonCodec.gen[SubscriptionsAcknowledgedNotificationParams]

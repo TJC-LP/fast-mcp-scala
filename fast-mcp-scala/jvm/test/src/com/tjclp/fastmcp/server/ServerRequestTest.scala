@@ -26,6 +26,8 @@ class ServerRequestTest extends AnyFunSuite with Matchers:
   private def runUnsafe[A](effect: ZIO[Any, Throwable, A]): A =
     Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(effect).getOrThrowFiberFailure())
 
+  // Deliberately bare (no 2026 sub-capabilities): this whole suite exercises the legacy path,
+  // where a 0.5.0-era `elicitation: {}` / `sampling: {}` declaration must keep working.
   private val fullCaps = ClientCapabilities(
     roots = Some(RootsCapability()),
     sampling = Some(SamplingCapability()),
@@ -120,6 +122,55 @@ class ServerRequestTest extends AnyFunSuite with Matchers:
         ps.flatMap(_.as[ElicitRequestParams].toOption) shouldBe Some(params)
       case other => fail(s"expected Request, got $other")
     out shouldBe Right(result)
+  }
+
+  test("createMessage with tools params passes on a legacy bare sampling capability") {
+    val router = freshRouter
+    val session = runUnsafe(Session.make("sampling-tools-legacy"))
+    val ctx = McpContext.withSession(session, clientCapabilities = Some(fullCaps))
+    val params = CreateMessageRequestParams(
+      messages = List(SamplingMessage(Role.User, TextContent("hello"))),
+      maxTokens = 100,
+      tools = Some(Nil)
+    )
+    val result = CreateMessageResult(Role.Assistant, TextContent("hi"), "claude-test", None)
+    val (sent, out) = roundTrip(
+      router,
+      session,
+      ctx.createMessage(params),
+      id => JsonRpcMessage.Success(id, ast(result))
+    )
+    sent match
+      case JsonRpcMessage.Request(_, method, _) => method shouldBe "sampling/createMessage"
+      case other => fail(s"expected Request, got $other")
+    out shouldBe Right(result)
+  }
+
+  test("parallel legacy elicits are independently correlated and each gets its own answer") {
+    val router = freshRouter
+    val session = runUnsafe(Session.make("elicit-par"))
+    val ctx = McpContext.withSession(session, clientCapabilities = Some(fullCaps))
+    def params(q: String) =
+      ElicitRequestParams(message = q, requestedSchema = Json.Obj("type" -> Json.Str("object")))
+    def answer(a: String) = ElicitResult("accept", Some(Map("answer" -> Json.Str(a))))
+    val (first, second) = runUnsafe(
+      for
+        fiber <- (ctx.elicit(params("q-one")) <&> ctx.elicit(params("q-two"))).fork
+        sentA <- session.outbound.take
+        sentB <- session.outbound.take
+        // Answer by question content, not arrival order — legacy correlation is per request id.
+        _ <- ZIO.foreachDiscard(List(sentA, sentB)) {
+          case JsonRpcMessage.Request(rid, _, ps) =>
+            val q = ps.flatMap(_.as[ElicitRequestParams].toOption).map(_.message).getOrElse("?")
+            val a = if q == "q-one" then "a-one" else "a-two"
+            router.dispatch(session, JsonRpcMessage.Success(rid, ast(answer(a)))).unit
+          case other => ZIO.die(new RuntimeException(s"expected Request, got $other"))
+        }
+        out <- fiber.join
+      yield out
+    )
+    first.content.flatMap(_.get("answer")) shouldBe Some(Json.Str("a-one"))
+    second.content.flatMap(_.get("answer")) shouldBe Some(Json.Str("a-two"))
   }
 
   test("elicitUrl emits URL-mode elicitation/create with mode and elicitationId on the wire") {
