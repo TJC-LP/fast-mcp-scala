@@ -136,6 +136,65 @@ class McpErrorMappingTest extends AnyFunSuite with Matchers:
     missingArg should include("Missing required arguments")
   }
 
+  test("legacy tools/call: a handler-raised McpError stays in-band as isError:true") {
+    val server = McpServer("ErrServer4")
+    runUnsafe(
+      server.tool(
+        McpTool.withSchema[GreetArgs, String](
+          name = "domain-error",
+          inputSchema =
+            ToolInputSchema.unsafeFromJsonString("""{"type":"object","properties":{}}"""),
+          description = Some("Raises an McpError as a domain failure")
+        )(_ => throw McpError.invalidParams("domain failure"))
+      )
+    )
+    val router = runUnsafe(server.buildRouter)
+    val session = runUnsafe(Session.make("err4"))
+    runUnsafe(MessageLoop.handleFrame(router, session, initFrame))
+
+    val reply = runUnsafe(
+      MessageLoop.handleFrame(
+        router,
+        session,
+        """{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"domain-error","arguments":{"name":"x"}}}"""
+      )
+    ).getOrElse(fail("no reply"))
+    reply should include(""""isError":true""")
+    reply should include("domain failure")
+    reply should not include """"error":{"""
+  }
+
+  test("legacy tools/call: a capability-gate failure inside the handler is in-band, not -32600") {
+    val server = McpServer("ErrServer5")
+    runUnsafe(
+      server.tool(
+        McpTool
+          .withSchema[GreetArgs, String](
+            name = "needs-roots",
+            inputSchema =
+              ToolInputSchema.unsafeFromJsonString("""{"type":"object","properties":{}}"""),
+            description = Some("Requires the roots capability")
+          )
+          .contextual((_, ctx) => ctx.get.listRoots().as("roots received"))
+      )
+    )
+    val router = runUnsafe(server.buildRouter)
+    val session = runUnsafe(Session.make("err5"))
+    // initFrame declares no capabilities, so the handler's requireCapability("roots") fails.
+    runUnsafe(MessageLoop.handleFrame(router, session, initFrame))
+
+    val reply = runUnsafe(
+      MessageLoop.handleFrame(
+        router,
+        session,
+        """{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"needs-roots","arguments":{"name":"x"}}}"""
+      )
+    ).getOrElse(fail("no reply"))
+    reply should include(""""isError":true""")
+    reply should include("roots")
+    reply should not include """"error":{"""
+  }
+
   test("tasks/result with unknown id answers -32602") {
     val server =
       McpServer("ErrServer3", "0.1.0", McpServerSettings(tasks = TaskSettings(enabled = true)))

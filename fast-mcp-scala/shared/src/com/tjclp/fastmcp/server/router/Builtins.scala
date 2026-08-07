@@ -109,6 +109,7 @@ final class Builtins[R](
         case Some(_) =>
           ZIO.fail(McpError.invalidParams("tools/call: `arguments` must be a JSON object"))
       ctx <- contextFor(session, req._meta)
+      modern <- session.currentRequestContext.map(_.isDefined)
       _ <- hooks.beforeToolCall(req.name, params, session)
       outcome <- toolManager.callTool(req.name, args, Some(ctx)).either
       outputSchema = toolManager.getToolDefinition(req.name).flatMap(_.outputSchema)
@@ -116,11 +117,13 @@ final class Builtins[R](
         case Right(result) => ok(WireMapping.toolResultToWire(result, outputSchema))
         case Left(err) if McpError.inputRequiredResult(err).isDefined =>
           ZIO.succeed(McpError.inputRequiredResult(err).get)
-        // Unknown tool is bad input (protocol error); a handler that threw is a tool-level failure
-        // surfaced as an error result (isError = true), per the MCP spec.
+        // Unknown tool is bad input (protocol error) in both eras. Modern (2026-07-28): a
+        // handler-raised McpError is a protocol error by contract — -32021 in particular must
+        // escape to the HTTP 400 mapping. Legacy keeps the 0.5.0 in-band contract: every handler
+        // failure, McpError included, surfaces as isError:true so the model can self-correct.
         case Left(_: ToolNotFoundError) =>
           ZIO.fail(McpError.invalidParams(s"Unknown tool: ${req.name}"))
-        case Left(err: McpError) => ZIO.fail(err)
+        case Left(err: McpError) if modern => ZIO.fail(err)
         case Left(err) => ok(WireMapping.toolErrorToWire(err))
       _ <- hooks.afterToolCall(req.name, json, session)
     yield json
