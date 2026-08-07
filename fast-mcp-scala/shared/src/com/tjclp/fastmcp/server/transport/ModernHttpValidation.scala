@@ -45,6 +45,28 @@ private[fastmcp] object ModernHttpValidation:
         !Protocol.LegacyProtocolVersions.contains(version)
       )
 
+  /** The version the client asked for: header first, else the body's `_meta` declaration. */
+  def requestedVersion(
+      header: String => Option[String],
+      message: JsonRpcMessage
+  ): Option[String] =
+    header("mcp-protocol-version").orElse(bodyDeclaredVersion(message))
+
+  /** Classify the requested version BEFORE decoding `_meta`, so a request that only reached the
+    * modern path through an unknown version fails `-32022` with `data.supported` instead of a
+    * misleading `-32602` about a missing `_meta` object.
+    */
+  private def supportedVersion(
+      header: String => Option[String],
+      rpc: JsonRpcMessage.Request
+  ): Either[(Int, McpError), Unit] =
+    requestedVersion(header, rpc) match
+      case Some(version) if !Protocol.SupportedProtocolVersions.contains(version) =>
+        Left(
+          400 -> McpError.unsupportedProtocolVersion(version, List(Protocol.LatestProtocolVersion))
+        )
+      case _ => Right(())
+
   private def acceptOk(header: String => Option[String]): Boolean =
     header("accept").exists { value =>
       val lower = value.toLowerCase
@@ -105,6 +127,7 @@ private[fastmcp] object ModernHttpValidation:
           "Accept must include application/json and text/event-stream"
         )
       )
+      _ <- supportedVersion(header, rpc)
       context <- RequestContext
         .decode(rpc.params.getOrElse(Json.Null))
         .left

@@ -131,6 +131,29 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     }
   }
 
+  it should "reject a bogus mcp-protocol-version header with -32022, not -32602" in {
+    serverReady.flatMap { _ =>
+      val init = js.Dynamic.literal(
+        method = "POST",
+        headers = js.Dictionary(
+          "content-type" -> "application/json",
+          "accept" -> "application/json, text/event-stream",
+          "mcp-protocol-version" -> "2099-01-01",
+          "mcp-method" -> "tools/list"
+        ),
+        body = """{"jsonrpc":"2.0","id":7,"method":"tools/list"}"""
+      )
+      for
+        resp <- httpFetch("/mcp", init)
+        body <- fromJsPromise(resp.text().asInstanceOf[js.Promise[String]])
+      yield
+        resp.status.asInstanceOf[Int] shouldBe 400
+        body should include(""""code":-32022""")
+        body should include("2026-07-28")
+        body should not include "-32602"
+    }
+  }
+
   it should "serve a session-free 2026 discovery request with the required response metadata" in {
     serverReady.flatMap { _ =>
       val init = js.Dynamic.literal(

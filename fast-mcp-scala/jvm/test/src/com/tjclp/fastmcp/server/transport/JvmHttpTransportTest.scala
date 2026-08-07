@@ -299,6 +299,26 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     new String(bytes.toArray, java.nio.charset.StandardCharsets.UTF_8) should include("ping")
   }
 
+  test("POST with a bogus mcp-protocol-version header and a legacy body answers -32022") {
+    val routes = buildRoutes(stateless = true)
+    // No _meta in the body: only the unknown header routes this to the modern path, so the
+    // version must be judged before _meta decoding or the client gets a misleading -32602.
+    val req = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(listFrame))
+      .addHeader(Header.Custom("content-type", "application/json"))
+      .addHeader(Header.Custom("accept", "application/json, text/event-stream"))
+      .addHeader(Header.Custom("mcp-protocol-version", "2099-01-01"))
+      .addHeader(Header.Custom("mcp-method", "tools/list"))
+    val resp = run(routes, req)
+    resp.status shouldBe Status.BadRequest
+    val body = bodyOf(resp)
+    body should include(""""code":-32022""")
+    body should include(""""supported":["2026-07-28"]""")
+    body should include(""""requested":"2099-01-01"""")
+    body should not include "-32602"
+    body should not include "_meta"
+  }
+
   test("stateless modern POST SSE emits keepalive pings when configured") {
     val routes =
       buildRoutes(stateless = true, keepAlive = Some(java.time.Duration.ofMillis(100)))
