@@ -129,6 +129,12 @@ final class McpRouter[R](
   ): URIO[R, Option[JsonRpcMessage]] =
     RequestContext.declaredProtocolVersion(params) match
       case Some(_) => dispatchStateless(session, id, method, params)
+      case None if modernOnlyMethods.contains(method) =>
+        // Method identity beats session state: -32601 is the truthful answer whether or not the
+        // legacy session initialized, mirroring removedFromStateless on the modern direction.
+        ZIO.succeed(
+          Some(Failure(Some(id), McpError.methodNotFound(method).toErrorObject))
+        )
       case None =>
         session.isInitialized.flatMap { initialized =>
           // Compatibility adapter for MCP <= 2025-11-25.
@@ -154,6 +160,16 @@ final class McpRouter[R](
     Methods.ResourcesUnsubscribe,
     Tasks.MethodTasksList,
     Tasks.MethodTasksResult
+  )
+
+  /** Methods that exist only on the 2026-07-28 stateless path — the mirror of
+    * [[removedFromStateless]]: legacy sessions get -32601, never a bogus success (server/discover)
+    * or a misleading -32603 (subscriptions/listen).
+    */
+  private val modernOnlyMethods: Set[String] = Set(
+    Methods.ServerDiscover,
+    Methods.SubscriptionsListen,
+    Tasks.MethodTasksUpdate
   )
 
   private val mrtrMethods: Set[String] = Set(

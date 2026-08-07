@@ -242,10 +242,10 @@ final class TaskHandlers[R](taskManager: TaskManager[R]):
         case Left(err) => ZIO.fail(McpError.invalidParams(err))
     yield json
 
-  val update: RequestHandler[R] = (session, params) =>
+  // Modern-only: legacy sessions are answered -32601 by McpRouter's modernOnlyMethods gate
+  // before this handler is ever reached.
+  val update: RequestHandler[R] = (_, params) =>
     for
-      modern <- session.currentRequestContext.map(_.isDefined)
-      _ <- ZIO.fail(McpError.methodNotFound(Tasks.MethodTasksUpdate)).unless(modern)
       req <- decodeParams[TaskUpdateParams](params, "tasks/update")
       task <- taskManager.get(req.taskId, None)
       _ <- task match

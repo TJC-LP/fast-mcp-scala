@@ -122,3 +122,51 @@ class ConformanceGapsTest extends AnyFunSuite with Matchers:
     reply should not include "-32601"
     reply should include(""""resourceTemplates":[]""")
   }
+
+  // ---- modern-only methods are -32601 for legacy sessions (PR #61 review) ----
+
+  test("legacy sessions get -32601 for server/discover and subscriptions/listen") {
+    val server = McpServer("ModernOnlyGate")
+    val router = runUnsafe(server.buildRouter)
+    val session = runUnsafe(Session.make("legacy-gate"))
+    runUnsafe(MessageLoop.handleFrame(router, session, initFrame))
+
+    // Pre-gate, server/discover answered a bogus 200 DiscoverResult on legacy sessions.
+    val discover = runUnsafe(
+      MessageLoop.handleFrame(
+        router,
+        session,
+        """{"jsonrpc":"2.0","id":6,"method":"server/discover"}"""
+      )
+    ).getOrElse(fail("no reply"))
+    discover should include(""""code":-32601""")
+    discover should not include "supportedVersions"
+
+    // Pre-gate, subscriptions/listen died on the missing request id with a confusing -32603.
+    val listen = runUnsafe(
+      MessageLoop.handleFrame(
+        router,
+        session,
+        """{"jsonrpc":"2.0","id":7,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true}}}"""
+      )
+    ).getOrElse(fail("no reply"))
+    listen should include(""""code":-32601""")
+    listen should not include "-32603"
+  }
+
+  test("legacy tasks/update is -32601 (router-gated, tasks enabled)") {
+    val server =
+      McpServer("ModernOnlyTasks", "0.1.0", McpServerSettings(tasks = TaskSettings(enabled = true)))
+    val router = runUnsafe(server.buildRouter)
+    val session = runUnsafe(Session.make("legacy-tasks-gate"))
+    runUnsafe(MessageLoop.handleFrame(router, session, initFrame))
+
+    val reply = runUnsafe(
+      MessageLoop.handleFrame(
+        router,
+        session,
+        """{"jsonrpc":"2.0","id":8,"method":"tasks/update","params":{"taskId":"t","inputResponses":{}}}"""
+      )
+    ).getOrElse(fail("no reply"))
+    reply should include(""""code":-32601""")
+  }
