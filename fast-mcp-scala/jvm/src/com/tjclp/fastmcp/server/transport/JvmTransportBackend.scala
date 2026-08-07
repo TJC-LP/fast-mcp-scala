@@ -11,7 +11,7 @@ import zio.stream.*
 import com.tjclp.fastmcp.core.{ErrorCodes, Protocol}
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError, RequestId}
 import com.tjclp.fastmcp.server.McpServerSettings
-import com.tjclp.fastmcp.server.router.{McpRouter, RequestContext, Session}
+import com.tjclp.fastmcp.server.router.{McpRouter, Session}
 
 /** JVM [[TransportBackend]] — pure ZIO over `System.in`/`System.out` (stdio) and ZIO HTTP. No
   * `Unsafe`, no runtime capture, no Mono: the native router is ZIO, so `R` flows straight through
@@ -420,15 +420,7 @@ object JvmTransportBackend extends TransportBackend:
     withSessionHeader(unbuffered, session, isNew)
 
   private def modernErrorStatus(message: JsonRpcMessage): Option[Status] =
-    message match
-      case JsonRpcMessage.Failure(_, error)
-          if Set(
-            ErrorCodes.HeaderMismatch,
-            ErrorCodes.MissingRequiredClientCapability,
-            ErrorCodes.UnsupportedProtocolVersion
-          ).contains(error.code) =>
-        Some(Status.BadRequest)
-      case _ => None
+    ModernHttpValidation.errorStatus(message).map(Status.fromInt)
 
   /** Dispatch a 2026-07-28 request without consulting or mutating the legacy session store. */
   private def modernPost[R](
@@ -486,118 +478,23 @@ object JvmTransportBackend extends TransportBackend:
       request: Request,
       notification: JsonRpcMessage.Notification
   ): Either[(Status, McpError), Unit] =
-    val header = (name: String) => request.rawHeader(name)
-    val acceptOk = header("accept").exists { value =>
-      val lower = value.toLowerCase
-      (lower.contains("*/*") || lower.contains("application/json")) &&
-      (lower.contains("*/*") || lower.contains("text/event-stream"))
-    }
-    val contentTypeOk = header("content-type").exists(_.toLowerCase.contains("application/json"))
-    for
-      _ <- Either.cond(
-        contentTypeOk,
-        (),
-        Status.UnsupportedMediaType -> McpError.headerMismatch(
-          "Content-Type must be application/json"
-        )
-      )
-      _ <- Either.cond(
-        acceptOk,
-        (),
-        Status.NotAcceptable -> McpError.headerMismatch(
-          "Accept must include application/json and text/event-stream"
-        )
-      )
-      version <- header("mcp-protocol-version").toRight(
-        Status.BadRequest -> McpError.headerMismatch(
-          "Missing required MCP-Protocol-Version header"
-        )
-      )
-      _ <- Either.cond(
-        version == Protocol.LatestProtocolVersion,
-        (),
-        Status.BadRequest -> McpError.unsupportedProtocolVersion(
-          version,
-          List(Protocol.LatestProtocolVersion)
-        )
-      )
-      _ <- router.validateHttpMethod(notification.method, header).left.map(Status.BadRequest -> _)
-    yield ()
+    ModernHttpValidation
+      .validateNotification(router, notification, name => request.rawHeader(name))
+      .left
+      .map((code, err) => (Status.fromInt(code), err))
 
   private def validateModernRequest[R](
       router: McpRouter[R],
       request: Request,
       rpc: JsonRpcMessage.Request
   ): Either[(Status, McpError), Unit] =
-    val acceptOk = request.rawHeader("accept").exists { value =>
-      val lower = value.toLowerCase
-      (lower.contains("*/*") || lower.contains("application/json")) &&
-      (lower.contains("*/*") || lower.contains("text/event-stream"))
-    }
-    val contentTypeOk = request
-      .rawHeader("content-type")
-      .exists(_.toLowerCase.contains("application/json"))
-    for
-      _ <- Either.cond(
-        contentTypeOk,
-        (),
-        Status.UnsupportedMediaType -> McpError.headerMismatch(
-          "Content-Type must be application/json"
-        )
-      )
-      _ <- Either.cond(
-        acceptOk,
-        (),
-        Status.NotAcceptable -> McpError.headerMismatch(
-          "Accept must include application/json and text/event-stream"
-        )
-      )
-      context <- RequestContext
-        .decode(rpc.params.getOrElse(zio.json.ast.Json.Null))
-        .left
-        .map(Status.BadRequest -> _)
-      headerVersion <- request
-        .rawHeader("mcp-protocol-version")
-        .toRight(
-          Status.BadRequest -> McpError.headerMismatch(
-            "Missing required MCP-Protocol-Version header"
-          )
-        )
-      _ <- Either.cond(
-        headerVersion == context.protocolVersion,
-        (),
-        Status.BadRequest -> McpError.headerMismatch(
-          "MCP-Protocol-Version header does not match request metadata"
-        )
-      )
-      _ <- Either.cond(
-        context.protocolVersion == Protocol.LatestProtocolVersion,
-        (),
-        Status.BadRequest -> McpError.unsupportedProtocolVersion(
-          context.protocolVersion,
-          List(Protocol.LatestProtocolVersion)
-        )
-      )
-      _ <- router
-        .validateHttpHeaders(rpc, name => request.rawHeader(name))
-        .left
-        .map(Status.BadRequest -> _)
-      _ <- Either.cond(
-        router.hasModernMethod(rpc.method),
-        (),
-        Status.NotFound -> McpError.methodNotFound(rpc.method)
-      )
-    yield ()
+    ModernHttpValidation
+      .validateRequest(router, rpc, name => request.rawHeader(name))
+      .left
+      .map((code, err) => (Status.fromInt(code), err))
 
   private def isModernRequest(request: Request, message: JsonRpcMessage): Boolean =
-    val bodyVersion = message match
-      case JsonRpcMessage.Request(_, _, params) =>
-        RequestContext.declaredProtocolVersion(params.getOrElse(zio.json.ast.Json.Null))
-      case _ => None
-    val headerVersion = request.rawHeader("mcp-protocol-version")
-    bodyVersion.isDefined || headerVersion.exists(version =>
-      !Protocol.LegacyProtocolVersions.contains(version)
-    )
+    ModernHttpValidation.isModern(name => request.rawHeader(name), message)
 
   /** Merge a heartbeat into an SSE stream so proxies / idle timeouts don't kill long-quiet
     * connections. The `ping` event type is ignored by conforming clients (the TS SDK only parses
