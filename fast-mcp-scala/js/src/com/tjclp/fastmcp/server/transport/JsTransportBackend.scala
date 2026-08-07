@@ -195,7 +195,7 @@ object JsTransportBackend extends TransportBackend:
                 modernPost(router, req, message, McpServerSettings(stateless = true))
               else
                 for
-                  session <- Session.make("stateless")
+                  session <- Session.make("stateless", supportsTasks = false)
                   // Legacy stateless compatibility mode starts ready without a handshake.
                   _ <- session.markInitialized
                   reply <- router.dispatch(session, message)

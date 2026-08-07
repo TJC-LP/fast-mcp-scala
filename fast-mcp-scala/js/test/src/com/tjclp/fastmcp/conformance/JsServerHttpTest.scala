@@ -420,3 +420,51 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
 
     done.andThen { case _ => taskBunServer.stop() }
   }
+
+  "runHttp (stateless tasks)" should "refuse legacy task augmentation on the shared stateless session" in {
+    val statelessTaskPort = 38922
+    val server = com.tjclp.fastmcp.server.McpServer(
+      "JsHttpStatelessTasksServer",
+      "0.1.0",
+      McpServerSettings(
+        host = "127.0.0.1",
+        port = statelessTaskPort,
+        httpEndpoint = "/mcp",
+        stateless = true,
+        tasks = TaskSettings(enabled = true)
+      )
+    )
+    val taskTool = McpTool
+      .withSchema[PingArgs, PingResult, Any](
+        name = "taskable",
+        description = Some("echo, task-capable"),
+        inputSchema = pingSchema
+      )(args => PingResult(args.msg))
+      .withTaskSupport(TaskSupport.Optional)
+
+    runZio(server.tool(taskTool).unit).flatMap { _ =>
+      val bun = server.startStatelessHttp()
+      val checked = for
+        resp <- fromJsPromise(
+          js.Dynamic.global
+            .fetch(
+              s"http://127.0.0.1:$statelessTaskPort/mcp",
+              js.Dynamic.literal(
+                method = "POST",
+                headers = js.Dictionary(
+                  "content-type" -> "application/json",
+                  "accept" -> "application/json, text/event-stream"
+                ),
+                body =
+                  """{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"taskable","arguments":{"msg":"hi"},"task":{"ttl":60000}}}"""
+              )
+            )
+            .asInstanceOf[js.Promise[js.Dynamic]]
+        )
+        body <- fromJsPromise(resp.text().asInstanceOf[js.Promise[String]])
+      yield
+        body should include(""""code":-32601""")
+        body should include("stateless")
+      checked.andThen { case _ => bun.stop() }
+    }
+  }

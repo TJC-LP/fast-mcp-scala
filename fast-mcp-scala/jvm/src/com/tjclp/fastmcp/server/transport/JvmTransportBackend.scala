@@ -214,7 +214,7 @@ object JvmTransportBackend extends TransportBackend:
             if isModernRequest(request, message) then modernPost(router, request, message, settings)
             else
               for
-                session <- Session.make("stateless")
+                session <- Session.make("stateless", supportsTasks = false)
                 // Legacy stateless compatibility mode starts ready without a handshake.
                 _ <- session.markInitialized
                 reply <- router.dispatch(session, message)

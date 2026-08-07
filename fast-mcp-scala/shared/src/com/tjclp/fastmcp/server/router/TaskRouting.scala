@@ -70,6 +70,16 @@ final class TaskMiddleware[R](
         val ttl = params.as[CallToolRequestParamsLite].toOption.flatMap(_.task).flatMap(_.ttl)
 
         (taskRequested, support) match
+          // The shared stateless session's id is not a client identity: tasks keyed on it would
+          // be visible to (and cancellable by) every stateless client. Modern 2026-07-28 task
+          // requests are unaffected — they never take this legacy branch.
+          case (true, _) if !session.supportsTasks =>
+            ZIO.fail(
+              McpError.methodNotFound(
+                "task augmentation is not available on the legacy stateless transport; " +
+                  "use MCP 2026-07-28 task requests or a session-bearing transport"
+              )
+            )
           case (true, TaskSupport.Optional | TaskSupport.Required) =>
             taskManager
               .create(
@@ -174,8 +184,18 @@ final class TaskHandlers[R](taskManager: TaskManager[R]):
       case other => other
     ZIO.fromEither(normalized.as[A]).mapError(err => McpError.invalidParams(s"$context: $err"))
 
+  /** Legacy callers on the shared stateless session all present the same session identity, so the
+    * legacy task surface must not exist there. Modern callers (with a request context) are
+    * unaffected.
+    */
+  private def rejectSharedLegacySession(session: Session, method: String): IO[McpError, Unit] =
+    session.currentRequestContext.flatMap { ctx =>
+      ZIO.fail(McpError.methodNotFound(method)).when(ctx.isEmpty && !session.supportsTasks).unit
+    }
+
   val get: RequestHandler[R] = (session, params) =>
     for
+      _ <- rejectSharedLegacySession(session, Tasks.MethodTasksGet)
       req <- decodeParams[TaskIdParams](params, "tasks/get")
       modern <- session.currentRequestContext.map(_.isDefined)
       json <-
@@ -193,6 +213,7 @@ final class TaskHandlers[R](taskManager: TaskManager[R]):
 
   val list: RequestHandler[R] = (session, params) =>
     for
+      _ <- rejectSharedLegacySession(session, Tasks.MethodTasksList)
       req <- decodeParams[TaskListParams](params, "tasks/list")
       _ <- ZIO
         .fail(McpError.invalidParams(s"tasks/list: unknown cursor: ${req.cursor.getOrElse("")}"))
@@ -203,6 +224,7 @@ final class TaskHandlers[R](taskManager: TaskManager[R]):
 
   val cancel: RequestHandler[R] = (session, params) =>
     for
+      _ <- rejectSharedLegacySession(session, Tasks.MethodTasksCancel)
       req <- decodeParams[TaskIdParams](params, "tasks/cancel")
       modern <- session.currentRequestContext.map(_.isDefined)
       outcome <- taskManager.cancel(req.taskId, if modern then None else Some(session.sessionId))
@@ -232,6 +254,7 @@ final class TaskHandlers[R](taskManager: TaskManager[R]):
 
   val result: RequestHandler[R] = (session, params) =>
     for
+      _ <- rejectSharedLegacySession(session, Tasks.MethodTasksResult)
       req <- decodeParams[TaskIdParams](params, "tasks/result")
       raw <- taskManager
         .result(req.taskId, Some(session.sessionId))

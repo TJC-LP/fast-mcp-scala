@@ -18,6 +18,11 @@ import com.tjclp.fastmcp.jsonrpc.{JsonRpcErrorObject, JsonRpcMessage, McpError, 
   */
 final class Session private (
     val sessionId: String,
+    /** False only for the shared legacy-stateless session, whose id is not a client identity — task
+      * ownership keyed on it would be cross-client. Stdio ("stdio") and streamable sessions are one
+      * client each and keep the legacy task surface.
+      */
+    val supportsTasks: Boolean,
     private val protocolVersionRef: Ref[String],
     private val logLevelRef: Ref[Option[LoggingLevel]],
     private val initializedRef: Ref[Boolean],
@@ -165,7 +170,7 @@ final class Session private (
 
 object Session:
 
-  def make(sessionId: String): UIO[Session] =
+  def make(sessionId: String, supportsTasks: Boolean = true): UIO[Session] =
     for
       pv <- Ref.make("")
       ll <- Ref.make(Option.empty[LoggingLevel])
@@ -187,6 +192,7 @@ object Session:
       activeGet <- Ref.make(false)
     yield new Session(
       sessionId,
+      supportsTasks,
       pv,
       ll,
       init,

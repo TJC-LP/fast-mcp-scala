@@ -53,8 +53,10 @@ private final case class TaskEntry(
   *     — an expired task never lingers as an invisible fiber).
   *
   * Session isolation: legacy tasks created with a `sessionId` are visible only to that initialized
-  * session. A `None` owner is a modern bearer task, visible to any caller that presents its
-  * high-entropy ID; authorization belongs at the MCP endpoint boundary.
+  * session. A `None` owner is a modern bearer task, visible only to bearer-scope (modern) callers
+  * that present its high-entropy ID — legacy protocol sessions never see bearer tasks, and
+  * bearer-scope callers never see session-bound tasks. Authorization beyond that belongs at the MCP
+  * endpoint boundary.
   *
   * @tparam R
   *   the ZIO environment the wrapped effect may require. `tm.create(...)` runs inside the server's
@@ -229,8 +231,10 @@ class TaskManager[R](
 
   private def sessionVisible(entry: TaskEntry, sessionId: Option[String]): Boolean =
     (entry.sessionId, sessionId) match
-      case (None, _) => true // session-less tasks are visible to all
-      case (Some(_), None) => false // session-bound task with no caller session → reject
+      case (None, None) =>
+        true // bearer task, bearer-scope (modern) caller: the id is the credential
+      case (None, Some(_)) => false // bearer task hidden from legacy protocol sessions
+      case (Some(_), None) => false // session-bound task hidden from bearer-scope callers
       case (Some(a), Some(b)) => a == b
 
   private def visible(

@@ -47,11 +47,15 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
   private def runUnsafe[A](effect: ZIO[Any, Throwable, A]): A =
     Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(effect).getOrThrowFiberFailure())
 
-  private def buildRoutes(maxConcurrent: Int = 64): Routes[Any, Response] =
+  private def buildRoutes(
+      maxConcurrent: Int = 64,
+      stateless: Boolean = false
+  ): Routes[Any, Response] =
     val server = McpServer.typed[Any](
       "TaskT",
       "0.1.0",
       McpServerSettings(
+        stateless = stateless,
         tasks = TaskSettings(
           enabled = true,
           pollIntervalMs = 50,
@@ -102,6 +106,28 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
 
   private def tasksCancel(id: Int, taskId: String): String =
     s"""{"jsonrpc":"2.0","id":$id,"method":"tasks/cancel","params":{"taskId":"$taskId"}}"""
+
+  private def tasksList(id: Int): String =
+    s"""{"jsonrpc":"2.0","id":$id,"method":"tasks/list","params":{}}"""
+
+  /** `_meta` block declaring a 2026-07-28 request from a client with the Tasks extension. */
+  private val taskMeta =
+    s""""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"extensions":{"${Tasks.ExtensionId}":{}}}}"""
+
+  private def modernPost(
+      routes: Routes[Any, Response],
+      body: String,
+      method: String,
+      name: String
+  ): Response =
+    val req = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(body))
+      .addHeader(Header.Custom("content-type", "application/json"))
+      .addHeader(Header.Custom("accept", "application/json, text/event-stream"))
+      .addHeader(Header.Custom("mcp-protocol-version", "2026-07-28"))
+      .addHeader(Header.Custom("mcp-method", method))
+      .addHeader(Header.Custom("mcp-name", name))
+    run(routes, req)
 
   /** Poll tasks/get until the body reports the wanted status (bounded by a hard timeout). */
   private def pollUntil(
@@ -237,4 +263,44 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     val stolen = bodyOf(post(routes, tasksGet(21, taskId), Some(sid2)))
     stolen should include(""""code":-32602""")
     stolen should include("Unknown task")
+  }
+
+  test("legacy stateless: task augmentation and legacy task methods are refused with -32601") {
+    val routes = buildRoutes(stateless = true)
+    // All legacy stateless POSTs share the literal session id "stateless" — task ownership keyed
+    // on it would let every client list, read, and cancel every other client's tasks.
+    val create = bodyOf(post(routes, augmentedCall(30, "slow"), None))
+    create should include(""""code":-32601""")
+    create should include("stateless")
+    val list = bodyOf(post(routes, tasksList(31), None))
+    list should include(""""code":-32601""")
+    // The 2026-07-28 bearer-task path stays available on the very same routes.
+    val modern = bodyOf(
+      modernPost(
+        routes,
+        s"""{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"slow","arguments":{},$taskMeta}}""",
+        "tools/call",
+        "slow"
+      )
+    )
+    modern should include(""""resultType":"task"""")
+  }
+
+  test("bearer tasks are invisible to legacy sessions (list, result, cancel)") {
+    val routes = buildRoutes()
+    val created = bodyOf(
+      modernPost(
+        routes,
+        s"""{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"blocky","arguments":{},$taskMeta}}""",
+        "tools/call",
+        "blocky"
+      )
+    )
+    val taskId = extractTaskId(created)
+    val sid = initSession(routes)
+    bodyOf(post(routes, tasksList(41), Some(sid))) should not include taskId
+    val result = bodyOf(post(routes, tasksResult(42, taskId), Some(sid)))
+    result should include(""""code":-32602""")
+    val cancel = bodyOf(post(routes, tasksCancel(43, taskId), Some(sid)))
+    cancel should include(""""code":-32602""")
   }

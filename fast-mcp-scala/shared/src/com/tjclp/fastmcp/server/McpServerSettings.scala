@@ -9,7 +9,10 @@ import com.tjclp.fastmcp.core.Tasks
   * draft remains available only through the legacy protocol adapter.
   *
   * Modern task IDs are bearer handles and work over stateless HTTP, Streamable HTTP, and stdio.
-  * Calls made through the legacy protocol adapter remain isolated by their protocol session.
+  * Bearer tasks are invisible to legacy protocol sessions and vice versa. Calls made through the
+  * legacy protocol adapter remain isolated by their protocol session; on the stateless legacy
+  * adapter — where all clients share one session identity — legacy task requests are refused with
+  * `-32601`.
   *
   * @param enabled
   *   Master switch. When false, `tasks` capability is not advertised and `params.task` is ignored.
@@ -20,7 +23,9 @@ import com.tjclp.fastmcp.core.Tasks
   * @param pollIntervalMs
   *   `pollInterval` value advertised back to clients in `tasks/get` responses.
   * @param maxConcurrentPerSession
-  *   Resource cap; additional task creations beyond this are rejected with `-32602`.
+  *   Resource cap; additional task creations beyond this are rejected with `-32602`. Legacy tasks
+  *   are counted per protocol session; modern bearer tasks all share one global bucket under this
+  *   same limit.
   */
 case class TaskSettings(
     enabled: Boolean = false,
