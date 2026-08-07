@@ -11,6 +11,7 @@ import com.tjclp.fastmcp.server.{CompletionHandler, McpContext}
 import com.tjclp.fastmcp.server.manager.{
   PromptManager,
   ResourceManager,
+  ResourceNotFoundError,
   ToolManager,
   ToolNotFoundError
 }
@@ -157,7 +158,15 @@ final class Builtins[R](
     for
       req <- decodeParams[ReadResourceRequestParams](params, "resources/read")
       ctx <- contextFor(session)
-      body <- resourceManager.readResource(req.uri, Some(ctx)).mapError(McpError.fromThrowable)
+      modern <- session.currentRequestContext.map(_.isDefined)
+      body <- resourceManager
+        .readResource(req.uri, Some(ctx))
+        .mapError {
+          // 2026-07-28 folded resource misses into -32602; legacy sessions keep the reserved
+          // -32002 their spec revisions promise. The manager is era-blind, so re-code here.
+          case e: ResourceNotFoundError if !modern => McpError.legacyResourceNotFound(e.uri)
+          case other => McpError.fromThrowable(other)
+        }
       mime = resourceManager.getResourceDefinition(req.uri).flatMap(_.mimeType)
       contents = WireMapping.resourceContentsToWire(req.uri, mime, body)
       json <- ok(ReadResourceResult(contents = List(contents)))

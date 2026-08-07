@@ -48,6 +48,16 @@ object McpError:
       Some(Json.Obj("uri" -> Json.Str(uri)))
     )
 
+  /** Pre-2026 revisions reserved -32002 for resource misses; the legacy adapter re-codes
+    * [[resourceNotFound]] to this at the router seam (`Builtins.resourcesRead`).
+    */
+  def legacyResourceNotFound(uri: String): McpError =
+    McpError(
+      ErrorCodes.LegacyResourceNotFound,
+      s"Resource not found: $uri",
+      Some(Json.Obj("uri" -> Json.Str(uri)))
+    )
+
   def headerMismatch(message: String): McpError =
     McpError(ErrorCodes.HeaderMismatch, message)
 
