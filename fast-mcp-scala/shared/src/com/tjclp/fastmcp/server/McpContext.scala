@@ -118,6 +118,13 @@ open class McpContext private[fastmcp] (
   /** Request additional client input. Modern calls produce an `InputRequiredResult` and consume
     * `inputResponses` on a retry of the original request; legacy calls use a correlated
     * server-initiated request on a session-bearing transport.
+    *
+    * Modern keys are opaque to clients and derived from the request content (see
+    * [[com.tjclp.fastmcp.server.router.Session.nextInputRequestKey]]) — the derivation assumes the
+    * handler builds the same params on every replay, which holds for derived encoders and fixed
+    * construction. N parallel questions cost N round trips: the dispatcher surfaces one
+    * `input_required` per trip and `zipPar` interrupts siblings after the first failure; unanswered
+    * siblings re-ask on the next replay.
     */
   def sendRequest(
       method: String,
@@ -136,19 +143,20 @@ open class McpContext private[fastmcp] (
         s.currentRequestContext.flatMap {
           case None => s.sendRequest(method, params, timeout)
           case Some(context) =>
+            // Strip BEFORE key derivation so the key hashes exactly what the client sees.
+            val modernParams =
+              if method == "elicitation/create" then
+                params.map {
+                  case Json.Obj(fields) =>
+                    Json.Obj(fields.filterNot(_._1 == "elicitationId")*)
+                  case other => other
+                }
+              else params
             for
-              key <- s.nextInputRequestKey
+              key <- s.nextInputRequestKey(method, modernParams)
               result <- context.inputResponses.get(key) match
                 case Some(response) => ZIO.succeed(response)
                 case None =>
-                  val modernParams =
-                    if method == "elicitation/create" then
-                      params.map {
-                        case Json.Obj(fields) =>
-                          Json.Obj(fields.filterNot(_._1 == "elicitationId")*)
-                        case other => other
-                      }
-                    else params
                   val request = Json.Obj(
                     "method" -> Json.Str(method),
                     "params" -> modernParams.getOrElse(Json.Obj())

@@ -32,6 +32,17 @@ class Protocol20260728Test extends AnyFunSuite with Matchers:
   private val rootsMeta =
     """"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"roots":{}},"io.modelcontextprotocol/clientInfo":{"name":"modern-test","version":"1.0"}}"""
 
+  /** MRTR keys are opaque and content-derived (`input-<hash>-<occurrence>`); tests extract them
+    * from the `inputRequests` map rather than assuming a literal.
+    */
+  private val InputKeyPattern = """"inputRequests":\{"(input-[0-9a-f]+-\d+)"""".r
+
+  private def inputKeyOf(response: String): String =
+    InputKeyPattern
+      .findFirstMatchIn(response)
+      .map(_.group(1))
+      .getOrElse(fail(s"no input key in: $response"))
+
   test("server/discover returns typed identity, capabilities, and conservative cache hints") {
     val server = McpServer("ModernDiscovery", "0.9.0")
     val router = runUnsafe(server.buildRouter)
@@ -83,12 +94,13 @@ class Protocol20260728Test extends AnyFunSuite with Matchers:
       s"""{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workspace-root","arguments":{},$rootsMeta}}"""
     )
     first should include(""""resultType":"input_required"""")
-    first should include(""""input-1":{"method":"roots/list"""")
+    first should include(""""method":"roots/list"""")
+    val rootsKey = inputKeyOf(first)
 
     val retried = frame(
       router,
       session,
-      s"""{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"workspace-root","arguments":{},"inputResponses":{"input-1":{"resultType":"complete","roots":[{"uri":"file:///workspace","name":"workspace"}]}},$rootsMeta}}"""
+      s"""{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"workspace-root","arguments":{},"inputResponses":{"$rootsKey":{"resultType":"complete","roots":[{"uri":"file:///workspace","name":"workspace"}]}},$rootsMeta}}"""
     )
     retried should include(""""resultType":"complete"""")
     retried should include("file:///workspace")
@@ -103,10 +115,62 @@ class Protocol20260728Test extends AnyFunSuite with Matchers:
     val resumed = frame(
       router,
       session,
-      s"""{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"stateful-input","arguments":{},"inputResponses":{"input-1":{"resultType":"complete","roots":[]}},"requestState":"opaque-state",$rootsMeta}}"""
+      s"""{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"stateful-input","arguments":{},"inputResponses":{"${inputKeyOf(stateful)}":{"resultType":"complete","roots":[]}},"requestState":"opaque-state",$rootsMeta}}"""
     )
     resumed should include("resumed")
     runUnsafe(session.outbound.poll) shouldBe None
+  }
+
+  test("parallel MRTR questions get distinct keys and answers route to the asking branch") {
+    val server = McpServer("ModernParMrtr", "0.9.0")
+    runUnsafe(
+      server.tool(
+        McpTool[RootsArgs, String](name = "par-input").contextual { (_, context) =>
+          val ctx = context.get
+          def ask(question: String) =
+            ctx
+              .sendRequest("elicitation/create", Some(Json.Obj("message" -> Json.Str(question))))
+              .map {
+                case Json.Obj(fields) =>
+                  fields.toMap.get("answer").collect { case Json.Str(s) => s }.getOrElse("?")
+                case other => other.toString
+              }
+          (ask("first") <&> ask("second")).map((a, b) => s"first=$a;second=$b")
+        }
+      )
+    )
+    val router = runUnsafe(server.buildRouter)
+    val session = runUnsafe(Session.make("modern-par-mrtr"))
+    def call(id: Int, responses: List[(String, String)]): String =
+      val inputResponses =
+        if responses.isEmpty then ""
+        else
+          responses
+            .map((k, a) => s""""$k":{"answer":"$a"}""")
+            .mkString(""""inputResponses":{""", ",", "},")
+      frame(
+        router,
+        session,
+        s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"par-input","arguments":{},$inputResponses$rootsMeta}}"""
+      )
+
+    // Trip 1: zipPar surfaces one question (nondeterministic which); answer exactly that one.
+    val trip1 = call(1, Nil)
+    trip1 should include(""""resultType":"input_required"""")
+    val k1 = inputKeyOf(trip1)
+    val q1 = if trip1.contains(""""message":"first"""") then "first" else "second"
+
+    // Trip 2: the answered branch resolves from inputResponses; the sibling asks with a DIFFERENT
+    // key carrying the other question.
+    val trip2 = call(2, List(k1 -> s"answer-$q1"))
+    val k2 = inputKeyOf(trip2)
+    k2 should not be k1
+    val q2 = if q1 == "first" then "second" else "first"
+    trip2 should include(s""""message":"$q2"""")
+
+    // Trip 3: both answers present — each branch must receive the answer to ITS question.
+    val trip3 = call(3, List(k1 -> s"answer-$q1", k2 -> s"answer-$q2"))
+    trip3 should include("first=answer-first;second=answer-second")
   }
 
   test("modern requests enforce capabilities and reject removed core methods") {

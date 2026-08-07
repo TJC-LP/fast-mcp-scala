@@ -122,6 +122,33 @@ class ServerRequestTest extends AnyFunSuite with Matchers:
     out shouldBe Right(result)
   }
 
+  test("parallel legacy elicits are independently correlated and each gets its own answer") {
+    val router = freshRouter
+    val session = runUnsafe(Session.make("elicit-par"))
+    val ctx = McpContext.withSession(session, clientCapabilities = Some(fullCaps))
+    def params(q: String) =
+      ElicitRequestParams(message = q, requestedSchema = Json.Obj("type" -> Json.Str("object")))
+    def answer(a: String) = ElicitResult("accept", Some(Map("answer" -> Json.Str(a))))
+    val (first, second) = runUnsafe(
+      for
+        fiber <- (ctx.elicit(params("q-one")) <&> ctx.elicit(params("q-two"))).fork
+        sentA <- session.outbound.take
+        sentB <- session.outbound.take
+        // Answer by question content, not arrival order — legacy correlation is per request id.
+        _ <- ZIO.foreachDiscard(List(sentA, sentB)) {
+          case JsonRpcMessage.Request(rid, _, ps) =>
+            val q = ps.flatMap(_.as[ElicitRequestParams].toOption).map(_.message).getOrElse("?")
+            val a = if q == "q-one" then "a-one" else "a-two"
+            router.dispatch(session, JsonRpcMessage.Success(rid, ast(answer(a)))).unit
+          case other => ZIO.die(new RuntimeException(s"expected Request, got $other"))
+        }
+        out <- fiber.join
+      yield out
+    )
+    first.content.flatMap(_.get("answer")) shouldBe Some(Json.Str("a-one"))
+    second.content.flatMap(_.get("answer")) shouldBe Some(Json.Str("a-two"))
+  }
+
   test("elicitUrl emits URL-mode elicitation/create with mode and elicitationId on the wire") {
     val router = freshRouter
     val session = runUnsafe(Session.make("elicit-url"))
