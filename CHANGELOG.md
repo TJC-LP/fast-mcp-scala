@@ -38,9 +38,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed modern RPCs (`ping`, `logging/setLevel`, `resources/subscribe`,
   `resources/unsubscribe`, `tasks/list`, and `tasks/result`) now return Method
   Not Found. Modern log opt-in is carried per request in `_meta`.
+- Symmetrically, modern-only RPCs (`server/discover`, `subscriptions/listen`,
+  `tasks/update`) return Method Not Found on legacy sessions.
 - HeaderMismatch, MissingRequiredClientCapability, and
   UnsupportedProtocolVersion now use allocated codes `-32020`, `-32021`, and
-  `-32022`. Resource-not-found uses Invalid Params (`-32602`).
+  `-32022`. Resource-not-found uses Invalid Params (`-32602`) on the
+  2026-07-28 path; legacy sessions retain the reserved `-32002`.
+- On the modern path, an `McpError` raised inside a tool handler escapes
+  `tools/call` as a JSON-RPC protocol error (so `-32021` capability failures
+  map to HTTP 400); legacy sessions keep the 0.5.0 in-band `isError: true`
+  contract for every handler failure.
+- The 2026 sub-capability gates (`elicitation.url`, `sampling.tools`,
+  `sampling.context`) apply to modern requests only; legacy sessions keep
+  accepting the bare `elicitation` / `sampling` declarations.
+- The 0.5.0 startup guard for `tasks.enabled` + `stateless` HTTP is replaced
+  by a runtime rejection scoped to the legacy adapter: modern bearer tasks are
+  spec-legal on stateless HTTP, while legacy task requests there answer
+  `-32601` (all stateless legacy clients share one session identity).
 - Tasks moved from the old core draft to the optional
   `io.modelcontextprotocol/tasks` extension. Modern clients declare the
   extension once per request and may receive unsolicited flat task handles;
@@ -49,12 +63,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opaque value as `requestState`, and exposes echoed retry state through
   `McpContext.getRequestState`. The field is retained for older-protocol encoding.
 
+### Fixed
+
+- Modern bearer tasks (owner-less handles) are no longer visible to legacy
+  protocol sessions: `tasks/list` / `tasks/result` / `tasks/cancel` from a
+  legacy session cannot enumerate, read, or cancel another client's bearer
+  tasks, and bearer-scope callers cannot see session-bound tasks.
+- Task fibers are no longer cancelled when their creating POST's SSE stream
+  closes: a task that emits progress, logs, or its status notification after
+  the `CreateTaskResult` response completes now runs to completion, with
+  post-response messages routed to the session's GET SSE channel.
+- Stateless HTTP handlers receive the real `McpServerSettings`, so
+  `keepAliveInterval` heartbeats now flow on modern POST SSE streams in
+  stateless mode (both platforms).
+- MRTR input keys are derived from request content
+  (`input-<hash>-<occurrence>`), so parallel handler branches
+  (`elicit(a) zipPar elicit(b)`) no longer collide on one key or cross-wire
+  retry answers. Keys remain opaque to clients.
+- An unrecognized `mcp-protocol-version` on a POST answers `-32022` with
+  `data.supported` (the downgrade signal) instead of a misleading `-32602`
+  about missing `_meta`.
+
 ### Compatibility
 
 - Initialization-based versions remain available through an explicit legacy
   adapter. On HTTP, those versions retain `Mcp-Session-Id`, GET/DELETE, and the
   old task/logging/resource-subscription surface; modern requests never touch
   or mint legacy session state.
+- Legacy sessions retain the full 0.5.0 behavior surface: in-band
+  `isError: true` tool failures (including handler-raised `McpError`s), the
+  reserved `-32002` resource-not-found code, and bare `elicitation` /
+  `sampling` capability acceptance for `elicitUrl` / `createMessage`.
 - Existing servers do not need to change tool/resource/prompt registration.
   Clients adopting 2026-07-28 must send the new request `_meta` and HTTP
   metadata headers.
