@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **MCP 2026-07-28 protocol path** with required `server/discover`, per-request
+  protocol version/client capabilities/client identity, required `resultType`,
+  and server identity on every modern result.
+- **Multi Round-Trip Requests (MRTR)** for `roots/list`,
+  `sampling/createMessage`, and `elicitation/create`. Tool, resource, and
+  prompt handlers return `input_required`; clients retry the original request
+  with `inputResponses` and a fresh JSON-RPC id.
+- **`subscriptions/listen`** as a long-lived POST response stream, including
+  the required first `notifications/subscriptions/acknowledged` notification
+  and subscription-id metadata. Dynamic list/resource change publishers are
+  not exposed yet, so the acknowledgement currently accepts only supported
+  filters.
+- **2026 Streamable HTTP request metadata validation** on JVM and Bun:
+  `MCP-Protocol-Version`, `Mcp-Method`, conditional `Mcp-Name`, Base64 sentinel
+  decoding, and schema-driven `Mcp-Param-*` values from `x-mcp-header`.
+- Required cache hints (`ttlMs`, `cacheScope`) on discovery, list, and resource
+  read results. Tool/resource/prompt lists are deterministic.
+- W3C trace propagation metadata is preserved and available through
+  `McpContext#getRequestMeta` / `requestMetadata`.
+
+### Changed
+
+- The latest protocol version is `2026-07-28`. Modern requests are stateless;
+  `initialize`, `notifications/initialized`, protocol sessions, standalone
+  HTTP GET/DELETE, SSE replay, and server-initiated JSON-RPC requests are no
+  longer used on this path.
+- Removed modern RPCs (`ping`, `logging/setLevel`, `resources/subscribe`,
+  `resources/unsubscribe`, `tasks/list`, and `tasks/result`) now return Method
+  Not Found. Modern log opt-in is carried per request in `_meta`.
+- HeaderMismatch, MissingRequiredClientCapability, and
+  UnsupportedProtocolVersion now use allocated codes `-32020`, `-32021`, and
+  `-32022`. Resource-not-found uses Invalid Params (`-32602`).
+- Tasks moved from the old core draft to the optional
+  `io.modelcontextprotocol/tasks` extension. Modern clients declare the
+  extension once per request and may receive unsolicited flat task handles;
+  `tasks/get`, `tasks/update`, and `tasks/cancel` use bearer task IDs.
+- URL elicitation drops `elicitationId` on modern MRTR messages, carries its
+  opaque value as `requestState`, and exposes echoed retry state through
+  `McpContext.getRequestState`. The field is retained for older-protocol encoding.
+
+### Compatibility
+
+- Initialization-based versions remain available through an explicit legacy
+  adapter. On HTTP, those versions retain `Mcp-Session-Id`, GET/DELETE, and the
+  old task/logging/resource-subscription surface; modern requests never touch
+  or mint legacy session state.
+- Existing servers do not need to change tool/resource/prompt registration.
+  Clients adopting 2026-07-28 must send the new request `_meta` and HTTP
+  metadata headers.
+
 ## [0.5.0] - 2026-07-29
 
 Highlights: **the entire MCP protocol layer is now native pure-Scala 3** — both

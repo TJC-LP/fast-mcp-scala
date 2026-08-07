@@ -40,6 +40,14 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     inputSchema = pingSchema
   )(args => PingResult(args.msg))
 
+  private val needsRootsTool = McpTool
+    .withSchema[PingArgs, String](
+      name = "needs-roots",
+      inputSchema = pingSchema,
+      description = Some("Requires the roots capability")
+    )
+    .contextual((_, context) => context.get.listRoots().as("roots received"))
+
   private val port = 38917
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
@@ -86,7 +94,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
         stateless = true
       )
     )
-    runZio(server.tool(pingTool).unit).map { _ =>
+    runZio(server.tool(pingTool) *> server.tool(needsRootsTool).unit).map { _ =>
       // Start the Bun listener directly — `runHttp()` would be a ZIO.never that we'd have to
       // fork & interrupt; tests prefer the direct handle so afterAll can `stop()` cleanly.
       bunServer = server.startStatelessHttp()
@@ -120,6 +128,77 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
         resp <- httpFetch("/mcp", init)
         body <- fromJsPromise(resp.text().asInstanceOf[js.Promise[String]])
       yield body should include("JsHttpStatelessServer")
+    }
+  }
+
+  it should "serve a session-free 2026 discovery request with the required response metadata" in {
+    serverReady.flatMap { _ =>
+      val init = js.Dynamic.literal(
+        method = "POST",
+        headers = js.Dictionary(
+          "content-type" -> "application/json",
+          "accept" -> "application/json, text/event-stream",
+          "mcp-protocol-version" -> "2026-07-28",
+          "mcp-method" -> "server/discover",
+          "mcp-session-id" -> "ignored-legacy-session"
+        ),
+        body =
+          """{"jsonrpc":"2.0","id":10,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"http-test","version":"1.0"}}}}"""
+      )
+      for
+        resp <- httpFetch("/mcp", init)
+        body <- fromJsPromise(resp.text().asInstanceOf[js.Promise[String]])
+      yield
+        resp.status.asInstanceOf[Int] shouldBe 200
+        Option(resp.headers.get("mcp-session-id").asInstanceOf[String]) shouldBe None
+        resp.headers.get("x-accel-buffering").asInstanceOf[String] shouldBe "no"
+        body should include("\"resultType\":\"complete\"")
+        body should include("JsHttpStatelessServer")
+    }
+  }
+
+  it should "reject a modern notification whose Mcp-Method header does not match" in {
+    serverReady.flatMap { _ =>
+      val init = js.Dynamic.literal(
+        method = "POST",
+        headers = js.Dictionary(
+          "content-type" -> "application/json",
+          "accept" -> "application/json, text/event-stream",
+          "mcp-protocol-version" -> "2026-07-28",
+          "mcp-method" -> "notifications/wrong"
+        ),
+        body =
+          """{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":10}}"""
+      )
+      for
+        resp <- httpFetch("/mcp", init)
+        body <- fromJsPromise(resp.text().asInstanceOf[js.Promise[String]])
+      yield
+        resp.status.asInstanceOf[Int] shouldBe 400
+        body should include("-32020")
+    }
+  }
+
+  it should "return HTTP 400 for a missing required client capability" in {
+    serverReady.flatMap { _ =>
+      val init = js.Dynamic.literal(
+        method = "POST",
+        headers = js.Dictionary(
+          "content-type" -> "application/json",
+          "accept" -> "application/json, text/event-stream",
+          "mcp-protocol-version" -> "2026-07-28",
+          "mcp-method" -> "tools/call",
+          "mcp-name" -> "needs-roots"
+        ),
+        body =
+          """{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"needs-roots","arguments":{"msg":"x"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+      )
+      for
+        resp <- httpFetch("/mcp", init)
+        body <- fromJsPromise(resp.text().asInstanceOf[js.Promise[String]])
+      yield
+        resp.status.asInstanceOf[Int] shouldBe 400
+        body should include("-32021")
     }
   }
 
@@ -216,12 +295,18 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     )
     val lifeBunServer = lifeServer.startStatefulHttp()
 
-    def send(method: String, body: Option[String], sid: Option[String]): Future[js.Dynamic] =
+    def send(
+        method: String,
+        body: Option[String],
+        sid: Option[String],
+        protocolVersion: Option[String] = None
+    ): Future[js.Dynamic] =
       val headers = js.Dictionary[String](
         "content-type" -> "application/json",
         "accept" -> "application/json, text/event-stream"
       )
       sid.foreach(s => headers("mcp-session-id") = s)
+      protocolVersion.foreach(version => headers("mcp-protocol-version") = version)
       val init = body match
         case Some(b) => js.Dynamic.literal(method = method, headers = headers, body = b)
         case None => js.Dynamic.literal(method = method, headers = headers)
@@ -239,11 +324,15 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       initResp <- send("POST", Some(initBody), None)
       sid = initResp.headers.get("mcp-session-id").asInstanceOf[String]
       list <- send("POST", Some(listBody), Some(sid))
+      modernDelete <- send("DELETE", None, Some(sid), Some("2026-07-28"))
+      stillLive <- send("POST", Some(listBody), Some(sid))
       del <- send("DELETE", None, Some(sid))
       after <- send("POST", Some(listBody), Some(sid))
     yield
       initResp.status.asInstanceOf[Int] shouldBe 200
       list.status.asInstanceOf[Int] shouldBe 200
+      modernDelete.status.asInstanceOf[Int] shouldBe 405
+      stillLive.status.asInstanceOf[Int] shouldBe 200
       del.status.asInstanceOf[Int] shouldBe 200
       after.status.asInstanceOf[Int] shouldBe 404
 

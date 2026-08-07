@@ -19,6 +19,7 @@ object NotificationMethods:
   val ResourcesListChanged: String = "notifications/resources/list_changed"
   val ToolsListChanged: String = "notifications/tools/list_changed"
   val PromptsListChanged: String = "notifications/prompts/list_changed"
+  val SubscriptionsAcknowledged: String = "notifications/subscriptions/acknowledged"
 
 /** `notifications/cancelled` params. `requestId` is the id of the in-flight request to abort; the
   * M4 router cancels the matching fiber. Task cancellation uses `tasks/cancel` instead, so
@@ -45,8 +46,8 @@ case class ProgressNotificationParams(
 object ProgressNotificationParams:
   given JsonCodec[ProgressNotificationParams] = DeriveJsonCodec.gen[ProgressNotificationParams]
 
-/** `notifications/resources/updated` params — sent only to clients that subscribed via
-  * `resources/subscribe`.
+/** `notifications/resources/updated` params — delivered through a modern subscription stream or to
+  * a legacy resource subscriber.
   */
 case class ResourceUpdatedNotificationParams(uri: String)
 

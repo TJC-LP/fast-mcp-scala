@@ -3,7 +3,7 @@ package com.tjclp.fastmcp.core.wire
 import zio.json.*
 import zio.json.ast.Json
 
-/** Describes the MCP implementation announcing itself on `initialize`. */
+/** Describes an MCP implementation in per-result metadata, discovery, or legacy initialize. */
 case class Implementation(
     name: String,
     version: String,
@@ -74,7 +74,7 @@ case class ServerTasksToolsRequest(call: Option[Json] = None)
 object ServerTasksToolsRequest:
   given JsonCodec[ServerTasksToolsRequest] = DeriveJsonCodec.gen[ServerTasksToolsRequest]
 
-/** Capabilities the server advertises on `initialize`.
+/** Server capabilities advertised by modern discovery or the legacy initialize adapter.
   *
   * Per the design doc, this is **derived from the registered handler map** at runtime — the router
   * opts in `tools`/`resources`/`prompts`/etc. only when handlers are wired. Fixes issue #56 by
@@ -146,7 +146,7 @@ object ClientTasksElicitationRequest:
   given JsonCodec[ClientTasksElicitationRequest] =
     DeriveJsonCodec.gen[ClientTasksElicitationRequest]
 
-/** Capabilities the client advertises on `initialize`. */
+/** Client capabilities carried per modern request or once in legacy initialize. */
 case class ClientCapabilities(
     experimental: Option[Map[String, Json]] = None,
     roots: Option[RootsCapability] = None,

@@ -1,5 +1,10 @@
 # MCP Feature-Parity Audit: fast-mcp-scala Native Core vs TypeScript SDK
 
+> Historical audit: this matrix records the 2025-11-25 implementation and the
+> native-core migration. The active protocol target is 2026-07-28; see
+> [`../../docs/2026-07-28-upgrade.md`](../../docs/2026-07-28-upgrade.md) for the
+> current architecture, compatibility split, and RC checklist.
+
 ## Context
 
 This audit compares **fast-mcp-scala native core** (a pure Scala/JVM implementation of the MCP protocol server, target spec version **2025-11-25**) against the **TypeScript SDK** reference implementation (spec baseline DRAFT-2026-v1, documented version **2025-11-25** at runtime). The Scala implementation is **not a vendored wrapper** around the TS SDK—it is a ground-up protocol implementation. We grade both SDKs against the spec as published, and note where either SDK diverges intentionally or has unimplemented features.
@@ -667,4 +672,3 @@ These are intentional differences that are NOT considered feature gaps:
 | **DRAFT-2026 Features** | ✗ 0% | N/A | Out of current scope; deferred to Phase 3 |
 
 **Recommendation**: Phase 1 resolves all 2025-11-25 blockers (6 tasks, ~3-4 weeks effort). Phase 2 brings coverage to ~98% for production. Phase 3 (DRAFT-2026) is post-release work.
-

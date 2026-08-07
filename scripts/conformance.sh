@@ -29,7 +29,7 @@ cleanup() {
 trap cleanup EXIT
 
 jvm_classpath() {
-  ./mill show fast-mcp-scala.jvm.runClasspath 2>/dev/null |
+  ./mill --no-server show fast-mcp-scala.jvm.runClasspath 2>/dev/null |
     python3 -c "import sys,json,re; print(':'.join(re.sub(r'^q?ref:v\\d+:[0-9a-f]+:','',p) for p in json.load(sys.stdin)),end='')"
 }
 
@@ -43,8 +43,8 @@ start_jvm() {
 
 start_js() {
   echo "→ linking JS (fastLinkJS)" >&2
-  ./mill fast-mcp-scala.js.fastLinkJS >/dev/null 2>&1
-  local dest; dest="$(./mill show fast-mcp-scala.js.fastLinkJS 2>/dev/null |
+  ./mill --no-server fast-mcp-scala.js.fastLinkJS >/dev/null 2>&1
+  local dest; dest="$(./mill --no-server show fast-mcp-scala.js.fastLinkJS 2>/dev/null |
     python3 -c "import sys,json,re; print(re.sub(r'^ref:v\\d+:[0-9a-f]+:','',json.load(sys.stdin)['dest']))")"
   ENTRY="$(mktemp -t fmcp-conf-entry.XXXXXX).mjs"
   printf 'import { startConformance } from "%s/main.js";\nstartConformance(Number(process.argv[2] ?? %s));\n' "$dest" "$PORT" >"$ENTRY"

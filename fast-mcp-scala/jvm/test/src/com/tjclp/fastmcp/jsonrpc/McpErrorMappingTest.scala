@@ -19,9 +19,10 @@ import com.tjclp.fastmcp.server.{McpServer, McpServerSettings, TaskSettings}
 
 /** Pins the JSON-RPC codes produced at the dispatch boundary for every domain error
   * ([[McpErrorCarrier]]), both at the `fromThrowable` unit level and through the router. Regression
-  * coverage for the review findings: unknown resource was -32603 (not -32002 + `data.uri`), unknown
-  * prompt was -32603, `tasks/result` unknown id was -32002, and the task concurrency cap was
-  * -32603 (0.4.0 returned -32602 for both task cases).
+  * coverage for the review findings: unknown resource was -32603 before moving through the former
+  * -32002 mapping to the 2026-required -32602 code (while retaining `data.uri`), unknown prompt was
+  * -32603, `tasks/result` unknown id was -32002, and the task concurrency cap was -32603 (0.4.0
+  * returned -32602 for both task cases).
   */
 class McpErrorMappingTest extends AnyFunSuite with Matchers:
 
@@ -35,7 +36,7 @@ class McpErrorMappingTest extends AnyFunSuite with Matchers:
 
   // ---- fromThrowable unit mappings ----
 
-  test("ResourceNotFoundError maps to -32002 with data.uri") {
+  test("ResourceNotFoundError maps to -32602 with data.uri") {
     val err = McpError.fromThrowable(new ResourceNotFoundError("res://missing"))
     err.code shouldBe ErrorCodes.ResourceNotFound
     err.message should include("res://missing")
@@ -81,7 +82,7 @@ class McpErrorMappingTest extends AnyFunSuite with Matchers:
 
   // ---- router-level: the codes actually reach the wire ----
 
-  test("resources/read with unknown URI answers -32002 and data.uri") {
+  test("resources/read with unknown URI answers -32602 and data.uri") {
     val server = McpServer("ErrServer")
     runUnsafe(server.resource(McpStaticResource("test://x", name = Some("x"))("body")))
     val router = runUnsafe(server.buildRouter)

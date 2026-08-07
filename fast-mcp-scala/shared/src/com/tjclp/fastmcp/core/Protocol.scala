@@ -6,28 +6,34 @@ import zio.json.*
 object Protocol:
 
   /** The MCP protocol version this implementation targets on the wire. */
-  val LatestProtocolVersion: String = "2025-11-25"
+  val LatestProtocolVersion: String = "2026-07-28"
 
   /** Version assumed for HTTP requests that omit the `mcp-protocol-version` header, per the spec's
     * backwards-compatibility rule (the header postdates 2025-03-26, so header-less clients speak at
-    * most that revision). Note: version *negotiation* on unknown `initialize` versions responds
-    * with [[LatestProtocolVersion]], not this.
+    * most that revision). Legacy `initialize` negotiation remains within the legacy version set.
     */
   val DefaultNegotiatedProtocolVersion: String = "2025-03-26"
 
   /** Versions this server is willing to negotiate. Listed newest-first. */
-  val SupportedProtocolVersions: List[String] = List(
-    LatestProtocolVersion,
+  val LegacyProtocolVersions: List[String] = List(
+    "2025-11-25",
     "2025-06-18",
     "2025-03-26",
     "2024-11-05",
     "2024-10-07"
   )
 
+  /** Versions advertised by `server/discover`, newest first. The pre-2026 revisions are retained
+    * through the legacy initialize/session adapter; all 2026 requests use the stateless path.
+    */
+  val SupportedProtocolVersions: List[String] = LatestProtocolVersion :: LegacyProtocolVersions
+
+  def isStatelessVersion(version: String): Boolean = version == LatestProtocolVersion
+
   /** JSON-RPC version string embedded in every request/response. */
   val JsonRpcVersion: String = "2.0"
 
-/** Standard + MCP-specific JSON-RPC error codes (spec 2025-11-25). */
+/** Standard + MCP-specific JSON-RPC error codes (spec 2026-07-28). */
 object ErrorCodes:
   // JSON-RPC 2.0 standard codes
   val ParseError: Int = -32700
@@ -37,8 +43,16 @@ object ErrorCodes:
   val InternalError: Int = -32603
 
   // MCP-specific codes
-  val ResourceNotFound: Int = -32002
+  // Reserved by older revisions; modern resource misses use InvalidParams.
+  val LegacyResourceNotFound: Int = -32002
+
+  @deprecated("Resource misses use InvalidParams (-32602) as of MCP 2026-07-28", "1.0.0-RC1")
+  val ResourceNotFound: Int = InvalidParams
   val UrlElicitationRequired: Int = -32042
+
+  val HeaderMismatch: Int = -32020
+  val MissingRequiredClientCapability: Int = -32021
+  val UnsupportedProtocolVersion: Int = -32022
 
   // Implementation-defined transport-level codes (JSON-RPC server-error range; TS SDK parity for
   // HTTP-layer rejections that never reach the router).

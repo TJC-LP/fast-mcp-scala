@@ -1,4 +1,4 @@
-# Native Scala MCP Core — Design Doc
+# Native Scala MCP Core — Design Record
 
 **Status:** Complete — M0–M9 shipped (0.5.0, PR #60); post-review resolution landed 2026-07-29
 **Linear:** [TJC-1131](https://linear.app/tjc-technologies/issue/TJC-1131/replace-javats-mcp-sdks-with-native-scala-mcp-core)
@@ -256,7 +256,7 @@ structuredContent + `withOutputSchema`, URL-mode elicitation + sampling `tools`/
 restored task/stdio/guard test coverage, and the pinned conformance toolchain
 (TS SDK 1.29.0 / bun 1.3.14).
 
-## Next: spec 2026-07-28
+## Implemented follow-up: spec 2026-07-28
 
 The revision released 2026-07-28 is a stateless redesign — and it validates this architecture:
 the per-request POST SSE sink is exactly its delivery model, honest capability derivation makes
@@ -271,4 +271,5 @@ becomes legacy surface), sessions/`Mcp-Session-Id`/GET/DELETE removal behind ver
 (`tasks/update`; `tasks/result`/`tasks/list` removed; global store), and MRTR replacing blocking
 server→client requests (Roots/Sampling/Logging are deprecated features there).
 
-Update this section at each milestone boundary.
+Implementation and verification details now live in
+[`2026-07-28-upgrade.md`](2026-07-28-upgrade.md).

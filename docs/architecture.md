@@ -20,11 +20,13 @@ As of 0.5.0 the entire MCP protocol layer is native Scala 3 in `shared/` — JSO
                    ┌──────────────────────────────────────┐
                    │  McpRouter  [shared/]                │
                    │  ├─ handler map (capability source)  │
-                   │  ├─ Session (per connection)         │
+                   │  ├─ RequestContext (fiber-local)     │
+                   │  ├─ Session (legacy/stdio plumbing)  │
                    │  ├─ middleware (validation / tasks)  │
-                   │  └─ built-ins (initialize, ping,     │
+                   │  └─ built-ins (server/discover,      │
                    │     tools/*, resources/*, prompts/*, │
-                   │     logging/setLevel, completion, …  │
+                   │     subscriptions/listen, completion │
+                   │     + legacy compatibility methods)  │
                    │     — registered only when wired)    │
                    └─────────────────┬────────────────────┘
                                      │ TransportBackend (the platform seam)
@@ -37,7 +39,7 @@ As of 0.5.0 the entire MCP protocol layer is native Scala 3 in `shared/` — JSO
     └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
-**Honest capabilities**: a built-in handler is registered only when its backing content exists (tools registered ⇒ `tools/list` + `tools/call`; a completion provider ⇒ `completion/complete`; `loggingEnabled` ⇒ `logging/setLevel`), and `initialize` capabilities are derived from the registered method set. The server structurally cannot advertise what it can't serve (issue #56 cannot recur).
+**Honest capabilities**: a built-in handler is registered only when its backing content exists (tools registered ⇒ `tools/list` + `tools/call`; a completion provider ⇒ `completion/complete`; `loggingEnabled` ⇒ per-request logging). `server/discover` capabilities are derived from that handler set, while the legacy `initialize` adapter renders its era-appropriate shape. The server structurally cannot advertise what it cannot serve (issue #56 cannot recur).
 
 ## Module layout
 
@@ -49,8 +51,8 @@ fast-mcp-scala/
 │   │   ├── Contracts.scala               # McpTool, McpPrompt, McpDecoder, McpEncoder
 │   │   ├── Types.scala                   # ToolDefinition, Content, Message, ...
 │   │   ├── Protocol.scala                # protocol versions + JSON-RPC error codes
-│   │   ├── Tasks.scala                   # MCP Tasks wire types (spec 2025-11-25)
-│   │   └── wire/                         # 2025-11-25 wire shapes (capabilities, tools, ...)
+│   │   ├── Tasks.scala                   # 2026 Tasks extension + legacy wire types
+│   │   └── wire/                         # 2026-07-28 and compatibility wire shapes
 │   ├── jsonrpc/                          # JSON-RPC 2.0 envelope + McpError
 │   ├── codec/                            # DefaultDecodeContext + McpDecoders (zio-json)
 │   ├── macros/                           # scanAnnotations, @Tool/@Resource/@Prompt processors
@@ -112,9 +114,9 @@ The `server.tool(McpTool)` extension method bridges the shared contract to the s
 
 The protocol layer that used to be delegated to the wrapped SDKs is now four small shared packages:
 
-- **`jsonrpc/`** — the JSON-RPC 2.0 envelope (`JsonRpcMessage` with structural discrimination: requests, notifications, responses, and an `Invalid` case so envelope violations answer `-32600` with the offender's id) and `McpError`, the protocol-error type every dispatch failure maps through. Domain errors implement `McpErrorCarrier` to declare their own wire codes (`-32002` + `data.uri` for unknown resources; `-32602` for unknown prompts/tasks and the task concurrency cap); codes live centrally in `core/Protocol.scala`.
-- **`core/wire/`** — the 2025-11-25 wire shapes (capabilities, tools, resources, prompts, sampling incl. `tools`/`toolChoice`, elicitation incl. the URL mode, roots), validated character-for-character against the official TS SDK schemas and round-trip-tested.
-- **`server/router/`** — `McpRouter` (dispatch, in-flight registry, `notifications/cancelled` interruption, pre-init gating), `Builtins` (every spec method), `Session` (per-connection state: negotiated version, log level, subscriptions, server→client request correlation, idle tracking), `WireMapping`, `ValidationMiddleware` (pluggable `SchemaValidator`, permissive by default), and `TaskRouting` (MCP Tasks as middleware).
+- **`jsonrpc/`** — the JSON-RPC 2.0 envelope (`JsonRpcMessage` with structural discrimination: requests, notifications, responses, and an `Invalid` case so envelope violations answer `-32600` with the offender's id) and `McpError`, including the 2026 allocated codes `-32020` through `-32022`. Unknown resources now use JSON-RPC Invalid Params (`-32602`).
+- **`core/wire/`** — the 2026-07-28 wire shapes for discovery, cacheable results, MRTR, subscriptions, capabilities, tools, resources, prompts, deprecated client-input features, and the older initialization adapter.
+- **`server/router/`** — `McpRouter` (stateless dispatch and compatibility routing), `RequestContext` (fiber-local per-call version, identity, capabilities, log level, trace metadata, and MRTR retry data), `Builtins`, `Session` (transport queues plus legacy connection state), `WireMapping`, `ValidationMiddleware`, and `TaskRouting`.
 - **`server/transport/`** — the `TransportBackend` trait (`serveStdio`, `serveHttp`, `randomId` — session/task ids come from the platform CSPRNG), the shared `MessageLoop` (parse → dispatch → reply framing used identically by every transport), and `HostGuard` (DNS-rebinding protection).
 
 Users only see the public methods on `McpServer` (`.tool`, `.prompt`, `.resource`, `.completion`, `.scanAnnotations`, `.runStdio`, `.runHttp`).
@@ -129,9 +131,11 @@ All transports are thin adapters over the shared `MessageLoop` + router:
 | Streamable HTTP (default) | `server.runHttp()` | ZIO HTTP | `Bun.serve` |
 | Stateless HTTP | `server.runHttp()` with `stateless = true` | ZIO HTTP | `Bun.serve` |
 
-Streamable HTTP semantics (identical on both platforms): only `initialize` may mint a session (header-less non-initialize POSTs get 400, malformed bodies 400 with a `-32700` JSON-RPC body); each POST *request* is answered as a `text/event-stream` that carries the notifications and server→client sub-requests the handler emits (progress, sampling, elicitation) followed by the final reply — one ordered stream, no cross-stream races; `notifications/cancelled` interrupts the handler and closes that stream; sessions idle past `sessionIdleTimeout` are evicted (live GET streams exempt); at most one standalone GET SSE channel per session (409 on the second — the GET channel is JVM-only; JS answers a spec-allowed 405 since per-request SSE already covers server→client); `keepAliveInterval` emits SSE heartbeats on quiet streams; `DELETE` terminates a session. Transport-level rejections carry JSON-RPC error bodies (`-32000`/`-32001`), and `mcp-protocol-version` is validated (absent ⇒ the pre-header `2025-03-26` assumed).
+Modern Streamable HTTP is identical on both platforms: every request is an independent POST, carries per-request protocol metadata plus `MCP-Protocol-Version`/`Mcp-Method`/conditional `Mcp-Name` headers, and receives JSON or a request-scoped SSE stream. There is no modern protocol session, GET endpoint, DELETE lifecycle, SSE event ID, replay, or redelivery. Closing a response stream interrupts its dispatch fiber; `subscriptions/listen` uses the same long-lived POST response. Header mismatches are HTTP 400/`-32020`, unsupported versions are HTTP 400/`-32022`, missing required client capabilities are HTTP 400/`-32021`, and unknown request methods are HTTP 404/`-32601`.
 
-MCP Tasks ride the router as middleware, so they work on any session-durable transport — streamable HTTP and stdio on both platforms; `tasks.enabled` + `stateless = true` fails fast at startup (one shared namespace would leak tasks across clients).
+The former initialize + session header + GET/DELETE behavior remains behind version dispatch as a compatibility adapter. `stateless`, `sessionIdleTimeout`, and the session portions of `keepAliveInterval` govern this adapter rather than the 2026 protocol.
+
+Modern Tasks use globally visible bearer handles and therefore work across requests on every transport setting. The legacy adapter keeps task IDs session-scoped and retains its old augmentation/list/result methods.
 
 ## Error handling
 

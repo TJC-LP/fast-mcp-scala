@@ -29,7 +29,7 @@ class ServerRequestTest extends AnyFunSuite with Matchers:
   private val fullCaps = ClientCapabilities(
     roots = Some(RootsCapability()),
     sampling = Some(SamplingCapability()),
-    elicitation = Some(ElicitationCapability())
+    elicitation = Some(ElicitationCapability(url = Some(Json.Obj())))
   )
 
   private def freshRouter: McpRouter[Any] =

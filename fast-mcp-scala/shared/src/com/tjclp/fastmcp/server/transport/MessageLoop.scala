@@ -42,8 +42,8 @@ object MessageLoop:
         Failure(None, McpError.parseError(s"Parse error: $parseError").toErrorObject)
       )
 
-  /** True for the `initialize` request — the only frame allowed to mint a streamable HTTP session
-    * (spec: non-initialize requests without a session id are rejected with 400).
+  /** True for the legacy `initialize` request — the only compatibility frame allowed to mint an
+    * initialization-era Streamable HTTP session.
     */
   def isInitialize(message: JsonRpcMessage): Boolean =
     message match

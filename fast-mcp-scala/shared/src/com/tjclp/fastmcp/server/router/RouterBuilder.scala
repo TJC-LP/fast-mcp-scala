@@ -1,6 +1,6 @@
 package com.tjclp.fastmcp.server.router
 
-import com.tjclp.fastmcp.core.Tasks
+import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.wire.Implementation
 import com.tjclp.fastmcp.server.{CompletionHandler, McpServerSettings}
 import com.tjclp.fastmcp.server.manager.{PromptManager, ResourceManager, TaskManager, ToolManager}
@@ -44,7 +44,12 @@ object RouterBuilder:
     val resourcesSubscribe = settings.resourcesSubscribe && hasResources
 
     // Which request methods this server will answer — drives capability derivation.
-    val methods: Set[String] = Set(Methods.Ping, Methods.Initialize) ++
+    val methods: Set[String] = Set(
+      Methods.ServerDiscover,
+      Methods.SubscriptionsListen,
+      Methods.Ping,
+      Methods.Initialize
+    ) ++
       Option.when(hasTools)(Set(Methods.ToolsList, Methods.ToolsCall)).getOrElse(Set.empty) ++
       Option
         .when(hasResources)(Set(Methods.ResourcesList, Methods.ResourcesRead))
@@ -64,11 +69,13 @@ object RouterBuilder:
 
     val capabilities =
       McpRouter.deriveCapabilities(methods, tasksOn, resourcesSubscribe, listChanged)
+    val modernCapabilities = McpRouter.toModernCapabilities(capabilities, tasksOn)
 
     val builtins = new Builtins[R](
       serverInfo = serverInfo,
       instructions = instructions,
       capabilities = capabilities,
+      modernCapabilities = modernCapabilities,
       toolManager = toolManager,
       promptManager = promptManager,
       resourceManager = resourceManager,
@@ -83,6 +90,8 @@ object RouterBuilder:
     // Map each registered method to its built-in handler.
     val requestHandlers: Map[String, RequestHandler[R]] =
       Map(
+        Methods.ServerDiscover -> builtins.discover,
+        Methods.SubscriptionsListen -> builtins.subscriptionsListen,
         Methods.Ping -> builtins.ping,
         Methods.Initialize -> builtins.initialize
       ) ++
@@ -117,6 +126,7 @@ object RouterBuilder:
           case Some(th) if tasksOn =>
             Map(
               Tasks.MethodTasksGet -> th.get,
+              Tasks.MethodTasksUpdate -> th.update,
               Tasks.MethodTasksList -> th.list,
               Tasks.MethodTasksCancel -> th.cancel,
               Tasks.MethodTasksResult -> th.result
@@ -135,10 +145,13 @@ object RouterBuilder:
         extraMiddlewares
 
     new McpRouter[R](
+      serverInfo = serverInfo,
       requestHandlers = requestHandlers,
       notificationHandlers = notificationHandlers,
       middlewares = middlewares,
       hooks = hooks,
+      toolInputSchemas =
+        toolManager.listDefinitions().map(d => d.name -> d.inputSchema.toAst).toMap,
       tasksEnabled = tasksOn,
       resourcesSubscribe = resourcesSubscribe,
       listChanged = listChanged

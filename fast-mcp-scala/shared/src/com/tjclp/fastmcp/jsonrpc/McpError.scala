@@ -29,6 +29,10 @@ trait McpErrorCarrier:
 
 object McpError:
 
+  // Never crosses the wire. It tunnels an MRTR interim result through user handler error channels
+  // until the request dispatcher can turn it back into a successful `input_required` result.
+  private val InputRequiredSentinel: Int = Int.MinValue
+
   def parseError(message: String): McpError = McpError(ErrorCodes.ParseError, message)
   def invalidRequest(message: String): McpError = McpError(ErrorCodes.InvalidRequest, message)
 
@@ -39,10 +43,52 @@ object McpError:
 
   def resourceNotFound(uri: String): McpError =
     McpError(
-      ErrorCodes.ResourceNotFound,
+      ErrorCodes.InvalidParams,
       s"Resource not found: $uri",
       Some(Json.Obj("uri" -> Json.Str(uri)))
     )
+
+  def headerMismatch(message: String): McpError =
+    McpError(ErrorCodes.HeaderMismatch, message)
+
+  def unsupportedProtocolVersion(requested: String, supported: List[String]): McpError =
+    McpError(
+      ErrorCodes.UnsupportedProtocolVersion,
+      s"Unsupported protocol version: $requested",
+      Some(
+        Json.Obj(
+          "supported" -> Json.Arr(supported.map(Json.Str(_))*),
+          "requested" -> Json.Str(requested)
+        )
+      )
+    )
+
+  def missingRequiredClientCapability(requiredCapabilities: Json): McpError =
+    McpError(
+      ErrorCodes.MissingRequiredClientCapability,
+      "The request requires a client capability that was not declared",
+      Some(Json.Obj("requiredCapabilities" -> requiredCapabilities))
+    )
+
+  private[fastmcp] def inputRequired(
+      key: String,
+      request: Json,
+      requestState: Option[String] = None
+  ): McpError =
+    val fields = List(
+      "resultType" -> Json.Str("input_required"),
+      "inputRequests" -> Json.Obj(key -> request)
+    ) ++ requestState.map(value => "requestState" -> Json.Str(value)).toList
+    McpError(
+      InputRequiredSentinel,
+      "Additional client input is required",
+      Some(Json.Obj(fields*))
+    )
+
+  private[fastmcp] def inputRequiredResult(error: Throwable): Option[Json] =
+    error match
+      case e: McpError if e.code == InputRequiredSentinel => e.data
+      case _ => None
 
   /** Map an arbitrary throwable to an `McpError`. Ports the classification the old
     * `ErrorMapper.errorMessage` did, but produces a structured protocol error rather than a string.

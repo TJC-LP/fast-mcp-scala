@@ -7,16 +7,14 @@ import com.tjclp.fastmcp.core.LoggingLevel
 import com.tjclp.fastmcp.core.wire.{ClientCapabilities, Implementation}
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcErrorObject, JsonRpcMessage, McpError, RequestId}
 
-/** Per-connection MCP session state.
+/** Mutable request/connection state owned by a transport.
   *
-  * One `Session` exists per transport connection (one for stdio; one per `mcp-session-id` for
-  * streamable HTTP; an ephemeral one per request for stateless HTTP). It carries the negotiated
-  * protocol version, the client's requested log level, subscription set, a server-request counter
-  * (for server-initiated requests like sampling/elicit), and the in-flight fiber registry used to
-  * honor `notifications/cancelled`.
+  * Modern HTTP creates one ephemeral instance per request, while stdio uses one connection object
+  * whose modern request data remains fiber-local. The legacy HTTP adapter keeps one instance per
+  * `mcp-session-id`. It also owns compatibility handshake state and the in-flight fiber registry.
   *
-  * `outbound` is the channel the transport drains to push server→client messages (log
-  * notifications, progress, server-initiated requests). Transports supply the sink.
+  * `outbound` is the channel the transport drains for request-scoped notifications and subscription
+  * acknowledgements; the legacy adapter also carries server-initiated requests.
   */
 final class Session private (
     val sessionId: String,
@@ -31,6 +29,9 @@ final class Session private (
     private val clientCapabilitiesRef: Ref[Option[ClientCapabilities]],
     val outbound: Queue[JsonRpcMessage],
     private val sinkRef: FiberRef[Option[Queue[JsonRpcMessage]]],
+    private val requestContextRef: FiberRef[Option[RequestContext]],
+    private val requestIdRef: FiberRef[Option[RequestId]],
+    private val inputRequestCounterRef: FiberRef[Int],
     private val lastSeenRef: Ref[Long],
     private val activeGetRef: Ref[Boolean]
 ):
@@ -96,6 +97,24 @@ final class Session private (
   def runWithSink[R, E, A](q: Queue[JsonRpcMessage])(zio: ZIO[R, E, A]): ZIO[R, E, A] =
     sinkRef.locally(Some(q))(zio)
 
+  /** Bind stateless per-request metadata to the handler fiber and all of its children. */
+  def runWithRequest[R, E, A](
+      id: RequestId,
+      context: RequestContext
+  )(zio: ZIO[R, E, A]): ZIO[R, E, A] =
+    requestContextRef.locally(Some(context))(
+      requestIdRef.locally(Some(id))(inputRequestCounterRef.locally(0)(zio))
+    )
+
+  def currentRequestContext: UIO[Option[RequestContext]] = requestContextRef.get
+  def currentRequestId: UIO[Option[RequestId]] = requestIdRef.get
+
+  /** Stable MRTR key allocation. The same handler execution allocates the same sequence again when
+    * the client retries the original request.
+    */
+  def nextInputRequestKey: UIO[String] =
+    inputRequestCounterRef.updateAndGet(_ + 1).map(n => s"input-$n")
+
   // --- cancellation registry ---
 
   def trackInflight(id: RequestId, method: String, fiber: Fiber.Runtime[?, ?]): UIO[Unit] =
@@ -159,6 +178,11 @@ object Session:
       cCaps <- Ref.make(Option.empty[ClientCapabilities])
       outbound <- Queue.unbounded[JsonRpcMessage]
       sink = Unsafe.unsafe(implicit u => FiberRef.unsafe.make(Option.empty[Queue[JsonRpcMessage]]))
+      requestContext = Unsafe.unsafe(implicit u =>
+        FiberRef.unsafe.make(Option.empty[RequestContext])
+      )
+      requestId = Unsafe.unsafe(implicit u => FiberRef.unsafe.make(Option.empty[RequestId]))
+      inputCounter = Unsafe.unsafe(implicit u => FiberRef.unsafe.make(0))
       seen <- Ref.make(java.lang.System.currentTimeMillis())
       activeGet <- Ref.make(false)
     yield new Session(
@@ -174,6 +198,9 @@ object Session:
       cCaps,
       outbound,
       sink,
+      requestContext,
+      requestId,
+      inputCounter,
       seen,
       activeGet
     )

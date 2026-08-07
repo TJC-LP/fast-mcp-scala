@@ -2,23 +2,27 @@ package com.tjclp.fastmcp.core
 
 import zio.json.*
 
-/** MCP Tasks — experimental polling primitive introduced in MCP spec 2025-11-25.
+/** MCP Tasks compatibility types plus the official `io.modelcontextprotocol/tasks` extension.
   *
-  * Tasks are durable, requestor-polled state machines wrapping long-running requests.
-  * fast-mcp-scala supports the **server-as-receiver** path: tools opt in via
-  * `execution.taskSupport`, clients augment `tools/call` with `params.task: { ttl }`, the server
-  * returns a `CreateTaskResult` immediately, and the client polls `tasks/get` / `tasks/result`
-  * until completion.
+  * On 2026-07-28, clients opt into the extension through capabilities and the server may return a
+  * flat `resultType: "task"` bearer handle; clients poll `tasks/get`, send input with
+  * `tasks/update`, or cancel with `tasks/cancel`. The old `params.task`, `tasks/list`, and
+  * `tasks/result` shapes remain internal to the initialization-based compatibility adapter.
   *
   * The feature is gated behind [[com.tjclp.fastmcp.server.TaskSettings.enabled]] (off by default)
   * since the spec marks Tasks as experimental.
   */
 object Tasks:
-  // Method names per spec 2025-11-25.
+  val ExtensionId: String = "io.modelcontextprotocol/tasks"
+  // Modern extension methods plus legacy compatibility names.
   val MethodTasksGet: String = "tasks/get"
+  val MethodTasksUpdate: String = "tasks/update"
   val MethodTasksList: String = "tasks/list"
   val MethodTasksCancel: String = "tasks/cancel"
   val MethodTasksResult: String = "tasks/result"
+  val NotificationTasks: String = "notifications/tasks"
+
+  /** Legacy core-draft notification name. */
   val NotificationTasksStatus: String = "notifications/tasks/status"
 
   /** Meta key that associates messages with their originating task. */
@@ -27,9 +31,10 @@ object Tasks:
   /** Default poll interval (5 seconds, per spec example). */
   val DefaultPollIntervalMs: Long = 5_000L
 
-/** Per-tool opt-in for task-augmented invocation.
+/** Per-tool policy controlling whether the server may execute an invocation as a task.
   *
-  * Wire encoding matches `execution.taskSupport` in the spec.
+  * Legacy `tools/list` encodes this as `execution.taskSupport`. It is an internal server policy in
+  * the 2026 extension and is not advertised on modern tool definitions.
   *
   *   - `Forbidden` (default): clients MUST NOT augment with a task; server returns `-32601` if they
   *     try.
@@ -121,6 +126,34 @@ case class CreateTaskResult(task: Task)
 
 object CreateTaskResult:
   given JsonCodec[CreateTaskResult] = DeriveJsonCodec.gen[CreateTaskResult]
+
+/** Official `io.modelcontextprotocol/tasks` extension handle. Unlike the legacy core draft this is
+  * flat, uses `resultType: "task"`, and names duration fields with an `Ms` suffix.
+  */
+case class ExtensionTaskHandle(
+    resultType: String = "task",
+    taskId: String,
+    status: TaskStatus,
+    statusMessage: Option[String] = None,
+    createdAt: String,
+    lastUpdatedAt: String,
+    @jsonExplicitNull ttlMs: Option[Long] = None,
+    pollIntervalMs: Option[Long] = None
+)
+
+object ExtensionTaskHandle:
+  given JsonCodec[ExtensionTaskHandle] = DeriveJsonCodec.gen[ExtensionTaskHandle]
+
+  def fromLegacy(task: Task): ExtensionTaskHandle =
+    ExtensionTaskHandle(
+      taskId = task.taskId,
+      status = task.status,
+      statusMessage = task.statusMessage,
+      createdAt = task.createdAt,
+      lastUpdatedAt = task.lastUpdatedAt,
+      ttlMs = task.ttl,
+      pollIntervalMs = task.pollInterval
+    )
 
 /** Body of `tasks/list` response. */
 case class ListTasksResult(tasks: List[Task], nextCursor: Option[String] = None)
