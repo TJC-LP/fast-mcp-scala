@@ -5,7 +5,7 @@ import zio.json.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.{*, given}
-import com.tjclp.fastmcp.core.{LoggingLevel, ProgressToken}
+import com.tjclp.fastmcp.core.{Fnv1a, LoggingLevel, ProgressToken}
 import com.tjclp.fastmcp.core.wire.{
   Completion,
   CreateMessageRequestParams,
@@ -86,20 +86,26 @@ object ConformanceServer:
       case Some(ctx) => f(ctx)
       case None => ZIO.fail(new RuntimeException("server-initiated request requires a session"))
 
+  /** One-question sampling probe: ask the client LLM and return the answer text. */
+  private def askLLM(ctx: McpContext, prompt: String, maxTokens: Int): Task[String] =
+    ctx
+      .createMessage(
+        CreateMessageRequestParams(
+          messages = List(SamplingMessage(Role.User, TextContent(prompt))),
+          maxTokens = maxTokens
+        )
+      )
+      .map(r => textOf(r.content))
+
   // ---- 2026-07-28 MRTR fixture helpers (SEP-2322 / SEP-2575) ----
 
   private val StateSecret = "conformance-fixture-secret"
 
-  private def fnv64(s: String): String =
-    val h = s
-      .getBytes(java.nio.charset.StandardCharsets.UTF_8)
-      .foldLeft(0xcbf29ce484222325L)((acc, b) => (acc ^ (b & 0xffL)) * 0x100000001b3L)
-    java.lang.Long.toHexString(h)
-
   /** Integrity-protected request state (`payload.keyedHash`) — test-fixture strength only, enough
     * for the tampered-state scenario to detect the appended suffix.
     */
-  private def signState(payload: String): String = s"$payload.${fnv64(StateSecret + payload)}"
+  private def signState(payload: String): String =
+    s"$payload.${Fnv1a.hex64(StateSecret + payload)}"
 
   private def verifyState(state: String): Option[String] =
     state.lastIndexOf('.') match
@@ -269,16 +275,7 @@ object ConformanceServer:
         )
       )
       .contextual { (args, ctxOpt) =>
-        withCtx(ctxOpt) { ctx =>
-          ctx
-            .createMessage(
-              CreateMessageRequestParams(
-                messages = List(SamplingMessage(Role.User, TextContent(args.prompt))),
-                maxTokens = 100
-              )
-            )
-            .map(r => s"LLM response: ${textOf(r.content)}")
-        }
+        withCtx(ctxOpt)(ctx => askLLM(ctx, args.prompt, 100).map(t => s"LLM response: $t"))
       },
     McpTool
       .withSchema[MessageArg, String](
@@ -348,16 +345,7 @@ object ConformanceServer:
         inputSchema = EmptySchema
       )
       .contextual { (_, ctxOpt) =>
-        withCtx(ctxOpt) { ctx =>
-          ctx
-            .createMessage(
-              CreateMessageRequestParams(
-                messages = List(SamplingMessage(Role.User, TextContent("capability probe"))),
-                maxTokens = 50
-              )
-            )
-            .map(r => s"LLM response: ${textOf(r.content)}")
-        }
+        withCtx(ctxOpt)(ctx => askLLM(ctx, "capability probe", 50).map(t => s"LLM response: $t"))
       },
     McpTool
       .withSchema[NoArgs, String](
@@ -414,17 +402,9 @@ object ConformanceServer:
         inputSchema = EmptySchema
       )
       .contextual { (_, ctxOpt) =>
-        withCtx(ctxOpt) { ctx =>
-          ctx
-            .createMessage(
-              CreateMessageRequestParams(
-                messages =
-                  List(SamplingMessage(Role.User, TextContent("What is the capital of France?"))),
-                maxTokens = 100
-              )
-            )
-            .map(r => s"LLM says: ${textOf(r.content)}")
-        }
+        withCtx(ctxOpt)(ctx =>
+          askLLM(ctx, "What is the capital of France?", 100).map(t => s"LLM says: $t")
+        )
       },
     McpTool
       .withSchema[NoArgs, String](
@@ -567,16 +547,7 @@ object ConformanceServer:
             ctx
               .elicit(ElicitRequestParams("What is your name?", stringSchema("name")))
               .map(r => s"elicited: action=${r.action}")
-          else
-            ctx
-              .createMessage(
-                CreateMessageRequestParams(
-                  messages =
-                    List(SamplingMessage(Role.User, TextContent("What is the capital of France?"))),
-                  maxTokens = 100
-                )
-              )
-              .map(r => s"LLM says: ${textOf(r.content)}")
+          else askLLM(ctx, "What is the capital of France?", 100).map(t => s"LLM says: $t")
         }
       }
   )
