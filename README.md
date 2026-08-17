@@ -39,10 +39,10 @@ Built on **ZIO 2**, **Tapir**-derived schemas, and **zio-json** on both platform
 
 ```scala 3 ignore
 // JVM — native Scala MCP core with annotations, derived schemas, HTTP + stdio transports.
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.5.0"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "1.0.0-RC1"
 
 // Scala.js — the same native core on Bun (Bun.serve + Node stdio), same annotation and typed-contract APIs.
-libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "0.5.0"
+libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "1.0.0-RC1"
 ```
 
 Built against Scala 3.8.3. JVM requires JDK 17+. Scala.js artifact is published for `sjs1_3` (Scala.js 1.x); runs on Bun (first-class) and Node 18+.
@@ -53,7 +53,7 @@ A single-file server with one tool — the same code lives in [`HelloWorld.scala
 
 ```scala 3 raw
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala:0.5.0
+//> using dep com.tjclp::fast-mcp-scala:1.0.0-RC1
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.{*, given}
@@ -356,7 +356,7 @@ Proof: the official **MCP conformance suite** runs against both platforms in CI 
 
 ```scala 3 raw
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala_sjs1:0.5.0
+//> using dep com.tjclp::fast-mcp-scala_sjs1:1.0.0-RC1
 
 import com.tjclp.fastmcp.{*, given}
 
@@ -441,7 +441,7 @@ Add to `claude_desktop_config.json`:
       "command": "scala-cli",
       "args": [
         "-e",
-        "//> using dep com.tjclp::fast-mcp-scala:0.5.0",
+        "//> using dep com.tjclp::fast-mcp-scala:1.0.0-RC1",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]
@@ -479,14 +479,14 @@ For architectural detail, see [`docs/architecture.md`](docs/architecture.md).
 After `publishLocal`:
 
 ```scala 3 ignore
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "0.5.0"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "1.0.0-RC1"
 ```
 
 Or with Mill:
 
 ```scala 3 ignore
 def ivyDeps = Agg(
-  ivy"com.tjclp::fast-mcp-scala:0.5.0"
+  ivy"com.tjclp::fast-mcp-scala:1.0.0-RC1"
 )
 ```
 
