@@ -19,6 +19,13 @@ import server.*
   */
 type PromptHandler[R] = Map[String, Any] => ZIO[R, Throwable, List[Message]]
 
+/** Context-aware prompt handler: like [[PromptHandler]] but also receives the request's
+  * [[McpContext]], so a prompt can drive MRTR input requests (`ctx.sendRequest`) or read request
+  * metadata — mirroring contextual tool handlers.
+  */
+type ContextualPromptHandler[R] =
+  (Map[String, Any], Option[McpContext]) => ZIO[R, Throwable, List[Message]]
+
 /** Manager for MCP prompts
   *
   * Responsible for registering, storing, and rendering prompts.
@@ -28,8 +35,10 @@ type PromptHandler[R] = Map[String, Any] => ZIO[R, Throwable, List[Message]]
   *   / `runStdio[R]()` entry.
   */
 class PromptManager[R] extends Manager[PromptDefinition]:
-  // Thread-safe storage for registered prompts
-  private val prompts = new ConcurrentHashMap[String, (PromptDefinition, PromptHandler[R])]()
+
+  // Thread-safe storage for registered prompts (stored context-aware; plain handlers are adapted)
+  private val prompts =
+    new ConcurrentHashMap[String, (PromptDefinition, ContextualPromptHandler[R])]()
 
   /** Register a prompt with the manager
     *
@@ -45,6 +54,14 @@ class PromptManager[R] extends Manager[PromptDefinition]:
   def addPrompt(
       name: String,
       handler: PromptHandler[R],
+      definition: PromptDefinition
+  ): ZIO[Any, Throwable, Unit] =
+    addContextualPrompt(name, (args, _) => handler(args), definition)
+
+  /** Register a context-aware prompt (see [[ContextualPromptHandler]]). */
+  def addContextualPrompt(
+      name: String,
+      handler: ContextualPromptHandler[R],
       definition: PromptDefinition
   ): ZIO[Any, Throwable, Unit] =
     ZIO
@@ -72,7 +89,6 @@ class PromptManager[R] extends Manager[PromptDefinition]:
     * @return
     *   ZIO effect that completes with the prompt messages or fails with Throwable
     */
-  @scala.annotation.nowarn("msg=unused explicit parameter")
   def getPrompt(
       name: String,
       arguments: Map[String, Any],
@@ -101,8 +117,12 @@ class PromptManager[R] extends Manager[PromptDefinition]:
         ) match
           case Some(error) => error
           case None =>
-            handler(arguments)
-              .mapError(e => new PromptExecutionError(s"Error rendering prompt '$name'", Some(e)))
+            handler(arguments, context).mapError {
+              // McpErrors pass through untouched — the MRTR input_required sentinel in
+              // particular must reach the router intact to become an InputRequiredResult.
+              case m: McpError => m
+              case e => new PromptExecutionError(s"Error rendering prompt '$name'", Some(e))
+            }
 
       case None =>
         ZIO.fail(new PromptNotFoundError(s"Prompt '$name' not found"))
@@ -114,7 +134,7 @@ class PromptManager[R] extends Manager[PromptDefinition]:
     * @return
     *   Option containing the handler if found
     */
-  def getPromptHandler(name: String): Option[PromptHandler[R]] =
+  def getPromptHandler(name: String): Option[ContextualPromptHandler[R]] =
     Option(prompts.get(name)).map(_._2)
 
   /** Get a prompt definition by name

@@ -90,6 +90,18 @@ final class McpServer[R](
       .addPrompt(definition.name, handler.asInstanceOf[PromptHandler[R]], definition)
       .as(this)
 
+  override def promptContextual[R1 >: R](
+      definition: PromptDefinition,
+      handler: ContextualPromptHandler[R1]
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    promptManager
+      .addContextualPrompt(
+        definition.name,
+        handler.asInstanceOf[ContextualPromptHandler[R]],
+        definition
+      )
+      .as(this)
+
   /** Register the `completion/complete` argument-completion provider. Advertises the `completions`
     * capability and routes completion requests to `handler`.
     */

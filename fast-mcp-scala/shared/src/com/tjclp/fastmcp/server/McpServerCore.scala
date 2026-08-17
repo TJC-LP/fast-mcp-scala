@@ -4,6 +4,7 @@ package server
 import zio.*
 
 import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.server.manager.ContextualPromptHandler
 import com.tjclp.fastmcp.server.manager.ContextualToolHandler
 import com.tjclp.fastmcp.server.manager.PromptHandler
 import com.tjclp.fastmcp.server.manager.ResourceHandler
@@ -221,6 +222,14 @@ trait McpServerCore[R]:
       handler: PromptHandler[R1]
   ): ZIO[Any, Throwable, McpServerCore[R]]
 
+  /** Register a context-aware prompt: the handler also receives the request's [[McpContext]], so it
+    * can drive MRTR input requests or read request metadata (parity with contextual tools).
+    */
+  def promptContextual[R1 >: R](
+      definition: PromptDefinition,
+      handler: ContextualPromptHandler[R1]
+  ): ZIO[Any, Throwable, McpServerCore[R]]
+
   def prompt[R1 >: R](
       name: String,
       handler: PromptHandler[R1],
@@ -235,23 +244,23 @@ trait McpServerCore[R]:
   def prompt[In, R1 >: R](
       contract: McpPrompt.WithEnv[In, R1]
   ): ZIO[Any, Throwable, McpServerCore[R]] =
-    prompt[R1](
+    promptContextual[R1](
       definition = contract.definition,
-      handler = (args: Map[String, Any]) =>
+      handler = (args: Map[String, Any], ctx: Option[McpContext]) =>
         ZIO
           .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
-          .flatMap(contract.handler)
+          .flatMap(in => contract.handler(in, ctx))
     )
 
   def prompt[In](
       contract: McpPrompt[In]
   ): ZIO[Any, Throwable, McpServerCore[R]] =
-    prompt[Any](
+    promptContextual[Any](
       definition = contract.definition,
-      handler = (args: Map[String, Any]) =>
+      handler = (args: Map[String, Any], ctx: Option[McpContext]) =>
         ZIO
           .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
-          .flatMap(contract.handler)
+          .flatMap(in => contract.handler(in, ctx))
     )
 
   // --- Server lifecycle ---

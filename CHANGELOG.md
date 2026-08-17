@@ -5,10 +5,25 @@ All notable changes to fast-mcp-scala will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0-RC1] - 2026-08-17
 
 ### Added
 
+- **Context-aware prompt handlers**: `McpPrompt` builders gain `.contextual`
+  (parity with `McpTool`), `McpServerCore.promptContextual` registers raw
+  context-aware handlers, and `prompts/get` can now drive MRTR input requests
+  end to end (the `input_required` sentinel raised inside a prompt reaches the
+  router intact instead of being wrapped into a `-32603`).
+- `McpError.inputRequired` multi-entry variant: one `InputRequiredResult` can
+  batch several pending input requests (SEP-2322).
+- **Official 2026-07-28 conformance**: both platforms pass
+  `--requirements 2026-07-28` on conformance `0.2.0-alpha.11` (all scored
+  scenarios; extension/pending scenarios are reported but unscored).
+  `scripts/conformance.sh` gains an `active|2026` mode argument, and the
+  ConformanceServer carries the SEP-2575/SEP-2322 diagnostic fixtures.
+- **Lifecycle soak gate**: dropped `subscriptions/listen` streams and task-TTL
+  expiry are proven to leave no fibers or task entries behind
+  (`LifecycleSoakTest`).
 - **MCP 2026-07-28 protocol path** with required `server/discover`, per-request
   protocol version/client capabilities/client identity, required `resultType`,
   and server identity on every modern result.

@@ -525,7 +525,7 @@ object McpTool:
   */
 final case class McpPrompt[In] private (
     definition: PromptDefinition,
-    handler: In => ZIO[Any, Throwable, List[Message]],
+    handler: (In, Option[McpContext]) => ZIO[Any, Throwable, List[Message]],
     private[fastmcp] val decoder: McpDecoder[In]
 )
 
@@ -534,7 +534,7 @@ object McpPrompt:
   /** Environment-aware typed prompt contract. */
   final case class WithEnv[In, R] private[McpPrompt] (
       definition: PromptDefinition,
-      handler: In => ZIO[R, Throwable, List[Message]],
+      handler: (In, Option[McpContext]) => ZIO[R, Throwable, List[Message]],
       private[fastmcp] val decoder: McpDecoder[In]
   )
 
@@ -550,13 +550,23 @@ object McpPrompt:
 
     /** Attach a pure handler `In => List[Message]`. */
     def apply(handler: In => List[Message]): McpPrompt[In] =
-      new McpPrompt(definition, in => ZIO.attempt(handler(in)), decoder)
+      new McpPrompt(definition, (in, _) => ZIO.attempt(handler(in)), decoder)
 
     /** Attach an effectful handler `In => F[List[Message]]`. */
     def apply[F[_]](
         handler: In => F[List[Message]]
     )(using effect: ToHandlerEffect[F, Any]): McpPrompt[In] =
-      new McpPrompt(definition, in => effect.lift(handler(in)), decoder)
+      new McpPrompt(definition, (in, _) => effect.lift(handler(in)), decoder)
+
+    /** Attach a pure contextual handler that sees the optional [[McpContext]]. */
+    def contextual(handler: (In, Option[McpContext]) => List[Message]): McpPrompt[In] =
+      new McpPrompt(definition, (in, ctx) => ZIO.attempt(handler(in, ctx)), decoder)
+
+    /** Attach an effectful contextual handler. */
+    def contextual[F[_]](
+        handler: (In, Option[McpContext]) => F[List[Message]]
+    )(using effect: ToHandlerEffect[F, Any]): McpPrompt[In] =
+      new McpPrompt(definition, (in, ctx) => effect.lift(handler(in, ctx)), decoder)
 
   /** Environment-aware builder produced by the two-type-argument factory. */
   final class EnvBuilder[In, R] private[McpPrompt] (
@@ -565,13 +575,23 @@ object McpPrompt:
 
     /** Attach a pure handler `In => List[Message]`. */
     def apply(handler: In => List[Message]): WithEnv[In, R] =
-      new WithEnv(definition, in => ZIO.attempt(handler(in)), decoder)
+      new WithEnv(definition, (in, _) => ZIO.attempt(handler(in)), decoder)
 
     /** Attach an effectful handler `In => F[List[Message]]`. */
     def apply[F[_]](
         handler: In => F[List[Message]]
     )(using effect: ToHandlerEffect[F, R]): WithEnv[In, R] =
-      new WithEnv(definition, in => effect.lift(handler(in)), decoder)
+      new WithEnv(definition, (in, _) => effect.lift(handler(in)), decoder)
+
+    /** Attach a pure contextual handler that sees the optional [[McpContext]]. */
+    def contextual(handler: (In, Option[McpContext]) => List[Message]): WithEnv[In, R] =
+      new WithEnv(definition, (in, ctx) => ZIO.attempt(handler(in, ctx)), decoder)
+
+    /** Attach an effectful contextual handler. */
+    def contextual[F[_]](
+        handler: (In, Option[McpContext]) => F[List[Message]]
+    )(using effect: ToHandlerEffect[F, R]): WithEnv[In, R] =
+      new WithEnv(definition, (in, ctx) => effect.lift(handler(in, ctx)), decoder)
 
   /** Primary factory. Apply the returned [[Builder]] with your handler lambda. */
   def apply[In](
