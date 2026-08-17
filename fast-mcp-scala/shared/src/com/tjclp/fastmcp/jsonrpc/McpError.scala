@@ -85,9 +85,18 @@ object McpError:
       request: Json,
       requestState: Option[String] = None
   ): McpError =
+    inputRequired(List(key -> request), requestState)
+
+  /** Multi-entry variant: one `input_required` result carrying several pending requests at once
+    * (SEP-2322 allows a server to batch its questions in a single round trip).
+    */
+  private[fastmcp] def inputRequired(
+      requests: List[(String, Json)],
+      requestState: Option[String]
+  ): McpError =
     val fields = List(
       "resultType" -> Json.Str("input_required"),
-      "inputRequests" -> Json.Obj(key -> request)
+      "inputRequests" -> Json.Obj(requests*)
     ) ++ requestState.map(value => "requestState" -> Json.Str(value)).toList
     McpError(
       InputRequiredSentinel,

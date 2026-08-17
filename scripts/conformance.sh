@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 #
-# Run the official MCP conformance "active" server suite against fast-mcp-scala.
+# Run the official MCP conformance server suites against fast-mcp-scala.
 #
-#   scripts/conformance.sh [jvm|js] [port]
+#   scripts/conformance.sh [jvm|js] [port] [active|2026]
 #
 # Boots the cross-platform ConformanceServer (com.tjclp.fastmcp.examples.conformance.*) over
 # streamable HTTP, then drives it with the official harness via `bunx`. Exit code follows the harness
-# (0 = all active scenarios pass or match the platform baseline; 1 = regression / stale baseline).
+# (0 = all scored scenarios pass or match the platform baseline; 1 = regression / stale baseline).
+#
+# Modes: "active" (default) runs the active suite across both protocol eras with the per-platform
+# baseline; "2026" runs `--requirements 2026-07-28` — exactly the scenarios that revision requires,
+# frozen at its release (extension/pending scenarios are reported but not scored by the harness).
 #
 # Requires: a JDK (jvm), bun (both). No vendored conformance checkout — the engine is fetched by bunx.
 set -euo pipefail
 
 PLATFORM="${1:-jvm}"
 PORT="${2:-8077}"
-CONF_VERSION="0.2.0-alpha.1" # pinned to match ~/git/conformance reference; bump deliberately
+MODE="${3:-active}"
+CONF_VERSION="0.2.0-alpha.11" # RC1 oracle: first release with the 2026-07-28 scenario set; bump deliberately
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 URL="http://127.0.0.1:${PORT}/mcp"
@@ -66,10 +71,20 @@ for i in $(seq 1 90); do
   sleep 0.5
 done
 
-echo "→ conformance active suite ($PLATFORM, baseline $(basename "$BASELINE"))" >&2
 set +e
-bunx "@modelcontextprotocol/conformance@${CONF_VERSION}" \
-  server --url "$URL" --suite active --expected-failures "$BASELINE"
+case "$MODE" in
+  active)
+    echo "→ conformance active suite ($PLATFORM, baseline $(basename "$BASELINE"))" >&2
+    bunx "@modelcontextprotocol/conformance@${CONF_VERSION}" \
+      server --url "$URL" --suite active --expected-failures "$BASELINE"
+    ;;
+  2026)
+    echo "→ conformance 2026-07-28 requirements ($PLATFORM)" >&2
+    bunx "@modelcontextprotocol/conformance@${CONF_VERSION}" \
+      server --url "$URL" --requirements 2026-07-28
+    ;;
+  *) echo "usage: $0 [jvm|js] [port] [active|2026]" >&2; exit 2 ;;
+esac
 RC=$?
 set -e
 echo "→ server log: $LOG" >&2

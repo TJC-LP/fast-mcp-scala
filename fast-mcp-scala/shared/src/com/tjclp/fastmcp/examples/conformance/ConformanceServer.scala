@@ -13,6 +13,7 @@ import com.tjclp.fastmcp.core.wire.{
   SamplingMessage,
   TextResourceContents
 }
+import com.tjclp.fastmcp.jsonrpc.McpError
 
 /** Cross-platform MCP "everything" server mirroring the conformance harness's reference
   * `everything-server.ts` legacy ACTIVE surface (spec 2025-11-25). One source of truth registered
@@ -84,6 +85,86 @@ object ConformanceServer:
     ctxOpt match
       case Some(ctx) => f(ctx)
       case None => ZIO.fail(new RuntimeException("server-initiated request requires a session"))
+
+  // ---- 2026-07-28 MRTR fixture helpers (SEP-2322 / SEP-2575) ----
+
+  private val StateSecret = "conformance-fixture-secret"
+
+  private def fnv64(s: String): String =
+    val h = s
+      .getBytes(java.nio.charset.StandardCharsets.UTF_8)
+      .foldLeft(0xcbf29ce484222325L)((acc, b) => (acc ^ (b & 0xffL)) * 0x100000001b3L)
+    java.lang.Long.toHexString(h)
+
+  /** Integrity-protected request state (`payload.keyedHash`) — test-fixture strength only, enough
+    * for the tampered-state scenario to detect the appended suffix.
+    */
+  private def signState(payload: String): String = s"$payload.${fnv64(StateSecret + payload)}"
+
+  private def verifyState(state: String): Option[String] =
+    state.lastIndexOf('.') match
+      case -1 => None
+      case i =>
+        val payload = state.substring(0, i)
+        Option.when(signState(payload) == state)(payload)
+
+  /** The raw `params.inputResponses` map — fixtures with hand-chosen keys decode it themselves. */
+  private def rawInputResponses(ctx: McpContext): UIO[Map[String, Json]] =
+    ctx.session match
+      case Some(s) => s.currentRequestContext.map(_.map(_.inputResponses).getOrElse(Map.empty))
+      case None => ZIO.succeed(Map.empty)
+
+  private def stringSchema(field: String): Json =
+    json(s"""{"type":"object","properties":{"$field":{"type":"string"}},"required":["$field"]}""")
+
+  private val OkSchema: Json =
+    json("""{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}""")
+
+  private def elicitationRequest(message: String, requestedSchema: Json): Json =
+    Json.Obj(
+      "method" -> Json.Str("elicitation/create"),
+      "params" -> Json.Obj(
+        "message" -> Json.Str(message),
+        "requestedSchema" -> requestedSchema
+      )
+    )
+
+  private def samplingRequest(text: String, maxTokens: Int): Json =
+    json(
+      s"""{"method":"sampling/createMessage","params":{"messages":[{"role":"user","content":{"type":"text","text":"$text"}}],"maxTokens":$maxTokens}}"""
+    )
+
+  private val RootsRequest: Json = json("""{"method":"roots/list","params":{}}""")
+
+  /** Decode an accepted ElicitResult's string field from a raw inputResponses entry. */
+  private def acceptedString(
+      responses: Map[String, Json],
+      key: String,
+      field: String
+  ): Option[String] =
+    responses.get(key).flatMap {
+      case Json.Obj(fields) =>
+        val m = fields.toMap
+        for
+          action <- m.get("action").collect { case Json.Str(a) => a }
+          if action == "accept"
+          content <- m.get("content").collect { case Json.Obj(c) => c.toMap }
+          value <- content.get(field).collect { case Json.Str(s) => s }
+        yield value
+      case _ => None
+    }
+
+  /** Read `content.<field>` from a raw ElicitResult Json (sendRequest's untyped answer). */
+  private def contentField(answer: Json, field: String): String =
+    answer match
+      case Json.Obj(fields) =>
+        fields.toMap
+          .get("content")
+          .collect { case Json.Obj(c) => c.toMap }
+          .flatMap(_.get(field))
+          .collect { case Json.Str(s) => s }
+          .getOrElse("?")
+      case _ => "?"
 
   // ---- tools ----
 
@@ -258,6 +339,245 @@ object ConformanceServer:
             )
             .map(r => s"Elicitation completed: action=${r.action}")
         }
+      },
+    // ---- 2026-07-28 fixtures (SEP-2575 stateless + SEP-2322 MRTR) ----
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "test_missing_capability",
+        description = Some("Requires the sampling capability; undeclared clients get -32021"),
+        inputSchema = EmptySchema
+      )
+      .contextual { (_, ctxOpt) =>
+        withCtx(ctxOpt) { ctx =>
+          ctx
+            .createMessage(
+              CreateMessageRequestParams(
+                messages = List(SamplingMessage(Role.User, TextContent("capability probe"))),
+                maxTokens = 50
+              )
+            )
+            .map(r => s"LLM response: ${textOf(r.content)}")
+        }
+      },
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "test_streaming_elicitation",
+        description = Some("Elicits via MRTR — never a server-initiated request on the stream"),
+        inputSchema = EmptySchema
+      )
+      .contextual { (_, ctxOpt) =>
+        withCtx(ctxOpt) { ctx =>
+          ctx
+            .elicit(ElicitRequestParams(message = "Confirm?", requestedSchema = OkSchema))
+            .map(r => s"confirmed: action=${r.action}")
+        }
+      },
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "test_logging_tool",
+        description = Some("Emits a log message only when the request authorizes a log level"),
+        inputSchema = EmptySchema
+      )
+      .contextual { (_, ctxOpt) =>
+        withCtx(ctxOpt) { ctx =>
+          ctx
+            .sendLogMessage(LoggingLevel.Info, Json.Str("test log emission"))
+            .as("logging attempted")
+        }
+      },
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "test_input_required_result_elicitation",
+        description = Some("MRTR: asks the user's name via elicitation, greets on the retry"),
+        inputSchema = EmptySchema
+      )
+      .contextual { (_, ctxOpt) =>
+        withCtx(ctxOpt) { ctx =>
+          // Hand-rolled sentinel: the scenario asserts the literal inputRequests key "user_name".
+          rawInputResponses(ctx).flatMap { responses =>
+            acceptedString(responses, "user_name", "name") match
+              case Some(name) => ZIO.succeed(s"Hello, $name!")
+              case None =>
+                ZIO.fail(
+                  McpError.inputRequired(
+                    "user_name",
+                    elicitationRequest("What is your name?", stringSchema("name"))
+                  )
+                )
+          }
+        }
+      },
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "test_input_required_result_sampling",
+        description = Some("MRTR: asks the client LLM a question, completes on the retry"),
+        inputSchema = EmptySchema
+      )
+      .contextual { (_, ctxOpt) =>
+        withCtx(ctxOpt) { ctx =>
+          ctx
+            .createMessage(
+              CreateMessageRequestParams(
+                messages =
+                  List(SamplingMessage(Role.User, TextContent("What is the capital of France?"))),
+                maxTokens = 100
+              )
+            )
+            .map(r => s"LLM says: ${textOf(r.content)}")
+        }
+      },
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "test_input_required_result_list_roots",
+        description = Some("MRTR: asks for the client's roots, completes on the retry"),
+        inputSchema = EmptySchema
+      )
+      .contextual { (_, ctxOpt) =>
+        withCtx(ctxOpt) { ctx =>
+          ctx.listRoots().map(r => s"Client roots: ${r.roots.map(_.uri).mkString(", ")}")
+        }
+      },
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "test_input_required_result_request_state",
+        description = Some("MRTR: carries integrity-protected requestState across the round trip"),
+        inputSchema = EmptySchema
+      )
+      .contextual { (_, ctxOpt) =>
+        withCtx(ctxOpt) { ctx =>
+          ctx
+            .sendRequest(
+              "elicitation/create",
+              Some(
+                Json.Obj(
+                  "message" -> Json.Str("Please confirm"),
+                  "requestedSchema" -> OkSchema
+                )
+              ),
+              requestState = Some(signState("confirm"))
+            )
+            .as("state-ok: confirmed")
+        }
+      },
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "test_input_required_result_multiple_inputs",
+        description = Some("MRTR: batches elicitation, sampling, and roots in one round trip"),
+        inputSchema = EmptySchema
+      )
+      .contextual { (_, ctxOpt) =>
+        withCtx(ctxOpt) { ctx =>
+          // Hand-rolled sentinel: one InputRequiredResult carrying all three request types.
+          rawInputResponses(ctx).flatMap { responses =>
+            val keys = List("user_name", "greeting", "client_roots")
+            if keys.forall(responses.contains) then ZIO.succeed("All inputs received: state-ok")
+            else
+              ZIO.fail(
+                McpError.inputRequired(
+                  List(
+                    "user_name" ->
+                      elicitationRequest("What is your name?", stringSchema("name")),
+                    "greeting" -> samplingRequest("Generate a greeting", 50),
+                    "client_roots" -> RootsRequest
+                  ),
+                  Some(signState("multi"))
+                )
+              )
+          }
+        }
+      },
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "test_input_required_result_multi_round",
+        description = Some("MRTR: two sequential questions across three round trips"),
+        inputSchema = EmptySchema
+      )
+      .contextual { (_, ctxOpt) =>
+        withCtx(ctxOpt) { ctx =>
+          def askStep1 = ctx.sendRequest(
+            "elicitation/create",
+            Some(
+              Json.Obj(
+                "message" -> Json.Str("Step 1: What is your name?"),
+                "requestedSchema" -> stringSchema("name")
+              )
+            ),
+            requestState = Some(signState("round1"))
+          )
+          // Step-2 params are identical on every replay so the content-derived key is stable;
+          // only requestState (not hashed) carries the accumulated answer.
+          def askStep2(name: String) = ctx.sendRequest(
+            "elicitation/create",
+            Some(
+              Json.Obj(
+                "message" -> Json.Str("Step 2: What is your favorite color?"),
+                "requestedSchema" -> stringSchema("color")
+              )
+            ),
+            requestState = Some(signState(s"round2:$name"))
+          )
+          ctx.getRequestState.flatMap(verifyState) match
+            case Some(payload) if payload.startsWith("round2:") =>
+              // Round 3: step 1's answer is no longer re-sent — skip straight to step 2.
+              val name = payload.stripPrefix("round2:")
+              askStep2(name).map(c => s"Done: $name likes ${contentField(c, "color")}")
+            case _ =>
+              for
+                nameAnswer <- askStep1
+                name = contentField(nameAnswer, "name")
+                colorAnswer <- askStep2(name)
+              yield s"Done: $name likes ${contentField(colorAnswer, "color")}"
+        }
+      },
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "test_input_required_result_tampered_state",
+        description = Some("MRTR: rejects requestState that fails integrity verification"),
+        inputSchema = EmptySchema
+      )
+      .contextual { (_, ctxOpt) =>
+        withCtx(ctxOpt) { ctx =>
+          ctx.getRequestState match
+            case Some(state) if verifyState(state).isEmpty =>
+              ZIO.fail(McpError.invalidParams("requestState failed integrity verification"))
+            case _ =>
+              ctx
+                .sendRequest(
+                  "elicitation/create",
+                  Some(
+                    Json.Obj(
+                      "message" -> Json.Str("Please confirm"),
+                      "requestedSchema" -> OkSchema
+                    )
+                  ),
+                  requestState = Some(signState("tamper-probe"))
+                )
+                .as("confirmed")
+        }
+      },
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "test_input_required_result_capabilities",
+        description = Some("MRTR: only requests input kinds the client declared capabilities for"),
+        inputSchema = EmptySchema
+      )
+      .contextual { (_, ctxOpt) =>
+        withCtx(ctxOpt) { ctx =>
+          if ctx.getClientCapabilities.exists(_.elicitation.isDefined) then
+            ctx
+              .elicit(ElicitRequestParams("What is your name?", stringSchema("name")))
+              .map(r => s"elicited: action=${r.action}")
+          else
+            ctx
+              .createMessage(
+                CreateMessageRequestParams(
+                  messages =
+                    List(SamplingMessage(Role.User, TextContent("What is the capital of France?"))),
+                  maxTokens = 100
+                )
+              )
+              .map(r => s"LLM says: ${textOf(r.content)}")
+        }
       }
   )
 
@@ -284,6 +604,32 @@ object ConformanceServer:
   // ---- prompts ----
 
   private val prompts: List[McpPrompt[?]] = List(
+    McpPrompt[NoArgs](
+      name = "test_input_required_result_prompt",
+      description = Some("MRTR prompt: elicits context before rendering (SEP-2322 non-tool path)")
+    ).contextual { (_, ctxOpt) =>
+      ctxOpt match
+        case None => ZIO.fail(new RuntimeException("MRTR prompt requires a request context"))
+        case Some(ctx) =>
+          ctx
+            .sendRequest(
+              "elicitation/create",
+              Some(
+                Json.Obj(
+                  "message" -> Json.Str("What context should the prompt use?"),
+                  "requestedSchema" -> stringSchema("context")
+                )
+              )
+            )
+            .map { answer =>
+              List(
+                Message(
+                  Role.User,
+                  TextContent(s"Prompt using context: ${contentField(answer, "context")}")
+                )
+              )
+            }
+    },
     McpPrompt[NoArgs](
       name = "test_simple_prompt",
       description = Some("A simple prompt without arguments")
