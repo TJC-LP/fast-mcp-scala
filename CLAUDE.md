@@ -298,7 +298,7 @@ rm -rf out/fast-mcp-scala && ./mill fast-mcp-scala.compile
 ./mill -i __.publishLocal
 ```
 
-Then in your project use version `1.0.0-RC1`.
+Then in your project use version `1.0.0-RC2-SNAPSHOT`.
 
 ## Dependencies
 
