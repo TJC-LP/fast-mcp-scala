@@ -7,6 +7,7 @@ import zio.json.*
 
 import com.tjclp.fastmcp.{given, *}
 import com.tjclp.fastmcp.codec.DefaultDecodeContext
+import com.tjclp.fastmcp.macros.MapToFunctionMacro
 
 class RootImportSurfaceTest extends AnyFunSuite {
 
@@ -85,5 +86,26 @@ class RootImportSurfaceTest extends AnyFunSuite {
       DefaultDecodeContext.default
     )
     assert(tagged == TaggedId("abc"))
+  }
+
+  // Regression for #64: at ROOT-IMPORT call sites `export McpDecoders.given` flattens the
+  // low-priority Mirror fallback to the same precedence as the JsonDecoder-based given, and
+  // Option[T] (a sum type with a Mirror) used to resolve to a derived sum decoder that expects
+  // `{"Some": ...}` — rejecting bare values AND `null`. Must resolve via zio-json's Option decoder.
+  test("root import decodes Option params from bare values, null, and absence (#64)") {
+    @SuppressWarnings(Array("org.wartremover.warts.Null"))
+    val jsonNull: Any = null
+
+    val decoder = summon[McpDecoder[Option[String]]]
+    assert(decoder.decode("p", "main", DefaultDecodeContext.default) == Some("main"))
+    assert(decoder.decode("p", jsonNull, DefaultDecodeContext.default) == None)
+
+    def search(query: String, drive: Option[String], limit: Option[Int]): String =
+      s"$query/${drive.getOrElse("all")}/${limit.getOrElse(10)}"
+
+    val fn = MapToFunctionMacro.callByMap(search).asInstanceOf[Map[String, Any] => Any]
+    assert(fn(Map("query" -> "q", "drive" -> "main", "limit" -> 3)) == "q/main/3")
+    assert(fn(Map("query" -> "q", "drive" -> jsonNull, "limit" -> jsonNull)) == "q/all/10")
+    assert(fn(Map("query" -> "q")) == "q/all/10")
   }
 }

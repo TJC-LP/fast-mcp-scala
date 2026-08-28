@@ -24,7 +24,16 @@ import com.tjclp.fastmcp.server.McpContext
   */
 trait McpDecodersLowPriority:
 
-  inline given derivedZioJsonDecoder[T](using Mirror.Of[T]): McpDecoder[T] =
+  /** Mirror-derived fallback for case classes WITHOUT an explicit `JsonDecoder`.
+    *
+    * Deliberately constrained to `Mirror.ProductOf` (not `Mirror.Of`): sum types like `Option[T]`
+    * and `Either[A, B]` also have mirrors, and `export McpDecoders.given` flattens this
+    * low-priority given to the same precedence as `zioJsonDecoder` at root-import call sites — so
+    * `McpDecoder[Option[String]]` used to resolve HERE, deriving a sum decoder that expects
+    * `{"Some": ...}` and rejects bare values (#64). With the product constraint, sum types with
+    * zio-json built-ins (Option, Either, collections) resolve uniquely through `zioJsonDecoder`.
+    */
+  inline given derivedZioJsonDecoder[T](using Mirror.ProductOf[T]): McpDecoder[T] =
     new McpDecoder[T]:
       def decode(name: String, rawValue: Any, context: McpDecodeContext): T =
         val json = context.writeValueAsString(rawValue)
