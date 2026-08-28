@@ -59,8 +59,12 @@ object DefaultDecodeContext:
     * [[parseJsonObject]]/[[parseJsonArray]], primitives, byte arrays (base64), and `Option`. Falls
     * back to a string rendering for anything else (rare; matches the old JS behavior).
     */
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
   def toJsonAst(value: Any): Json =
     value match
+      // Raw null can reach us from direct in-process calls and JS interop (wire null arrives
+      // as None via fromJsonAst); rendering it as Json.Null instead of NPE-ing on toString
+      case null => Json.Null
       case j: Json => j
       case s: String => Json.Str(s)
       case b: Boolean => Json.Bool(b)
