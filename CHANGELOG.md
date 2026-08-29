@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **GraalVM native-image support for stdio servers** (TJC-2114, #66): the
+  non-published `nativeSmoke.stdio` Mill module builds `examples.AnnotatedServer`
+  into a native binary (GraalVM 25, `--no-fallback`) with **zero hand-written
+  reachability metadata**, and `scripts/native-smoke.sh` drives the full MCP
+  handshake against it — including the runtime tapir→circe schema path — plus a
+  netty-shed assertion (`io.netty`/`zio.http` string counts ≈ 0). A new
+  PR-blocking `native.yml` workflow runs both on linux-x64 so the metadata
+  story can't rot. Downstream recipe and audit loop in `docs/native-image.md`.
+
 ### Changed
 
 - **BREAKING (binary): the transport seam is split in two** (TJC-2114, #66).
