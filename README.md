@@ -258,9 +258,12 @@ object server extends ScalaModule with mill.javalib.NativeImageModule {
 }
 ```
 
-CI builds and exercises a native `AnnotatedServer` on every PR (`scripts/native-smoke.sh`).
-HTTP-transport native images are in progress. Full recipe, caveats, and the metadata audit loop:
-[docs/native-image.md](docs/native-image.md).
+HTTP servers compile too (keep the zio-http dep, add `--install-exit-handlers` and
+`--initialize-at-run-time=io.netty`): the official MCP conformance suite passes against the
+native binary with results identical to the JVM. CI exercises both a native `AnnotatedServer`
+over stdio (`scripts/native-smoke.sh`) and the native conformance server over HTTP
+(`scripts/conformance.sh native`) on every PR. Full recipes, caveats, and the metadata audit
+loop: [docs/native-image.md](docs/native-image.md).
 
 ## Tasks (experimental, off by default)
 

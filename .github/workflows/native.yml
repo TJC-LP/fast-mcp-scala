@@ -54,3 +54,49 @@ jobs:
 
       - name: Exercise binary over stdio JSON-RPC
         run: ./scripts/native-smoke.sh
+
+  native-http:
+    name: native-image HTTP conformance (linux-x64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK (Mill runner only)
+        uses: coursier/setup-action@v1
+        with:
+          jvm: temurin:21
+
+      - name: Set up Bun (conformance harness)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Cache Coursier (incl. GraalVM archive)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.ivy2/cache
+          key: ${{ runner.os }}-coursier-native-${{ hashFiles('**/build.mill') }}
+          restore-keys: |
+            ${{ runner.os }}-coursier-native-
+
+      - name: Cache Mill
+        uses: actions/cache@v4
+        with:
+          path: ~/.mill
+          key: ${{ runner.os }}-mill-native-${{ hashFiles('**/build.mill') }}
+          restore-keys: |
+            ${{ runner.os }}-mill-native-
+
+      - name: Build native HTTP conformance binary
+        run: ./mill fast-mcp-scala.nativeSmoke.http.nativeImage
+
+      # The official MCP conformance suite against the native binary, held to the SAME
+      # (empty) baseline as the JVM: any divergence is a native-image bug, never a new baseline.
+      - name: Conformance (active suite)
+        run: ./scripts/conformance.sh native 8077 active
+
+      - name: Conformance (2026-07-28 requirements)
+        run: ./scripts/conformance.sh native 8077 2026

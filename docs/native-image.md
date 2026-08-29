@@ -7,7 +7,7 @@ Databricks Apps). Tracking issue: [#66](https://github.com/TJC-LP/fast-mcp-scala
 | Transport | Status |
 |---|---|
 | **stdio** (`McpServerApp[Stdio]`, `runStdio()`) | ✅ Supported, CI-gated (`.github/workflows/native.yml`), **zero hand-written reachability metadata** |
-| **HTTP** (`McpServerApp[Http]`, `runHttp()`) | 🚧 In progress (TJC-2114 stage 3): zio-http/netty under native-image |
+| **HTTP** (`McpServerApp[Http]`, `runHttp()`) | ✅ Supported, CI-gated: the official MCP conformance suite runs against the native binary (identical results to the JVM in both `active` and `2026` modes) |
 
 ## Why zero metadata works
 
@@ -63,10 +63,10 @@ This is not just size hygiene: netty's own in-jar reflect-config unconditionally
 methods whose signatures mention netty buffer types, forcing them reachable, and netty's
 `--initialize-at-build-time=io.netty` directive then allocates a native `MemorySegment` in
 `EmptyByteBuf.<clinit>` on JDK 25 — failing the build with "Detected a native MemorySegment in
-the image heap". With the dependency excluded, none of that metadata is on the image classpath — and Mill's
-GraalVM-reachability-metadata-repo integration can stay at its defaults, so any OTHER dependency
-you add keeps its repo metadata. (Making netty itself work under native-image is the HTTP stage
-of TJC-2114.)
+the image heap". With the dependency excluded, none of that metadata is on the image classpath —
+and Mill's GraalVM-reachability-metadata-repo integration can stay at its defaults, so any OTHER
+dependency you add keeps its repo metadata. (HTTP builds keep netty and counter the stale-repo
+problem with a scoped override — see the HTTP section below.)
 
 The in-repo proof: `fast-mcp-scala.nativeSmoke.stdio` builds
 `examples.AnnotatedServer` with exactly this shape (it filters netty/zio-http from
@@ -111,3 +111,48 @@ CI. To re-audit (e.g. after a major dependency bump):
    `fast-mcp-scala/jvm/resources/META-INF/native-image/com.tjclp/fast-mcp-scala_3/reachability-metadata.json`
    (the modern single-file format). Mill's default `resources` ships it inside the published jar,
    so downstream builds stay zero-config.
+
+## Building an HTTP server
+
+HTTP native images keep zio-http/netty and need exactly two extra flags:
+
+```scala
+object server extends ScalaModule with mill.javalib.NativeImageModule {
+  def scalaVersion = "3.8.3"
+  def mainClass = Some("com.example.MyHttpServer")
+  def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:<version>")   // zio-http stays
+
+  override def jvmVersion = Task { "graalvm-community:25.0.2" }
+  override def nativeMetadataConfigurations =
+    Task { Set.empty[mill.javalib.graalvm.MetadataResult] }
+  override def nativeExcludedConfigJars = Task { Seq.empty[PathRef] }
+
+  override def nativeImageOptions = Task {
+    super.nativeImageOptions() ++ Seq(
+      "--no-fallback",
+      // SIGINT/SIGTERM must terminate a long-running server binary.
+      "--install-exit-handlers",
+      // netty-codec-http ships a blanket `--initialize-at-build-time=io.netty`, which is
+      // incompatible with GraalVM on JDK 25 (buffer/handler <clinit>s allocate native memory via
+      // the FFM CleanerJava25 and bake response objects into the image heap). Equal specificity +
+      // later rule wins, so this re-defaults the whole netty tree to run-time init; netty's own
+      // class-specific run-time entries are unaffected.
+      "--initialize-at-run-time=io.netty"
+    )
+  }
+}
+```
+
+Runtime behavior baked into `JvmHttpBackend`:
+
+- **Netty channel type**: `AUTO` (epoll/kqueue) on a normal JVM, **`NIO` inside a native image**
+  (detected via the `org.graalvm.nativeimage.imagecode` property — `AUTO`'s runtime transport
+  probing is exactly what closed-world analysis can't tolerate). Override with
+  `-Dfastmcp.http.channelType=nio|epoll|kqueue|auto` if you know what you're doing.
+- **Container binding**: the default host is `127.0.0.1`; set
+  `McpServerSettings(host = "0.0.0.0")` for containerized deployments (Databricks Apps included).
+
+The in-repo proof: `fast-mcp-scala.nativeSmoke.http` builds the conformance server, and
+`scripts/conformance.sh native [port] [active|2026]` runs the **official MCP conformance suite**
+against the native binary, held to the unchanged (empty) JVM baseline — measured identical to the
+JVM in both modes. CI runs both on every PR.

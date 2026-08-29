@@ -321,8 +321,27 @@ object `fast-mcp-scala` extends Module {
       }
     }
 
-    // object http — added by the HTTP native-image stage (TJC-2114 PR 3/3):
-    //   mainClass = ConformanceServerJvm; netty init flags layer in as overrides there.
+    /** HTTP smoke: the conformance server over streamable HTTP — the strongest possible check
+      * (the official MCP conformance suite runs against the native binary; see
+      * `scripts/conformance.sh native`). Netty stays on the classpath here, so this module owns
+      * the netty-under-native-image flags.
+      */
+    object http extends NativeSmokeModule {
+      override def mainClass = Some("com.tjclp.fastmcp.examples.conformance.ConformanceServerJvm")
+
+      override def nativeImageOptions = Task {
+        super.nativeImageOptions() ++ Seq(
+          // SIGINT/SIGTERM must terminate a long-running server binary.
+          "--install-exit-handlers",
+          // netty-codec-http ships a blanket `--initialize-at-build-time=io.netty`, which is
+          // incompatible with GraalVM on JDK 25: buffer/handler <clinit>s allocate native memory
+          // (FFM Arena via CleanerJava25) and bake response objects into the image heap. Equal
+          // specificity + later rule wins, so this CLI arg re-defaults the whole netty tree to
+          // run-time init (netty's own class-specific run-time entries are unaffected).
+          "--initialize-at-run-time=io.netty"
+        )
+      }
+    }
   }
 }
 // Run all tests: ./mill fast-mcp-scala.jvm.test + fast-mcp-scala.js.test.bunTest

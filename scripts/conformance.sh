@@ -2,7 +2,7 @@
 #
 # Run the official MCP conformance server suites against fast-mcp-scala.
 #
-#   scripts/conformance.sh [jvm|js] [port] [active|2026]
+#   scripts/conformance.sh [jvm|js|native] [port] [active|2026]
 #
 # Boots the cross-platform ConformanceServer (com.tjclp.fastmcp.examples.conformance.*) over
 # streamable HTTP, then drives it with the official harness via `bunx`. Exit code follows the harness
@@ -13,6 +13,11 @@
 # frozen at its release (extension/pending scenarios are reported but not scored by the harness).
 #
 # Requires: a JDK (jvm), bun (both). No vendored conformance checkout — the engine is fetched by bunx.
+#
+# "native" runs the SAME conformance server compiled to a GraalVM native image
+# (fast-mcp-scala.nativeSmoke.http.nativeImage; override with FAST_MCP_NATIVE_BIN) against the
+# UNCHANGED jvm baseline — the binary is behaviorally the same server, so any divergence is a
+# native-image bug to fix, never a new baseline.
 set -euo pipefail
 
 PLATFORM="${1:-jvm}"
@@ -23,6 +28,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 URL="http://127.0.0.1:${PORT}/mcp"
 BASELINE="$ROOT/conformance/baseline-${PLATFORM}.yml"
+[ "$PLATFORM" = "native" ] && BASELINE="$ROOT/conformance/baseline-jvm.yml"
 LOG="$(mktemp -t fmcp-conf-log.XXXXXX)"
 SRV_PID=""
 ENTRY=""
@@ -58,10 +64,25 @@ start_js() {
   SRV_PID=$!
 }
 
+start_native() {
+  local bin="${FAST_MCP_NATIVE_BIN:-}"
+  if [ -z "$bin" ]; then
+    echo "→ building native ConformanceServer (GraalVM)" >&2
+    ./mill --no-server fast-mcp-scala.nativeSmoke.http.nativeImage >/dev/null 2>&1
+    bin="$(./mill --no-server show fast-mcp-scala.nativeSmoke.http.nativeImage 2>/dev/null |
+      python3 -c "import sys,json,re; print(re.sub(r'^q?ref:v\\d+:[0-9a-f]+:','',json.load(sys.stdin)))")"
+  fi
+  [ -x "$bin" ] || { echo "native binary not found/executable: $bin" >&2; exit 1; }
+  echo "→ launching native ConformanceServer on :$PORT ($bin)" >&2
+  "$bin" "$PORT" >"$LOG" 2>&1 &
+  SRV_PID=$!
+}
+
 case "$PLATFORM" in
   jvm) start_jvm ;;
   js) start_js ;;
-  *) echo "usage: $0 [jvm|js] [port]" >&2; exit 2 ;;
+  native) start_native ;;
+  *) echo "usage: $0 [jvm|js|native] [port]" >&2; exit 2 ;;
 esac
 
 echo "→ waiting for $URL" >&2
@@ -83,7 +104,7 @@ case "$MODE" in
     bunx "@modelcontextprotocol/conformance@${CONF_VERSION}" \
       server --url "$URL" --requirements 2026-07-28
     ;;
-  *) echo "usage: $0 [jvm|js] [port] [active|2026]" >&2; exit 2 ;;
+  *) echo "usage: $0 [jvm|js|native] [port] [active|2026]" >&2; exit 2 ;;
 esac
 RC=$?
 set -e
