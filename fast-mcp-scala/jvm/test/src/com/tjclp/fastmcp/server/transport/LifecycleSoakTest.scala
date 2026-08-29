@@ -40,7 +40,7 @@ class LifecycleSoakTest extends AnyFunSuite with Matchers:
     val _ = server.scanAnnotations[SoakServer.type]
     runUnsafe(
       server.buildRouter.flatMap(r =>
-        JvmTransportBackend.httpRoutes(r, server.settings, ZEnvironment.empty)
+        JvmHttpBackend.httpRoutes(r, server.settings, ZEnvironment.empty)
       )
     )
 

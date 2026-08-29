@@ -8,7 +8,7 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.wire.{CompleteRequestParams, Completion, Implementation}
 import com.tjclp.fastmcp.server.manager.*
 import com.tjclp.fastmcp.server.router.{McpRouter, RouterBuilder}
-import com.tjclp.fastmcp.server.transport.TransportBackend
+import com.tjclp.fastmcp.server.transport.{HttpTransportBackend, TransportBackend}
 
 /** A completion provider for `completion/complete` (argument autocompletion): given the request
   * (ref + argument + optional context), return candidate values. Registered via
@@ -137,8 +137,8 @@ final class McpServer[R](
   override def runStdio(): ZIO[R, Throwable, Unit] =
     buildRouter.flatMap(backend.serveStdio(_, settings))
 
-  override def runHttp(): ZIO[R, Throwable, Unit] =
-    buildRouter.flatMap(backend.serveHttp(_, settings))
+  override def runHttp()(using http: HttpTransportBackend): ZIO[R, Throwable, Unit] =
+    buildRouter.flatMap(http.serveHttp(_, settings))
 
 /** The public `McpServer` factory — one definition for both platforms (replaces the per-platform
   * `McpServerBuilders`). Each platform need only provide a `given TransportBackend` in scope.
@@ -181,7 +181,7 @@ object McpServer:
       name: String = "FastMCPScala",
       version: String = "0.1.0",
       settings: McpServerSettings = McpServerSettings()
-  )(using TransportBackend): ZIO[Any, Throwable, Unit] =
+  )(using TransportBackend, HttpTransportBackend): ZIO[Any, Throwable, Unit] =
     ZIO.succeed(apply(name, version, settings)).flatMap(_.runHttp())
 
   /** Create + run on stdio in one step. */

@@ -38,5 +38,9 @@ object TransportRunner:
   given stdio: TransportRunner[Stdio] with
     def run(core: McpServerCore[Any]): ZIO[Any, Throwable, Unit] = core.runStdio()
 
-  given http: TransportRunner[Http] with
-    def run(core: McpServerCore[Any]): ZIO[Any, Throwable, Unit] = core.runHttp()
+  /** Conditional on the platform [[transport.HttpTransportBackend]]: the instance is only
+    * constructed where one is summoned, so an `McpServerApp[Stdio, ...]` has no reachable path into
+    * the HTTP stack (GraalVM native-image / Scala.js DCE drop it entirely).
+    */
+  given http(using h: transport.HttpTransportBackend): TransportRunner[Http] with
+    def run(core: McpServerCore[Any]): ZIO[Any, Throwable, Unit] = core.runHttp()(using h)

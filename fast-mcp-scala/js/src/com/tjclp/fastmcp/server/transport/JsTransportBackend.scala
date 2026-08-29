@@ -33,7 +33,7 @@ import com.tjclp.fastmcp.server.router.{McpRouter, Session}
   * answer 405 for its standalone legacy GET channel. Modern semantics match the JVM backend; only
   * the `Bun.serve` / `ReadableStream` shim differs.
   */
-object JsTransportBackend extends TransportBackend:
+object JsTransportBackend extends TransportBackend with HttpTransportBackend:
 
   /** UUID v4 via Web Crypto (`crypto.randomUUID`) — the JS runtime's CSPRNG. */
   override def randomId(): UIO[String] = ZIO.succeed(WebCrypto.randomUUID())
@@ -533,9 +533,12 @@ object JsTransportBackend extends TransportBackend:
     new WebResponse(body, WebResponseInit(status, headers)).asInstanceOf[js.Dynamic]
 
   /** The JS platform seam — re-exported by `ExportsJs` so `import com.tjclp.fastmcp.*` resolves a
-    * `TransportBackend` and `McpServer(...)` works on Scala.js.
+    * `TransportBackend` and `McpServer(...)` works on Scala.js. One object provides both halves:
+    * Scala.js DCE follows call sites the same way native-image reachability does, so stdio-only
+    * bundles still shed `Bun.serve`.
     */
   given instance: TransportBackend = this
+  given httpInstance: HttpTransportBackend = this
 
 import com.tjclp.fastmcp.server.McpServer
 
