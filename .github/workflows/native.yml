@@ -1,0 +1,56 @@
+name: Native Image
+
+# Builds the stdio smoke binary with GraalVM and drives it over JSON-RPC
+# (scripts/native-smoke.sh) so the native-image story (GH #66 / TJC-2114) can
+# never rot silently: any dependency bump that introduces a reflection need or
+# re-couples the transport seam turns this red on the PR that does it.
+#
+# No JDK matrix: temurin:21 only runs Mill itself — GraalVM is provisioned by
+# Mill via the coursier JVM index (`jvmVersion` on the nativeSmoke modules).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  native-smoke:
+    name: native-image stdio smoke (linux-x64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK (Mill runner only)
+        uses: coursier/setup-action@v1
+        with:
+          jvm: temurin:21
+
+      # Separate cache key from ci.yml so the ~350MB GraalVM archive doesn't
+      # bloat the main build's cache.
+      - name: Cache Coursier (incl. GraalVM archive)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.ivy2/cache
+          key: ${{ runner.os }}-coursier-native-${{ hashFiles('**/build.mill') }}
+          restore-keys: |
+            ${{ runner.os }}-coursier-native-
+
+      - name: Cache Mill
+        uses: actions/cache@v4
+        with:
+          path: ~/.mill
+          key: ${{ runner.os }}-mill-native-${{ hashFiles('**/build.mill') }}
+          restore-keys: |
+            ${{ runner.os }}-mill-native-
+
+      - name: Build native stdio smoke binary
+        run: ./mill fast-mcp-scala.nativeSmoke.stdio.nativeImage
+
+      - name: Exercise binary over stdio JSON-RPC
+        run: ./scripts/native-smoke.sh
