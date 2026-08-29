@@ -18,7 +18,6 @@ val organization = "com.tjclp"
 /** Version constants - centralized for maintenance */
 object Versions {
   val zio = "2.1.20"
-  val zioSchema = "1.7.4"
   val zioJson = "0.7.44"
   val tapir = "1.11.42"
   val jsonSchemaCirce = "0.11.10"
@@ -158,10 +157,6 @@ object `fast-mcp-scala` extends Module {
       // ZIO Core
       mvn"dev.zio::zio:${Versions.zio}",
       mvn"dev.zio::zio-json:${Versions.zioJson}",
-      // ZIO Schema for schema generation
-      mvn"dev.zio::zio-schema:${Versions.zioSchema}",
-      mvn"dev.zio::zio-schema-json:${Versions.zioSchema}",
-      mvn"dev.zio::zio-schema-derivation:${Versions.zioSchema}",
       // Tapir
       mvn"com.softwaremill.sttp.tapir::tapir-core:${Versions.tapir}",
       mvn"com.softwaremill.sttp.tapir::tapir-apispec-docs:${Versions.tapir}",
@@ -170,8 +165,6 @@ object `fast-mcp-scala` extends Module {
       // ZIO HTTP for HTTP transports (stateless + streamable)
       mvn"dev.zio::zio-http:${Versions.zioHttp}"
     )
-
-    override def mainClass = Some("fastmcp.FastMCPMain")
 
     object test extends ScalaTests with FastMCPTestModule {
       override def mvnDeps = Seq(
