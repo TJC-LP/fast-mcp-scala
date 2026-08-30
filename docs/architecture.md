@@ -4,7 +4,7 @@ A short tour of how the library is put together. For a user-facing overview see 
 
 ## One native core, one platform seam
 
-As of 0.5.0 the entire MCP protocol layer is native Scala 3 in `shared/` — JSON-RPC envelope, wire types, router, built-in handlers, middleware, and the Tasks state machine. There is exactly one server class, `McpServer[R]`, and exactly one platform abstraction, `TransportBackend`: the JVM supplies ZIO HTTP + `System.in/out`, Scala.js supplies `Bun.serve` + Node stdio. No vendored SDK remains on either platform (the official TS SDK survives only as a test-time conformance client).
+As of 0.5.0 the entire MCP protocol layer is native Scala 3 in `shared/` — JSON-RPC envelope, wire types, router, built-in handlers, middleware, and the Tasks state machine. There is exactly one server class, `McpServer[R]`, and one platform seam split along transport lines: `TransportBackend` (stdio + `randomId`) and `HttpTransportBackend` (HTTP) — split so stdio-only programs, and their GraalVM native images, never reach the HTTP stack. The JVM supplies `System.in/out` (`JvmTransportBackend`) and ZIO HTTP (`JvmHttpBackend`); Scala.js supplies Node stdio + `Bun.serve` (`JsTransportBackend`, both givens). No vendored SDK remains on either platform (the official TS SDK survives only as a test-time conformance client).
 
 ```
                    ┌──────────────────────────────────────┐
@@ -29,7 +29,7 @@ As of 0.5.0 the entire MCP protocol layer is native Scala 3 in `shared/` — JSO
                    │     + legacy compatibility methods)  │
                    │     — registered only when wired)    │
                    └─────────────────┬────────────────────┘
-                                     │ TransportBackend (the platform seam)
+                                     │ TransportBackend / HttpTransportBackend (the platform seam)
               ┌──────────────────────┼──────────────────────┐
               ▼                      ▼                      ▼
     ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
@@ -63,11 +63,12 @@ fast-mcp-scala/
 │       ├── McpServerSettings.scala
 │       ├── manager/                      # Tool/Prompt/Resource/Task managers
 │       ├── router/                       # McpRouter, Builtins, Session, middleware
-│       └── transport/                    # TransportBackend seam, MessageLoop, HostGuard
+│       └── transport/                    # TransportBackend + HttpTransportBackend seam, MessageLoop, HostGuard
 │
 ├── jvm/src/com/tjclp/fastmcp/           # JVM-specific
 │   ├── macros/                           # JsonSchemaMacro, MacroUtils (Tapir-backed)
-│   ├── server/transport/JvmTransportBackend.scala   # ZIO HTTP + System.in/out
+│   ├── server/transport/JvmTransportBackend.scala   # System.in/out (stdio; netty-free)
+│   ├── server/transport/JvmHttpBackend.scala          # ZIO HTTP (streamable + stateless)
 │   └── examples/                         # runnable example servers
 │
 └── js/src/com/tjclp/fastmcp/            # Scala.js (Bun-first)
@@ -117,7 +118,7 @@ The protocol layer that used to be delegated to the wrapped SDKs is now four sma
 - **`jsonrpc/`** — the JSON-RPC 2.0 envelope (`JsonRpcMessage` with structural discrimination: requests, notifications, responses, and an `Invalid` case so envelope violations answer `-32600` with the offender's id) and `McpError`, including the 2026 allocated codes `-32020` through `-32022`. Unknown resources now use JSON-RPC Invalid Params (`-32602`).
 - **`core/wire/`** — the 2026-07-28 wire shapes for discovery, cacheable results, MRTR, subscriptions, capabilities, tools, resources, prompts, deprecated client-input features, and the older initialization adapter.
 - **`server/router/`** — `McpRouter` (stateless dispatch and compatibility routing), `RequestContext` (fiber-local per-call version, identity, capabilities, log level, trace metadata, and MRTR retry data), `Builtins`, `Session` (transport queues plus legacy connection state), `WireMapping`, `ValidationMiddleware`, and `TaskRouting`.
-- **`server/transport/`** — the `TransportBackend` trait (`serveStdio`, `serveHttp`, `randomId` — session/task ids come from the platform CSPRNG), the shared `MessageLoop` (parse → dispatch → reply framing used identically by every transport), and `HostGuard` (DNS-rebinding protection).
+- **`server/transport/`** — the `TransportBackend` trait (`serveStdio`, `randomId` — session/task ids come from the platform CSPRNG) and the `HttpTransportBackend` trait (`serveHttp`; a separate trait with a conditional `TransportRunner[Http]` given, so stdio-only programs have no reachable path into the HTTP stack), the shared `MessageLoop` (parse → dispatch → reply framing used identically by every transport), and `HostGuard` (DNS-rebinding protection).
 
 Users only see the public methods on `McpServer` (`.tool`, `.prompt`, `.resource`, `.completion`, `.scanAnnotations`, `.runStdio`, `.runHttp`).
 

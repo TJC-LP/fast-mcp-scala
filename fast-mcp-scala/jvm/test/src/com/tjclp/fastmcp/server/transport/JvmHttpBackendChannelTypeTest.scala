@@ -32,6 +32,13 @@ class JvmHttpBackendChannelTypeTest extends AnyFunSuite:
     assert(JvmHttpBackend.channelTypeFor(Some("Epoll"), inNativeImage = true) == ChannelType.EPOLL)
   }
 
+  test("nettyConfigFor pins the worker AND boss event-loop groups alike") {
+    for ct <- List(ChannelType.NIO, ChannelType.EPOLL, ChannelType.KQUEUE, ChannelType.AUTO) do
+      val cfg = JvmHttpBackend.nettyConfigFor(ct)
+      assert(cfg.channelType == ct)
+      assert(cfg.bossGroup.channelType == ct)
+  }
+
   test("unrecognized override falls back to the environment default") {
     assert(JvmHttpBackend.channelTypeFor(Some("io_uring"), inNativeImage = false) == ChannelType.AUTO)
     assert(JvmHttpBackend.channelTypeFor(Some("io_uring"), inNativeImage = true) == ChannelType.NIO)

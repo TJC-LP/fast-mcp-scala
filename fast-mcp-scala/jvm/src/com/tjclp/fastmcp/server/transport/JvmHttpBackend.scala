@@ -100,12 +100,23 @@ object JvmHttpBackend extends HttpTransportBackend:
       configured: Option[String],
       inNativeImage: Boolean
   ): ChannelType =
-    configured.map(_.trim.toLowerCase) match
+    configured.map(_.trim.toLowerCase(java.util.Locale.ROOT)) match
       case Some("nio") => ChannelType.NIO
       case Some("epoll") => ChannelType.EPOLL
       case Some("kqueue") => ChannelType.KQUEUE
       case Some("auto") => ChannelType.AUTO
       case _ => if inNativeImage then ChannelType.NIO else ChannelType.AUTO
+
+  /** Full [[NettyConfig]] for [[serve]]: the channel type pinned on BOTH event-loop groups.
+    * NettyConfig.channelType covers the worker group and the channel factory, but the boss (accept)
+    * group carries its own nested config (NettyConfig.bossGroup) — zio-http's ServerEventLoopGroups
+    * builds it separately. An unpinned boss group probes epoll/kqueue at runtime, which crashes
+    * native images (FFM shared arenas in netty's cleanup) and then fails channel registration with
+    * "incompatible event loop type".
+    */
+  private[transport] def nettyConfigFor(ct: ChannelType): NettyConfig =
+    val base = NettyConfig.default.channelType(ct)
+    base.bossGroup(base.bossGroup.copy(channelType = ct))
 
   private def resolveChannelType(): ChannelType =
     channelTypeFor(
@@ -122,15 +133,7 @@ object JvmHttpBackend extends HttpTransportBackend:
     // (Server.live supplies NettyConfig.default internally); going through it is what lets the
     // channel type be pinned.
     val config = Server.Config.default.binding(settings.host, settings.port)
-    // Pin BOTH event-loop groups. NettyConfig.channelType covers the worker group and the
-    // channel factory, but the boss (accept) group carries its own nested config
-    // (NettyConfig.bossGroup) — zio-http's ServerEventLoopGroups builds it separately. An
-    // unpinned boss group probes epoll/kqueue at runtime, which crashes native images (FFM
-    // shared arenas in netty's cleanup) and then fails channel registration with
-    // "incompatible event loop type".
-    val ct = resolveChannelType()
-    val base = NettyConfig.default.channelType(ct)
-    val netty = base.bossGroup(base.bossGroup.copy(channelType = ct))
+    val netty = nettyConfigFor(resolveChannelType())
     Server
       .serve(routes)
       .provideLayer((ZLayer.succeed(config) ++ ZLayer.succeed(netty)) >>> Server.customized)
