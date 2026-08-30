@@ -23,6 +23,9 @@ reflection need, the smoke goes red on the PR that introduces it, and only then 
 ```scala
 object server extends ScalaModule with mill.javalib.NativeImageModule {
   def scalaVersion = "3.8.3"
+  // fast-mcp-scala's annotation macros are @experimental; consumers compile with -experimental
+  // (same requirement as the scala-cli quickstart in the README)
+  def scalacOptions = Seq("-experimental")
   def mainClass = Some("com.example.MyServer")
 
   def mvnDeps = Seq(
