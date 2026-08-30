@@ -249,11 +249,12 @@ stdio-only images entirely (~35 MB, instant startup, no JVM in the container):
 
 ```scala
 object server extends ScalaModule with mill.javalib.NativeImageModule {
+  def scalaVersion = "3.8.3"
+  def scalacOptions = Seq("-experimental")   // the annotation macros require it
   def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:<version>".exclude("dev.zio" -> "zio-http_3"))
   def mainClass = Some("com.example.MyServer")
   override def jvmVersion = Task { "graalvm-community:25.0.2" }
   override def nativeImageOptions = Task { super.nativeImageOptions() ++ Seq("--no-fallback") }
-  // + two one-line overrides to neutralize stale netty metadata; see the guide
 }
 ```
 

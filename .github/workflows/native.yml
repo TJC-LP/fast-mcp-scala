@@ -44,7 +44,7 @@ jobs:
       - name: Cache Mill
         uses: actions/cache@v4
         with:
-          path: ~/.mill
+          path: ~/.cache/mill
           key: ${{ runner.os }}-mill-native-${{ hashFiles('**/build.mill') }}
           restore-keys: |
             ${{ runner.os }}-mill-native-

@@ -93,15 +93,22 @@ printf '%s\n' \
 
 for id in 2 3 4 5 6 7; do await_id "$id"; done
 
-# Close stdin → EOF ends the stdio loop; give the process a moment to exit on its own.
+# Close stdin → EOF must end the stdio loop and the process must exit 0 on its own; a hang or a
+# nonzero status is a real defect (forced TERM/KILL would mask it), so both fail the smoke.
 exec 3>&-
-for _ in $(seq 1 20); do
-  kill -0 "$SRV_PID" 2>/dev/null || break
+EXITED=""
+for _ in $(seq 1 40); do
+  kill -0 "$SRV_PID" 2>/dev/null || { EXITED=1; break; }
   sleep 0.25
 done
-kill "$SRV_PID" 2>/dev/null || true
-wait "$SRV_PID" 2>/dev/null || true
+if [ -z "$EXITED" ]; then
+  kill -9 "$SRV_PID" 2>/dev/null || true
+  fail "server did not exit on stdin EOF within 10s"
+fi
+SRV_RC=0
+wait "$SRV_PID" || SRV_RC=$?
 SRV_PID=""
+[ "$SRV_RC" -eq 0 ] || fail "server exited with status $SRV_RC (expected 0 on clean EOF)"
 
 # Replies may arrive out of order (each frame dispatches in its own fiber), so slurp and select.
 for id in 1 2 3 4 5 6 7; do

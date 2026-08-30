@@ -281,14 +281,6 @@ object `fast-mcp-scala` extends Module {
       // JVM index; pinned exactly (bump deliberately, in step with docs/native-image.md).
       override def jvmVersion: T[String] = Task { "graalvm-community:25.0.2" }
 
-      // Neutralize Mill's GraalVM-reachability-metadata-repo integration. Left enabled it would
-      // `--exclude-config` netty's own in-jar metadata (the repo marks netty `override: true`)
-      // and substitute stale 4.1.x-era configs that predate netty 4.2's module renames. We want
-      // exactly the in-jar metadata that libraries ship (zio and netty both do).
-      override def nativeMetadataConfigurations =
-        Task { Set.empty[mill.javalib.graalvm.MetadataResult] }
-      override def nativeExcludedConfigJars = Task { Seq.empty[PathRef] }
-
       override def nativeImageOptions = Task {
         super.nativeImageOptions() ++ Seq(
           "--no-fallback" // fail the build rather than emit a JVM-hosted fallback image
@@ -302,6 +294,16 @@ object `fast-mcp-scala` extends Module {
       */
     object stdio extends NativeSmokeModule {
       override def mainClass = Some("com.tjclp.fastmcp.examples.AnnotatedServer")
+
+      // Neutralize Mill's GraalVM-reachability-metadata-repo integration FOR THIS MODULE: netty
+      // stays in the resolved deps (moduleDeps can't exclude it the way a downstream dependency
+      // exclusion does, only the classpath filter below), so Mill would otherwise inject stale
+      // 4.1.x-era netty repo configs referencing classes this image doesn't carry. A downstream
+      // stdio build that excludes zio-http needs NEITHER override — Mill's defaults are correct
+      // there (and other dependencies keep their repo metadata).
+      override def nativeMetadataConfigurations =
+        Task { Set.empty[mill.javalib.graalvm.MetadataResult] }
+      override def nativeExcludedConfigJars = Task { Seq.empty[PathRef] }
 
       // A stdio-only server has no reachable path into the HTTP stack (the transport-seam split),
       // so drop zio-http/netty from the image classpath — the same shape as a downstream

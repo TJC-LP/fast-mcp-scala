@@ -37,13 +37,6 @@ object server extends ScalaModule with mill.javalib.NativeImageModule {
   // GraalVM provisioned by Mill via the coursier JVM index — no GRAALVM_HOME, no setup-graalvm.
   override def jvmVersion = Task { "graalvm-community:25.0.2" }
 
-  // Neutralize Mill's GraalVM-reachability-metadata-repo integration: the repo marks netty
-  // `override: true` with stale 4.1.x-era configs, and Mill would strip netty's own (fresher)
-  // in-jar metadata in favor of them. Rely on in-jar metadata instead.
-  override def nativeMetadataConfigurations =
-    Task { Set.empty[mill.javalib.graalvm.MetadataResult] }
-  override def nativeExcludedConfigJars = Task { Seq.empty[PathRef] }
-
   override def nativeImageOptions = Task {
     // Always call super — the default wires resource inclusion and config directories.
     super.nativeImageOptions() ++ Seq("--no-fallback")
@@ -70,8 +63,10 @@ This is not just size hygiene: netty's own in-jar reflect-config unconditionally
 methods whose signatures mention netty buffer types, forcing them reachable, and netty's
 `--initialize-at-build-time=io.netty` directive then allocates a native `MemorySegment` in
 `EmptyByteBuf.<clinit>` on JDK 25 — failing the build with "Detected a native MemorySegment in
-the image heap". With the dependency excluded, none of that metadata is on the image classpath.
-(Making netty itself work under native-image is the HTTP stage of TJC-2114.)
+the image heap". With the dependency excluded, none of that metadata is on the image classpath — and Mill's
+GraalVM-reachability-metadata-repo integration can stay at its defaults, so any OTHER dependency
+you add keeps its repo metadata. (Making netty itself work under native-image is the HTTP stage
+of TJC-2114.)
 
 The in-repo proof: `fast-mcp-scala.nativeSmoke.stdio` builds
 `examples.AnnotatedServer` with exactly this shape (it filters netty/zio-http from
