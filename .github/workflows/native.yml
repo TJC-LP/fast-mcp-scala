@@ -85,7 +85,7 @@ jobs:
       - name: Cache Mill
         uses: actions/cache@v4
         with:
-          path: ~/.mill
+          path: ~/.cache/mill
           key: ${{ runner.os }}-mill-native-${{ hashFiles('**/build.mill') }}
           restore-keys: |
             ${{ runner.os }}-mill-native-
@@ -95,8 +95,15 @@ jobs:
 
       # The official MCP conformance suite against the native binary, held to the SAME
       # (empty) baseline as the JVM: any divergence is a native-image bug, never a new baseline.
+      # Distinct ports per step so a lingering listener can never satisfy the next readiness poll
+      # (the script also refuses to start if its port is taken).
       - name: Conformance (active suite)
         run: ./scripts/conformance.sh native 8077 active
 
-      - name: Conformance (2026-07-28 requirements)
-        run: ./scripts/conformance.sh native 8077 2026
+      # Scenario-level parity on the 2026 requirements run: the native binary must produce the
+      # SAME normalized scenario results as the JVM server, not merely a passing exit code.
+      - name: Conformance parity (2026 requirements, JVM vs native)
+        run: |
+          ./scripts/conformance.sh jvm 8078 2026 | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(✓|✗|Total:)' > jvm-2026.txt
+          ./scripts/conformance.sh native 8079 2026 | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(✓|✗|Total:)' > native-2026.txt
+          diff -u jvm-2026.txt native-2026.txt

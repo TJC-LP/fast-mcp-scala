@@ -329,6 +329,13 @@ object `fast-mcp-scala` extends Module {
     object http extends NativeSmokeModule {
       override def mainClass = Some("com.tjclp.fastmcp.examples.conformance.ConformanceServerJvm")
 
+      // Netty-scoped counter to the stale GraalVM-metadata-repo entries: the repo marks netty
+      // `override: true` but its newest netty configs are 4.1.x-era (predating netty 4.2's
+      // module renames). With the latest-config fallback off, the untested 4.2.3 gets no repo
+      // config and no `--exclude-config` stripping of its own (correct) in-jar metadata — while
+      // every other dependency keeps Mill's default repo-metadata behavior.
+      override def nativeUseLatestConfigWhenVersionIsUntested = Task { false }
+
       override def nativeImageOptions = Task {
         super.nativeImageOptions() ++ Seq(
           // SIGINT/SIGTERM must terminate a long-running server binary.

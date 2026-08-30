@@ -31,13 +31,40 @@ BASELINE="$ROOT/conformance/baseline-${PLATFORM}.yml"
 [ "$PLATFORM" = "native" ] && BASELINE="$ROOT/conformance/baseline-jvm.yml"
 LOG="$(mktemp -t fmcp-conf-log.XXXXXX)"
 SRV_PID=""
+SRV_STOPPED=""
 ENTRY=""
 
+# Terminate the launched server and record HOW it died: "clean" (exited within 15s of SIGTERM)
+# or "hang" (needed SIGKILL). Idempotent; used both on the normal path (so the completed log can
+# be inspected afterwards) and from the EXIT trap.
+stop_server() {
+  [ -n "$SRV_PID" ] || return 0
+  kill -TERM "$SRV_PID" 2>/dev/null || true
+  for _ in $(seq 1 30); do
+    kill -0 "$SRV_PID" 2>/dev/null || { SRV_STOPPED="clean"; break; }
+    sleep 0.5
+  done
+  if [ "$SRV_STOPPED" != "clean" ]; then
+    SRV_STOPPED="hang"
+    kill -9 "$SRV_PID" 2>/dev/null || true
+  fi
+  wait "$SRV_PID" 2>/dev/null || true
+  SRV_PID=""
+}
+
 cleanup() {
-  [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null || true
+  stop_server
   [ -n "$ENTRY" ] && rm -f "$ENTRY" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+# Refuse to run if ANYTHING already listens on the port — the readiness poll below would
+# otherwise happily bless a foreign server and the suite would test the wrong process.
+if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+  exec 3>&- 3<&- 2>/dev/null || true
+  echo "port $PORT is already in use — refusing to test an unknown server" >&2
+  exit 2
+fi
 
 jvm_classpath() {
   ./mill --no-server show fast-mcp-scala.jvm.runClasspath 2>/dev/null |
@@ -87,6 +114,11 @@ esac
 
 echo "→ waiting for $URL" >&2
 for i in $(seq 1 90); do
+  # The child must still be alive AND answering — a dead child with a lingering listener (or a
+  # foreign process) must never pass readiness.
+  if ! kill -0 "$SRV_PID" 2>/dev/null; then
+    echo "server process died during startup; log:" >&2; cat "$LOG" >&2; exit 1
+  fi
   curl -s -o /dev/null "$URL" 2>/dev/null && break
   if [ "$i" -eq 90 ]; then echo "server failed to start; log:" >&2; cat "$LOG" >&2; exit 1; fi
   sleep 0.5
@@ -108,12 +140,22 @@ case "$MODE" in
 esac
 RC=$?
 set -e
+# Terminate BEFORE inspecting the log, so teardown-time failures are gated too.
+stop_server
 echo "→ server log: $LOG" >&2
-# Native binaries can shed threads on GraalVM UnsupportedFeatureError while the suite still
-# passes on the surviving event loops — treat any such error as a failure.
-if [ "$PLATFORM" = "native" ] && grep -q "UnsupportedFeatureError" "$LOG"; then
-  echo "native FAIL: UnsupportedFeatureError in server log (suite verdict: $RC)" >&2
-  grep -m1 -A3 "UnsupportedFeatureError" "$LOG" >&2
-  exit 1
+if [ "$PLATFORM" = "native" ]; then
+  # --install-exit-handlers must actually work: a binary that survives 15s of SIGTERM is a bug
+  # (dead event loops deadlocking shutdown was exactly the failure SharedArenaSupport fixed).
+  if [ "$SRV_STOPPED" = "hang" ]; then
+    echo "native FAIL: server did not exit within 15s of SIGTERM (suite verdict: $RC)" >&2
+    exit 1
+  fi
+  # Native binaries can shed threads on GraalVM UnsupportedFeatureError while the suite still
+  # passes on the surviving event loops — treat any such error as a failure.
+  if grep -q "UnsupportedFeatureError" "$LOG"; then
+    echo "native FAIL: UnsupportedFeatureError in server log (suite verdict: $RC)" >&2
+    grep -m1 -A3 "UnsupportedFeatureError" "$LOG" >&2
+    exit 1
+  fi
 fi
 exit "$RC"

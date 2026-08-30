@@ -114,7 +114,8 @@ CI. To re-audit (e.g. after a major dependency bump):
 
 ## Building an HTTP server
 
-HTTP native images keep zio-http/netty and need exactly two extra flags:
+HTTP native images keep zio-http/netty; relative to the stdio recipe they need one netty-scoped
+build override and four extra flags:
 
 ```scala
 object server extends ScalaModule with mill.javalib.NativeImageModule {
@@ -124,9 +125,12 @@ object server extends ScalaModule with mill.javalib.NativeImageModule {
   def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:<version>")   // zio-http stays
 
   override def jvmVersion = Task { "graalvm-community:25.0.2" }
-  override def nativeMetadataConfigurations =
-    Task { Set.empty[mill.javalib.graalvm.MetadataResult] }
-  override def nativeExcludedConfigJars = Task { Seq.empty[PathRef] }
+
+  // The GraalVM metadata repo marks netty `override: true` with stale 4.1.x-era configs that
+  // predate netty 4.2's module renames; with the latest-config fallback off, untested netty
+  // versions get no repo config and keep their own (correct) in-jar metadata, while every other
+  // dependency keeps Mill's default repo-metadata behavior.
+  override def nativeUseLatestConfigWhenVersionIsUntested = Task { false }
 
   override def nativeImageOptions = Task {
     super.nativeImageOptions() ++ Seq(
@@ -159,5 +163,7 @@ Runtime behavior baked into `JvmHttpBackend`:
 
 The in-repo proof: `fast-mcp-scala.nativeSmoke.http` builds the conformance server, and
 `scripts/conformance.sh native [port] [active|2026]` runs the **official MCP conformance suite**
-against the native binary, held to the unchanged (empty) JVM baseline — measured identical to the
-JVM in both modes. CI runs both on every PR.
+against the native binary, held to the unchanged (empty) JVM baseline. CI runs the active suite,
+enforces scenario-level JVM/native parity on the 2026 requirements run, requires a clean server
+log (no `UnsupportedFeatureError`), and requires the binary to exit within 15s of SIGTERM — on
+every PR.
