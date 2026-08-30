@@ -119,6 +119,7 @@ HTTP native images keep zio-http/netty and need exactly two extra flags:
 ```scala
 object server extends ScalaModule with mill.javalib.NativeImageModule {
   def scalaVersion = "3.8.3"
+  def scalacOptions = Seq("-experimental")                      // annotation macros require it
   def mainClass = Some("com.example.MyHttpServer")
   def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:<version>")   // zio-http stays
 
@@ -137,7 +138,11 @@ object server extends ScalaModule with mill.javalib.NativeImageModule {
       // the FFM CleanerJava25 and bake response objects into the image heap). Equal specificity +
       // later rule wins, so this re-defaults the whole netty tree to run-time init; netty's own
       // class-specific run-time entries are unaffected.
-      "--initialize-at-run-time=io.netty"
+      "--initialize-at-run-time=io.netty",
+      // netty's JDK-25 direct-buffer cleaner allocates via Arena.ofShared at runtime; without
+      // this, cleaner allocations throw and kill event-loop threads (and SIGTERM shutdown hangs).
+      "-H:+UnlockExperimentalVMOptions",
+      "-H:+SharedArenaSupport"
     )
   }
 }

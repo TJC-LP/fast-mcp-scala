@@ -338,7 +338,13 @@ object `fast-mcp-scala` extends Module {
           // (FFM Arena via CleanerJava25) and bake response objects into the image heap. Equal
           // specificity + later rule wins, so this CLI arg re-defaults the whole netty tree to
           // run-time init (netty's own class-specific run-time entries are unaffected).
-          "--initialize-at-run-time=io.netty"
+          "--initialize-at-run-time=io.netty",
+          // netty's JDK-25 direct-buffer cleaner allocates via Arena.ofShared at RUNTIME; without
+          // this, the first cleaner allocation throws UnsupportedFeatureError, killing event-loop
+          // threads one by one (service limps along on the survivors) and deadlocking SIGTERM
+          // shutdown. Found by dogfooding; the conformance gate now greps the server log for it.
+          "-H:+UnlockExperimentalVMOptions",
+          "-H:+SharedArenaSupport"
         )
       }
     }

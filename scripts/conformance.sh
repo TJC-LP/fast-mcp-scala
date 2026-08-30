@@ -109,4 +109,11 @@ esac
 RC=$?
 set -e
 echo "→ server log: $LOG" >&2
+# Native binaries can shed threads on GraalVM UnsupportedFeatureError while the suite still
+# passes on the surviving event loops — treat any such error as a failure.
+if [ "$PLATFORM" = "native" ] && grep -q "UnsupportedFeatureError" "$LOG"; then
+  echo "native FAIL: UnsupportedFeatureError in server log (suite verdict: $RC)" >&2
+  grep -m1 -A3 "UnsupportedFeatureError" "$LOG" >&2
+  exit 1
+fi
 exit "$RC"
