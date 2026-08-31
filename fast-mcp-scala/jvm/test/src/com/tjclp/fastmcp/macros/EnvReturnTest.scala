@@ -7,6 +7,7 @@ import zio.*
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
 import com.tjclp.fastmcp.server.*
+import com.tjclp.fastmcp.server.transport.JvmHttpBackend.given
 import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
 /** Annotated tool handler with a `Ref[Int]` environment requirement. */

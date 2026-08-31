@@ -72,7 +72,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val _ = server.scanAnnotations[TestServer.type]
     runUnsafe(
       server.buildRouter.flatMap(r =>
-        JvmTransportBackend.httpRoutes(r, server.settings, ZEnvironment.empty)
+        JvmHttpBackend.httpRoutes(r, server.settings, ZEnvironment.empty)
       )
     )
 
@@ -400,7 +400,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
         live <- Session.make("live")
         _ <- live.tryAcquireGet
         store <- Ref.make(Map("idle" -> idle, "live" -> live))
-        sweeper <- JvmTransportBackend.evictIdleSessions(store, settings).fork
+        sweeper <- JvmHttpBackend.evictIdleSessions(store, settings).fork
         _ <- (ZIO.sleep(50.millis) *> store.get)
           .map(m => !m.contains("idle") && m.contains("live"))
           .repeatUntil(identity)

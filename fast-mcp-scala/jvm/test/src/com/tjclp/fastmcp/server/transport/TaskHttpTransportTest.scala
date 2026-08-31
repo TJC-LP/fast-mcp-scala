@@ -88,7 +88,7 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     runUnsafe(
       server.tool(chattyTool) *>
         server.buildRouter.flatMap(r =>
-          JvmTransportBackend.httpRoutes(r, server.settings, ZEnvironment.empty)
+          JvmHttpBackend.httpRoutes(r, server.settings, ZEnvironment.empty)
         )
     )
 

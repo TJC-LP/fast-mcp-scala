@@ -5,6 +5,34 @@ All notable changes to fast-mcp-scala will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING (binary): the transport seam is split in two** (TJC-2114, #66).
+  `TransportBackend` keeps `serveStdio` + `randomId`; `serveHttp` moves to the
+  new `HttpTransportBackend` trait, `runHttp()` takes it as a `using`
+  parameter, and the `TransportRunner[Http]` given is conditional on it. On
+  the JVM the HTTP implementation now lives in `JvmHttpBackend`
+  (`JvmTransportBackend` is stdio-only and netty-free); on JS
+  `JsTransportBackend` provides both givens. Typical users are
+  source-compatible (`import com.tjclp.fastmcp.{*, given}` puts both givens
+  in scope), but code referencing `JvmTransportBackend.httpRoutes` or
+  implementing `TransportBackend` directly must adjust. The payoff: a
+  stdio-only program has no reachable path into the HTTP stack, so GraalVM
+  native images (and DCE'd JS bundles) shed zio-http/netty entirely.
+- **Netty channel type is now pinned deliberately**: `AUTO` on a normal JVM
+  (unchanged behavior), `NIO` inside a GraalVM native image (where `AUTO`'s
+  runtime epoll/kqueue/io_uring probing breaks closed-world analysis), with a
+  `-Dfastmcp.http.channelType=nio|epoll|kqueue|auto` escape hatch.
+
+### Removed
+
+- The phantom `fastmcp.FastMCPMain` `mainClass` in `build.mill` (the class
+  never existed) and the unused zio-schema dependencies
+  (`zio-schema`/`-json`/`-derivation` had zero usages; schema derivation is
+  tapir-based).
+
 ## [1.0.0-RC1] - 2026-08-17
 
 ### Added

@@ -267,4 +267,9 @@ trait McpServerCore[R]:
 
   def runStdio(): ZIO[R, Throwable, Unit]
 
-  def runHttp(): ZIO[R, Throwable, Unit]
+  /** Serve over HTTP. Takes the platform [[transport.HttpTransportBackend]] as a `using` parameter
+    * (rather than capturing it at construction) so programs that never call `runHttp()` have no
+    * reachable path into the HTTP stack — a stdio-only GraalVM native image sheds zio-http/Netty
+    * entirely, and Scala.js DCE drops `Bun.serve`.
+    */
+  def runHttp()(using transport.HttpTransportBackend): ZIO[R, Throwable, Unit]
