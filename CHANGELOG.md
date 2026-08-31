@@ -5,7 +5,7 @@ All notable changes to fast-mcp-scala will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0-RC3] - 2026-08-31
 
 ### Added
 
@@ -55,6 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never existed) and the unused zio-schema dependencies
   (`zio-schema`/`-json`/`-derivation` had zero usages; schema derivation is
   tapir-based).
+
+## [1.0.0-RC2] - 2026-08-28
+
+### Fixed
+
+- `Option` tool parameters decode via zio-json instead of a `Mirror` sum
+  decoder (#64, #65).
 
 ## [1.0.0-RC1] - 2026-08-17
 

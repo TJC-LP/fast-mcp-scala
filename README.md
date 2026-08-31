@@ -40,10 +40,10 @@ Built on **ZIO 2**, **Tapir**-derived schemas, and **zio-json** on both platform
 
 ```scala 3 ignore
 // JVM — native Scala MCP core with annotations, derived schemas, HTTP + stdio transports.
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "1.0.0-RC1"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "1.0.0-RC3"
 
 // Scala.js — the same native core on Bun (Bun.serve + Node stdio), same annotation and typed-contract APIs.
-libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "1.0.0-RC1"
+libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "1.0.0-RC3"
 ```
 
 Built against Scala 3.8.3. JVM requires JDK 17+. Scala.js artifact is published for `sjs1_3` (Scala.js 1.x); runs on Bun (first-class) and Node 18+.
@@ -54,7 +54,7 @@ A single-file server with one tool — the same code lives in [`HelloWorld.scala
 
 ```scala 3 raw
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala:1.0.0-RC1
+//> using dep com.tjclp::fast-mcp-scala:1.0.0-RC3
 //> using options "-Xcheck-macros" "-experimental"
 
 import com.tjclp.fastmcp.{*, given}
@@ -251,7 +251,7 @@ stdio-only images entirely (~35 MB, instant startup, no JVM in the container):
 object server extends ScalaModule with mill.javalib.NativeImageModule {
   def scalaVersion = "3.8.3"
   def scalacOptions = Seq("-experimental")   // the annotation macros require it
-  def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:<version>".exclude("dev.zio" -> "zio-http_3"))
+  def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:1.0.0-RC3".exclude("dev.zio" -> "zio-http_3"))
   def mainClass = Some("com.example.MyServer")
   override def jvmVersion = Task { "graalvm-community:25.0.2" }
   override def nativeImageOptions = Task { super.nativeImageOptions() ++ Seq("--no-fallback") }
@@ -383,7 +383,7 @@ Proof: the official **MCP conformance suite** runs against both platforms in CI 
 
 ```scala 3 raw
 //> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala_sjs1:1.0.0-RC1
+//> using dep com.tjclp::fast-mcp-scala_sjs1:1.0.0-RC3
 
 import com.tjclp.fastmcp.{*, given}
 
@@ -468,7 +468,7 @@ Add to `claude_desktop_config.json`:
       "command": "scala-cli",
       "args": [
         "-e",
-        "//> using dep com.tjclp::fast-mcp-scala:1.0.0-RC1",
+        "//> using dep com.tjclp::fast-mcp-scala:1.0.0-RC3",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]
@@ -506,14 +506,14 @@ For architectural detail, see [`docs/architecture.md`](docs/architecture.md).
 After `publishLocal`:
 
 ```scala 3 ignore
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "1.0.0-RC2-SNAPSHOT"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "1.0.0-RC3"
 ```
 
 Or with Mill:
 
 ```scala 3 ignore
 def ivyDeps = Agg(
-  ivy"com.tjclp::fast-mcp-scala:1.0.0-RC2-SNAPSHOT"
+  ivy"com.tjclp::fast-mcp-scala:1.0.0-RC3"
 )
 ```
 
