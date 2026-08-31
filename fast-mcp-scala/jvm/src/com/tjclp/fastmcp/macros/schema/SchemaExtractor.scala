@@ -63,7 +63,30 @@ object SchemaExtractor:
         // carries string-based enum schemas: the block-local givens win over the imported
         // generic.auto candidates when the derivation's per-field summons run (GH #78). The
         // macro-time summon is kept purely for its friendly missing-import diagnostic.
-        val nestedEnums = com.tjclp.fastmcp.macros.EnumTypeCollector.collectSingletonEnums(tpeRepr)
+        //
+        // User schemas always win: a local is planted only when the macro-time summon for the
+        // enum finds nothing, or finds tapir's AUTO-derivation bridge (LowPrioritySchema
+        // .derivedSchema over generic.auto's Derived) — a plain `.isEmpty` filter would disable
+        // the fix entirely under generic.auto, whose bridge satisfies every Schema summon.
+        def isAutoDerivedSchema(term: Term): Boolean =
+          def fnSymbol(t: Term): Symbol = t match
+            case Apply(fn, _) => fnSymbol(fn)
+            case TypeApply(fn, _) => fnSymbol(fn)
+            case Inlined(_, _, body) => fnSymbol(body)
+            case Block(_, expr) => fnSymbol(expr)
+            case other => other.symbol
+          val fullName = fnSymbol(term).fullName
+          fullName.startsWith("sttp.tapir.generic.auto") ||
+          fullName.endsWith("LowPrioritySchema.derivedSchema")
+        val nestedEnums = com.tjclp.fastmcp.macros.EnumTypeCollector
+          .collectSingletonEnums(tpeRepr)
+          .filter { e =>
+            e.asType match
+              case '[et] =>
+                Expr.summon[Schema[et]] match
+                  case None => true
+                  case Some(existing) => isAutoDerivedSchema(existing.asTerm)
+          }
         val rawSchemaExpr: Expr[Schema[T]] =
           if nestedEnums.isEmpty then summonOrAbort
           else

@@ -54,6 +54,15 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
     }
   case class ToneArgs(tone: Tone)
 
+  // Schema-override guard: a user companion tapir Schema for an enum must win over the
+  // planted derivedEnumeration default (review finding on GH #78).
+  enum Grade:
+    case A, B, C
+  object Grade:
+    given sttp.tapir.Schema[Grade] =
+      sttp.tapir.Schema.string[Grade].description("user-grade-schema")
+  case class GradeArgs(grade: Grade)
+
   // Parameterized-case enum: schema stays a coproduct, decode uses wrapper objects — must compile.
   enum Shape:
     case Circle(radius: Double)
@@ -423,3 +432,12 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
         structured.map(_.toString).getOrElse("") should include(""""mood":"happy"""")
       case other => fail(s"unexpected: $other")
   }
+
+  test("a user-supplied tapir Schema for a nested enum always wins (GH #78 review)") {
+    val schema = parse(ToolInputSchema.derived[GradeArgs].toJsonString).toOption.get
+    val grade = schema.hcursor.downField("properties").downField("grade")
+    grade.get[String]("description") shouldBe Right("user-grade-schema")
+    // The planted default would have added an enum constraint; the user schema has none.
+    grade.downField("enum").succeeded shouldBe false
+  }
+
