@@ -53,3 +53,31 @@ class SharedContractSurfaceTest extends AnyFunSuite:
     assert(staticResource.definition.uri == "static://welcome")
     assert(templateResource.definition.isTemplate)
   }
+
+// GH #78: zero-boilerplate enum support must hold on Scala.js too (macro expansion runs at JS
+// compile). Top-level fixtures: no hand-written givens anywhere.
+enum JsMood:
+  case bright, dim
+
+case class JsMoodArgs(mood: JsMood, label: Option[String])
+
+class EnumContractSurfaceJsTest extends AnyFunSuite:
+
+  test("enum-field contract derives decoder and schema with zero user givens on JS") {
+    import sttp.tapir.generic.auto.*
+    val schemaJson = ToolInputSchema.derived[JsMoodArgs].toJsonString
+    assert(schemaJson.contains("\"enum\""), s"missing enum constraint: $schemaJson")
+    assert(schemaJson.contains("bright"), s"missing enum value: $schemaJson")
+
+    val decoder = summon[McpDecoder[JsMoodArgs]]
+    val decoded = decoder.decode(
+      "args",
+      Map[String, Any]("mood" -> "dim"),
+      com.tjclp.fastmcp.codec.DefaultDecodeContext.default
+    )
+    assert(decoded == JsMoodArgs(JsMood.dim, None))
+
+    val encoder = summon[McpEncoder[JsMoodArgs]]
+    val structured = encoder.encodeStructured(JsMoodArgs(JsMood.bright, Some("x"))).map(_.toString)
+    assert(structured.exists(_.contains("bright")), s"structured: $structured")
+  }

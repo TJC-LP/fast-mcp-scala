@@ -20,12 +20,18 @@ import zio.json.*
   * enum already produces bare strings (`enumValuesAsStrings` defaults to true), so no shim is
   * needed; parameterized-case enums derive zio-json's wrapper-object encoding.
   */
-private[fastmcp] object ZioJsonEnumDerivation:
+object ZioJsonEnumDerivation:
+  // Public (not private[fastmcp]) deliberately: the deriveDecoder/deriveEncoder entry points are
+  // called from inline givens in other packages, and a package-private member forces the compiler
+  // to synthesize an inline accessor whose parameter type is the *package class*
+  // (com/tjclp/fastmcp/macros) — a class that never exists in bytecode, blowing up any runtime
+  // reflection over inheritors (e.g. test discovery) with NoClassDefFoundError. Internal API:
+  // not exported from com.tjclp.fastmcp, not documented for direct use.
 
-  inline def deriveDecoder[T](using inline m: Mirror.Of[T]): JsonDecoder[T] =
+  inline def deriveDecoder[T](using m: Mirror.Of[T]): JsonDecoder[T] =
     ${ deriveDecoderImpl[T]('m) }
 
-  inline def deriveEncoder[T](using inline m: Mirror.Of[T]): JsonEncoder[T] =
+  inline def deriveEncoder[T](using m: Mirror.Of[T]): JsonEncoder[T] =
     ${ deriveEncoderImpl[T]('m) }
 
   private[macros] def deriveDecoderImpl[T: Type](

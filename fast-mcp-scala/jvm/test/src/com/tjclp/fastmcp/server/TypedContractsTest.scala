@@ -395,3 +395,31 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
       case StructuredToolResult(List(TextContent(text, _, _)), _) => text shouldBe "ok"
       case other => fail(s"unexpected: $other")
   }
+
+  test("Out with enum field encodes and derives outputSchema with zero user givens (GH #78 Part 3)") {
+    case class Report(mood: Mood, n: Int)
+    val server = McpServer("EnumOutServer")
+    runUnsafe(
+      server.tool(
+        McpTool[MoodArgs, Report](name = "report-tool", description = Some("d")) { args =>
+          Report(args.mood, 7)
+        }.withOutputSchema
+      )
+    )
+    val defn = server.toolManager.getToolDefinition("report-tool").get
+    val outSchemaStr = {
+      import com.tjclp.fastmcp.core.wire.toJsonString
+      defn.outputSchema.get.toJsonString
+    }
+    val outSchema = parse(outSchemaStr).toOption.get
+    val mood = outSchema.hcursor.downField("properties").downField("mood")
+    mood.get[String]("type") shouldBe Right("string")
+    mood.get[List[String]]("enum").toOption.get should contain("happy")
+
+    val r = runUnsafe(server.toolManager.callTool("report-tool", Map("mood" -> "happy"), None))
+    r match
+      case StructuredToolResult(List(TextContent(text, _, _)), structured) =>
+        text should include(""""mood":"happy"""")
+        structured.map(_.toString).getOrElse("") should include(""""mood":"happy"""")
+      case other => fail(s"unexpected: $other")
+  }
