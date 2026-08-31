@@ -5,6 +5,29 @@ All notable changes to fast-mcp-scala will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Zero-boilerplate Scala 3 enum support in typed contracts** (TJC-2167, #78):
+  `McpTool[In, Out]` with enum fields now derives string-enum JSON schemas
+  (`{"type":"string","enum":[...]}`) and string-based zio-json codecs with no
+  user-supplied givens — at any nesting depth, including through `Option`,
+  collections, and nested case classes. The annotation path gains the same
+  for enums nested inside case-class params (previously coproducts of empty
+  objects / decode failures). User-defined `JsonDecoder`/`JsonEncoder`/tapir
+  `Schema` instances always win: the fix is macro-side (summon-first, local
+  givens planted only where the call-site search finds nothing), never
+  exported givens that could shadow companions. Parameterized-case enums
+  intentionally keep coproduct schemas and wrapper-object codecs.
+
+### Added
+
+- **Mirror-based `McpEncoder` fallback**: `Out` case classes without any
+  `JsonEncoder` in scope now encode (text + `structuredContent`)
+  automatically; guarded by `NotGiven[JsonEncoder[A]]` so every existing
+  explicit-encoder call site resolves exactly as before.
+
 ## [1.0.0-RC3] - 2026-08-31
 
 ### Added
