@@ -262,5 +262,99 @@ object `fast-mcp-scala` extends Module {
       }
     }
   }
+
+  /** GraalVM native-image smoke binaries (NOT published — verify with `resolve __.publishArtifacts`).
+    *
+    * These exist so CI proves that a downstream `NativeImageModule` build against fast-mcp-scala
+    * needs zero hand-written reachability config (GH #66 / TJC-2114). One object per binary,
+    * because `NativeImageModule` builds from `finalMainClass`. Exercised by
+    * `scripts/native-smoke.sh` and `.github/workflows/native.yml`.
+    */
+  object nativeSmoke extends Module {
+
+    trait NativeSmokeModule extends ScalaModule with mill.javalib.NativeImageModule {
+      override def scalaVersion: T[String] = scala3Version
+      override def moduleDeps = Seq(jvm)
+
+      // GraalVM scoped to the smoke modules ONLY — setting jvmVersion on the published jvm
+      // module would silently change its compile/test JVM. Provisioned by Mill via the coursier
+      // JVM index; pinned exactly (bump deliberately, in step with docs/native-image.md).
+      override def jvmVersion: T[String] = Task { "graalvm-community:25.0.2" }
+
+      override def nativeImageOptions = Task {
+        super.nativeImageOptions() ++ Seq(
+          "--no-fallback" // fail the build rather than emit a JVM-hosted fallback image
+        )
+      }
+    }
+
+    /** Stdio smoke: AnnotatedServer covers the full surface a downstream stdio server hits at
+      * runtime — macro-registered tools/prompts/resources AND the genuine runtime tapir→circe
+      * JSON-schema rendering path (materialized at registration/tools-list time).
+      */
+    object stdio extends NativeSmokeModule {
+      override def mainClass = Some("com.tjclp.fastmcp.examples.AnnotatedServer")
+
+      // Neutralize Mill's GraalVM-reachability-metadata-repo integration FOR THIS MODULE: netty
+      // stays in the resolved deps (moduleDeps can't exclude it the way a downstream dependency
+      // exclusion does, only the classpath filter below), so Mill would otherwise inject stale
+      // 4.1.x-era netty repo configs referencing classes this image doesn't carry. A downstream
+      // stdio build that excludes zio-http needs NEITHER override — Mill's defaults are correct
+      // there (and other dependencies keep their repo metadata).
+      override def nativeMetadataConfigurations =
+        Task { Set.empty[mill.javalib.graalvm.MetadataResult] }
+      override def nativeExcludedConfigJars = Task { Seq.empty[PathRef] }
+
+      // A stdio-only server has no reachable path into the HTTP stack (the transport-seam split),
+      // so drop zio-http/netty from the image classpath — the same shape as a downstream
+      // stdio-only build that excludes the zio-http dependency. This isn't just size hygiene:
+      // netty's own in-jar reflect-config unconditionally registers methods whose signatures
+      // mention netty buffer types, forcing them reachable, and netty's
+      // `--initialize-at-build-time=io.netty` then allocates a native MemorySegment in
+      // EmptyByteBuf.<clinit> on JDK 25 — an image-heap error. Reachability truth is proven by
+      // the smoke run: any seam leak resurfaces as a linking/runtime failure.
+      override def nativeImageClasspath = Task {
+        super.nativeImageClasspath().filterNot { ref =>
+          val name = ref.path.last
+          name.startsWith("netty-") || name.startsWith("zio-http")
+        }
+      }
+    }
+
+    /** HTTP smoke: the conformance server over streamable HTTP — the strongest possible check
+      * (the official MCP conformance suite runs against the native binary; see
+      * `scripts/conformance.sh native`). Netty stays on the classpath here, so this module owns
+      * the netty-under-native-image flags.
+      */
+    object http extends NativeSmokeModule {
+      override def mainClass = Some("com.tjclp.fastmcp.examples.conformance.ConformanceServerJvm")
+
+      // Netty-scoped counter to the stale GraalVM-metadata-repo entries: the repo marks netty
+      // `override: true` but its newest netty configs are 4.1.x-era (predating netty 4.2's
+      // module renames). With the latest-config fallback off, the untested 4.2.3 gets no repo
+      // config and no `--exclude-config` stripping of its own (correct) in-jar metadata — while
+      // every other dependency keeps Mill's default repo-metadata behavior.
+      override def nativeUseLatestConfigWhenVersionIsUntested = Task { false }
+
+      override def nativeImageOptions = Task {
+        super.nativeImageOptions() ++ Seq(
+          // SIGINT/SIGTERM must terminate a long-running server binary.
+          "--install-exit-handlers",
+          // netty-codec-http ships a blanket `--initialize-at-build-time=io.netty`, which is
+          // incompatible with GraalVM on JDK 25: buffer/handler <clinit>s allocate native memory
+          // (FFM Arena via CleanerJava25) and bake response objects into the image heap. Equal
+          // specificity + later rule wins, so this CLI arg re-defaults the whole netty tree to
+          // run-time init (netty's own class-specific run-time entries are unaffected).
+          "--initialize-at-run-time=io.netty",
+          // netty's JDK-25 direct-buffer cleaner allocates via Arena.ofShared at RUNTIME; without
+          // this, the first cleaner allocation throws UnsupportedFeatureError, killing event-loop
+          // threads one by one (service limps along on the survivors) and deadlocking SIGTERM
+          // shutdown. Found by dogfooding; the conformance gate now greps the server log for it.
+          "-H:+UnlockExperimentalVMOptions",
+          "-H:+SharedArenaSupport"
+        )
+      }
+    }
+  }
 }
 // Run all tests: ./mill fast-mcp-scala.jvm.test + fast-mcp-scala.js.test.bunTest

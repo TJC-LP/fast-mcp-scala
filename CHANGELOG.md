@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **GraalVM native-image support for stdio servers** (TJC-2114, #66): the
+  non-published `nativeSmoke.stdio` Mill module builds `examples.AnnotatedServer`
+  into a native binary (GraalVM 25, `--no-fallback`) with **zero hand-written
+  reachability metadata**, and `scripts/native-smoke.sh` drives the full MCP
+  handshake against it — including the runtime tapir→circe schema path — plus a
+  netty-shed assertion (`io.netty`/`zio.http` string counts ≈ 0). A new
+  PR-blocking `native.yml` workflow runs both on linux-x64 so the metadata
+  story can't rot. Downstream recipe and audit loop in `docs/native-image.md`.
+- **GraalVM native-image support for HTTP servers** (TJC-2114, #66): the
+  `nativeSmoke.http` module compiles the conformance server (zio-http/netty)
+  to a native binary with a four-flag recipe: `--install-exit-handlers`,
+  `--initialize-at-run-time=io.netty` (countering netty-codec-http's blanket
+  build-time-init rule, incompatible with GraalVM on JDK 25), and
+  `-H:+UnlockExperimentalVMOptions -H:+SharedArenaSupport` (netty's JDK-25
+  direct-buffer cleaner allocates via `Arena.ofShared` at runtime; without it
+  event-loop threads die one by one and SIGTERM shutdown hangs).
+  `scripts/conformance.sh native` runs the official MCP conformance suite
+  against the binary: identical results to the JVM in both `active` (empty
+  baseline) and `2026` modes, CI-gated in `native.yml`. Netty runs on NIO
+  inside images (auto-detected; `-Dfastmcp.http.channelType` overrides).
+
 ### Changed
 
 - **BREAKING (binary): the transport seam is split in two** (TJC-2114, #66).

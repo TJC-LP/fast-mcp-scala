@@ -1,0 +1,109 @@
+name: Native Image
+
+# Builds the stdio smoke binary with GraalVM and drives it over JSON-RPC
+# (scripts/native-smoke.sh) so the native-image story (GH #66 / TJC-2114) can
+# never rot silently: any dependency bump that introduces a reflection need or
+# re-couples the transport seam turns this red on the PR that does it.
+#
+# No JDK matrix: temurin:21 only runs Mill itself — GraalVM is provisioned by
+# Mill via the coursier JVM index (`jvmVersion` on the nativeSmoke modules).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  native-smoke:
+    name: native-image stdio smoke (linux-x64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK (Mill runner only)
+        uses: coursier/setup-action@v1
+        with:
+          jvm: temurin:21
+
+      # Separate cache key from ci.yml so the ~350MB GraalVM archive doesn't
+      # bloat the main build's cache.
+      - name: Cache Coursier (incl. GraalVM archive)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.ivy2/cache
+          key: ${{ runner.os }}-coursier-native-${{ hashFiles('**/build.mill') }}
+          restore-keys: |
+            ${{ runner.os }}-coursier-native-
+
+      - name: Cache Mill
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mill
+          key: ${{ runner.os }}-mill-native-${{ hashFiles('**/build.mill') }}
+          restore-keys: |
+            ${{ runner.os }}-mill-native-
+
+      - name: Build native stdio smoke binary
+        run: ./mill fast-mcp-scala.nativeSmoke.stdio.nativeImage
+
+      - name: Exercise binary over stdio JSON-RPC
+        run: ./scripts/native-smoke.sh
+
+  native-http:
+    name: native-image HTTP conformance (linux-x64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK (Mill runner only)
+        uses: coursier/setup-action@v1
+        with:
+          jvm: temurin:21
+
+      - name: Set up Bun (conformance harness)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Cache Coursier (incl. GraalVM archive)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.ivy2/cache
+          key: ${{ runner.os }}-coursier-native-${{ hashFiles('**/build.mill') }}
+          restore-keys: |
+            ${{ runner.os }}-coursier-native-
+
+      - name: Cache Mill
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mill
+          key: ${{ runner.os }}-mill-native-${{ hashFiles('**/build.mill') }}
+          restore-keys: |
+            ${{ runner.os }}-mill-native-
+
+      - name: Build native HTTP conformance binary
+        run: ./mill fast-mcp-scala.nativeSmoke.http.nativeImage
+
+      # The official MCP conformance suite against the native binary, held to the SAME
+      # (empty) baseline as the JVM: any divergence is a native-image bug, never a new baseline.
+      # Distinct ports per step so a lingering listener can never satisfy the next readiness poll
+      # (the script also refuses to start if its port is taken).
+      - name: Conformance (active suite)
+        run: ./scripts/conformance.sh native 8077 active
+
+      # Scenario-level parity on the 2026 requirements run: the native binary must produce the
+      # SAME normalized scenario results as the JVM server, not merely a passing exit code.
+      - name: Conformance parity (2026 requirements, JVM vs native)
+        run: |
+          ./scripts/conformance.sh jvm 8078 2026 | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(✓|✗|Total:)' > jvm-2026.txt
+          ./scripts/conformance.sh native 8079 2026 | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(✓|✗|Total:)' > native-2026.txt
+          diff -u jvm-2026.txt native-2026.txt

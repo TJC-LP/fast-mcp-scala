@@ -28,6 +28,7 @@ Built on **ZIO 2**, **Tapir**-derived schemas, and **zio-json** on both platform
 - [Prompts](#prompts)
 - [Context (`McpContext`)](#context-mcpcontext)
 - [Transports](#transports)
+- [Native image (GraalVM)](#native-image-graalvm)
 - [Customizing decoding (zio-json)](#customizing-decoding-zio-json)
 - [One core, two transports](#one-core-two-transports)
 - [Spec coverage](#spec-coverage)
@@ -238,6 +239,32 @@ Need lower-level control? Skip the sugar trait and construct directly — `val s
 | `resourcesSubscribe` | `false` | Enable legacy `resources/subscribe`; modern clients use `subscriptions/listen` |
 
 Modern POST requests must include `Content-Type: application/json`, an `Accept` header listing both JSON and SSE, `MCP-Protocol-Version: 2026-07-28`, and `Mcp-Method`; tool calls, resource reads, and prompt gets also require `Mcp-Name`. The protocol version and client capabilities are repeated in every request's `params._meta`. Header/body mismatches return HTTP 400 with `-32020`; unsupported versions return `-32022`; unknown request methods return HTTP 404 with `-32601`. The complete wire-behavior and review matrix is in the [2026-07-28 upgrade guide](docs/2026-07-28-upgrade.md).
+
+## Native image (GraalVM)
+
+Stdio servers compile to self-contained native binaries with **zero hand-written reachability
+metadata** — registration and schema derivation are compile-time macros, so there is nothing for
+closed-world analysis to miss, and the transport-seam split keeps zio-http/netty out of
+stdio-only images entirely (~35 MB, instant startup, no JVM in the container):
+
+```scala
+object server extends ScalaModule with mill.javalib.NativeImageModule {
+  def scalaVersion = "3.8.3"
+  def scalacOptions = Seq("-experimental")   // the annotation macros require it
+  def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:<version>".exclude("dev.zio" -> "zio-http_3"))
+  def mainClass = Some("com.example.MyServer")
+  override def jvmVersion = Task { "graalvm-community:25.0.2" }
+  override def nativeImageOptions = Task { super.nativeImageOptions() ++ Seq("--no-fallback") }
+}
+```
+
+HTTP servers compile too (keep the zio-http dep; add `--install-exit-handlers`,
+`--initialize-at-run-time=io.netty`, and `-H:+UnlockExperimentalVMOptions
+-H:+SharedArenaSupport` — see the guide for the full recipe): the official MCP conformance suite
+passes against the native binary with scenario-level parity to the JVM, enforced in CI. CI exercises both a native `AnnotatedServer`
+over stdio (`scripts/native-smoke.sh`) and the native conformance server over HTTP
+(`scripts/conformance.sh native`) on every PR. Full recipes, caveats, and the metadata audit
+loop: [docs/native-image.md](docs/native-image.md).
 
 ## Tasks (experimental, off by default)
 
