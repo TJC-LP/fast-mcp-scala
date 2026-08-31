@@ -1,11 +1,11 @@
 package com.tjclp.fastmcp.macros.schema
 
 import org.scalatest.funsuite.AnyFunSuite
-import sttp.tapir.generic.auto.*
 
+import com.tjclp.fastmcp.JsonTestSupport.*
 import com.tjclp.fastmcp.macros.JsonSchemaMacro
 
-/** Simple tests for SchemaExtractor functionality to increase coverage
+/** Additional native enum-schema coverage.
   */
 class SchemaExtractorExtendedTest extends AnyFunSuite {
 

@@ -1,49 +1,33 @@
 package com.tjclp.fastmcp.macros
 
 import scala.quoted.*
-import scala.util.Properties
 
-import io.circe.Json
-import io.circe.syntax.*
-import sttp.apispec.circe.*
-import sttp.tapir.*
-import sttp.tapir.SchemaType.SProductField
-import sttp.tapir.docs.apispec.schema.TapirSchemaToJsonSchema
+import zio.json.*
+import zio.json.ast.Json
 
+import com.tjclp.fastmcp.core.McpSchema
 import com.tjclp.fastmcp.macros.schema.FunctionAnalyzer
-import com.tjclp.fastmcp.macros.schema.SchemaExtractor
-import com.tjclp.fastmcp.macros.schema.SchemaGenerator
 
-/** Macro that generates JSON Schema for function parameters. The implementation is split across
-  * multiple helpers to reduce compile time.
+/** Native JSON Schema derivation for annotation parameters and typed contracts.
+  *
+  * The macro emits the small JSON Schema subset MCP tools need directly from Scala types. It
+  * supports primitives, options, collections, maps, Scala 3 enums, products, and tagged sums. A
+  * user-provided [[com.tjclp.fastmcp.core.McpInputCodec]] is the escape hatch for domain types
+  * whose wire representation cannot be inferred from their Scala shape.
   */
 object JsonSchemaMacro:
 
-  /** Produces a JSON schema describing the parameters of the given function. Definitions (`$defs`)
-    * are resolved and inlined into the `properties`. Also injects @Param annotation parameter
-    * descriptions as JSON "description" fields in properties.
-    *
-    * Example usage:
-    * {{{
-    *   case class Address(street: String, city: String)
-    *   case class User(name: String, address: Address)
-    *   def processUser(user: User, count: Int): Unit = ()
-    *   val schemaJson = JsonSchemaMacro.schemaForFunctionArgs(processUser)
-    *   // schemaJson will have Address definition inlined within User property,
-    *   // and any @Param descriptions injected.
-    *   println(schemaJson.spaces2)
-    * }}}
-    */
+  /** Produces a JSON schema describing the parameters of the given function. */
   inline def schemaForFunctionArgs[F](inline fn: F): Json =
     ${ schemaForFunctionArgsImpl('fn, '{ Nil }) }
 
   /** Produces a JSON schema describing the parameters of the given function, excluding specified
-    * parameters. This overload is used primarily for excluding context parameters from the schema.
+    * parameters. This is primarily used to omit an injected `McpContext`.
     */
   inline def schemaForFunctionArgs[F](inline fn: F, inline exclude: List[String]): Json =
     ${ schemaForFunctionArgsImpl('fn, 'exclude) }
 
-  /** Produces a JSON schema describing a single request type `T`. */
+  /** Produces a JSON schema describing a single request or result type `T`. */
   inline def schemaForType[T]: Json =
     ${ schemaForTypeImpl[T] }
 
@@ -52,58 +36,252 @@ object JsonSchemaMacro:
   ): Expr[Json] =
     import quotes.reflect.*
 
-    // Check if we're running in a CI/test environment; use noTrace to avoid excessive macro trace
-    // Accessed for its *side‑effect* of eagerly initialising Json logic inside circe / tapir.
-    // Assigning to _ silences the compiler warning about a discarded pure expression.
-    val _ = Properties.propOrFalse("scala.util.noTrace")
+    val paramNamesOpt = FunctionAnalyzer.maybeRealParamNames(fn.asTerm)
+    val excluded = exclude.valueOrAbort
+    val params = FunctionAnalyzer
+      .extractParams(fn.asTerm.tpe, paramNamesOpt)
+      .filterNot(param => excluded.contains(param._1))
 
-    // Analyze function to extract parameters
-    val fnTerm = fn.asTerm
-    val fnType = fnTerm.tpe
+    val fields = params.map { case (name, tpe) => name -> schemaFor(tpe, Set.empty) }
+    val required = params.collect { case (name, tpe) if !isOption(tpe) => name }
+    val rawSchema = objectSchema(fields, required)
 
-    val paramNamesOpt = FunctionAnalyzer.maybeRealParamNames(fnTerm)
-    val excludeList = exclude.valueOrAbort
-    val params: List[(String, TypeRepr)] = FunctionAnalyzer
-      .extractParams(fnType, paramNamesOpt)
-      .filterNot(p => excludeList.contains(p._1))
-
-    // Generate schema for each parameter
-    val productFieldsExpr = params.map { case (paramName, paramType) =>
-      paramType.asType match
-        case '[t] => SchemaGenerator.generateProductField[t](paramName)
+    val metadataEntries = params.map { case (name, tpe) =>
+      tpe.asType match
+        case '[t] =>
+          val metadata = MacroUtils.schemaMetadataForType[t]
+          '{ ${ Expr(name) } -> $metadata }
     }
+    val metadata = '{ SchemaMetadataNode(properties = Map(${ Varargs(metadataEntries) }*)) }
 
-    // Create fields list and product schema
-    val fieldsListExpr: Expr[List[SProductField[Unit]]] = Expr.ofList(productFieldsExpr)
-    val productSchemaExpr: Expr[Schema[Unit]] = SchemaGenerator.createArgsSchema(fieldsListExpr)
-
-    // Convert to Apispec + Circe JSON, then resolve references
-    '{
-      // Convert Tapir schema -> apispec schema
-      val apispecSchema = TapirSchemaToJsonSchema($productSchemaExpr, markOptionsAsNullable = true)
-      // Convert apispec schema -> initial circe JSON (potentially with $defs/$ref)
-      val initialJson = apispecSchema.asJson
-      // Post-process the JSON to resolve and inline references
-      MacroUtils.resolveJsonRefs(initialJson)
-    }
+    '{ MacroUtils.injectSchemaMetadata($rawSchema, $metadata) }
 
   private def schemaForTypeImpl[T: Type](using Quotes): Expr[Json] =
+    val rawSchema = schemaFor(quotes.reflect.TypeRepr.of[T], Set.empty)
+    val metadata = MacroUtils.schemaMetadataForType[T]
+    '{ MacroUtils.injectSchemaMetadata($rawSchema, $metadata) }
+
+  private def schemaFor(using Quotes)(
+      rawTpe: quotes.reflect.TypeRepr,
+      seenProducts: Set[quotes.reflect.Symbol]
+  ): Expr[Json] =
     import quotes.reflect.*
 
-    if TypeRepr.of[T] =:= TypeRepr.of[Unit] then
+    val tpe = rawTpe.dealias.simplified
+
+    customSchema(tpe).getOrElse {
+      tpe.asType match
+        case '[Option[a]] => schemaFor(TypeRepr.of[a], seenProducts)
+        case '[List[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
+        case '[Seq[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
+        case '[Vector[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
+        case '[Set[a]] => uniqueArraySchema(schemaFor(TypeRepr.of[a], seenProducts))
+        case '[Array[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
+        case '[Iterable[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
+        case '[Map[String, value]] => mapSchema(schemaFor(TypeRepr.of[value], seenProducts))
+        case '[Either[left, right]] =>
+          oneOfSchema(
+            List(
+              schemaFor(TypeRepr.of[left], seenProducts),
+              schemaFor(TypeRepr.of[right], seenProducts)
+            )
+          )
+        case _ => schemaForNonContainer(tpe, seenProducts)
+    }
+
+  private def schemaForNonContainer(using Quotes)(
+      tpe: quotes.reflect.TypeRepr,
+      seenProducts: Set[quotes.reflect.Symbol]
+  ): Expr[Json] =
+    import quotes.reflect.*
+
+    val symbol = tpe.typeSymbol
+    val fullName = symbol.fullName
+
+    if tpe =:= TypeRepr.of[String] || tpe =:= TypeRepr.of[Char] then scalarSchema("string")
+    else if tpe =:= TypeRepr.of[Boolean] then scalarSchema("boolean")
+    else if List(
+        TypeRepr.of[Byte],
+        TypeRepr.of[Short],
+        TypeRepr.of[Int],
+        TypeRepr.of[Long],
+        TypeRepr.of[BigInt]
+      ).exists(candidate => tpe =:= candidate)
+    then scalarSchema("integer")
+    else if List(TypeRepr.of[Float], TypeRepr.of[Double], TypeRepr.of[BigDecimal])
+        .exists(candidate => tpe =:= candidate)
+    then scalarSchema("number")
+    else if tpe =:= TypeRepr.of[Unit] then objectSchema(Nil, Nil)
+    else if fullName == "java.util.UUID" then formattedStringSchema("uuid")
+    else if fullName == "java.net.URI" || fullName == "java.net.URL" then
+      formattedStringSchema("uri")
+    else if fullName == "java.time.LocalDate" then formattedStringSchema("date")
+    else if Set(
+        "java.time.Instant",
+        "java.time.LocalDateTime",
+        "java.time.OffsetDateTime",
+        "java.time.ZonedDateTime"
+      ).contains(fullName)
+    then formattedStringSchema("date-time")
+    else if fullName == "java.time.LocalTime" || fullName == "java.time.OffsetTime" then
+      formattedStringSchema("time")
+    else if fullName == "java.time.Duration" || fullName == "java.time.Period" then
+      formattedStringSchema("duration")
+    else if Set(
+        "java.time.DayOfWeek",
+        "java.time.Month",
+        "java.time.MonthDay",
+        "java.time.Year",
+        "java.time.YearMonth",
+        "java.time.ZoneId",
+        "java.time.ZoneOffset",
+        "java.util.Currency",
+        "scala.Symbol"
+      ).contains(fullName)
+    then scalarSchema("string")
+    else if fullName == "zio.json.ast.Json" || tpe =:= TypeRepr.of[Any] then '{ Json.Obj() }
+    else if symbol.flags.is(Flags.Enum) then enumSchema(tpe)
+    else if symbol.flags.is(Flags.Case) then productSchema(tpe, seenProducts)
+    else if symbol.flags.is(Flags.Sealed) && symbol.children.nonEmpty then
+      sumSchema(tpe, seenProducts)
+    else
+      report.errorAndAbort(
+        s"Cannot derive an MCP JSON Schema for ${tpe.show}. " +
+          s"Define a given McpInputCodec[${tpe.show}] (decoder + schema), a given " +
+          s"McpSchema[${tpe.show}] (schema only), or construct the tool with McpTool.withSchema."
+      )
+
+  private def productSchema(using Quotes)(
+      tpe: quotes.reflect.TypeRepr,
+      seenProducts: Set[quotes.reflect.Symbol]
+  ): Expr[Json] =
+    import quotes.reflect.*
+
+    val symbol = tpe.typeSymbol
+    if seenProducts.contains(symbol) then
+      report.errorAndAbort(
+        s"Recursive type ${tpe.show} cannot be inlined into an MCP tool schema. " +
+          s"Provide a given McpSchema[${tpe.show}] or use McpTool.withSchema."
+      )
+
+    val fields = symbol.caseFields.map { field =>
+      field.name -> schemaFor(tpe.memberType(field), seenProducts + symbol)
+    }
+    val required = symbol.caseFields.collect {
+      case field if !isOption(tpe.memberType(field)) => field.name
+    }
+    objectSchema(fields, required)
+
+  private def enumSchema(using Quotes)(tpe: quotes.reflect.TypeRepr): Expr[Json] =
+    import quotes.reflect.*
+
+    val cases = tpe.typeSymbol.children
+    val casesWithParameters = cases.filter(_.caseFields.nonEmpty)
+    if cases.isEmpty || casesWithParameters.nonEmpty then
+      report.errorAndAbort(
+        s"Only singleton-case Scala 3 enums derive as string schemas automatically: ${tpe.show}. " +
+          s"Provide a given McpInputCodec[${tpe.show}] for an enum with parameterized cases."
+      )
+
+    val valueExprs = cases.map(enumCaseName).map(value => '{ Json.Str(${ Expr(value) }) })
+    '{
+      Json.Obj(
+        "type" -> Json.Str("string"),
+        "enum" -> Json.Arr(${ Varargs(valueExprs) }*)
+      )
+    }
+
+  private def sumSchema(using Quotes)(
+      tpe: quotes.reflect.TypeRepr,
+      seenProducts: Set[quotes.reflect.Symbol]
+  ): Expr[Json] =
+    import quotes.reflect.*
+
+    val variants = tpe.typeSymbol.children.map { child =>
+      val caseName = enumCaseName(child)
+      val payload =
+        if child.flags.is(Flags.Module) then objectSchema(Nil, Nil)
+        else schemaFor(child.typeRef, seenProducts + tpe.typeSymbol)
+      objectSchema(List(caseName -> payload), List(caseName))
+    }
+    oneOfSchema(variants)
+
+  private def customSchema(using Quotes)(tpe: quotes.reflect.TypeRepr): Option[Expr[Json]] =
+    tpe.asType match
+      case '[t] =>
+        Expr.summon[McpSchema[t]].map { schema =>
+          val typeName = Expr(tpe.show)
+          '{
+            $schema.jsonSchema
+              .fromJson[Json]
+              .fold(
+                error =>
+                  throw new IllegalArgumentException(
+                    "Invalid McpSchema JSON for " + $typeName + ": " + error
+                  ),
+                identity
+              )
+          }
+        }
+
+  private def isOption(using Quotes)(rawTpe: quotes.reflect.TypeRepr): Boolean =
+    rawTpe.dealias.simplified.asType match
+      case '[Option[?]] => true
+      case _ => false
+
+  private def enumCaseName(using Quotes)(symbol: quotes.reflect.Symbol): String =
+    symbol.name.stripSuffix("$")
+
+  private def scalarSchema(kind: String)(using Quotes): Expr[Json] =
+    '{ Json.Obj("type" -> Json.Str(${ Expr(kind) })) }
+
+  private def formattedStringSchema(format: String)(using Quotes): Expr[Json] =
+    '{
+      Json.Obj(
+        "type" -> Json.Str("string"),
+        "format" -> Json.Str(${ Expr(format) })
+      )
+    }
+
+  private def arraySchema(items: Expr[Json])(using Quotes): Expr[Json] =
+    '{ Json.Obj("type" -> Json.Str("array"), "items" -> $items) }
+
+  private def uniqueArraySchema(items: Expr[Json])(using Quotes): Expr[Json] =
+    '{
+      Json.Obj(
+        "type" -> Json.Str("array"),
+        "items" -> $items,
+        "uniqueItems" -> Json.Bool(true)
+      )
+    }
+
+  private def mapSchema(values: Expr[Json])(using Quotes): Expr[Json] =
+    '{ Json.Obj("type" -> Json.Str("object"), "additionalProperties" -> $values) }
+
+  private def oneOfSchema(variants: List[Expr[Json]])(using Quotes): Expr[Json] =
+    '{ Json.Obj("oneOf" -> Json.Arr(${ Varargs(variants) }*)) }
+
+  private def objectSchema(fields: List[(String, Expr[Json])], required: List[String])(using
+      Quotes
+  ): Expr[Json] =
+    val fieldExprs = fields.map { case (name, schema) => '{ ${ Expr(name) } -> $schema } }
+    val requiredExprs = required.map(name => '{ Json.Str(${ Expr(name) }) })
+
+    if required.isEmpty then
       '{
-        Json.obj(
-          "type" -> Json.fromString("object"),
-          "properties" -> Json.obj(),
-          "additionalProperties" -> Json.fromBoolean(false)
+        Json.Obj(
+          "type" -> Json.Str("object"),
+          "properties" -> Json.Obj(${ Varargs(fieldExprs) }*),
+          "additionalProperties" -> Json.Bool(false)
         )
       }
     else
-      val (_, schemaExpr) = SchemaExtractor.createSchemaFor[T](Type.show[T])
-      val metadataExpr = MacroUtils.schemaMetadataForType[T]
       '{
-        val apispecSchema = TapirSchemaToJsonSchema($schemaExpr, markOptionsAsNullable = true)
-        val resolvedSchema = MacroUtils.resolveJsonRefs(apispecSchema.asJson)
-        MacroUtils.injectSchemaMetadata(resolvedSchema, $metadataExpr)
+        Json.Obj(
+          "type" -> Json.Str("object"),
+          "properties" -> Json.Obj(${ Varargs(fieldExprs) }*),
+          "required" -> Json.Arr(${ Varargs(requiredExprs) }*),
+          "additionalProperties" -> Json.Bool(false)
+        )
       }
 end JsonSchemaMacro

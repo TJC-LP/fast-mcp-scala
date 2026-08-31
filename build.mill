@@ -19,8 +19,6 @@ val organization = "com.tjclp"
 object Versions {
   val zio = "2.1.20"
   val zioJson = "0.7.44"
-  val tapir = "1.11.42"
-  val jsonSchemaCirce = "0.11.10"
   val zioHttp = "3.4.0"
   val scalaTest = "3.2.19"
   val scalaCheck = "1.18.1"
@@ -157,11 +155,6 @@ object `fast-mcp-scala` extends Module {
       // ZIO Core
       mvn"dev.zio::zio:${Versions.zio}",
       mvn"dev.zio::zio-json:${Versions.zioJson}",
-      // Tapir
-      mvn"com.softwaremill.sttp.tapir::tapir-core:${Versions.tapir}",
-      mvn"com.softwaremill.sttp.tapir::tapir-apispec-docs:${Versions.tapir}",
-      mvn"com.softwaremill.sttp.tapir::tapir-json-circe:${Versions.tapir}",
-      mvn"com.softwaremill.sttp.apispec::jsonschema-circe:${Versions.jsonSchemaCirce}",
       // ZIO HTTP for HTTP transports (stateless + streamable)
       mvn"dev.zio::zio-http:${Versions.zioHttp}"
     )
@@ -198,10 +191,7 @@ object `fast-mcp-scala` extends Module {
     // Shared deps needed by shared/ sources and the JS macro/schema derivation path.
     override def mvnDeps = Seq(
       mvn"dev.zio::zio::${Versions.zio}",
-      mvn"dev.zio::zio-json::${Versions.zioJson}",
-      mvn"com.softwaremill.sttp.tapir::tapir-core::${Versions.tapir}",
-      mvn"com.softwaremill.sttp.tapir::tapir-apispec-docs::${Versions.tapir}",
-      mvn"com.softwaremill.sttp.apispec::jsonschema-circe::${Versions.jsonSchemaCirce}"
+      mvn"dev.zio::zio-json::${Versions.zioJson}"
     )
 
     override def scalacOptions = Seq(
@@ -289,8 +279,8 @@ object `fast-mcp-scala` extends Module {
     }
 
     /** Stdio smoke: AnnotatedServer covers the full surface a downstream stdio server hits at
-      * runtime — macro-registered tools/prompts/resources AND the genuine runtime tapir→circe
-      * JSON-schema rendering path (materialized at registration/tools-list time).
+      * runtime — macro-registered tools/prompts/resources and native JSON-schema materialization
+      * at registration/tools-list time.
       */
     object stdio extends NativeSmokeModule {
       override def mainClass = Some("com.tjclp.fastmcp.examples.AnnotatedServer")

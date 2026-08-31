@@ -1,8 +1,9 @@
 package com.tjclp.fastmcp.macros
 
-import io.circe.Json
-import io.circe.parser.parse
 import org.scalatest.funsuite.AnyFunSuite // For .asJson
+import zio.json.ast.Json
+
+import com.tjclp.fastmcp.JsonTestSupport.*
 
 class MacroUtilsTest extends AnyFunSuite { // Ensure this matches the import
 

@@ -2,10 +2,10 @@ package com.tjclp.fastmcp
 package macros
 
 import org.scalatest.funsuite.AnyFunSuite
-import sttp.tapir.Schema
 import zio.*
 import zio.json.*
 
+import com.tjclp.fastmcp.JsonTestSupport.*
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
 import com.tjclp.fastmcp.server.*
@@ -163,7 +163,7 @@ class ToolProcessorTest extends AnyFunSuite {
 
     // Parse the schema JSON
     val schemaStr = toolDef.get.inputSchema.toJsonString
-    val schemaJson = io.circe.parser.parse(schemaStr).getOrElse(io.circe.Json.Null)
+    val schemaJson = parse(schemaStr).getOrElse(zio.json.ast.Json.Null)
 
     // Check username has description and examples
     val usernameDesc = schemaJson.hcursor.downField("properties").downField("username").downField("description").as[String]
@@ -194,7 +194,7 @@ class ToolProcessorTest extends AnyFunSuite {
     assert(toolDef.isDefined, "Tool 'custom-schema-test' should be registered")
 
     val schemaStr = toolDef.get.inputSchema.toJsonString
-    val schemaJson = io.circe.parser.parse(schemaStr).getOrElse(io.circe.Json.Null)
+    val schemaJson = parse(schemaStr).getOrElse(zio.json.ast.Json.Null)
 
     // Check that status uses the custom enum schema
     val statusEnum = schemaJson.hcursor.downField("properties").downField("status").downField("enum").as[List[String]]
@@ -212,9 +212,6 @@ class ToolProcessorTest extends AnyFunSuite {
 object ToolProcessorTest {
   // Create a test server for tool registration
   val server = new McpServer[Any]("TestServer", "0.1.0")
-
-  // Schema for the enum
-  given Schema[Operation] = Schema.derivedEnumeration.defaultStringBased
 
   /** Simple calculator tool for testing
     */

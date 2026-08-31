@@ -12,8 +12,8 @@ Databricks Apps). Tracking issue: [#66](https://github.com/TJC-LP/fast-mcp-scala
 ## Why zero metadata works
 
 The library's registration and schema machinery is compile-time (Scala 3 macros, zio-json inline
-derivation); the only runtime work is plain ADT transformation (tapir → circe schema rendering),
-which uses no reflection. ZIO ships its own native-image metadata in its jar. The
+derivation); the generated runtime code only constructs `zio-json` AST values and uses no
+reflection. ZIO ships its own native-image metadata in its jar. The
 `native-smoke.sh` CI gate is the rot protection — if a future dependency bump introduces a
 reflection need, the smoke goes red on the PR that introduces it, and only then does a
 `META-INF/native-image/com.tjclp/fast-mcp-scala_3/reachability-metadata.json` entry get added.

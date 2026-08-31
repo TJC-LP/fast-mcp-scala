@@ -6,8 +6,6 @@ import java.util.UUID
 
 import scala.collection.mutable
 
-import sttp.tapir.*
-import sttp.tapir.generic.auto.*
 import zio.json.*
 
 import com.tjclp.fastmcp.*

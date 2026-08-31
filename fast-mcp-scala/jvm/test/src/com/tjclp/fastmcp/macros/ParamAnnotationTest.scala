@@ -1,13 +1,13 @@
 package com.tjclp.fastmcp.macros
 
-import io.circe.Json
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-import sttp.tapir.*
-import sttp.tapir.Schema.annotations.description
-import sttp.tapir.generic.auto.*
+import zio.json.ast.Json
 
-/** Tests to ensure that tapir annotations are properly included in the JSON schema
+import com.tjclp.fastmcp.JsonTestSupport.*
+import com.tjclp.fastmcp.Param
+
+/** Tests to ensure that `@Param` annotations are included in nested JSON schemas.
   */
 class ParamAnnotationTest extends AnyFunSuite with Matchers {
 
@@ -17,14 +17,9 @@ class ParamAnnotationTest extends AnyFunSuite with Matchers {
 
   // Test with a case class parameter
   case class ConfigOptions(
-      @description("Name of the configuration") name: String,
-      @description("Value of the configuration") value: Int
+      @Param("Name of the configuration") name: String,
+      @Param("Value of the configuration") value: Int
   )
-
-  object ConfigOptions {
-    // Provide a Schema instance for ConfigOptions
-    given Schema[ConfigOptions] = Schema.derived[ConfigOptions]
-  }
 
   test("should handle schema annotations on case class properties") {
     val schema = JsonSchemaMacro.schemaForFunctionArgs(configFunction)

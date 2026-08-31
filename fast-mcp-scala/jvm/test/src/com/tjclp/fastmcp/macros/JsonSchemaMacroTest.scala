@@ -1,11 +1,11 @@
 package com.tjclp.fastmcp.macros
 
-import io.circe.Json
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-import sttp.tapir.Schema
-import sttp.tapir.generic.auto.*
+import zio.json.ast.Json
 
+import com.tjclp.fastmcp.JsonTestSupport.*
+import com.tjclp.fastmcp.McpInputCodec
 import com.tjclp.fastmcp.server.McpContext
 
 /** Tests for the JsonSchemaMacro that generates JSON schema for function parameters
@@ -19,6 +19,13 @@ class JsonSchemaMacroTest extends AnyFunSuite with Matchers {
   case class Address(street: String, city: String, zipCode: String)
 
   case class User(person: Person, address: Address, tags: List[String])
+
+  case class UserId(value: String)
+  case class UserLookup(id: UserId)
+
+  given McpInputCodec[UserId] = McpInputCodec.string(
+    """{"type":"string","pattern":"^usr_[a-z0-9]+$"}"""
+  )(value => Right(UserId(value)))
 
   // Test with a simple function with primitive types
   test("should generate schema for simple function with primitive types") {
@@ -45,6 +52,14 @@ class JsonSchemaMacroTest extends AnyFunSuite with Matchers {
     // Check active property
     val activeProperty = properties.hcursor.downField("active").focus.getOrElse(Json.Null)
     assert(activeProperty.hcursor.downField("type").as[String].getOrElse("") == "boolean")
+  }
+
+  test("should use one McpInputCodec for custom nested decoding and schema") {
+    val schema = JsonSchemaMacro.schemaForType[UserLookup]
+    val idSchema = schema.hcursor.downField("properties").downField("id")
+
+    idSchema.downField("type").as[String] shouldBe Right("string")
+    idSchema.downField("pattern").as[String] shouldBe Right("^usr_[a-z0-9]+$")
   }
 
   // Test with a function that takes case classes

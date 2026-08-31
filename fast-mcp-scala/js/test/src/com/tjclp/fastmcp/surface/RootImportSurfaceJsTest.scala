@@ -1,11 +1,11 @@
 package com.tjclp.fastmcp.surface
 
 import org.scalatest.funsuite.AnyFunSuite
-import sttp.tapir.generic.auto.*
 import zio.*
 import zio.json.*
 
 import com.tjclp.fastmcp.{given, *}
+import com.tjclp.fastmcp.core.StructuredToolResult
 
 class RootImportSurfaceJsTest extends AnyFunSuite:
 
@@ -27,6 +27,9 @@ class RootImportSurfaceJsTest extends AnyFunSuite:
       name: String
   )
   case class HelloResult(message: String)
+  enum Mood:
+    case happy, sad
+  case class MoodArgs(mood: Mood)
 
   given JsonEncoder[HelloResult] = DeriveJsonEncoder.gen[HelloResult]
 
@@ -64,4 +67,18 @@ class RootImportSurfaceJsTest extends AnyFunSuite:
 
     val resourceResult = runUnsafe(server.resourceManager.readResource("static://hello", None))
     assert(resourceResult == "hello")
+  }
+
+  test("typed contracts derive singleton enum schemas and decoders on Scala.js (#78)") {
+    val server = McpServer("RootImportJsEnumServer")
+    val tool = McpTool[MoodArgs, String](name = "describe-mood") { args =>
+      s"mood:${args.mood}"
+    }
+
+    assert(tool.definition.inputSchema.toJsonString.contains("\"enum\":[\"happy\",\"sad\"]"))
+    runUnsafe(server.tool(tool))
+    val result = runUnsafe(
+      server.toolManager.callTool("describe-mood", Map("mood" -> "happy"), None)
+    )
+    assert(result == StructuredToolResult(List(TextContent("mood:happy")), None))
   }

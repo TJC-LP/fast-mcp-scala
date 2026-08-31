@@ -1,15 +1,14 @@
 package com.tjclp.fastmcp
 package core
 
+import zio.json.*
+
 import com.tjclp.fastmcp.macros.JsonSchemaMacro
 
 /** The single, platform-neutral `ToolSchemaProvider` derivation.
   *
-  * Promoted to `shared/` from the (identical) old `JvmToolSchemaProviders` /
-  * `JsToolSchemaProviders` — both already drove the same compile-time [[JsonSchemaMacro]]
-  * (Tapir-backed), so one copy serves JVM and Scala.js. `McpTool.derived[...]` auto-generates input
-  * schemas as long as the call site has Tapir schema derivation in scope (`import
-  * sttp.tapir.generic.auto.*`).
+  * [[JsonSchemaMacro]] derives schemas directly from Scala 3 types on both JVM and Scala.js. No
+  * schema-library import is required at the call site.
   */
 object ToolSchemaProviders:
 
@@ -22,13 +21,11 @@ object ToolSchemaProviders:
 
   inline given [A]: ToolSchemaProvider[A] =
     ToolSchemaProvider.instance(
-      ToolInputSchema.unsafeFromJsonString(JsonSchemaMacro.schemaForType[A].spaces2)
+      ToolInputSchema.unsafeFromJsonString(JsonSchemaMacro.schemaForType[A].toJson)
     )
 
-  /** Output-schema derivation for `McpTool#withOutputSchema` — same macro, same Tapir scope
-    * requirements as the input derivation above.
-    */
+  /** Output-schema derivation for `McpTool#withOutputSchema` — same native macro as input. */
   inline given [A]: ToolOutputSchemaProvider[A] =
     ToolOutputSchemaProvider.instance(
-      wire.ToolOutputSchema.unsafeFromJsonString(JsonSchemaMacro.schemaForType[A].spaces2)
+      wire.ToolOutputSchema.unsafeFromJsonString(JsonSchemaMacro.schemaForType[A].toJson)
     )

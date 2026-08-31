@@ -1,10 +1,10 @@
 package com.tjclp.fastmcp.macros
 
-import io.circe.Json
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-import sttp.tapir.Schema
-import sttp.tapir.generic.auto.*
+import zio.json.ast.Json
+
+import com.tjclp.fastmcp.JsonTestSupport.*
 
 /** Tests to verify that Option types are correctly marked as not required in JSON schemas
   */
@@ -18,9 +18,6 @@ class OptionTypeTest extends AnyFunSuite with Matchers {
       age: Option[Int] = None, // Optional with default
       preferences: Option[Map[String, String]] = None // Optional with default
   )
-
-  // Schema is automatically derived by Tapir
-  given Schema[UserProfile] = Schema.derived[UserProfile]
 
   // Function that takes both required and optional parameters
   def searchUsers(

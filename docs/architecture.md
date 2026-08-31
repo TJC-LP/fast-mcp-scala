@@ -66,7 +66,7 @@ fast-mcp-scala/
 │       └── transport/                    # TransportBackend + HttpTransportBackend seam, MessageLoop, HostGuard
 │
 ├── jvm/src/com/tjclp/fastmcp/           # JVM-specific
-│   ├── macros/                           # JsonSchemaMacro, MacroUtils (Tapir-backed)
+│   ├── macros/                           # Native JsonSchemaMacro + MacroUtils
 │   ├── server/transport/JvmTransportBackend.scala   # System.in/out (stdio; netty-free)
 │   ├── server/transport/JvmHttpBackend.scala          # ZIO HTTP (streamable + stateless)
 │   └── examples/                         # runnable example servers
@@ -97,7 +97,7 @@ server.scanAnnotations[MyServer.type]
 
 1. **Discovery** — `MacroUtils` reflects over `T` (the object's type) and collects every method symbol carrying `@Tool`, `@Resource`, or `@Prompt`.
 
-2. **Schema generation** — for `@Tool` methods, `JsonSchemaMacro.schemaForFunctionArgs` walks the parameter list and emits a `ToolInputSchema` value. It uses Tapir's `Schema` derivation under the hood, which supports case classes, Scala 3 enums, `Option`, collections, and a handful of primitives. `@Param` metadata is folded in (descriptions, examples, required flags, custom schema fragments).
+2. **Schema generation** — for `@Tool` methods, `JsonSchemaMacro.schemaForFunctionArgs` walks the parameter list and emits JSON Schema directly as a `zio-json` AST. It supports primitives, `java.time`, case classes, tagged sums, singleton-case Scala 3 enums, `Option`, collections, maps, `McpSchema` overrides, and the unified decoder-plus-schema `McpInputCodec` escape hatch. `@Param` metadata is folded in (descriptions, examples, required flags, custom schema fragments).
 
 3. **Handler generation** — `MapToFunctionMacro` generates a function `(Map[String, Any], Option[McpContext]) => ZIO[Any, Throwable, Any]` that: (a) extracts each parameter from the `Map` by name, (b) decodes it into the expected Scala type through the shared zio-json decoder path (`McpDecoders` over `DefaultDecodeContext` — identical on JVM and JS), (c) optionally passes an `McpContext` if the method signature asks for one, and (d) calls the original method. The method handle is resolved at runtime via `RefResolver` (no runtime reflection in the hot path).
 
@@ -148,7 +148,7 @@ Pinned in `build.mill`:
 
 - **Scala** 3.8.3
 - **ZIO** 2.1.20, **zio-json** 0.7.44 (the wire codec on both platforms), **zio-http** 3.4.0
-- **Tapir** 1.11.42 (schema derivation) + apispec 0.11.10 (JSON Schema emitter)
+- **Native Scala 3 macros** for JSON Schema derivation, emitted as `zio-json` ASTs
 - **mill-bun-plugin** 0.2.1 (Scala.js + Bun integration)
 - **WartRemover** 3.5.6 (linting)
 - Test-time only: **`@modelcontextprotocol/sdk` 1.29.0** (conformance client), **ScalaTest** 3.2.19

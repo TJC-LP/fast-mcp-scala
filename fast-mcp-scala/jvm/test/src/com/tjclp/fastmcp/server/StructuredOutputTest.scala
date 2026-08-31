@@ -2,7 +2,6 @@ package com.tjclp.fastmcp.server
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-import sttp.tapir.generic.auto.*
 import zio.*
 import zio.json.*
 

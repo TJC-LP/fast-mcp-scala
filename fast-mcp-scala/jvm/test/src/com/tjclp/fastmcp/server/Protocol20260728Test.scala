@@ -5,7 +5,6 @@ import org.scalatest.matchers.should.Matchers
 import zio.*
 import zio.json.*
 import zio.json.ast.Json
-import sttp.tapir.generic.auto.*
 
 import com.tjclp.fastmcp.{given, *}
 import com.tjclp.fastmcp.core.*

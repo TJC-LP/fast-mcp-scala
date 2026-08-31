@@ -2,18 +2,23 @@ package com.tjclp.fastmcp.server
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-import io.circe.parser.parse
-import sttp.tapir.generic.auto.*
 import zio.*
 import zio.json.*
 
 import com.tjclp.fastmcp.{given, *}
+import com.tjclp.fastmcp.JsonTestSupport.*
 import com.tjclp.fastmcp.core.StructuredToolResult
 
 class TypedContractsTest extends AnyFunSuite with Matchers:
 
   case class AddArgs(a: Int, b: Int)
   case class AddResult(sum: Int)
+  enum Mood:
+    case happy, sad
+  case class MoodArgs(mood: Mood)
+  case class MoodCollectionArgs(moods: List[Mood], fallback: Option[Mood])
+  case class UserId(value: String)
+  case class UserLookupArgs(id: UserId)
   case class GreetingArgs(name: String)
   case class UserProfileArgs(userId: String)
   case class AddressArgs(
@@ -35,6 +40,11 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
   )
 
   given JsonEncoder[AddResult] = DeriveJsonEncoder.gen[AddResult]
+  given McpInputCodec[UserId] = McpInputCodec.string(
+    """{"type":"string","pattern":"^usr_[a-z0-9]+$"}"""
+  ) { raw =>
+    Either.cond(raw.startsWith("usr_"), UserId(raw), s"Invalid user id '$raw'")
+  }
 
   // --- GH #78 fixtures: Scala 3 enums in typed contracts, zero user-supplied givens ---
   enum Mood:
@@ -111,6 +121,78 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
         structured.map(_.toString) shouldBe Some("""{"sum":7}""")
       case other =>
         fail(s"Unexpected typed tool result: $other")
+  }
+
+  test("typed contracts derive singleton enum schemas and decoders without user givens (#78)") {
+    val server = McpServer("TypedEnumServer")
+
+    runUnsafe(
+      server.tool(
+        McpTool[MoodArgs, String](name = "describe-mood") { args =>
+          s"mood:${args.mood}"
+        }
+      )
+    )
+
+    val schema = parse(
+      server.toolManager.getToolDefinition("describe-mood").get.inputSchema.toJsonString
+    ).toOption.get
+    schema.hcursor
+      .downField("properties")
+      .downField("mood")
+      .downField("type")
+      .as[String] shouldBe Right("string")
+    schema.hcursor
+      .downField("properties")
+      .downField("mood")
+      .downField("enum")
+      .as[List[String]] shouldBe Right(List("happy", "sad"))
+
+    runUnsafe(server.toolManager.callTool("describe-mood", Map("mood" -> "happy"), None)) shouldBe
+      StructuredToolResult(List(TextContent("mood:happy")), None)
+
+    val invalid = runUnsafe(
+      server.toolManager.callTool("describe-mood", Map("mood" -> "angry"), None).exit
+    )
+    invalid.isFailure shouldBe true
+    invalid.causeOption.get.prettyPrint should include("Invalid Mood value 'angry'")
+  }
+
+  test("nested enum collections and custom input codecs stay zero-boilerplate") {
+    val enumServer = McpServer("TypedEnumCollectionServer")
+    val enumTool = McpTool[MoodCollectionArgs, String](name = "mood-list") { args =>
+      s"${args.moods.mkString(",")}:${args.fallback.fold("none")(_.toString)}"
+    }
+    runUnsafe(enumServer.tool(enumTool))
+
+    val enumSchema = parse(enumTool.definition.inputSchema.toJsonString).toOption.get
+    enumSchema.hcursor
+      .downField("properties")
+      .downField("moods")
+      .downField("items")
+      .downField("enum")
+      .as[List[String]] shouldBe Right(List("happy", "sad"))
+    runUnsafe(
+      enumServer.toolManager.callTool(
+        "mood-list",
+        Map("moods" -> List("happy", "sad"), "fallback" -> "sad"),
+        None
+      )
+    ) shouldBe StructuredToolResult(List(TextContent("happy,sad:sad")), None)
+
+    val customServer = McpServer("TypedCustomCodecServer")
+    val customTool = McpTool[UserLookupArgs, String](name = "find-user")(_.id.value)
+    runUnsafe(customServer.tool(customTool))
+
+    val customSchema = parse(customTool.definition.inputSchema.toJsonString).toOption.get
+    customSchema.hcursor
+      .downField("properties")
+      .downField("id")
+      .downField("pattern")
+      .as[String] shouldBe Right("^usr_[a-z0-9]+$")
+    runUnsafe(
+      customServer.toolManager.callTool("find-user", Map("id" -> "usr_42"), None)
+    ) shouldBe StructuredToolResult(List(TextContent("usr_42")), None)
   }
 
   test("typed contextual tool contracts receive McpContext") {

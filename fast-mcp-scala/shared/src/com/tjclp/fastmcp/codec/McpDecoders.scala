@@ -3,12 +3,28 @@ package codec
 
 import java.util.Base64
 
+import scala.compiletime.{constValue, constValueTuple}
 import scala.deriving.Mirror
 
 import zio.json.*
 
 import com.tjclp.fastmcp.core.{Content, ImageContent, McpDecodeContext, McpDecoder, McpEncoder}
 import com.tjclp.fastmcp.server.McpContext
+
+/** Evidence that every case in an enum's mirrored element tuple is a singleton value. */
+trait SingletonEnumValues[A, Cases <: Tuple]:
+  def values: List[A]
+
+object SingletonEnumValues:
+
+  given empty[A]: SingletonEnumValues[A, EmptyTuple] with
+    val values: List[A] = Nil
+
+  given cons[A, Head <: A & Singleton, Tail <: Tuple](using
+      head: ValueOf[Head],
+      tail: SingletonEnumValues[A, Tail]
+  ): SingletonEnumValues[A, Head *: Tail] with
+    val values: List[A] = head.value :: tail.values
 
 /** The single, platform-neutral default codec set for the native core.
   *
@@ -23,6 +39,21 @@ import com.tjclp.fastmcp.server.McpContext
   *   - `given McpEncoder[Array[Byte]]` — binary → `ImageContent("application/octet-stream")`.
   */
 trait McpDecodersLowPriority:
+
+  /** String decoder for ordinary Scala 3 enums whose cases carry no constructor parameters. */
+  inline given singletonEnumJsonDecoder[A <: scala.reflect.Enum](using
+      mirror: Mirror.SumOf[A],
+      enumValues: SingletonEnumValues[A, mirror.MirroredElemTypes]
+  ): JsonDecoder[A] =
+    val cases = constValueTuple[mirror.MirroredElemLabels].toList
+      .map(_.toString)
+      .zip(enumValues.values)
+    JsonDecoder.string.mapOrFail { raw =>
+      cases
+        .find(_._1 == raw)
+        .map(_._2)
+        .toRight(s"Invalid ${constValue[mirror.MirroredLabel]} value '$raw'")
+    }
 
   /** Mirror-derived fallback for case classes WITHOUT an explicit `JsonDecoder`.
     *

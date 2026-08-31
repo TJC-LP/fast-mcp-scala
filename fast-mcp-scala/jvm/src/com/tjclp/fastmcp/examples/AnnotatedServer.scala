@@ -1,9 +1,6 @@
 package com.tjclp.fastmcp
 package examples
 
-import sttp.tapir.*
-import sttp.tapir.Schema.annotations.*
-import sttp.tapir.generic.auto.*
 import zio.json.*
 
 import com.tjclp.fastmcp.*
@@ -39,12 +36,12 @@ object AnnotatedServer extends McpServerApp[Stdio, AnnotatedServer.type]:
 
   // Case classes are supported as tool params
   case class Description(
-      @description("The text to describe") text: String,
-      @description("Whether to set the text to uppercase") isUpper: Boolean = false
+      @Param("The text to describe") text: String,
+      @Param("Whether to set the text to uppercase") isUpper: Boolean = false
   )
 
   /** Nested-case-class argument: FastMCP-Scala derives the JSON schema from the `Description`
-    * fields, including the `@description` annotations from Tapir.
+    * fields, including the `@Param` descriptions.
     */
   @Tool(name = Some("description"), readOnlyHint = Some(true), idempotentHint = Some(true))
   def generateDescription(

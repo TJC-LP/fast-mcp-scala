@@ -3,8 +3,8 @@ package macros
 
 import scala.quoted.*
 
-import io.circe.Json
-import io.circe.JsonObject
+import zio.json.*
+import zio.json.ast.Json
 
 import com.tjclp.fastmcp.runtime.RefResolver
 
@@ -567,105 +567,58 @@ private[macros] object MacroUtils:
     else None
 
   /** Takes a JSON schema potentially containing `$defs` and `$ref` and returns a new JSON schema
-    * where all references are resolved and inlined.
+    * where all references are resolved and inlined. Retained for callers migrating hand-written
+    * schemas; native derivation itself emits schemas without references.
     */
-  def resolveJsonRefs(inputJson: Json): Json = {
-    val cursor = inputJson.hcursor
-    val definitions: Map[String, Json] = cursor
-      .downField("$defs")
-      .as[Map[String, Json]]
-      .getOrElse(Map.empty)
+  def resolveJsonRefs(inputJson: Json): Json =
+    val definitions = inputJson.asObject
+      .flatMap(_.get("$defs"))
+      .flatMap(_.asObject)
+      .fold(Map.empty[String, Json])(_.toMap)
 
-    def resolve(currentJson: Json, defs: Map[String, Json]): Json = {
-      currentJson.fold(
-        jsonNull = Json.Null,
-        jsonBoolean = Json.fromBoolean,
-        jsonNumber = Json.fromJsonNumber,
-        jsonString = Json.fromString,
-        jsonArray = arr => Json.fromValues(arr.map(elem => resolve(elem, defs))),
-        jsonObject = obj => {
-          obj("$ref") match {
-            case Some(refJson) if refJson.isString =>
-              val refPath = refJson.asString.get
-              // Assuming format like "#/$defs/DefinitionName"
-              val defName = refPath.split('/').last
-              defs.get(defName) match {
-                case Some(definition) =>
-                  // Recursively resolve within the definition itself
-                  resolve(definition, defs)
-                case None =>
-                  // Reference not found, return the original ref object
-                  currentJson
-              }
-            case _ =>
-              // Not a $ref object or $ref is not a string,
-              // resolve recursively within values.
-              // Filter out the $defs key if encountered nested (shouldn't happen with root removal).
-              Json.fromJsonObject(
-                JsonObject.fromIterable(
-                  obj.toIterable.filter(_._1 != "$defs").map { case (k, v) =>
-                    (k, resolve(v, defs))
-                  }
-                )
+    def resolve(currentJson: Json): Json =
+      currentJson match
+        case obj: Json.Obj =>
+          obj.get("$ref").flatMap(_.asString) match
+            case Some(refPath) =>
+              definitions.get(refPath.split('/').last).fold(currentJson)(resolve)
+            case None =>
+              Json.Obj(
+                obj.fields
+                  .filterNot(_._1 == "$defs")
+                  .map { case (name, value) => name -> resolve(value) }
               )
-          }
-        }
-      )
-    }
+        case array: Json.Arr => Json.Arr(array.elements.map(resolve))
+        case scalar => scalar
 
-    // Remove top-level $defs and $schema before starting resolution.
-    // $schema (Tapir emits the draft-2020-12 meta-schema URL) violates Anthropic's
-    // tool input_schema key pattern ^[a-zA-Z0-9_.-]{1,64}$ and breaks managed agents. See issue #44.
-    val rootJsonWithoutDefs = inputJson.mapObject(_.remove("$defs").remove("$schema"))
-    resolve(rootJsonWithoutDefs, definitions)
-  }
+    val rootWithoutDefinitions = inputJson.asObject
+      .map(_.remove("$defs").remove("$schema"))
+      .getOrElse(inputJson)
+    resolve(rootWithoutDefinitions)
 
   /** Injects param descriptions (from @Param annotations) into the top-level "properties" fields of
     * the JSON schema. Returns a new Json with descriptions added.
     */
-  def injectParamDescriptions(schemaJson: Json, descriptionMap: Map[String, String]): Json = {
-    val cursor = schemaJson.hcursor
+  def injectParamDescriptions(schemaJson: Json, descriptionMap: Map[String, String]): Json =
+    val updatedProperties = for
+      schemaObject <- schemaJson.asObject
+      properties <- schemaObject.get("properties").flatMap(_.asObject)
+    yield Json.Obj(
+      properties.fields.map { case (fieldName, fieldJson) =>
+        val updatedField = descriptionMap.get(fieldName) match
+          case Some(description) =>
+            fieldJson.asObject
+              .map(replaceField(_, "description", Json.Str(description)))
+              .getOrElse(fieldJson)
+          case None => fieldJson
+        fieldName -> updatedField
+      }
+    )
 
-    // Navigate to properties object
-    val maybeProps = cursor.downField("properties").focus
-
-    maybeProps match {
-      case Some(propsJson) if propsJson.isObject =>
-        // Build new properties object with description injected
-        val newPropsObj = propsJson.asObject.map { propsObj =>
-          val updatedFields = propsObj.toMap.map { case (fieldName, fieldJson) =>
-            descriptionMap.get(fieldName) match {
-              case Some(desc) =>
-                // Inject or replace description
-                val newFieldObj = fieldJson.asObject match {
-                  case Some(obj) =>
-                    Json.fromJsonObject(obj.add("description", Json.fromString(desc)))
-                  case None => fieldJson
-                }
-                fieldName -> newFieldObj
-              case None =>
-                fieldName -> fieldJson
-            }
-          }
-          JsonObject.fromMap(updatedFields)
-        }
-
-        // Replace properties with updated object
-        newPropsObj match {
-          case Some(obj) =>
-            cursor
-              .withFocus(_.mapObject(_.add("properties", Json.fromJsonObject(obj))))
-              .top
-              .getOrElse(schemaJson)
-          case None =>
-            schemaJson
-        }
-
-      case _ =>
-        // No properties object to inject into
-        schemaJson
-    }
-  }
+    (schemaJson.asObject, updatedProperties) match
+      case (Some(schemaObject), Some(properties)) =>
+        replaceField(schemaObject, "properties", properties)
+      case _ => schemaJson
 
   /** Injects all @Param metadata into JSON schema properties.
     *   - description: Added to each property object
@@ -673,142 +626,111 @@ private[macros] object MacroUtils:
     *   - required: Updates top-level "required" array
     *   - schema: Replaces entire property definition with custom schema
     */
-  def injectParamMetadata(schemaJson: Json, metadataMap: Map[String, ParamMetadata]): Json = {
-    import io.circe.parser.parse
-
-    if (metadataMap.isEmpty) return schemaJson
-
-    val cursor = schemaJson.hcursor
-
-    // 1. Get current required array (or empty)
-    val currentRequired = cursor.downField("required").as[List[String]].getOrElse(Nil).toSet
-
-    // 2. Compute new required array based on metadata
-    // Only modify required status for params that have metadata
-    val newRequired = metadataMap.foldLeft(currentRequired) { case (acc, (name, meta)) =>
-      if (meta.required) acc + name else acc - name
-    }
-
-    // 3. Update properties with description, examples, or custom schema
-    val maybeProps = cursor.downField("properties").focus
-    val newPropsJson = maybeProps.flatMap(_.asObject).map { propsObj =>
-      val updatedFields = propsObj.toMap.map { case (fieldName, fieldJson) =>
-        metadataMap.get(fieldName) match {
-          case Some(meta) =>
-            meta.schema match {
-              case Some(customSchema) =>
-                // Replace entire property with parsed custom schema
-                fieldName -> parse(customSchema).getOrElse(fieldJson)
-              case None =>
-                // Add description and examples to existing property
-                val baseObj = fieldJson.asObject.getOrElse(JsonObject.empty)
-                val withDesc = meta.description.fold(baseObj)(d =>
-                  baseObj.add("description", Json.fromString(d))
-                )
-                val withExamples =
-                  if (meta.examples.nonEmpty) {
-                    val examplesJson = Json.fromValues(meta.examples.map(Json.fromString))
-                    withDesc.add("examples", examplesJson)
-                  } else withDesc
-                fieldName -> Json.fromJsonObject(withExamples)
-            }
-          case None => fieldName -> fieldJson
-        }
+  def injectParamMetadata(schemaJson: Json, metadataMap: Map[String, ParamMetadata]): Json =
+    if metadataMap.isEmpty then schemaJson
+    else
+      val currentRequired = stringArrayField(schemaJson, "required").toSet
+      val updatedRequired = metadataMap.foldLeft(currentRequired) { case (required, (name, meta)) =>
+        if meta.required then required + name else required - name
       }
-      JsonObject.fromMap(updatedFields)
-    }
 
-    // 4. Rebuild schema with updated properties and required
-    schemaJson.mapObject { obj =>
-      val withProps = newPropsJson.fold(obj)(p => obj.add("properties", Json.fromJsonObject(p)))
-      if (newRequired.nonEmpty)
-        withProps.add("required", Json.fromValues(newRequired.toSeq.sorted.map(Json.fromString)))
-      else
-        withProps.remove("required")
-    }
-  }
+      schemaJson.asObject match
+        case Some(schemaObject) =>
+          val updatedProperties =
+            schemaObject.get("properties").flatMap(_.asObject).map { properties =>
+              Json.Obj(properties.fields.map { case (fieldName, fieldJson) =>
+                val updatedField = metadataMap.get(fieldName) match
+                  case Some(meta) => applyMetadata(fieldJson, meta)
+                  case None => fieldJson
+                fieldName -> updatedField
+              })
+            }
+          withPropertiesAndRequired(schemaObject, updatedProperties, updatedRequired)
+        case None => schemaJson
 
   /** Recursively injects `@Param` metadata collected from typed request fields into an already
     * generated JSON schema.
     */
-  def injectSchemaMetadata(schemaJson: Json, metadataNode: SchemaMetadataNode): Json = {
-    import io.circe.parser.parse
+  def injectSchemaMetadata(schemaJson: Json, metadataNode: SchemaMetadataNode): Json =
+    val withOwnMetadata = metadataNode.metadata.fold(schemaJson)(applyMetadata(schemaJson, _))
 
-    def applyOwnMetadata(currentJson: Json, metadata: Option[ParamMetadata]): Json =
-      metadata match {
-        case Some(meta) if meta.schema.isDefined =>
-          parse(meta.schema.get).getOrElse(currentJson)
-        case Some(meta) =>
-          val baseObj = currentJson.asObject.getOrElse(JsonObject.empty)
-          val withDesc =
-            meta.description.fold(baseObj)(d => baseObj.add("description", Json.fromString(d)))
-          val withExamples =
-            if (meta.examples.nonEmpty) then
-              withDesc.add("examples", Json.fromValues(meta.examples.map(Json.fromString)))
-            else withDesc
-          Json.fromJsonObject(withExamples)
-        case None =>
-          currentJson
-      }
-
-    val withOwnMetadata = applyOwnMetadata(schemaJson, metadataNode.metadata)
-
-    // Custom schema replaces the field entirely.
     if metadataNode.metadata.exists(_.schema.isDefined) then withOwnMetadata
-    else {
-      val withItems =
-        metadataNode.items match {
-          case Some(itemNode) =>
-            withOwnMetadata.hcursor.downField("items").focus match {
-              case Some(itemsJson) =>
-                withOwnMetadata.mapObject(
-                  _.add("items", injectSchemaMetadata(itemsJson, itemNode))
-                )
-              case None =>
-                withOwnMetadata
-            }
-          case None =>
-            withOwnMetadata
-        }
+    else
+      val withItems = (metadataNode.items, withOwnMetadata.asObject) match
+        case (Some(itemNode), Some(schemaObject)) =>
+          schemaObject.get("items") match
+            case Some(items) =>
+              replaceField(schemaObject, "items", injectSchemaMetadata(items, itemNode))
+            case None => withOwnMetadata
+        case _ => withOwnMetadata
 
-      withItems.hcursor.downField("properties").focus.flatMap(_.asObject) match {
-        case Some(propsObj) if metadataNode.properties.nonEmpty =>
-          val currentRequired =
-            withItems.hcursor.downField("required").as[List[String]].getOrElse(Nil).toSet
-
-          val updatedRequired = metadataNode.properties.foldLeft(currentRequired) {
-            case (acc, (fieldName, childNode)) =>
-              childNode.metadata match {
-                case Some(meta) =>
-                  if meta.required then acc + fieldName else acc - fieldName
-                case None =>
-                  acc
+      withItems.asObject match
+        case Some(schemaObject) if metadataNode.properties.nonEmpty =>
+          schemaObject.get("properties").flatMap(_.asObject) match
+            case Some(properties) =>
+              val currentRequired = stringArrayField(withItems, "required").toSet
+              val updatedRequired = metadataNode.properties.foldLeft(currentRequired) {
+                case (required, (fieldName, childNode)) =>
+                  childNode.metadata match
+                    case Some(meta) if meta.required => required + fieldName
+                    case Some(_) => required - fieldName
+                    case None => required
               }
-          }
-
-          val updatedProps = propsObj.toMap.map { case (fieldName, fieldJson) =>
-            metadataNode.properties.get(fieldName) match {
-              case Some(childNode) =>
-                fieldName -> injectSchemaMetadata(fieldJson, childNode)
-              case None =>
-                fieldName -> fieldJson
-            }
-          }
-
-          withItems.mapObject { obj =>
-            val withProps =
-              obj.add("properties", Json.fromJsonObject(JsonObject.fromMap(updatedProps)))
-            if updatedRequired.nonEmpty then
-              withProps.add(
-                "required",
-                Json.fromValues(updatedRequired.toSeq.sorted.map(Json.fromString))
+              val updatedProperties = Json.Obj(properties.fields.map {
+                case (fieldName, fieldJson) =>
+                  val updatedField = metadataNode.properties.get(fieldName) match
+                    case Some(childNode) => injectSchemaMetadata(fieldJson, childNode)
+                    case None => fieldJson
+                  fieldName -> updatedField
+              })
+              withPropertiesAndRequired(
+                schemaObject,
+                Some(updatedProperties),
+                updatedRequired
               )
-            else withProps.remove("required")
-          }
+            case None => withItems
+        case _ => withItems
 
-        case _ =>
-          withItems
+  private def applyMetadata(schemaJson: Json, metadata: ParamMetadata): Json =
+    metadata.schema.flatMap(_.fromJson[Json].toOption).getOrElse {
+      val baseObject = schemaJson.asObject.getOrElse(Json.Obj())
+      val withDescription = metadata.description.fold(baseObject) { description =>
+        replaceField(baseObject, "description", Json.Str(description))
       }
+      if metadata.examples.nonEmpty then
+        replaceField(
+          withDescription,
+          "examples",
+          Json.Arr(metadata.examples.map(Json.Str(_))*)
+        )
+      else withDescription
     }
-  }
+
+  private def stringArrayField(json: Json, name: String): List[String] =
+    json.asObject
+      .flatMap(_.get(name))
+      .flatMap(_.asArray)
+      .fold(List.empty[String])(_.flatMap(_.asString).toList)
+
+  private def withPropertiesAndRequired(
+      schemaObject: Json.Obj,
+      properties: Option[Json.Obj],
+      required: Set[String]
+  ): Json.Obj =
+    val withProperties = properties.fold(schemaObject)(replaceField(schemaObject, "properties", _))
+    if required.nonEmpty then
+      replaceField(
+        withProperties,
+        "required",
+        Json.Arr(required.toList.sorted.map(Json.Str(_))*)
+      )
+    else withProperties.remove("required")
+
+  private def replaceField(obj: Json.Obj, name: String, value: Json): Json.Obj =
+    if obj.contains(name) then
+      Json.Obj(obj.fields.map {
+        case (`name`, _) => name -> value
+        case field => field
+      })
+    else Json.Obj(obj.fields :+ (name -> value))
 end MacroUtils

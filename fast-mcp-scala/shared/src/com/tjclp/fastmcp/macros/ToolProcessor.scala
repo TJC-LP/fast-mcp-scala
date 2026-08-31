@@ -4,6 +4,7 @@ package macros
 import scala.quoted.*
 
 import zio.*
+import zio.json.*
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.*
@@ -86,7 +87,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
 
     val effectShape = MacroUtils.detectEffectShape(methodSym)
 
-    val rawSchema: Expr[io.circe.Json] = '{
+    val rawSchema: Expr[zio.json.ast.Json] = '{
       JsonSchemaMacro.schemaForFunctionArgs(
         $methodRefExpr,
         ${ Expr(if ctxParamPresent then List("ctx") else Nil) }
@@ -128,7 +129,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
           }
       }
 
-    val schemaWithMetadata: Expr[io.circe.Json] =
+    val schemaWithMetadata: Expr[zio.json.ast.Json] =
       if paramMetadata.isEmpty then rawSchema
       else
         val metadataEntries: List[Expr[(String, ParamMetadata)]] = paramMetadata.map {
@@ -243,7 +244,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
             definition = ToolDefinition(
               name = ${ Expr(finalName) },
               description = ${ Expr(finalDesc) },
-              inputSchema = ToolInputSchema.unsafeFromJsonString($schemaWithMetadata.spaces2),
+              inputSchema = ToolInputSchema.unsafeFromJsonString($schemaWithMetadata.toJson),
               annotations = $annotationsExpr,
               taskSupport = $taskSupportExpr
             ),

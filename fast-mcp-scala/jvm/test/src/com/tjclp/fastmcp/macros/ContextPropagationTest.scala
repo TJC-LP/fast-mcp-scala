@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicReference
 import org.scalatest.funsuite.AnyFunSuite
 import zio.*
 
+import JsonTestSupport.*
 import core.toJsonString
 import core.wire.Implementation
 import server.*
