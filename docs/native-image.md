@@ -30,7 +30,7 @@ object server extends ScalaModule with mill.javalib.NativeImageModule {
 
   def mvnDeps = Seq(
     // stdio-only: exclude the HTTP stack — see "The stdio/HTTP split" below
-    mvn"com.tjclp::fast-mcp-scala:<version>"
+    mvn"com.tjclp::fast-mcp-scala:1.0.0-RC3"
       .exclude("dev.zio" -> "zio-http_3")
   )
 
@@ -122,7 +122,7 @@ object server extends ScalaModule with mill.javalib.NativeImageModule {
   def scalaVersion = "3.8.3"
   def scalacOptions = Seq("-experimental")                      // annotation macros require it
   def mainClass = Some("com.example.MyHttpServer")
-  def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:<version>")   // zio-http stays
+  def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:1.0.0-RC3")   // zio-http stays
 
   override def jvmVersion = Task { "graalvm-community:25.0.2" }
 
