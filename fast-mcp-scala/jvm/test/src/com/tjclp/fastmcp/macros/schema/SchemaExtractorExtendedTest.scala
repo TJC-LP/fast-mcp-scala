@@ -5,8 +5,10 @@ import org.scalatest.funsuite.AnyFunSuite
 import com.tjclp.fastmcp.JsonTestSupport.*
 import com.tjclp.fastmcp.macros.JsonSchemaMacro
 
-/** Additional native enum-schema coverage.
-  */
+import zio.json.*
+import zio.json.ast.Json
+
+/** Nested enum-schema coverage for the annotation path (native derivation). */
 class SchemaExtractorExtendedTest extends AnyFunSuite {
 
   // Expanded enum test class
@@ -20,34 +22,25 @@ class SchemaExtractorExtendedTest extends AnyFunSuite {
   // Enum behind Option, nested one level deeper (annotation-path TaskUpdate shape)
   case class PaymentUpdate(payment: Payment, fallback: Option[PaymentMethod])
 
-  /** Resolve a property node, following a `$defs` `$ref` if tapir named the product schema. */
-  private def property(schema: io.circe.Json, path: String*): io.circe.Json =
-    def deref(node: io.circe.Json): io.circe.Json =
-      node.hcursor.get[String]("$ref").toOption match
-        case Some(ref) =>
-          val name = ref.stripPrefix("#/$defs/")
-          schema.hcursor.downField("$defs").downField(name).focus.getOrElse(node)
-        case None => node
+  private def property(schema: Json, path: String*): Json =
     path.foldLeft(schema) { (node, key) =>
-      deref(node).hcursor.downField("properties").downField(key).focus.getOrElse(
-        fail(s"missing property '$key' in ${deref(node).noSpaces}")
+      node.hcursor.downField("properties").downField(key).focus.getOrElse(
+        fail(s"missing property '$key' in ${node.toJson}")
       )
     }
 
-  private def assertStringEnum(rawNode: io.circe.Json, values: String*): Unit =
-    // Option[enum] renders as a nullable anyOf under markOptionsAsNullable — unwrap to the
-    // branch carrying the enum constraint.
-    val node = rawNode.hcursor.downField("anyOf").as[List[io.circe.Json]].toOption match
+  private def assertStringEnum(rawNode: Json, values: String*): Unit =
+    // Option[enum] renders as a nullable anyOf — unwrap to the branch carrying the enum.
+    val node = rawNode.hcursor.downField("anyOf").as[List[Json]].toOption match
       case Some(branches) =>
         branches.find(_.hcursor.downField("enum").succeeded).getOrElse(
-          fail(s"no enum branch in anyOf: ${rawNode.noSpaces}")
+          fail(s"no enum branch in anyOf: ${rawNode.toJson}")
         )
       case None => rawNode
-    val tpe = node.hcursor.get[String]("type").toOption
-      .orElse(node.hcursor.downField("type").as[List[String]].toOption.map(_.head))
-    assert(tpe.contains("string"), s"expected string type in ${node.noSpaces}")
-    val enumValues = node.hcursor.get[List[String]]("enum").getOrElse(Nil)
-    values.foreach(v => assert(enumValues.contains(v), s"missing enum value $v in ${node.noSpaces}"))
+    val tpe = node.hcursor.downField("type").as[String].toOption
+    assert(tpe.contains("string"), s"expected string type in ${node.toJson}")
+    val enumValues = node.hcursor.downField("enum").as[List[String]].getOrElse(Nil)
+    values.foreach(v => assert(enumValues.contains(v), s"missing enum value $v in ${node.toJson}"))
 
   // Nested enum fields must render as string enums, not coproducts of empty objects (GH #78)
   test("nested enum field renders as a string enum schema") {

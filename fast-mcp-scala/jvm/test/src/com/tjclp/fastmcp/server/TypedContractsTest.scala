@@ -14,8 +14,8 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
   case class AddArgs(a: Int, b: Int)
   case class AddResult(sum: Int)
   enum Mood:
-    case happy, sad
-  case class MoodArgs(mood: Mood)
+    case happy, sad, mixed
+  case class MoodArgs(mood: Mood, note: Option[String] = None)
   case class MoodCollectionArgs(moods: List[Mood], fallback: Option[Mood])
   case class UserId(value: String)
   case class UserLookupArgs(id: UserId)
@@ -47,9 +47,6 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
   }
 
   // --- GH #78 fixtures: Scala 3 enums in typed contracts, zero user-supplied givens ---
-  enum Mood:
-    case happy, sad, mixed
-  case class MoodArgs(mood: Mood, note: Option[String])
   case class MoodInner(mood: Mood)
   case class MoodOuter(inner: MoodInner, alt: Option[Mood])
 
@@ -64,19 +61,25 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
     }
   case class ToneArgs(tone: Tone)
 
-  // Schema-override guard: a user companion tapir Schema for an enum must win over the
-  // planted derivedEnumeration default (review finding on GH #78).
+  // Schema-override guard: a user companion McpSchema for an enum must win over the
+  // native macro's derived string-enum schema (review finding on GH #78).
   enum Grade:
     case A, B, C
   object Grade:
-    given sttp.tapir.Schema[Grade] =
-      sttp.tapir.Schema.string[Grade].description("user-grade-schema")
+    given McpSchema[Grade] =
+      McpSchema.instance("""{"type":"string","description":"user-grade-schema"}""")
   case class GradeArgs(grade: Grade)
 
-  // Parameterized-case enum: schema stays a coproduct, decode uses wrapper objects — must compile.
+  // Parameterized-case enum: the native macro rejects it for schema derivation (no faithful
+  // string-enum shape exists), so the user supplies an McpSchema; decode still derives
+  // zio-json's wrapper-object codec with zero decoder givens.
   enum Shape:
     case Circle(radius: Double)
     case Point
+  object Shape:
+    given McpSchema[Shape] = McpSchema.instance(
+      """{"oneOf":[{"type":"object","properties":{"Circle":{"type":"object"}}},{"type":"object","properties":{"Point":{"type":"object"}}}]}"""
+    )
   case class ShapeArgs(shape: Shape)
 
   // Inline-budget headroom: many enum fields in one args type.
@@ -87,6 +90,12 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
       e1: E1, e2: E2, e3: E3, e4: E4, e5: E5,
       e6: E6, e7: E7, e8: E8, e9: E9, e10: E10
   )
+
+  // Review-findings regression fixtures (PR #80 review)
+  case class MapArgs(tags: Map[String, Int])
+  case class EitherArgs(v: Either[Int, String])
+  case class Wrap[A](value: A)
+  case class WrapArgs(w: Wrap[Wrap[Int]])
 
   private def runUnsafe[A](effect: ZIO[Any, Throwable, A]): A =
     Unsafe.unsafe { implicit unsafe =>
@@ -146,7 +155,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
       .downField("properties")
       .downField("mood")
       .downField("enum")
-      .as[List[String]] shouldBe Right(List("happy", "sad"))
+      .as[List[String]] shouldBe Right(List("happy", "sad", "mixed"))
 
     runUnsafe(server.toolManager.callTool("describe-mood", Map("mood" -> "happy"), None)) shouldBe
       StructuredToolResult(List(TextContent("mood:happy")), None)
@@ -155,7 +164,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
       server.toolManager.callTool("describe-mood", Map("mood" -> "angry"), None).exit
     )
     invalid.isFailure shouldBe true
-    invalid.causeOption.get.prettyPrint should include("Invalid Mood value 'angry'")
+    invalid.causeOption.get.prettyPrint should include("invalid enumeration value")
   }
 
   test("nested enum collections and custom input codecs stay zero-boilerplate") {
@@ -171,7 +180,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
       .downField("moods")
       .downField("items")
       .downField("enum")
-      .as[List[String]] shouldBe Right(List("happy", "sad"))
+      .as[List[String]] shouldBe Right(List("happy", "sad", "mixed"))
     runUnsafe(
       enumServer.toolManager.callTool(
         "mood-list",
@@ -374,8 +383,8 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
   test("enum field derives a string-enum schema with zero user givens (GH #78)") {
     val schema = parse(ToolInputSchema.derived[MoodArgs].toJsonString).toOption.get
     val mood = schema.hcursor.downField("properties").downField("mood")
-    mood.get[String]("type") shouldBe Right("string")
-    mood.get[List[String]]("enum").toOption.get should contain allOf ("happy", "sad", "mixed")
+    mood.downField("type").as[String] shouldBe Right("string")
+    mood.downField("enum").as[List[String]].toOption.get should contain allOf ("happy", "sad", "mixed")
   }
 
   test("enum field decodes with zero user givens; invalid values error cleanly (GH #78)") {
@@ -404,7 +413,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
     val nested = schema.hcursor
       .downField("properties").downField("inner")
       .downField("properties").downField("mood")
-    nested.get[String]("type") shouldBe Right("string")
+    nested.downField("type").as[String] shouldBe Right("string")
 
     val server = McpServer("EnumNestedServer")
     runUnsafe(
@@ -446,10 +455,10 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
     cap.isLeft shouldBe true
   }
 
-  test("parameterized-case enums compile: coproduct schema, wrapper-object decode (GH #78)") {
+  test("parameterized-case enums: user McpSchema for schema, wrapper-object decode (GH #78)") {
     val schema = parse(ToolInputSchema.derived[ShapeArgs].toJsonString).toOption.get
-    // Not a string enum — the coproduct path is intentional for parameterized cases.
-    schema.hcursor.downField("properties").downField("shape").get[String]("type") should not be Right("string")
+    // Not a string enum — the user-supplied McpSchema is advertised for parameterized cases.
+    schema.hcursor.downField("properties").downField("shape").downField("oneOf").succeeded shouldBe true
 
     val server = McpServer("ShapeServer")
     runUnsafe(
@@ -473,7 +482,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
 
   test("ten enum fields derive within the inline budget (GH #78)") {
     val schema = parse(ToolInputSchema.derived[ManyEnums].toJsonString).toOption.get
-    schema.hcursor.downField("properties").downField("e10").get[String]("type") shouldBe Right("string")
+    schema.hcursor.downField("properties").downField("e10").downField("type").as[String] shouldBe Right("string")
     val server = McpServer("ManyEnumServer")
     runUnsafe(
       server.tool(
@@ -504,8 +513,8 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
     }
     val outSchema = parse(outSchemaStr).toOption.get
     val mood = outSchema.hcursor.downField("properties").downField("mood")
-    mood.get[String]("type") shouldBe Right("string")
-    mood.get[List[String]]("enum").toOption.get should contain("happy")
+    mood.downField("type").as[String] shouldBe Right("string")
+    mood.downField("enum").as[List[String]].toOption.get should contain("happy")
 
     val r = runUnsafe(server.toolManager.callTool("report-tool", Map("mood" -> "happy"), None))
     r match
@@ -515,11 +524,76 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
       case other => fail(s"unexpected: $other")
   }
 
-  test("a user-supplied tapir Schema for a nested enum always wins (GH #78 review)") {
+  test("a user-supplied McpSchema for a nested enum always wins (GH #78 review)") {
     val schema = parse(ToolInputSchema.derived[GradeArgs].toJsonString).toOption.get
     val grade = schema.hcursor.downField("properties").downField("grade")
-    grade.get[String]("description") shouldBe Right("user-grade-schema")
+    grade.downField("description").as[String] shouldBe Right("user-grade-schema")
     // The planted default would have added an enum constraint; the user schema has none.
     grade.downField("enum").succeeded shouldBe false
+  }
+
+  test("Map[String, V] advertises an object schema its decoder accepts (PR #80 review)") {
+    val schema = parse(ToolInputSchema.derived[MapArgs].toJsonString).toOption.get
+    val tags = schema.hcursor.downField("properties").downField("tags")
+    tags.downField("type").as[String] shouldBe Right("object")
+    tags.downField("additionalProperties").downField("type").as[String] shouldBe Right("integer")
+
+    val server = McpServer("MapServer")
+    runUnsafe(
+      server.tool(
+        McpTool[MapArgs, String](name = "map-tool", description = Some("d")) { args =>
+          args.tags.toList.sorted.mkString(",")
+        }
+      )
+    )
+    val r = runUnsafe(
+      server.toolManager.callTool("map-tool", Map("tags" -> Map("a" -> 1, "b" -> 2)), None)
+    )
+    r match
+      case StructuredToolResult(List(TextContent(text, _, _)), _) => text shouldBe "(a,1),(b,2)"
+      case other => fail(s"unexpected: $other")
+  }
+
+  test("Either advertises zio-json's wrapper-object shape and decodes it (PR #80 review)") {
+    val schema = parse(ToolInputSchema.derived[EitherArgs].toJsonString).toOption.get
+    val variants = schema.hcursor
+      .downField("properties").downField("v").downField("oneOf").as[List[zio.json.ast.Json]]
+      .toOption.get
+    variants.flatMap(_.hcursor.downField("properties").keys.toList.flatten) should
+      contain allOf ("Left", "Right")
+
+    val server = McpServer("EitherServer")
+    runUnsafe(
+      server.tool(
+        McpTool[EitherArgs, String](name = "either-tool", description = Some("d")) { args =>
+          args.v.fold(i => s"L$i", s => s"R$s")
+        }
+      )
+    )
+    val r = runUnsafe(
+      server.toolManager.callTool("either-tool", Map("v" -> Map("Right" -> "x")), None)
+    )
+    r match
+      case StructuredToolResult(List(TextContent(text, _, _)), _) => text shouldBe "Rx"
+      case other => fail(s"unexpected: $other")
+  }
+
+  test("Option fields advertise nullability alongside the inner schema (PR #80 review)") {
+    val schema = parse(ToolInputSchema.derived[MoodArgs].toJsonString).toOption.get
+    val note = schema.hcursor.downField("properties").downField("note")
+    val branches = note.downField("anyOf").as[List[zio.json.ast.Json]].toOption.get
+    branches.exists(_.hcursor.downField("type").as[String].toOption.contains("null")) shouldBe true
+    branches.exists(_.hcursor.downField("type").as[String].toOption.contains("string")) shouldBe true
+    // Option fields stay non-required.
+    schema.hcursor.downField("required").as[List[String]].toOption.get should not contain "note"
+  }
+
+  test("generic case classes nested at different type arguments derive (PR #80 review)") {
+    val schema = parse(ToolInputSchema.derived[WrapArgs].toJsonString).toOption.get
+    schema.hcursor
+      .downField("properties").downField("w")
+      .downField("properties").downField("value")
+      .downField("properties").downField("value")
+      .downField("type").as[String] shouldBe Right("integer")
   }
 

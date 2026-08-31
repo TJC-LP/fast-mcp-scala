@@ -42,7 +42,7 @@ object JsonSchemaMacro:
       .extractParams(fn.asTerm.tpe, paramNamesOpt)
       .filterNot(param => excluded.contains(param._1))
 
-    val fields = params.map { case (name, tpe) => name -> schemaFor(tpe, Set.empty) }
+    val fields = params.map { case (name, tpe) => name -> schemaFor(tpe, Nil) }
     val required = params.collect { case (name, tpe) if !isOption(tpe) => name }
     val rawSchema = objectSchema(fields, required)
 
@@ -57,13 +57,13 @@ object JsonSchemaMacro:
     '{ MacroUtils.injectSchemaMetadata($rawSchema, $metadata) }
 
   private def schemaForTypeImpl[T: Type](using Quotes): Expr[Json] =
-    val rawSchema = schemaFor(quotes.reflect.TypeRepr.of[T], Set.empty)
+    val rawSchema = schemaFor(quotes.reflect.TypeRepr.of[T], Nil)
     val metadata = MacroUtils.schemaMetadataForType[T]
     '{ MacroUtils.injectSchemaMetadata($rawSchema, $metadata) }
 
   private def schemaFor(using Quotes)(
       rawTpe: quotes.reflect.TypeRepr,
-      seenProducts: Set[quotes.reflect.Symbol]
+      seenProducts: List[quotes.reflect.TypeRepr]
   ): Expr[Json] =
     import quotes.reflect.*
 
@@ -71,27 +71,46 @@ object JsonSchemaMacro:
 
     customSchema(tpe).getOrElse {
       tpe.asType match
-        case '[Option[a]] => schemaFor(TypeRepr.of[a], seenProducts)
+        // Option first, and nullable: the decoder accepts an explicit JSON null, so the
+        // advertised schema must too (parity with the old markOptionsAsNullable behavior).
+        case '[Option[a]] => nullableSchema(schemaFor(TypeRepr.of[a], seenProducts))
+        // Map MUST precede Iterable: quoted type patterns match by conformance and
+        // Map[String, V] <: Iterable[(String, V)] — the Iterable case would otherwise
+        // advertise an array-of-tuples schema the zio-json object decoder rejects.
+        case '[Map[String, value]] => mapSchema(schemaFor(TypeRepr.of[value], seenProducts))
+        case '[Map[k, v]] =>
+          report.errorAndAbort(
+            s"Cannot derive an MCP JSON Schema for non-string-keyed map ${tpe.show}. " +
+              s"JSON objects have string keys; provide a given McpSchema[${tpe.show}] or use " +
+              "McpTool.withSchema."
+          )
+        // Either mirrors zio-json's wire shape: {"Left": ...} / {"Right": ...} wrapper objects
+        // (a bare payload oneOf would advertise inputs the decoder rejects).
+        case '[Either[left, right]] =>
+          oneOfSchema(
+            List(
+              objectSchema(
+                List("Left" -> schemaFor(TypeRepr.of[left], seenProducts)),
+                List("Left")
+              ),
+              objectSchema(
+                List("Right" -> schemaFor(TypeRepr.of[right], seenProducts)),
+                List("Right")
+              )
+            )
+          )
         case '[List[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
         case '[Seq[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
         case '[Vector[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
         case '[Set[a]] => uniqueArraySchema(schemaFor(TypeRepr.of[a], seenProducts))
         case '[Array[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
         case '[Iterable[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
-        case '[Map[String, value]] => mapSchema(schemaFor(TypeRepr.of[value], seenProducts))
-        case '[Either[left, right]] =>
-          oneOfSchema(
-            List(
-              schemaFor(TypeRepr.of[left], seenProducts),
-              schemaFor(TypeRepr.of[right], seenProducts)
-            )
-          )
         case _ => schemaForNonContainer(tpe, seenProducts)
     }
 
   private def schemaForNonContainer(using Quotes)(
       tpe: quotes.reflect.TypeRepr,
-      seenProducts: Set[quotes.reflect.Symbol]
+      seenProducts: List[quotes.reflect.TypeRepr]
   ): Expr[Json] =
     import quotes.reflect.*
 
@@ -153,19 +172,21 @@ object JsonSchemaMacro:
 
   private def productSchema(using Quotes)(
       tpe: quotes.reflect.TypeRepr,
-      seenProducts: Set[quotes.reflect.Symbol]
+      seenProducts: List[quotes.reflect.TypeRepr]
   ): Expr[Json] =
     import quotes.reflect.*
 
     val symbol = tpe.typeSymbol
-    if seenProducts.contains(symbol) then
+    // Guard keys on the APPLIED type (=:=), not the bare symbol: Wrapper[Wrapper[Int]] revisits
+    // the Wrapper symbol at a different argument and is finite, not recursive.
+    if seenProducts.exists(_ =:= tpe) then
       report.errorAndAbort(
         s"Recursive type ${tpe.show} cannot be inlined into an MCP tool schema. " +
           s"Provide a given McpSchema[${tpe.show}] or use McpTool.withSchema."
       )
 
     val fields = symbol.caseFields.map { field =>
-      field.name -> schemaFor(tpe.memberType(field), seenProducts + symbol)
+      field.name -> schemaFor(tpe.memberType(field), tpe :: seenProducts)
     }
     val required = symbol.caseFields.collect {
       case field if !isOption(tpe.memberType(field)) => field.name
@@ -193,7 +214,7 @@ object JsonSchemaMacro:
 
   private def sumSchema(using Quotes)(
       tpe: quotes.reflect.TypeRepr,
-      seenProducts: Set[quotes.reflect.Symbol]
+      seenProducts: List[quotes.reflect.TypeRepr]
   ): Expr[Json] =
     import quotes.reflect.*
 
@@ -201,7 +222,7 @@ object JsonSchemaMacro:
       val caseName = enumCaseName(child)
       val payload =
         if child.flags.is(Flags.Module) then objectSchema(Nil, Nil)
-        else schemaFor(child.typeRef, seenProducts + tpe.typeSymbol)
+        else schemaFor(child.typeRef, tpe :: seenProducts)
       objectSchema(List(caseName -> payload), List(caseName))
     }
     oneOfSchema(variants)
@@ -243,6 +264,9 @@ object JsonSchemaMacro:
       )
     }
 
+  private def nullableSchema(inner: Expr[Json])(using Quotes): Expr[Json] =
+    '{ Json.Obj("anyOf" -> Json.Arr($inner, Json.Obj("type" -> Json.Str("null")))) }
+
   private def arraySchema(items: Expr[Json])(using Quotes): Expr[Json] =
     '{ Json.Obj("type" -> Json.Str("array"), "items" -> $items) }
 
@@ -276,12 +300,13 @@ object JsonSchemaMacro:
         )
       }
     else
+      // No additionalProperties:false here: the zio-json decoders accept unknown fields by
+      // default, and the advertised contract must not be stricter than what decode enforces.
       '{
         Json.Obj(
           "type" -> Json.Str("object"),
           "properties" -> Json.Obj(${ Varargs(fieldExprs) }*),
-          "required" -> Json.Arr(${ Varargs(requiredExprs) }*),
-          "additionalProperties" -> Json.Bool(false)
+          "required" -> Json.Arr(${ Varargs(requiredExprs) }*)
         )
       }
 end JsonSchemaMacro

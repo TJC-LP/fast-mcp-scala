@@ -64,7 +64,6 @@ case class JsMoodArgs(mood: JsMood, label: Option[String])
 class EnumContractSurfaceJsTest extends AnyFunSuite:
 
   test("enum-field contract derives decoder and schema with zero user givens on JS") {
-    import sttp.tapir.generic.auto.*
     val schemaJson = ToolInputSchema.derived[JsMoodArgs].toJsonString
     assert(schemaJson.contains("\"enum\""), s"missing enum constraint: $schemaJson")
     assert(schemaJson.contains("bright"), s"missing enum value: $schemaJson")
