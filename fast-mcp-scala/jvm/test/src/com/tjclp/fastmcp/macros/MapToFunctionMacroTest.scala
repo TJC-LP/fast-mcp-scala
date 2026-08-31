@@ -68,6 +68,18 @@ class MapToFunctionMacroTest extends AnyFunSuite with Matchers {
     result4 should be("Dr. Alice")
   }
 
+  // GH #78: enum nested INSIDE a case-class param must decode with zero user givens
+  test("should decode a case-class param whose field is an enum") {
+    case class Payment(amount: Double, method: Color)
+    def describe(payment: Payment): String = s"${payment.amount}:${payment.method}"
+
+    val mapFunction = MapToFunctionMacro.callByMap(describe)
+    val result = mapFunction.asInstanceOf[Map[String, Any] => String](
+      Map("payment" -> Map("amount" -> 1.5, "method" -> "RED"))
+    )
+    result should be("1.5:RED")
+  }
+
   // Test with uppercase enum parameters (traditional Java-style)
   test("should handle uppercase enum parameters") {
     def getColorHex(color: Color): String =

@@ -149,8 +149,11 @@ object MapToFunctionMacro:
           Expr
             .summon[JsonDecoder[t]]
             .orElse(
+              // Enum-aware derivation: plants string-based JsonDecoder locals for enum FIELD
+              // types lacking a user instance, so case-class params with enum fields decode
+              // zero-boilerplate like top-level enum params already do (GH #78).
               Expr.summon[Mirror.Of[t]].map { mirror =>
-                '{ DeriveJsonDecoder.gen[t](using $mirror) }
+                ZioJsonEnumDerivation.deriveDecoderImpl[t](mirror)
               }
             )
             .getOrElse(

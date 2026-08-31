@@ -32,12 +32,17 @@ trait McpDecodersLowPriority:
     * `McpDecoder[Option[String]]` used to resolve HERE, deriving a sum decoder that expects
     * `{"Some": ...}` and rejects bare values (#64). With the product constraint, sum types with
     * zio-json built-ins (Option, Either, collections) resolve uniquely through `zioJsonDecoder`.
+    *
+    * Derivation goes through [[macros.ZioJsonEnumDerivation]], which plants string-based
+    * `JsonDecoder` locals for Scala 3 enum field types that have no user-supplied instance at the
+    * call site (GH #78) — user-defined enum decoders always win.
     */
-  inline given derivedZioJsonDecoder[T](using Mirror.ProductOf[T]): McpDecoder[T] =
+  inline given derivedZioJsonDecoder[T](using m: Mirror.ProductOf[T]): McpDecoder[T] =
+    val jsonDecoder = macros.ZioJsonEnumDerivation.deriveDecoder[T](using m)
     new McpDecoder[T]:
       def decode(name: String, rawValue: Any, context: McpDecodeContext): T =
         val json = context.writeValueAsString(rawValue)
-        DeriveJsonDecoder.gen[T].decodeJson(json) match
+        jsonDecoder.decodeJson(json) match
           case Right(value) => value
           case Left(err) =>
             throw new RuntimeException(
