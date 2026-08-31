@@ -97,6 +97,26 @@ trait McpEncoderLowPriority:
     override def encodeStructured(value: A): Option[zio.json.ast.Json] =
       value.toJsonAST.toOption
 
+  /** Mirror fallback for case classes with NO `JsonEncoder` anywhere in scope.
+    *
+    * The `NotGiven` guard makes eligibility DISJOINT from the `JsonEncoder`-based given above —
+    * `export McpEncoder.given` flattens trait-layer priorities (the #64 lesson), so disjointness,
+    * not layering, is what prevents ambiguity. Every call site with an explicit `given
+    * JsonEncoder[Out]` is untouched (`NotGiven` fails there and the given above applies).
+    * Derivation goes through [[com.tjclp.fastmcp.macros.ZioJsonEnumDerivation]], so `Out` case
+    * classes with Scala 3 enum or nested case-class fields encode zero-boilerplate (GH #78).
+    */
+  inline given derivedZioJsonEncoder[A](using
+      m: scala.deriving.Mirror.ProductOf[A],
+      ev: scala.util.NotGiven[JsonEncoder[A]]
+  ): McpEncoder[A] =
+    val jsonEncoder = com.tjclp.fastmcp.macros.ZioJsonEnumDerivation.deriveEncoder[A](using m)
+    new McpEncoder[A]:
+      def encode(value: A): List[Content] =
+        List(TextContent(jsonEncoder.encodeJson(value, None).toString))
+      override def encodeStructured(value: A): Option[zio.json.ast.Json] =
+        jsonEncoder.toJsonAST(value).toOption
+
 object McpEncoder extends McpEncoderLowPriority:
   def apply[A](using encoder: McpEncoder[A]): McpEncoder[A] = encoder
 

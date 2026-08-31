@@ -301,7 +301,7 @@ Task IDs come from the platform CSPRNG, a task that outlives its TTL is interrup
 
 ## Customizing decoding (zio-json)
 
-fast-mcp-scala decodes raw JSON-RPC arguments into Scala values with **zio-json** on both platforms (`codec/McpDecoders.scala` over the shared `DefaultDecodeContext`). Primitives, Scala 3 enums, case classes, `Option`, `List`, and `Map` work out of the box.
+fast-mcp-scala decodes raw JSON-RPC arguments into Scala values with **zio-json** on both platforms (`codec/McpDecoders.scala` over the shared `DefaultDecodeContext`). Primitives, Scala 3 enums, case classes (nested included), `Option`, `List`, and `Map` work out of the box — on the annotation path *and* in typed contracts. An enum field derives a string-enum JSON schema (`{"type":"string","enum":[...]}`) and a string-based codec with zero user-supplied givens; a hand-written `given JsonDecoder`/`JsonEncoder` for the enum — custom naming and all — always wins over the derived one. Result (`Out`) case classes likewise need no hand-written `JsonEncoder`. Enums with parameterized cases keep zio-json's wrapper-object encoding and tapir's coproduct schema (override per field with `@Param(schema = ...)` if needed).
 
 For anything else — including `java.time` types, which no longer decode for free now that Jackson is gone — supply a `given JsonDecoder[T]`; the shared derivation turns it into the `McpDecoder[T]` the contract layer needs:
 

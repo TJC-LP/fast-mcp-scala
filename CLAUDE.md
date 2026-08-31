@@ -166,7 +166,8 @@ server.tool(addTool)
 - `McpTemplateResource[In]` / `McpTemplateResource[In, R](...)` - Typed resource template
 - `McpDecoder[T]` / `McpEncoder[A]` - Platform-neutral codecs
 - `ToolSchemaProvider[A]` - Auto-derives `inputSchema` from `@Param`-annotated case classes on both JVM and JS
-- `McpEncoder` falls back to `JsonEncoder[A]` → `TextContent(a.toJson)` via ZIO JSON
+- `McpEncoder` falls back to `JsonEncoder[A]` → `TextContent(a.toJson)` via ZIO JSON; case classes without any `JsonEncoder` derive one automatically (Mirror-based, `NotGiven`-guarded)
+- Scala 3 enums and nested case classes in `In`/`Out` need no user-supplied givens (GH #78): schemas render string enums, codecs derive string-based; user-defined instances always win (macro-side summon-first, never exported givens). Machinery: `shared/.../macros/EnumTypeCollector.scala` + `ZioJsonEnumDerivation.scala`
 
 ### Transports
 
