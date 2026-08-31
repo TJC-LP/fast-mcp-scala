@@ -49,18 +49,36 @@ object SchemaExtractor:
             s"Cannot derive enum schema for ${Type.show[T]}: Missing Mirror.SumOf[T]. Ensure it's a standard Scala 3 enum."
           )
         }
-        report.info(
-          s"Detected enum type ${Type.show[T]}, using derivedEnumeration."
-        ) // Optional debug info
         '{ Schema.derivedEnumeration[T].defaultStringBased }
       else
         // For non-enums, use the regular implicit summon and naming logic
         // NOTE: Requires `import sttp.tapir.generic.auto.*` at the *call site*
-        val rawSchemaExpr = Expr.summon[Schema[T]].getOrElse {
+        def summonOrAbort: Expr[Schema[T]] = Expr.summon[Schema[T]].getOrElse {
           report.errorAndAbort(
             s"No Tapir Schema found for parameter '$paramName' of type: ${Type.show[T]}. Did you import sttp.tapir.generic.auto.* at the call site?"
           )
         }
+        // Scala 3 enums nested anywhere in T's field tree would render as coproducts of empty
+        // objects under generic.auto. Re-derive T's schema inside a block whose innermost scope
+        // carries string-based enum schemas: the block-local givens win over the imported
+        // generic.auto candidates when the derivation's per-field summons run (GH #78). The
+        // macro-time summon is kept purely for its friendly missing-import diagnostic.
+        val nestedEnums = com.tjclp.fastmcp.macros.EnumTypeCollector.collectSingletonEnums(tpeRepr)
+        val rawSchemaExpr: Expr[Schema[T]] =
+          if nestedEnums.isEmpty then summonOrAbort
+          else
+            val _ = summonOrAbort
+            def withLocalGivens(remaining: List[TypeRepr]): Expr[Schema[T]] =
+              remaining match
+                case Nil => '{ scala.compiletime.summonInline[Schema[T]] }
+                case e :: rest =>
+                  e.asType match
+                    case '[et] =>
+                      '{
+                        given Schema[et] = Schema.derivedEnumeration[et].defaultStringBased
+                        ${ withLocalGivens(rest) }
+                      }
+            withLocalGivens(nestedEnums)
         // Apply naming only to non-enum product types
         maybeAssignNameToSchema[T](rawSchemaExpr)
 
