@@ -1,5 +1,5 @@
 //| mvnDeps: ["com.lihaoyi::mill-contrib-scoverage:$MILL_VERSION", "com.tjclp::mill-bun_mill1:0.2.1"]
-// Mill 1.1.5 is used for Scala 3.8.x support and mill-bun-plugin compatibility.
+// Mill 1.1.8 (latest stable) — Scala 3.8.x support and mill-bun-plugin compatibility.
 // Version is controlled via .mill-version file.
 import mill._
 import mill.api.BuildCtx
