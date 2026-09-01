@@ -13,7 +13,7 @@ Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **
 
 ## Build System
 
-**Build tool**: Mill 1.1.5 (configured in `.mill-version`)
+**Build tool**: Mill 1.1.8 (configured in `.mill-version`)
 **Scala**: 3.8.3
 **Plugins**: mill-bun-plugin 0.2.1 (Scala.js + Bun integration)
 
@@ -43,10 +43,11 @@ Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **
 
 ```
 fast-mcp-scala/
-├── build.mill                 # Mill build definition
-├── .mill-version              # Mill version (1.1.5)
+├── build.mill                 # Versions, compiler flags, shared module traits
+├── .mill-version              # Mill version (1.1.8)
 ├── fast-mcp-scala/
-│   ├── shared/src/            # Platform-independent code (JVM + JS) — the native MCP core
+│   ├── package.mill           # The platform modules (jvm/js/scalaNative) + aggregates
+│   ├── shared/src/            # Platform-independent code (all 3 platforms) — the native MCP core
 │   │   └── com/tjclp/fastmcp/
 │   │       ├── core/
 │   │       │   ├── Annotations.scala    # @Tool, @Param, @Resource, @Prompt
@@ -57,9 +58,11 @@ fast-mcp-scala/
 │   │       │   └── wire/                # 2025-11-25 wire shapes (capabilities, tools, ...)
 │   │       ├── jsonrpc/                 # JSON-RPC 2.0 envelope + McpError
 │   │       ├── codec/                   # DefaultDecodeContext + McpDecoders (zio-json)
-│   │       ├── macros/                  # scanAnnotations + @Tool/@Resource/@Prompt processors
+│   │       ├── macros/                  # scanAnnotations, @Tool/@Resource/@Prompt processors,
+│   │       │                            #   JsonSchemaMacro + MacroUtils (schema derivation)
 │   │       ├── runtime/                 # RefResolver
-│   │       ├── examples/                # cross-platform ConformanceServer
+│   │       ├── examples/                # cross-platform examples (HelloWorld, AnnotatedServer,
+│   │       │                            #   ContractServer, ContextEchoServer, ConformanceServer)
 │   │       └── server/
 │   │           ├── McpServer.scala      # THE server class (both platforms)
 │   │           ├── McpServerCore.scala  # abstract API the macros target
@@ -67,17 +70,19 @@ fast-mcp-scala/
 │   │           ├── McpServerSettings.scala
 │   │           ├── manager/             # Tool/Prompt/Resource/Task managers
 │   │           ├── router/              # McpRouter, Builtins, Session, middleware
-│   │           └── transport/           # TransportBackend seam, MessageLoop, HostGuard
+│   │           └── transport/           # TransportBackend seam, StdioLoop, MessageLoop, HostGuard
 │   ├── jvm/
 │   │   ├── src/               # JVM-specific code
 │   │   │   └── com/tjclp/fastmcp/
-│   │   │       ├── macros/                  # Native JsonSchemaMacro + reflection helpers
-│   │   │       ├── server/transport/JvmTransportBackend.scala  # ZIO HTTP + System.in/out
-│   │   │       └── examples/
+│   │   │       ├── server/transport/        # JvmTransportBackend (stdio) + JvmHttpBackend (netty)
+│   │   │       └── examples/                # JVM-only: HttpServer, TaskManagerServer
 │   │   └── test/src/          # JVM test sources
-│   └── js/                    # Scala.js code (Bun-first runtime)
-│       ├── src/               # JsTransportBackend (Bun.serve + Node stdio), facades, examples
-│       └── test/src/          # Conformance, HTTP, codec, contract surface tests
+│   ├── js/                    # Scala.js code (Bun-first runtime)
+│   │   ├── src/               # JsTransportBackend (Bun.serve + Node stdio), facades, examples
+│   │   └── test/src/          # Conformance, HTTP, codec, contract surface tests
+│   └── native/                # Scala Native code (EXPERIMENTAL, stdio only)
+│       ├── src/               # NativeTransportBackend (System.in/out + /dev/urandom)
+│       └── test/src/          # Surface, contract, and stdio-lifecycle canaries
 ```
 
 ## Key Concepts
@@ -224,10 +229,11 @@ The `tasks` capability is advertised on `initialize` only when `settings.tasks.e
 
 The codebase is split into three sibling trees under `fast-mcp-scala/`:
 - `shared/` — the entire native MCP core: annotations, wire types, JSON-RPC, ZIO JSON codecs, the router + built-in handlers + middleware, `McpServer[R]` + `McpServerCore`, typed contracts, and the `TransportBackend` seam
-- `jvm/` — the JVM `TransportBackend` (ZIO HTTP + `System.in`/`System.out`), the schema-derivation macros, and examples
-- `js/` — the Scala.js `TransportBackend` (`Bun.serve` + Node stdio), small JS facades, and examples
+- `jvm/` — the JVM `TransportBackend` (`System.in`/`System.out`), the `HttpTransportBackend` (ZIO HTTP), and JVM-only examples
+- `js/` — the Scala.js `TransportBackend` (`Bun.serve` + Node stdio), small JS facades, and the Bun HTTP example
+- `native/` — the Scala Native `TransportBackend` (stdio only, EXPERIMENTAL)
 
-JVM module reads from `shared/src/ + jvm/src/`. JS module reads from `shared/src/ + js/src/` (plus the compile-time-only schema macros under `jvm/src/.../macros`).
+Every module reads exactly `shared/src/ + <platform>/src/`. Nothing reaches across platform trees: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/` compiles standalone on all three targets.
 
 ### Native MCP core (no vendored SDK)
 
@@ -282,13 +288,15 @@ Key test classes:
 
 1. Platform-independent code goes in `shared/src/`
 2. JVM-specific code stays in `jvm/src/`
-3. Add tests in `jvm/test/src/` or `js/test/src/`
-4. Run `./mill fast-mcp-scala.test` (runs both JVM and JS aggregates)
+3. Add tests in `jvm/test/src/`, `js/test/src/`, or `native/test/src/`
+4. Run `./mill fast-mcp-scala.test` (runs all three platform aggregates)
 5. Run `./mill fast-mcp-scala.checkFormat` (or `reformat`)
 
 ### Modifying Macros
 
-Macros are in `fast-mcp-scala/jvm/src/com/tjclp/fastmcp/macros/`. After changes:
+Macros are in `fast-mcp-scala/shared/src/com/tjclp/fastmcp/macros/` (all three platforms compile
+them). Incremental builds go stale after macro edits or file moves — expansion then fails with a
+`NoClassDefFoundError` or a spurious `-Xcheck-macros` "Malformed tree". After changes:
 ```bash
 rm -rf out/fast-mcp-scala && ./mill fast-mcp-scala.compile
 ```

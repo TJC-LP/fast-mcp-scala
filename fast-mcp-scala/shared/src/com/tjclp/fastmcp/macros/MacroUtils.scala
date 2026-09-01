@@ -509,7 +509,7 @@ private[macros] object MacroUtils:
     )
 
   // Helper method to invoke a function (runtime)
-  // Delegates to the RefResolver implementation which uses MethodHandles
+  // Delegates to RefResolver, which matches on FunctionN arity (no reflection — see its scaladoc)
   def invokeFunctionWithArgs(function: Any, args: List[Any]): Any =
     RefResolver.invokeFunctionWithArgs(function, args)
 

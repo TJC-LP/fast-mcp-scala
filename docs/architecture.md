@@ -55,30 +55,36 @@ fast-mcp-scala/
 │   │   └── wire/                         # 2026-07-28 and compatibility wire shapes
 │   ├── jsonrpc/                          # JSON-RPC 2.0 envelope + McpError
 │   ├── codec/                            # DefaultDecodeContext + McpDecoders (zio-json)
-│   ├── macros/                           # scanAnnotations, @Tool/@Resource/@Prompt processors
-│   ├── runtime/RefResolver.scala         # method-handle lookup helper for the macro
+│   ├── macros/                           # scanAnnotations, @Tool/@Resource/@Prompt processors,
+│   │                                     #   JsonSchemaMacro + MacroUtils (schema derivation)
+│   ├── runtime/RefResolver.scala         # FunctionN-arity dispatch helper for the macro
 │   └── server/
 │       ├── McpServer.scala               # THE server class (both platforms)
 │       ├── McpContext.scala              # request context incl. server→client requests
 │       ├── McpServerSettings.scala
 │       ├── manager/                      # Tool/Prompt/Resource/Task managers
 │       ├── router/                       # McpRouter, Builtins, Session, middleware
-│       └── transport/                    # TransportBackend + HttpTransportBackend seam, MessageLoop, HostGuard
+│       └── transport/                    # TransportBackend + HttpTransportBackend seam,
+│                                         #   StdioLoop, MessageLoop, HostGuard
 │
 ├── jvm/src/com/tjclp/fastmcp/           # JVM-specific
-│   ├── macros/                           # Native JsonSchemaMacro + MacroUtils
 │   ├── server/transport/JvmTransportBackend.scala   # System.in/out (stdio; netty-free)
 │   ├── server/transport/JvmHttpBackend.scala          # ZIO HTTP (streamable + stateless)
-│   └── examples/                         # runnable example servers
+│   └── examples/                         # JVM-only examples (HttpServer, TaskManagerServer)
 │
-└── js/src/com/tjclp/fastmcp/            # Scala.js (Bun-first)
-    ├── facades/{node,runtime}/           # Node process + Bun/Web-platform facades
-    ├── interop/ZioJsPromise.scala        # ZIO ↔ js.Promise bridge
-    ├── server/transport/JsTransportBackend.scala    # Bun.serve + Node stdio
-    └── examples/                         # runnable Bun examples
+├── js/src/com/tjclp/fastmcp/            # Scala.js (Bun-first)
+│   ├── facades/{node,runtime}/           # Node process + Bun/Web-platform facades
+│   ├── interop/ZioJsPromise.scala        # ZIO ↔ js.Promise bridge
+│   ├── server/transport/JsTransportBackend.scala    # Bun.serve + Node stdio
+│   └── examples/                         # Bun HTTP example
+│
+└── native/src/com/tjclp/fastmcp/        # Scala Native (EXPERIMENTAL, stdio only)
+    └── server/transport/NativeTransportBackend.scala # System.in/out + /dev/urandom ids
 ```
 
-**JVM module sources** = `shared/src/` + `jvm/src/`. **Scala.js module sources** = `shared/src/` + `js/src/`. **Scala Native module sources (experimental)** = `shared/src/` + `native/src/` (+ the borrowed compile-time macro files and the platform-pure `AnnotatedServer` example). Mill's `Task.Sources` wires this in `build.mill`.
+Every module's sources are exactly `shared/src/` + its own platform tree — no module reaches across into another's. That is an invariant worth preserving: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/` compiles standalone on all three targets. Mill wires this in `fast-mcp-scala/package.mill` (module definitions live next to the code; the root `build.mill` holds only versions, compiler flags, and shared traits).
+
+The stdio serving lifecycle is shared too: `StdioLoop` owns the session, the single-writer stdout lock, the outbound drainer fiber, and EOF teardown, so the JVM and Scala Native backends contribute only their stdin stream and their `randomId` source. The JS backend drives Node's callback IO directly and does not use it.
 
 ## The annotation path at compile time
 
