@@ -185,15 +185,9 @@ object `fast-mcp-scala` extends Module {
 
     override def moduleKind = Task { ModuleKind.ESModule }
 
-    // JS module reads from shared/, js/src/, plus the macro/schema helpers in jvm/src/ that are
-    // compile-time only and portable across targets.
-    override def sources = Task.Sources(
-      moduleDir / "src",
-      moduleDir / os.up / "shared" / "src",
-      moduleDir / os.up / "jvm" / "src" / "com" / "tjclp" / "fastmcp" / "macros" / "JsonSchemaMacro.scala",
-      moduleDir / os.up / "jvm" / "src" / "com" / "tjclp" / "fastmcp" / "macros" / "MacroUtils.scala",
-      moduleDir / os.up / "jvm" / "src" / "com" / "tjclp" / "fastmcp" / "macros" / "schema"
-    )
+    // JS module reads from shared/ (the whole MCP core, incl. the schema-derivation macros) and
+    // js/src/ (Bun transport + facades).
+    override def sources = Task.Sources(moduleDir / "src", moduleDir / os.up / "shared" / "src")
 
     // Shared deps needed by shared/ sources and the JS macro/schema derivation path.
     override def mvnDeps = Seq(
@@ -274,17 +268,10 @@ object `fast-mcp-scala` extends Module {
     // nativeSmoke pipeline); the source directory follows the jvm/js sibling convention.
     override def moduleDir = super.moduleDir / os.up / "native"
 
-    // Native module reads from native/src/, shared/, the compile-time-only macro/schema helpers
-    // in jvm/src/ (same borrow as the js module), and the platform-pure AnnotatedServer example —
-    // this module's demo main for `nativeLink`, driven by scripts/native-smoke.sh in CI.
-    override def sources = Task.Sources(
-      moduleDir / "src",
-      moduleDir / os.up / "shared" / "src",
-      moduleDir / os.up / "jvm" / "src" / "com" / "tjclp" / "fastmcp" / "macros" / "JsonSchemaMacro.scala",
-      moduleDir / os.up / "jvm" / "src" / "com" / "tjclp" / "fastmcp" / "macros" / "MacroUtils.scala",
-      moduleDir / os.up / "jvm" / "src" / "com" / "tjclp" / "fastmcp" / "macros" / "schema",
-      moduleDir / os.up / "jvm" / "src" / "com" / "tjclp" / "fastmcp" / "examples" / "AnnotatedServer.scala"
-    )
+    // Native module reads from native/src/ (the stdio backend) and shared/ — which carries the
+    // whole MCP core, the schema-derivation macros, and the platform-pure AnnotatedServer example
+    // used as this module's demo main for `nativeLink` (driven by scripts/native-smoke.sh in CI).
+    override def sources = Task.Sources(moduleDir / "src", moduleDir / os.up / "shared" / "src")
 
     // `::` resolves the _native0.5_3 artifacts. zio-json transitively brings
     // io.github.cquiroz:scala-java-time (compile scope), which links the java.time.Duration
