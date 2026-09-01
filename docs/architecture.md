@@ -78,7 +78,7 @@ fast-mcp-scala/
     └── examples/                         # runnable Bun examples
 ```
 
-**JVM module sources** = `shared/src/` + `jvm/src/`. **Scala.js module sources** = `shared/src/` + `js/src/`. Mill's `Task.Sources` wires this in `build.mill`.
+**JVM module sources** = `shared/src/` + `jvm/src/`. **Scala.js module sources** = `shared/src/` + `js/src/`. **Scala Native module sources (experimental)** = `shared/src/` + `native/src/` (+ the borrowed compile-time macro files and the platform-pure `AnnotatedServer` example). Mill's `Task.Sources` wires this in `build.mill`.
 
 ## The annotation path at compile time
 

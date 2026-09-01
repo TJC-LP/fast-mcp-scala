@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Scala Native target (experimental)** (TJC-2188, #82):
+  `com.tjclp:fast-mcp-scala_native0.5_3` — stdio MCP servers compiled to
+  standalone binaries via Scala Native 0.5.12 (21MB debug links in
+  seconds). HTTP is excluded by design (zio-http has no Native
+  artifacts): the platform provides only the `TransportBackend` given,
+  so `McpServerApp[Http]` fails at compile time while
+  `McpServerApp[Stdio]` works unchanged. Session/task ids come from
+  `/dev/urandom` (javalib `UUID.randomUUID` doesn't link on SN); stdin
+  reads via `ZStream.fromReader`. CI links the `AnnotatedServer` demo
+  binary and drives it with the same stdio smoke script that gates the
+  GraalVM images.
+
 - **Mirror-based `McpEncoder` fallback**: `Out` case classes without any
   `JsonEncoder` in scope now encode (text + `structuredContent`)
   automatically; guarded by `NotGiven[JsonEncoder[A]]` so every existing
