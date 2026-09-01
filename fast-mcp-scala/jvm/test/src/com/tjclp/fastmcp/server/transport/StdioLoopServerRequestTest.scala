@@ -16,7 +16,7 @@ import com.tjclp.fastmcp.server.router.Session
   *
   * A tool that issues a server→client `roots/list` request must resolve from a *later* inbound frame
   * on the same connection. A sequential read loop (awaiting each dispatch) deadlocks here;
-  * [[JvmTransportBackend.stdioLoop]] forks each frame so the reply can be read while the handler is
+  * [[StdioLoop.run]] forks each frame so the reply can be read while the handler is
   * still blocked.
   *
   * Driven over in-memory queues (no real `System.in`/`out`); a hard timeout turns a regression
@@ -53,8 +53,8 @@ class StdioLoopServerRequestTest extends AnyFunSuite with Matchers:
         session <- Session.make("stdio-loop")
         inQ <- Queue.unbounded[String]
         outQ <- Queue.unbounded[String]
-        loop <- JvmTransportBackend
-          .stdioLoop(router, session, ZStream.fromQueue(inQ), s => outQ.offer(s).unit)
+        loop <- StdioLoop
+          .run(router, session, ZStream.fromQueue(inQ), s => outQ.offer(s).unit)
           .fork
         _ <- inQ.offer(initFrame)
         _ <- takeUntil(outQ, _.contains("\"id\":1")) // initialize reply (caps now stored on session)

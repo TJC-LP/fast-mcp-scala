@@ -7,7 +7,7 @@ import zio.*
 import zio.stream.*
 
 import com.tjclp.fastmcp.server.McpServerSettings
-import com.tjclp.fastmcp.server.router.{McpRouter, Session}
+import com.tjclp.fastmcp.server.router.McpRouter
 
 /** Scala Native [[TransportBackend]] — pure ZIO over `System.in`/`System.out`, compiled to a
   * standalone binary via LLVM. Stdio only: zio-http is not published for Scala Native, so this
@@ -15,15 +15,17 @@ import com.tjclp.fastmcp.server.router.{McpRouter, Session}
   * compile at the declaration site (by design — the same seam that keeps netty out of GraalVM stdio
   * images).
   *
-  * Platform notes vs. the JVM backend:
+  * The serving lifecycle is shared with the JVM ([[StdioLoop]]); only the two pieces that genuinely
+  * differ on this platform live here:
   *   - stdin: zio-streams Native has no `ZStream.fromInputStream`; chars are read via
   *     `ZStream.fromReader` (the `InputStreamReader` owns byte→UTF-8 decoding) and re-chunked into
   *     Strings for the shared `ZPipeline.splitLines`.
   *   - `randomId()`: javalib's `UUID.randomUUID()` does not link on Scala Native 0.5 (it references
   *     `java.security.SecureRandom`, which has no published implementation); 16 bytes of
   *     `/dev/urandom` are formatted as an RFC-4122 v4 UUID instead. Unix-only.
-  *   - ZIO signal handlers and shutdown hooks are silent no-ops on Scala Native; benign for stdio,
-  *     where the parent closing stdin ends the loop via EOF exactly like the JVM.
+  *
+  * ZIO signal handlers and shutdown hooks are silent no-ops on Scala Native; benign for stdio,
+  * where the parent closing stdin ends the loop via EOF exactly like the JVM.
   */
 object NativeTransportBackend extends TransportBackend:
 
@@ -51,62 +53,16 @@ object NativeTransportBackend extends TransportBackend:
       router: McpRouter[R],
       settings: McpServerSettings
   ): ZIO[R, Throwable, Unit] =
-    for
-      session <- Session.make("stdio")
-      // One writer owns stdout; both replies and server-pushed outbound go through it so lines
-      // never interleave.
-      outLock <- Semaphore.make(1)
-      emit = (line: String) => outLock.withPermit(writeLine(line))
-      inLines =
-        ZStream
-          .fromReader(new java.io.InputStreamReader(java.lang.System.in, StandardCharsets.UTF_8))
-          .chunks
-          .map(chunk => new String(chunk.toArray))
-          .via(ZPipeline.splitLines)
-          .map(_.trim)
-          .filter(_.nonEmpty)
-      _ <- stdioLoop(router, session, inLines, emit)
-    yield ()
-
-  /** The stdio dispatch loop, factored out of [[serveStdio]] so it can be driven over in-memory
-    * streams in tests — identical semantics to `JvmTransportBackend.stdioLoop`: the outbound
-    * drainer is forked as a daemon, each inbound frame dispatches in its own fiber (so a handler
-    * blocked on a server→client round trip never stalls the read loop), and stdin EOF ends the
-    * loop, taking the drainer down via `.ensuring`.
-    */
-  private[fastmcp] def stdioLoop[R](
-      router: McpRouter[R],
-      session: Session,
-      inLines: ZStream[Any, Throwable, String],
-      emit: String => Task[Unit]
-  ): ZIO[R, Throwable, Unit] =
-    for
-      drainer <- session.outbound.take
-        .flatMap(msg => emit(MessageLoop.encodeOutbound(msg)))
-        .forever
-        .forkDaemon
-      _ <- inLines
-        .runForeach { line =>
-          MessageLoop
-            .handleFrame(router, session, line)
-            .flatMap {
-              case Some(reply) => emit(reply)
-              case None => ZIO.unit
-            }
-            .forkDaemon
-            .unit
-        }
-        // stdin EOF (or scope interruption) ends the loop; take the drainer down with it.
-        .ensuring(drainer.interrupt)
-    yield ()
-
-  private def writeLine(line: String): Task[Unit] =
-    ZIO.attempt {
-      val out = java.lang.System.out
-      out.print(line)
-      out.print('\n')
-      out.flush()
-    }
+    StdioLoop.serve(
+      router,
+      ZStream
+        .fromReader(new java.io.InputStreamReader(java.lang.System.in, StandardCharsets.UTF_8))
+        .chunks
+        .map(chunk => new String(chunk.toArray))
+        .via(ZPipeline.splitLines)
+        .map(_.trim)
+        .filter(_.nonEmpty)
+    )
 
   /** The Scala Native platform seam, in the impl object so it's exportable (givens can't be
     * wildcard-exported straight from a package). `ExportsNative` re-exports this so `import

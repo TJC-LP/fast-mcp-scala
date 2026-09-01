@@ -11,9 +11,11 @@ import com.tjclp.fastmcp.server.router.Session
 import com.tjclp.fastmcp.server.transport.NativeTransportBackend.given
 
 /** Platform contracts for the Scala Native stdio backend: the /dev/urandom-backed `randomId`
-  * (javalib `UUID.randomUUID` does not link on SN 0.5) and the stdio-loop termination contracts
-  * ported from the JVM `StdioLoopLifecycleTest` — EOF and interruption must both end the loop AND
-  * its outbound-drainer fiber.
+  * (javalib `UUID.randomUUID` does not link on SN 0.5), plus the shared [[StdioLoop]] termination
+  * contracts re-run *on the Scala Native runtime* — EOF and interruption must both end the loop AND
+  * its outbound-drainer fiber. The loop itself is shared with the JVM, but its fiber semantics rest
+  * on SN's threading and GC, so these deliberately duplicate the JVM `StdioLoopLifecycleTest` cases
+  * as a platform canary rather than trusting the JVM run.
   */
 class NativeTransportBackendTest extends AnyFunSuite with Matchers:
 
@@ -42,7 +44,7 @@ class NativeTransportBackendTest extends AnyFunSuite with Matchers:
         session <- Session.make("stdio-eof")
         outQ <- Queue.unbounded[String]
         // A finite inbound stream IS the EOF: the loop must dispatch the frame and return.
-        _ <- NativeTransportBackend.stdioLoop(
+        _ <- StdioLoop.run(
           router,
           session,
           ZStream(initFrame),
@@ -68,8 +70,8 @@ class NativeTransportBackendTest extends AnyFunSuite with Matchers:
         router <- server.buildRouter
         session <- Session.make("stdio-shutdown")
         inQ <- Queue.unbounded[String] // never closed — the loop would run forever
-        loop <- NativeTransportBackend
-          .stdioLoop(router, session, ZStream.fromQueue(inQ), _ => ZIO.unit)
+        loop <- StdioLoop
+          .run(router, session, ZStream.fromQueue(inQ), _ => ZIO.unit)
           .fork
         _ <- inQ.offer(initFrame)
         _ <- ZIO.sleep(100.millis)
