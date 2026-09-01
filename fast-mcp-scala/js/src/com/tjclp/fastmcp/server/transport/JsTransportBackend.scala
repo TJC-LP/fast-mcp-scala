@@ -481,10 +481,12 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     if HostGuard.isAllowed(host, origin, allowedHosts) then None
     else Some(webResponse(403, "Host/Origin not allowed (DNS-rebinding protection)"))
 
-  /** POST guard, mirroring the JVM backend: `mcp-protocol-version` must be supported (absent ⇒ the
-    * pre-header default); `Accept` (if present) must allow `application/json` — and on the
-    * streamable transport (`requireSse`) `text/event-stream` too, since request replies stream as
-    * SSE.
+  /** POST guard, mirroring the JVM backend: `Accept` (if present) must allow `application/json` —
+    * and on the streamable transport (`requireSse`) `text/event-stream` too, since request replies
+    * stream as SSE.
+    *
+    * As on the JVM, `mcp-protocol-version` is deliberately not checked here: on POST the version
+    * comes from the initialize payload (legacy) or from the modern validation path (`-32022`).
     */
   private def postHeaderError(req: js.Dynamic, requireSse: Boolean): Option[js.Dynamic] =
     val accept = Option(req.headers.get("accept").asInstanceOf[String]).map(_.toLowerCase)

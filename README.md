@@ -50,7 +50,7 @@ Built against Scala 3.8.3. JVM requires JDK 17+. Scala.js artifact is published 
 
 ## Quickstart
 
-A single-file server with one tool — the same code lives in [`HelloWorld.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/HelloWorld.scala):
+A single-file server with one tool — the same code lives in [`HelloWorld.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/HelloWorld.scala):
 
 ```scala 3 raw
 //> using scala 3.8.3
@@ -99,7 +99,7 @@ object MyServer extends McpServerApp[Stdio, MyServer.type]:
 
 Handler lambdas return plain values, `ZIO`, `Either[Throwable, _]`, or `scala.util.Try` — the `ToHandlerEffect[F[_]]` typeclass picks the right lift. Bring your own given for other effect systems (`cats.effect.IO`, Monix, ...).
 
-See [`AnnotatedServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts.
+See [`AnnotatedServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts.
 
 ## Tools and `@Param` metadata
 
@@ -125,7 +125,7 @@ def search(
 - `required = false` — combined with `Option[...]` or a default value, marks the field optional
 - `schema` — raw JSON Schema fragment that overrides the derived schema entirely (useful for enum constraints, patterns, or numeric bounds Scala types can't express)
 
-Full demo in [`AnnotatedServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala).
+Full demo in [`AnnotatedServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala).
 
 ## Tool hints
 
@@ -198,7 +198,7 @@ def echo(args: Map[String, Any], ctx: Option[McpContext]): String =
   s"Hello from $clientName"
 ```
 
-Runnable demo: [`ContextEchoServer.scala`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/ContextEchoServer.scala).
+Runnable demo: [`ContextEchoServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContextEchoServer.scala).
 
 ## Transports
 
@@ -404,7 +404,7 @@ object HelloBun extends McpServerApp[Stdio, HelloBun.type]:
 
 Same shape as the JVM — the `McpServerApp` trait picks up the shared `McpServerCoreFactory` given and builds the one shared `McpServer` over the Bun `TransportBackend`. Typed contracts auto-generate their input schemas on Scala.js as well, with no schema-library import.
 
-Link with `./mill fast-mcp-scala.js.fastLinkJS`, then `bun run out/fast-mcp-scala/js/fastLinkJS.dest/main.js`. See [`HelloWorldJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HelloWorldJs.scala) and [`HttpServerJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HttpServerJs.scala) for runnable references.
+Link with `./mill fast-mcp-scala.js.fastLinkJS`, then `bun run out/fast-mcp-scala/js/fastLinkJS.dest/main.js`. See [`HelloWorld.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/HelloWorld.scala) (shared across platforms) and [`HttpServerJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HttpServerJs.scala) for runnable references.
 
 ### Running on Scala Native (experimental)
 
@@ -459,16 +459,21 @@ See the [CHANGELOG](CHANGELOG.md) for release-by-release changes.
 
 ## Running examples
 
-**JVM** — [`fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/):
+**Cross-platform** — [`fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/). These compile and run on all three platforms (JVM, Scala.js/Bun, Scala Native):
 
 | Example | Demonstrates |
 |---|---|
 | `HelloWorld.scala` | Minimum viable server — one tool, stdio |
 | `AnnotatedServer.scala` | Flagship annotation path — tools, hints, `@Param` features, resources, prompts |
-| `ContractServer.scala` | Typed contracts as first-class values; cross-platform story |
-| `TaskManagerServer.scala` | Realistic domain server — custom decoders, hints across a CRUD-style surface |
+| `ContractServer.scala` | Typed contracts as first-class values |
 | `ContextEchoServer.scala` | `McpContext` introspection inside a tool handler |
+
+**JVM-only** — [`fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/`](fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/):
+
+| Example | Demonstrates |
+|---|---|
 | `HttpServer.scala` | HTTP transport (Streamable default, Stateless via a flag) with curl recipes |
+| `TaskManagerServer.scala` | Realistic domain server — custom decoders, hints across a CRUD-style surface |
 
 ```bash
 ./mill fast-mcp-scala.jvm.runMain com.tjclp.fastmcp.examples.HelloWorld
@@ -476,11 +481,10 @@ See the [CHANGELOG](CHANGELOG.md) for release-by-release changes.
 scala-cli scripts/quickstart.sc
 ```
 
-**Scala.js / Bun** — [`fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/):
+**Scala.js / Bun** — [`fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/) adds the Bun-specific HTTP entrypoint:
 
 | Example | Demonstrates |
 |---|---|
-| `HelloWorldJs.scala` | Minimum viable server on Bun — one tool, stdio |
 | `HttpServerJs.scala` | Streamable HTTP transport on Bun — stateful sessions or stateless |
 
 ```bash

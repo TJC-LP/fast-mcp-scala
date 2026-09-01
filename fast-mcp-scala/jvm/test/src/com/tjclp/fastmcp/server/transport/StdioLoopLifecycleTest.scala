@@ -32,7 +32,7 @@ class StdioLoopLifecycleTest extends AnyFunSuite with Matchers:
         session <- Session.make("stdio-eof")
         outQ <- Queue.unbounded[String]
         // A finite inbound stream IS the EOF: the loop must dispatch the frame and return.
-        _ <- JvmTransportBackend.stdioLoop(
+        _ <- StdioLoop.run(
           router,
           session,
           ZStream(initFrame),
@@ -58,8 +58,8 @@ class StdioLoopLifecycleTest extends AnyFunSuite with Matchers:
         router <- server.buildRouter
         session <- Session.make("stdio-shutdown")
         inQ <- Queue.unbounded[String] // never closed — the loop would run forever
-        loop <- JvmTransportBackend
-          .stdioLoop(router, session, ZStream.fromQueue(inQ), _ => ZIO.unit)
+        loop <- StdioLoop
+          .run(router, session, ZStream.fromQueue(inQ), _ => ZIO.unit)
           .fork
         _ <- inQ.offer(initFrame)
         _ <- ZIO.sleep(100.millis)

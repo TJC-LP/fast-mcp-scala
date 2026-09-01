@@ -7,9 +7,10 @@ import com.tjclp.fastmcp.jsonrpc.*
 import com.tjclp.fastmcp.jsonrpc.JsonRpcMessage.*
 import com.tjclp.fastmcp.server.router.{McpRouter, Methods, Session}
 
-/** Platform-neutral wire ↔ dispatch bridge. Both the JVM and JS transports reduce to "get bytes,
-  * call [[handleFrame]], write bytes" — all parsing, dispatch, and error framing lives here so the
-  * platform code stays a thin I/O adapter.
+/** Platform-neutral wire ↔ dispatch bridge. Every transport — JVM, Scala.js, Scala Native — reduces
+  * to "get bytes, call [[handleFrame]], write bytes"; all parsing, dispatch, and error framing
+  * lives here so the platform code stays a thin I/O adapter. The stdio *lifecycle* around this
+  * (drainer fiber, forked dispatch, EOF teardown) lives in [[StdioLoop]].
   */
 object MessageLoop:
 

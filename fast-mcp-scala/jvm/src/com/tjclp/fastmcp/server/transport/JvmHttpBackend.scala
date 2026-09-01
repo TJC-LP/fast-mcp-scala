@@ -602,10 +602,13 @@ object JvmHttpBackend extends HttpTransportBackend:
     if HostGuard.isAllowed(req.rawHeader("host"), req.rawHeader("origin"), allowedHosts) then None
     else Some(errorResponse(Status.Forbidden, "Host/Origin not allowed (DNS-rebinding protection)"))
 
-  /** POST guard: `mcp-protocol-version` must be supported (absent ⇒ pre-header default); `Accept`
-    * (if present) must allow `application/json` — and on the streamable transport (`requireSse`)
-    * `text/event-stream` too, since request replies stream as SSE (spec requires clients to accept
-    * both).
+  /** POST guard: `Accept` (if present) must allow `application/json` — and on the streamable
+    * transport (`requireSse`) `text/event-stream` too, since request replies stream as SSE (spec
+    * requires clients to accept both).
+    *
+    * Note this guard does NOT check `mcp-protocol-version`: on POST the version travels in the
+    * initialize payload (legacy) or is validated by [[ModernHttpValidation]] (modern, `-32022`).
+    * The header itself is only enforced on the GET channel — see [[getHeaderError]].
     */
   private def postHeaderError(
       req: Request,

@@ -32,6 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Build and source layout modularized** (TJC-2198): Mill 1.1.5 → 1.1.8;
+  module definitions moved out of the monolithic `build.mill` into
+  `fast-mcp-scala/package.mill`, next to the code they build (task paths such
+  as `fast-mcp-scala.jvm.test` are unchanged, as are all three published
+  artifacts). The schema-derivation macros (`JsonSchemaMacro`, `MacroUtils`,
+  `FunctionAnalyzer`) and the platform-pure examples (`HelloWorld`,
+  `AnnotatedServer`, `ContractServer`, `ContextEchoServer`) moved from
+  `jvm/src/` to `shared/src/`, so each module now compiles exactly
+  `shared/src/` + its own platform tree instead of reaching across into
+  another's — those four examples now build on all three platforms, and the
+  duplicated `HelloWorldJs` is gone. The stdio serving lifecycle (session,
+  single-writer stdout, outbound drainer, EOF teardown) is now shared as
+  `StdioLoop`, replacing byte-identical copies in the JVM and Scala Native
+  backends.
 - JSON Schema derivation is now a native Scala 3 macro that emits `zio-json`
   AST values directly on JVM and Scala.js. Typed contracts no longer require
   `sttp.tapir.generic.auto.*` at call sites.

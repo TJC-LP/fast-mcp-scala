@@ -9,14 +9,15 @@ import com.tjclp.fastmcp.server.router.McpRouter
   * on the separate [[HttpTransportBackend]] so stdio-only applications (and their native images /
   * DCE'd JS bundles) never reach the HTTP server stack.
   *
-  * Each platform supplies exactly one `given TransportBackend`: the JVM one drives
-  * `System.in`-`System.out`; the JS one drives Node process IO. Everything else — schema, codecs,
-  * JSON-RPC, router, built-ins, middleware — is shared. This is what lets a single `McpServer`
-  * serve both platforms with identical behavior.
+  * Each platform supplies exactly one `given TransportBackend`: the JVM and Scala Native ones drive
+  * `System.in`-`System.out` (sharing the [[StdioLoop]] lifecycle), while the JS one drives Node
+  * process IO. Everything else — schema, codecs, JSON-RPC, router, built-ins, middleware — is
+  * shared. This is what lets a single `McpServer` serve all three platforms with identical
+  * behavior.
   *
   * `serveStdio` takes the fully-built [[McpRouter]] and runs forever (until interrupted). `R` is
-  * the server environment; it threads straight through on the JVM (pure ZIO) and is captured into a
-  * `Runtime[R]` at the process-IO boundary on JS.
+  * the server environment; it threads straight through on the JVM and Scala Native (pure ZIO) and
+  * is captured into a `Runtime[R]` at the process-IO boundary on JS.
   */
 trait TransportBackend:
 

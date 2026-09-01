@@ -2,11 +2,14 @@ package com.tjclp.fastmcp.runtime
 
 /** Runtime utility for resolving function references and invoking methods. This class is extracted
   * from the macro utilities to allow for runtime resolution without requiring macro expansion.
+  *
+  * Deliberately reflection-free: dispatch is a plain match over `FunctionN`, which is what lets the
+  * shared core link on Scala.js and Scala Native as well as the JVM.
   */
 object RefResolver:
 
-  /** Invoke a function object with a list of arguments. Uses MethodHandle API for more efficient
-    * function invocation.
+  /** Invoke a function object with a list of arguments by matching on its `FunctionN` arity — no
+    * reflection and no `MethodHandle`, so this links on every platform.
     *
     * @param fun
     *   The function object to invoke
