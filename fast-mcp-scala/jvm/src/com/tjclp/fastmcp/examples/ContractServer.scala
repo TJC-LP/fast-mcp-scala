@@ -1,6 +1,5 @@
 package com.tjclp.fastmcp.examples
 
-import sttp.tapir.generic.auto.*
 import zio.json.*
 
 import com.tjclp.fastmcp.{*, given}

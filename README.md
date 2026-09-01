@@ -15,7 +15,7 @@ No `override def run`, no `import zio.*`, no ceremony. Two complementary registr
 - `@Tool` / `@Resource` / `@Prompt` annotations + `scanAnnotations[T]` for a zero-boilerplate, macro-driven experience (JVM + Scala.js/Bun)
 - `McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource` for first-class, testable, cross-platform contract values — handlers return plain values, `ZIO`, `Either[Throwable, _]`, or `Try` via the `ToHandlerEffect` typeclass
 
-Built on **ZIO 2**, **Tapir**-derived schemas, and **zio-json** on both platforms. The whole MCP protocol layer — JSON-RPC, wire types, router, transports — is **native pure Scala 3** in `shared/`; there is no vendored SDK (the official TS SDK appears only as a test-time conformance client). Transport is a phantom type parameter — `McpServerApp[Stdio, Self.type]` or `McpServerApp[Http, Self.type]` — with compile-time runner dispatch.
+Built on **ZIO 2** and **zio-json** on both platforms, with JSON Schemas derived directly by Scala 3 macros. The whole MCP protocol layer — JSON-RPC, wire types, router, transports — is **native pure Scala 3** in `shared/`; there is no vendored SDK (the official TS SDK appears only as a test-time conformance client). Transport is a phantom type parameter — `McpServerApp[Stdio, Self.type]` or `McpServerApp[Http, Self.type]` — with compile-time runner dispatch.
 
 ## Contents
 
@@ -29,7 +29,7 @@ Built on **ZIO 2**, **Tapir**-derived schemas, and **zio-json** on both platform
 - [Context (`McpContext`)](#context-mcpcontext)
 - [Transports](#transports)
 - [Native image (GraalVM)](#native-image-graalvm)
-- [Customizing decoding (zio-json)](#customizing-decoding-zio-json)
+- [Customizing input types (zio-json)](#customizing-input-types-zio-json)
 - [One core, two transports](#one-core-two-transports)
 - [Spec coverage](#spec-coverage)
 - [Running examples](#running-examples)
@@ -299,25 +299,33 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
 
 Task IDs come from the platform CSPRNG, a task that outlives its TTL is interrupted (not orphaned), and terminal results stay pollable until the TTL sweeps them. The current server creates working/completed/failed/cancelled tool tasks; it implements `tasks/update` validation but does not yet suspend a task in `input_required`, and task-status notifications are not emitted. The extension remains off by default.
 
-## Customizing decoding (zio-json)
+## Customizing input types (zio-json)
 
-fast-mcp-scala decodes raw JSON-RPC arguments into Scala values with **zio-json** on both platforms (`codec/McpDecoders.scala` over the shared `DefaultDecodeContext`). Primitives, Scala 3 enums, case classes (nested included), `Option`, `List`, and `Map` work out of the box — on the annotation path *and* in typed contracts. An enum field derives a string-enum JSON schema (`{"type":"string","enum":[...]}`) and a string-based codec with zero user-supplied givens; a hand-written `given JsonDecoder`/`JsonEncoder` for the enum — custom naming and all — always wins over the derived one. Result (`Out`) case classes likewise need no hand-written `JsonEncoder`. Enums with parameterized cases keep zio-json's wrapper-object encoding and tapir's coproduct schema (override per field with `@Param(schema = ...)` if needed).
+fast-mcp-scala derives both decoding and JSON Schema natively on JVM and Scala.js — no schema-library import at call sites. Primitives, `java.time` values, Scala 3 enums, case classes (nested included), `Option`, collections, and string-keyed maps work without per-type givens, on the annotation path *and* in typed contracts. An enum field derives a string-enum JSON schema (`{"type":"string","enum":[...]}`) and a string-based codec; a hand-written `given JsonDecoder`/`JsonEncoder` for the enum — custom naming and all — always wins over the derived one. Result (`Out`) case classes likewise need no hand-written `JsonEncoder`. Enums with parameterized cases keep zio-json's wrapper-object encoding (provide an `McpInputCodec` for a custom shape).
 
-For anything else — including `java.time` types, which no longer decode for free now that Jackson is gone — supply a `given JsonDecoder[T]`; the shared derivation turns it into the `McpDecoder[T]` the contract layer needs:
+For a domain type whose wire representation differs from its Scala shape, define one
+`McpInputCodec[T]`. It is simultaneously the zio-json decoder used inside request case classes and
+the schema advertised to MCP clients:
 
 ```scala 3 raw
-import java.time.LocalDateTime
-import zio.json.*
+opaque type UserId = String
 
-given JsonDecoder[LocalDateTime] =
-  JsonDecoder[String].mapOrFail(s =>
-    scala.util.Try(LocalDateTime.parse(s)).toEither.left.map(_.getMessage)
-  )
+object UserId:
+  extension (id: UserId) def value: String = id
 
-case class Task(title: String, due: LocalDateTime) derives JsonDecoder
+  given McpInputCodec[UserId] = McpInputCodec.string(
+    """{"type":"string","pattern":"^usr_[a-z0-9]+$"}"""
+  ) { raw =>
+    Either.cond(raw.startsWith("usr_"), raw, s"Invalid user id '$raw'")
+  }
+
+case class LookupArgs(id: UserId)
 ```
 
-Implement `McpDecoder[T]` directly only when the wire format can't be expressed as a `JsonDecoder`.
+For a one-off field, `@Param(schema = Some("..."))` overrides its generated schema. Entire typed
+tools can opt out through `McpTool.withSchema`. For a nested output-only type, `McpSchema[T]`
+provides the schema without requiring a decoder. Implement `McpDecoder[T]` directly only for a
+low-level input conversion that does not need automatic nested case-class derivation.
 
 ## One core, two transports
 
@@ -367,7 +375,7 @@ Capabilities are **derived from the registered handler map** — a capability is
 | `McpServerApp[T, Self]` sugar trait | ✅ | ✅ |
 | `@Tool` / `@Resource` / `@Prompt` + `scanAnnotations[T]` | ✅ | ✅ |
 | Typed contracts (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) | ✅ | ✅ |
-| `ToolSchemaProvider[A]` auto-derivation from `@Param` | ✅ via Tapir | ✅ via Tapir |
+| `ToolSchemaProvider[A]` auto-derivation from `@Param` | ✅ native macro | ✅ native macro |
 | `ToHandlerEffect[F]` — plain values / ZIO / Either / Try | ✅ | ✅ |
 | Stdio transport | ✅ (native) | ✅ (native) |
 | Streamable HTTP — stateful (sessions + per-request SSE) | ✅ (ZIO HTTP) | ✅ (Bun.serve) |
@@ -392,7 +400,7 @@ object HelloBun extends McpServerApp[Stdio, HelloBun.type]:
   def add(@Param("First operand") a: Int, @Param("Second operand") b: Int): Int = a + b
 ```
 
-Same shape as the JVM — the `McpServerApp` trait picks up the shared `McpServerCoreFactory` given and builds the one shared `McpServer` over the Bun `TransportBackend`. For typed contracts on Scala.js, `McpTool[...]` auto-generates the input schema as well; import `sttp.tapir.generic.auto.*` at the call site the same way you do on the JVM.
+Same shape as the JVM — the `McpServerApp` trait picks up the shared `McpServerCoreFactory` given and builds the one shared `McpServer` over the Bun `TransportBackend`. Typed contracts auto-generate their input schemas on Scala.js as well, with no schema-library import.
 
 Link with `./mill fast-mcp-scala.js.fastLinkJS`, then `bun run out/fast-mcp-scala/js/fastLinkJS.dest/main.js`. See [`HelloWorldJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HelloWorldJs.scala) and [`HttpServerJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HttpServerJs.scala) for runnable references.
 

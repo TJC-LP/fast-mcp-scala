@@ -1,10 +1,10 @@
 package com.tjclp.fastmcp.macros
 
-import io.circe.Json
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-import sttp.tapir.Schema
-import sttp.tapir.generic.auto.*
+import zio.json.ast.Json
+
+import com.tjclp.fastmcp.JsonTestSupport.*
 
 /** Tests to verify that fields with Option types (even with default values) are correctly marked as
   * not required in schemas
@@ -21,9 +21,6 @@ class DefaultValueTest extends AnyFunSuite with Matchers {
         Map.empty
       ) // Optional via Option with default value
   )
-
-  // Schema is automatically derived by Tapir
-  given Schema[UserConfig] = Schema.derived[UserConfig]
 
   // Function that takes the case class as a parameter
   def processUserConfig(config: UserConfig): String = s"Processed config for ${config.username}"

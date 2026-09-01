@@ -1,7 +1,6 @@
 package com.tjclp.fastmcp.surface
 
 import org.scalatest.funsuite.AnyFunSuite
-import sttp.tapir.generic.auto.*
 import zio.*
 import zio.json.*
 

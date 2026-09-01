@@ -7,26 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **Zero-boilerplate Scala 3 enum support in typed contracts** (TJC-2167, #78):
-  `McpTool[In, Out]` with enum fields now derives string-enum JSON schemas
-  (`{"type":"string","enum":[...]}`) and string-based zio-json codecs with no
-  user-supplied givens — at any nesting depth, including through `Option`,
-  collections, and nested case classes. The annotation path gains the same
-  for enums nested inside case-class params (previously coproducts of empty
-  objects / decode failures). User-defined `JsonDecoder`/`JsonEncoder`/tapir
-  `Schema` instances always win: the fix is macro-side (summon-first, local
-  givens planted only where the call-site search finds nothing), never
-  exported givens that could shadow companions. Parameterized-case enums
-  intentionally keep coproduct schemas and wrapper-object codecs.
-
 ### Added
 
 - **Mirror-based `McpEncoder` fallback**: `Out` case classes without any
   `JsonEncoder` in scope now encode (text + `structuredContent`)
   automatically; guarded by `NotGiven[JsonEncoder[A]]` so every existing
-  explicit-encoder call site resolves exactly as before.
+  explicit-encoder call site resolves exactly as before (TJC-2167, #78).
+- `McpSchema[A]` for nested custom schema shapes and `McpInputCodec[A]`, a
+  single customization point that supplies both the zio-json decoder used
+  inside typed request case classes and the JSON Schema advertised for a
+  custom wire type.
+
+### Changed
+
+- JSON Schema derivation is now a native Scala 3 macro that emits `zio-json`
+  AST values directly on JVM and Scala.js. Typed contracts no longer require
+  `sttp.tapir.generic.auto.*` at call sites.
+
+### Fixed
+
+- **Zero-boilerplate Scala 3 enum support** (TJC-2167, #78): enum fields —
+  in typed contracts and annotation tools alike — derive string-enum JSON
+  schemas (`{"type":"string","enum":[...]}`) and string-based zio-json
+  codecs with no user-supplied givens, at any nesting depth, including
+  through `Option`, collections, and nested case classes. User-defined
+  `JsonDecoder`/`JsonEncoder`/`McpSchema` instances always win: derivation
+  is macro-side and summon-first (locals planted only where the call-site
+  search finds nothing), never exported givens that could shadow
+  companions. Parameterized-case enums intentionally keep wrapper-object
+  codecs; provide an `McpInputCodec` for a custom shape.
+
+### Removed
+
+- Tapir, ApiSpec, Circe, and Cats production dependencies. Existing
+  `sttp.tapir.Schema` overrides should migrate to `McpInputCodec`,
+  `McpSchema`, `@Param(schema = ...)`, or `McpTool.withSchema`.
 
 ## [1.0.0-RC3] - 2026-08-31
 

@@ -5,6 +5,7 @@ import scala.reflect.ClassTag
 
 import zio.*
 import zio.json.*
+import zio.json.internal.RetractReader
 
 import com.tjclp.fastmcp.server.McpContext
 
@@ -182,9 +183,9 @@ object McpCodec:
 
 /** Platform hook for deriving a tool input schema from a typed request.
   *
-  * The JVM supplies a given instance via macro (`JsonSchemaMacro.schemaForCaseClass`) for any case
-  * class that Tapir's `Schema` derivation can handle, honoring `@Param` metadata on fields.
-  * `McpTool.apply` picks it up implicitly.
+  * Both platforms supply a native Scala 3 macro instance for primitives, products, sums,
+  * collections, and singleton enums, honoring `@Param` metadata on fields. `McpTool.apply` picks it
+  * up implicitly.
   */
 trait ToolSchemaProvider[A]:
   def inputSchema: ToolInputSchema
@@ -196,8 +197,47 @@ object ToolSchemaProvider:
     new ToolSchemaProvider[A]:
       val inputSchema: ToolInputSchema = schema
 
+/** Custom JSON Schema for a nested domain type whose wire shape cannot be inferred. */
+trait McpSchema[A]:
+  def jsonSchema: String
+
+object McpSchema:
+  def apply[A](using schema: McpSchema[A]): McpSchema[A] = schema
+
+  def instance[A](jsonSchemaValue: String): McpSchema[A] =
+    new McpSchema[A]:
+      val jsonSchema: String = jsonSchemaValue
+
+/** One-stop customization for an MCP input type's zio-json decoder and advertised schema.
+  *
+  * Ordinary Scala types need no instance. Use this for a domain type whose wire representation is
+  * not visible from its Scala shape; the same given participates in zio-json case-class derivation
+  * and native MCP schema derivation, avoiding separate decoder and schema givens.
+  */
+trait McpInputCodec[A] extends McpSchema[A] with JsonDecoder[A]
+
+object McpInputCodec:
+  def apply[A](using codec: McpInputCodec[A]): McpInputCodec[A] = codec
+
+  def fromJsonDecoder[A](jsonSchemaValue: String)(
+      decoder: JsonDecoder[A]
+  ): McpInputCodec[A] =
+    new McpInputCodec[A]:
+      val jsonSchema: String = jsonSchemaValue
+
+      def unsafeDecode(trace: List[JsonError], in: RetractReader): A =
+        decoder.unsafeDecode(trace, in)
+
+      override def unsafeDecodeMissing(trace: List[JsonError]): A =
+        decoder.unsafeDecodeMissing(trace)
+
+  def string[A](jsonSchemaValue: String)(
+      decode: String => Either[String, A]
+  ): McpInputCodec[A] =
+    fromJsonDecoder(jsonSchemaValue)(JsonDecoder.string.mapOrFail(decode))
+
 /** Output-schema twin of [[ToolSchemaProvider]]: derives the `outputSchema` a tool advertises on
-  * `tools/list` from its `Out` type (same Tapir-backed macro, both platforms). Opt-in via
+  * `tools/list` from its `Out` type (same native macro, both platforms). Opt-in via
   * `McpTool#withOutputSchema` — a tool that declares an output schema also emits conforming
   * `structuredContent` on every call (spec MUST).
   */
@@ -304,7 +344,7 @@ final case class McpTool[In, Out] private (
 
   /** Advertise a derived `outputSchema` on `tools/list` and emit conforming `structuredContent` on
     * every call (the spec requires the two together). Needs an `Out` the schema macro can derive —
-    * same Tapir path as input schemas — and an encoder with a structured form (any zio-json
+    * the same native path as input schemas — and an encoder with a structured form (any zio-json
     * `JsonEncoder` qualifies).
     */
   def withOutputSchema(using provider: ToolOutputSchemaProvider[Out]): McpTool[In, Out] =

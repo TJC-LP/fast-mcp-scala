@@ -67,7 +67,7 @@ fast-mcp-scala/
 │   ├── jvm/
 │   │   ├── src/               # JVM-specific code
 │   │   │   └── com/tjclp/fastmcp/
-│   │   │       ├── macros/                  # JsonSchemaMacro, MacroUtils, schema/ (Tapir-backed)
+│   │   │       ├── macros/                  # Native JsonSchemaMacro + reflection helpers
 │   │   │       ├── server/transport/JvmTransportBackend.scala  # ZIO HTTP + System.in/out
 │   │   │       └── examples/
 │   │   └── test/src/          # JVM test sources
@@ -118,8 +118,6 @@ error pointing at the mismatched handler.
 ### Typed Contract Path (cross-platform)
 
 ```scala
-import sttp.tapir.generic.auto.*   // enables ToolSchemaProvider derivation
-
 case class AddArgs(@Param("First number") a: Int, @Param("Second number") b: Int)
 
 val addTool = McpTool[AddArgs, Int](
@@ -308,7 +306,7 @@ Key dependencies (versions in `build.mill`):
 - ZIO 2.1.20 - Effect system
 - ZIO JSON 0.7.44 - JSON codecs (shared)
 - ZIO HTTP 3.4.0 - HTTP transport
-- Tapir 1.11.42 - Compile-time JSON Schema derivation
+- Native Scala 3 macros - Compile-time JSON Schema derivation
 - mill-bun-plugin 0.2.1 - Scala.js + Bun build integration
 - `@modelcontextprotocol/sdk` 1.29.0 - TS MCP SDK, pinned in the js module's `bunDeps`; consumed only by the `js.test` conformance client (zero production `@JSImport`s)
 - WartRemover 3.5.6 - Code quality

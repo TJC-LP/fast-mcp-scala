@@ -1,16 +1,13 @@
 package com.tjclp.fastmcp.macros.schema
 
-import io.circe.Json
 import org.scalatest.funsuite.AnyFunSuite
-import sttp.tapir.Schema
-import sttp.tapir.SchemaType.*
-import sttp.tapir.generic.auto.*
+import zio.json.ast.Json
 
+import com.tjclp.fastmcp.JsonTestSupport.*
 import com.tjclp.fastmcp.macros.Color
 import com.tjclp.fastmcp.macros.JsonSchemaMacro
 
-/** Tests for the schema package components that support JSON Schema generation for function
-  * parameters. This includes FunctionAnalyzer, SchemaExtractor, and SchemaGenerator.
+/** Tests for native JSON Schema generation from function parameters.
   */
 class SchemaComponentsTest extends AnyFunSuite {
 

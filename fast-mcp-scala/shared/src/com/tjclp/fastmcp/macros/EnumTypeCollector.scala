@@ -5,9 +5,9 @@ import scala.quoted.*
 /** Compile-time walker that finds Scala 3 enum types reachable through a type's field tree.
   *
   * Used by the schema and decoder derivation macros to plant block-local givens (string-based
-  * `Schema` / `JsonDecoder`) for enum fields that would otherwise fall through to tapir's coproduct
-  * rendering or fail zio-json's per-field summon (GH #78). Shared so both the JVM and Scala.js
-  * compilations of the macros can use it.
+  * `Schema` / `JsonDecoder`) for enum and nested case-class fields that would otherwise fail
+  * zio-json's per-field summon (GH #78). Shared so both the JVM and Scala.js compilations of the
+  * macros can use it.
   */
 private[fastmcp] object EnumTypeCollector:
 
@@ -90,15 +90,5 @@ private[fastmcp] object EnumTypeCollector:
     if rootSym.isClassDef && rootSym.caseFields.nonEmpty then
       rootSym.caseFields.foreach(f => walk(rootTpe.memberType(f), 1))
     found.toList
-
-  /** The subset of [[collectEnums]] safe for `Schema.derivedEnumeration` (all-singleton cases — a
-    * parameterized case desugars to a class child, and derivedEnumeration's validator macro aborts
-    * compilation on those).
-    */
-  def collectSingletonEnums(using q: Quotes)(root: q.reflect.TypeRepr): List[q.reflect.TypeRepr] =
-    collectEnums(root).filter { t =>
-      val children = t.typeSymbol.children
-      children.nonEmpty && children.forall(c => !c.isClassDef)
-    }
 
   private val MaxDepth = 32
