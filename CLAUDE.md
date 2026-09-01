@@ -9,6 +9,8 @@ fast-mcp-scala is a high-level Scala 3 library for building Model Context Protoc
 
 Both paths converge on the same `McpServer` trait and support `@Param` metadata on parameters/fields.
 
+Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **Scala Native** (stdio only, EXPERIMENTAL — published as `fast-mcp-scala_native0.5_3`; zio-http has no Native artifacts, so `McpServerApp[Http]` fails to compile there by design).
+
 ## Build System
 
 **Build tool**: Mill 1.1.5 (configured in `.mill-version`)
@@ -27,6 +29,8 @@ Both paths converge on the same `McpServer` trait and support `@Param` metadata 
 # Single-platform
 ./mill fast-mcp-scala.jvm.test                      # JVM tests only
 ./mill fast-mcp-scala.js.test.bunTest               # Scala.js conformance tests only
+./mill fast-mcp-scala.scalaNative.test              # Scala Native tests (links a native binary)
+./mill fast-mcp-scala.scalaNative.nativeLink        # Standalone LLVM binary of AnnotatedServer
 ./mill fast-mcp-scala.jvm.test com.tjclp.fastmcp.macros.ToolProcessorTest
 
 # Publish

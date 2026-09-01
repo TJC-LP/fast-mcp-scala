@@ -77,7 +77,7 @@ jobs:
       - name: Verify Publishing Setup
         run: |
           echo "Version: $PUBLISH_VERSION"
-          ./mill show fast-mcp-scala.jvm.publishVersion fast-mcp-scala.js.publishVersion
+          ./mill show fast-mcp-scala.jvm.publishVersion fast-mcp-scala.js.publishVersion fast-mcp-scala.scalaNative.publishVersion
         env:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
 

@@ -59,3 +59,47 @@ jobs:
 
       - name: Test (Scala.js on Bun)
         run: ./mill -i fast-mcp-scala.js.test.bunTest
+
+  scala-native:
+    name: Scala Native (linux-x64)
+    runs-on: ubuntu-latest # clang + jq preinstalled; SN 0.5 recommends LLVM >= 17
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK (Mill/scalac runner only)
+        uses: coursier/setup-action@v1
+        with:
+          jvm: temurin:21
+
+      # Separate cache key from the JDK-matrix builds so the Scala Native toolchain artifacts
+      # (nativelib/javalib/clib NIR jars) don't churn the main cache.
+      - name: Cache Coursier
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.ivy2/cache
+          key: ${{ runner.os }}-coursier-scala-native-${{ hashFiles('**/build.mill') }}
+          restore-keys: |
+            ${{ runner.os }}-coursier-scala-native-
+
+      - name: Cache Mill
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mill
+          key: ${{ runner.os }}-mill-scala-native-${{ hashFiles('**/build.mill') }}
+          restore-keys: |
+            ${{ runner.os }}-mill-scala-native-
+
+      - name: Test (Scala Native)
+        run: ./mill -i fast-mcp-scala.scalaNative.test
+
+      - name: Link demo binary (AnnotatedServer)
+        run: |
+          BIN="$(./mill --no-server show fast-mcp-scala.scalaNative.nativeLink 2>/dev/null |
+            python3 -c "import sys,json,re; print(re.sub(r'^q?ref:v\d+:[0-9a-f]+:','',json.load(sys.stdin)))")"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Stdio smoke over the Scala Native binary
+        run: scripts/native-smoke.sh "$BIN"

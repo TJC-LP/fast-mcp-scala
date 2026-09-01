@@ -25,8 +25,9 @@ trait TransportBackend:
 
   /** Cryptographically-secure random identifier (UUID v4 string). Session and task ids are bearer
     * handles, so they must be unguessable. Lives on the backend because shared code has no CSPRNG:
-    * the JVM uses `java.util.UUID` (SecureRandom), JS uses Web Crypto — Scala.js's
-    * `UUID.randomUUID` stub needs a `SecureRandom` the runtime doesn't provide.
+    * the JVM uses `java.util.UUID` (SecureRandom), JS uses Web Crypto, and Scala Native reads
+    * `/dev/urandom` directly — on both non-JVM platforms `UUID.randomUUID` needs a `SecureRandom`
+    * the runtime doesn't provide.
     */
   def randomId(): UIO[String]
 

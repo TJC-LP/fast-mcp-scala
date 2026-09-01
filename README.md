@@ -30,7 +30,7 @@ Built on **ZIO 2** and **zio-json** on both platforms, with JSON Schemas derived
 - [Transports](#transports)
 - [Native image (GraalVM)](#native-image-graalvm)
 - [Customizing input types (zio-json)](#customizing-input-types-zio-json)
-- [One core, two transports](#one-core-two-transports)
+- [One core, three platforms](#one-core-three-platforms)
 - [Spec coverage](#spec-coverage)
 - [Running examples](#running-examples)
 - [Claude Desktop integration](#claude-desktop-integration)
@@ -327,7 +327,7 @@ tools can opt out through `McpTool.withSchema`. For a nested output-only type, `
 provides the schema without requiring a decoder. Implement `McpDecoder[T]` directly only for a
 low-level input conversion that does not need automatic nested case-class derivation.
 
-## One core, two transports
+## One core, three platforms
 
 fast-mcp-scala is a single native MCP implementation. The entire protocol layer — JSON-RPC envelope, wire types, router, built-in handlers, middleware, the Tasks state machine — lives in `shared/`; each platform contributes only a `TransportBackend`:
 
@@ -370,18 +370,20 @@ Capabilities are **derived from the registered handler map** — a capability is
 
 **Current platform parity**:
 
-| Capability | JVM | Scala.js (Bun-first) |
-|---|---|---|
-| `McpServerApp[T, Self]` sugar trait | ✅ | ✅ |
-| `@Tool` / `@Resource` / `@Prompt` + `scanAnnotations[T]` | ✅ | ✅ |
-| Typed contracts (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) | ✅ | ✅ |
-| `ToolSchemaProvider[A]` auto-derivation from `@Param` | ✅ native macro | ✅ native macro |
-| `ToHandlerEffect[F]` — plain values / ZIO / Either / Try | ✅ | ✅ |
-| Stdio transport | ✅ (native) | ✅ (native) |
-| Streamable HTTP — stateful (sessions + per-request SSE) | ✅ (ZIO HTTP) | ✅ (Bun.serve) |
-| Streamable HTTP — stateless | ✅ | ✅ |
-| Standalone GET SSE push channel | ✅ | 405 (per-request SSE covers server→client) |
-| Custom decoders | ✅ `given JsonDecoder[T] → McpDecoder[T]` | ✅ same (shared zio-json path) |
+| Capability | JVM | Scala.js (Bun-first) | Scala Native (experimental) |
+|---|---|---|---|
+| `McpServerApp[T, Self]` sugar trait | ✅ | ✅ | ✅ |
+| `@Tool` / `@Resource` / `@Prompt` + `scanAnnotations[T]` | ✅ | ✅ | ✅ |
+| Typed contracts (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) | ✅ | ✅ | ✅ |
+| `ToolSchemaProvider[A]` auto-derivation from `@Param` | ✅ native macro | ✅ native macro | ✅ native macro |
+| `ToHandlerEffect[F]` — plain values / ZIO / Either / Try | ✅ | ✅ | ✅ |
+| Stdio transport | ✅ (native) | ✅ (native) | ✅ (LLVM binary) |
+| Streamable HTTP — stateful (sessions + per-request SSE) | ✅ (ZIO HTTP) | ✅ (Bun.serve) | ✗ by design¹ |
+| Streamable HTTP — stateless | ✅ | ✅ | ✗ by design¹ |
+| Standalone GET SSE push channel | ✅ | 405 (per-request SSE covers server→client) | ✗ by design¹ |
+| Custom decoders | ✅ `given JsonDecoder[T] → McpDecoder[T]` | ✅ same (shared zio-json path) | ✅ same |
+
+¹ zio-http is not published for Scala Native (upstream support is 4.x-milestoned). The platform provides no `HttpTransportBackend` given, so `McpServerApp[Http]` programs fail to compile — a compile-time property, not a runtime failure. A socket-based HTTP backend is planned as a follow-up ([#81](https://github.com/TJC-LP/fast-mcp-scala/issues/81)).
 
 Node / Deno parity for the HTTP listener is a follow-up; only the `Bun.serve(...)` entry point is Bun-specific today.
 
@@ -403,6 +405,27 @@ object HelloBun extends McpServerApp[Stdio, HelloBun.type]:
 Same shape as the JVM — the `McpServerApp` trait picks up the shared `McpServerCoreFactory` given and builds the one shared `McpServer` over the Bun `TransportBackend`. Typed contracts auto-generate their input schemas on Scala.js as well, with no schema-library import.
 
 Link with `./mill fast-mcp-scala.js.fastLinkJS`, then `bun run out/fast-mcp-scala/js/fastLinkJS.dest/main.js`. See [`HelloWorldJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HelloWorldJs.scala) and [`HttpServerJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HttpServerJs.scala) for runnable references.
+
+### Running on Scala Native (experimental)
+
+The same shared core compiles to a standalone LLVM binary — no JVM, no JS runtime (~21 MB in a debug link, single-digit-second link times):
+
+```scala 3 raw
+//> using scala 3.8.3
+//> using platform native
+//> using nativeVersion 0.5.12
+//> using dep com.tjclp::fast-mcp-scala::1.0.0-RC4
+
+import com.tjclp.fastmcp.{*, given}
+
+object HelloNative extends McpServerApp[Stdio, HelloNative.type]:
+  @Tool(name = Some("add"), description = Some("Add two numbers"), readOnlyHint = Some(true))
+  def add(@Param("First operand") a: Int, @Param("Second operand") b: Int): Int = a + b
+```
+
+Or in this repo: `./mill fast-mcp-scala.scalaNative.nativeLink` builds the `AnnotatedServer` demo binary, and `scripts/native-smoke.sh <binary>` drives it through the full MCP handshake — the same script that gates the GraalVM images.
+
+Caveats (experimental): stdio only (see the matrix footnote); session/task ids come from `/dev/urandom` (Unix-only); ZIO's signal handlers and shutdown hooks are no-ops on Scala Native — shutdown is EOF-driven (the client closing stdin ends the loop), and SIGINT falls back to the OS default; `java.util.regex` is RE2-backed (no lookaheads) — relevant only if your resource URI templates embed exotic regex.
 
 ## Spec coverage
 

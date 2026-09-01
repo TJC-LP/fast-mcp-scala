@@ -80,8 +80,8 @@ await_id 1
 printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}' >&3
 
 # One exercise of every registration kind on AnnotatedServer. tools/list is the load-bearing
-# check: its inputSchema payloads are produced by the genuine RUNTIME tapir→circe
-# schema-rendering path, exactly where closed-world analysis would break if reachability
+# check: its inputSchema payloads are produced by the native zio-json
+# schema-materialization path, exactly where closed-world analysis would break if reachability
 # metadata were missing.
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
