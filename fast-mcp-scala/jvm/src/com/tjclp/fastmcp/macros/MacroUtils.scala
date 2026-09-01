@@ -656,40 +656,63 @@ private[macros] object MacroUtils:
 
     if metadataNode.metadata.exists(_.schema.isDefined) then withOwnMetadata
     else
-      val withItems = (metadataNode.items, withOwnMetadata.asObject) match
-        case (Some(itemNode), Some(schemaObject)) =>
-          schemaObject.get("items") match
-            case Some(items) =>
-              replaceField(schemaObject, "items", injectSchemaMetadata(items, itemNode))
-            case None => withOwnMetadata
-        case _ => withOwnMetadata
+      // Option fields render as {"anyOf":[inner, {"type":"null"}]}: the annotatable structure
+      // (properties/items) lives inside the branches, so descend with the structural part of the
+      // node (own metadata is already applied at the wrapper level above).
+      val hasStructure = withOwnMetadata.asObject.exists(o =>
+        o.get("properties").isDefined || o.get("items").isDefined
+      )
+      val anyOfBranches =
+        if hasStructure then None
+        else withOwnMetadata.asObject.flatMap(_.get("anyOf")).flatMap(_.asArray)
+      anyOfBranches match
+        case Some(branches) if metadataNode.properties.nonEmpty || metadataNode.items.isDefined =>
+          val structuralNode = metadataNode.copy(metadata = None)
+          val updated = branches.map(branch => injectSchemaMetadata(branch, structuralNode))
+          replaceField(
+            withOwnMetadata.asObject.getOrElse(Json.Obj()),
+            "anyOf",
+            Json.Arr(updated*)
+          )
+        case _ => injectStructuralMetadata(withOwnMetadata, metadataNode)
 
-      withItems.asObject match
-        case Some(schemaObject) if metadataNode.properties.nonEmpty =>
-          schemaObject.get("properties").flatMap(_.asObject) match
-            case Some(properties) =>
-              val currentRequired = stringArrayField(withItems, "required").toSet
-              val updatedRequired = metadataNode.properties.foldLeft(currentRequired) {
-                case (required, (fieldName, childNode)) =>
-                  childNode.metadata match
-                    case Some(meta) if meta.required => required + fieldName
-                    case Some(_) => required - fieldName
-                    case None => required
-              }
-              val updatedProperties = Json.Obj(properties.fields.map {
-                case (fieldName, fieldJson) =>
-                  val updatedField = metadataNode.properties.get(fieldName) match
-                    case Some(childNode) => injectSchemaMetadata(fieldJson, childNode)
-                    case None => fieldJson
-                  fieldName -> updatedField
-              })
-              withPropertiesAndRequired(
-                schemaObject,
-                Some(updatedProperties),
-                updatedRequired
-              )
-            case None => withItems
-        case _ => withItems
+  private def injectStructuralMetadata(
+      withOwnMetadata: Json,
+      metadataNode: SchemaMetadataNode
+  ): Json =
+    val withItems = (metadataNode.items, withOwnMetadata.asObject) match
+      case (Some(itemNode), Some(schemaObject)) =>
+        schemaObject.get("items") match
+          case Some(items) =>
+            replaceField(schemaObject, "items", injectSchemaMetadata(items, itemNode))
+          case None => withOwnMetadata
+      case _ => withOwnMetadata
+
+    withItems.asObject match
+      case Some(schemaObject) if metadataNode.properties.nonEmpty =>
+        schemaObject.get("properties").flatMap(_.asObject) match
+          case Some(properties) =>
+            val currentRequired = stringArrayField(withItems, "required").toSet
+            val updatedRequired = metadataNode.properties.foldLeft(currentRequired) {
+              case (required, (fieldName, childNode)) =>
+                childNode.metadata match
+                  case Some(meta) if meta.required => required + fieldName
+                  case Some(_) => required - fieldName
+                  case None => required
+            }
+            val updatedProperties = Json.Obj(properties.fields.map { case (fieldName, fieldJson) =>
+              val updatedField = metadataNode.properties.get(fieldName) match
+                case Some(childNode) => injectSchemaMetadata(fieldJson, childNode)
+                case None => fieldJson
+              fieldName -> updatedField
+            })
+            withPropertiesAndRequired(
+              schemaObject,
+              Some(updatedProperties),
+              updatedRequired
+            )
+          case None => withItems
+      case _ => withItems
 
   private def applyMetadata(schemaJson: Json, metadata: ParamMetadata): Json =
     metadata.schema.flatMap(_.fromJson[Json].toOption).getOrElse {

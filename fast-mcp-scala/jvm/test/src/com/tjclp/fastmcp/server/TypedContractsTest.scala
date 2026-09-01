@@ -91,6 +91,19 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
       e6: E6, e7: E7, e8: E8, e9: E9, e10: E10
   )
 
+  // Round-2 review fixtures (PR #80 review)
+  case class AllOptional(a: Option[Int], b: Option[String])
+  case class InnerDoc(@Param(description = "street-doc") street: String)
+  case class OuterDoc(addr: Option[InnerDoc])
+  sealed trait GResult[T]
+  case class GOk[T](value: T) extends GResult[T]
+  case class GErr[T](msg: String) extends GResult[T]
+  object GResult:
+    given McpInputCodec[GResult[Int]] = McpInputCodec.fromJsonDecoder(
+      """{"oneOf":[{"type":"object","properties":{"GOk":{"type":"object"}}},{"type":"object","properties":{"GErr":{"type":"object"}}}]}"""
+    )(DeriveJsonDecoder.gen[GResult[Int]])
+  case class GArgs(result: GResult[Int])
+
   // Review-findings regression fixtures (PR #80 review)
   case class MapArgs(tags: Map[String, Int])
   case class EitherArgs(v: Either[Int, String])
@@ -595,5 +608,48 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
       .downField("properties").downField("value")
       .downField("properties").downField("value")
       .downField("type").as[String] shouldBe Right("integer")
+  }
+
+  test("all-Optional args advertise no additionalProperties constraint (PR #80 review r2)") {
+    val schema = parse(ToolInputSchema.derived[AllOptional].toJsonString).toOption.get
+    schema.hcursor.downField("additionalProperties").failed shouldBe true
+    schema.hcursor.downField("required").failed shouldBe true
+    // The truly-empty schema (Unit) keeps the closed shape.
+    val unit = parse(ToolInputSchema.derived[Unit].toJsonString).toOption.get
+    unit.hcursor.downField("additionalProperties").as[Boolean] shouldBe Right(false)
+  }
+
+  test("@Param metadata survives behind Option-wrapped case classes (PR #80 review r2)") {
+    val schema = parse(ToolInputSchema.derived[OuterDoc].toJsonString).toOption.get
+    val addr = schema.hcursor.downField("properties").downField("addr")
+    val branches = addr.downField("anyOf").as[List[zio.json.ast.Json]].toOption.get
+    val inner = branches.find(_.hcursor.downField("properties").succeeded).getOrElse(
+      fail(s"no object branch in ${branches.map(_.toJson)}")
+    )
+    inner.hcursor
+      .downField("properties").downField("street")
+      .downField("description").as[String] shouldBe Right("street-doc")
+  }
+
+  test("generic sealed ADTs work via McpInputCodec (PR #80 review r2)") {
+    val schema = parse(ToolInputSchema.derived[GArgs].toJsonString).toOption.get
+    schema.hcursor.downField("properties").downField("result").downField("oneOf").succeeded shouldBe true
+
+    val server = McpServer("GenericAdtServer")
+    runUnsafe(
+      server.tool(
+        McpTool[GArgs, String](name = "gadt-tool", description = Some("d")) { args =>
+          args.result match
+            case GOk(v) => s"ok:$v"
+            case GErr(m) => s"err:$m"
+        }
+      )
+    )
+    val r = runUnsafe(
+      server.toolManager.callTool("gadt-tool", Map("result" -> Map("GOk" -> Map("value" -> 5))), None)
+    )
+    r match
+      case StructuredToolResult(List(TextContent(text, _, _)), _) => text shouldBe "ok:5"
+      case other => fail(s"unexpected: $other")
   }
 

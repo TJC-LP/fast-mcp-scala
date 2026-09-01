@@ -163,6 +163,14 @@ object JsonSchemaMacro:
     else if symbol.flags.is(Flags.Case) then productSchema(tpe, seenProducts)
     else if symbol.flags.is(Flags.Sealed) && symbol.children.nonEmpty then
       sumSchema(tpe, seenProducts)
+    else if symbol.isTypeParam then
+      report.errorAndAbort(
+        s"Cannot derive an MCP JSON Schema for unresolved type parameter ${tpe.show} — a " +
+          "generic sealed trait's child schemas cannot be resolved through the parent's type " +
+          "arguments. Provide a given McpInputCodec (decoder + schema) or McpSchema for the " +
+          "sealed trait itself; note zio-json decoding of nested sealed traits also needs a " +
+          "user-supplied JsonDecoder, so McpInputCodec covers both in one given."
+      )
     else
       report.errorAndAbort(
         s"Cannot derive an MCP JSON Schema for ${tpe.show}. " +
@@ -291,17 +299,26 @@ object JsonSchemaMacro:
     val fieldExprs = fields.map { case (name, schema) => '{ ${ Expr(name) } -> $schema } }
     val requiredExprs = required.map(name => '{ Json.Str(${ Expr(name) }) })
 
-    if required.isEmpty then
+    // additionalProperties:false is emitted ONLY for truly empty schemas (Unit, case-object
+    // payloads) — the long-standing Unit shape. Any schema with fields omits it, required or
+    // not: the zio-json decoders accept unknown fields by default, and the advertised contract
+    // must not be stricter than what decode enforces.
+    if fields.isEmpty then
       '{
         Json.Obj(
           "type" -> Json.Str("object"),
-          "properties" -> Json.Obj(${ Varargs(fieldExprs) }*),
+          "properties" -> Json.Obj(),
           "additionalProperties" -> Json.Bool(false)
         )
       }
+    else if required.isEmpty then
+      '{
+        Json.Obj(
+          "type" -> Json.Str("object"),
+          "properties" -> Json.Obj(${ Varargs(fieldExprs) }*)
+        )
+      }
     else
-      // No additionalProperties:false here: the zio-json decoders accept unknown fields by
-      // default, and the advertised contract must not be stricter than what decode enforces.
       '{
         Json.Obj(
           "type" -> Json.Str("object"),
