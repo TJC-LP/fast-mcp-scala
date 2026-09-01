@@ -1,0 +1,279 @@
+// The fast-mcp-scala library: one MCP core in `shared/`, three platform targets around it.
+// Cross-cutting build vocabulary (versions, compiler flags, publish + module traits) lives in the
+// root `build.mill` and is referenced here as `build.<name>`.
+package build.`fast-mcp-scala`
+
+import mill._
+import mill.api.BuildCtx
+import mill.scalalib._
+import mill.scalalib.scalafmt._
+import mill.scalajslib._
+import mill.scalajslib.api._
+import mill.scalajslib.bun._
+import mill.scalanativelib._
+import build.{BuildConfig, FastMCPModule, FastMCPPublishingBase, FastMCPTestModule, Versions,
+  scala3Version}
+
+// Namespace module. Aggregate tasks at this level fan out to all three platform children so
+// `./mill fast-mcp-scala.compile` and `./mill fast-mcp-scala.test` cover the whole project
+// without having to spell out each platform.
+object `package` extends Module {
+
+  /** Compile the JVM, Scala.js, and Scala Native sources. */
+  def compile: T[Unit] = Task {
+    jvm.compile()
+    js.compile()
+    scalaNative.compile()
+    ()
+  }
+
+  /** Run the JVM test suite, the Scala.js/Bun conformance tests, and the Scala Native tests. */
+  def test: T[Unit] = Task {
+    jvm.test.testForked()()
+    js.test.bunTest(mill.api.Args())()
+    scalaNative.test.testForked()()
+    ()
+  }
+
+  /** Scalafmt check on every Scala source (shared/, jvm/, js/, native/). */
+  def checkFormat: T[Unit] = Task {
+    jvm.checkFormat()()
+    js.checkFormat()()
+    scalaNative.checkFormat()()
+    ()
+  }
+
+  /** Auto-format every Scala source (shared/, jvm/, js/, native/). */
+  def reformat: T[Unit] = Task {
+    jvm.reformat()()
+    js.reformat()()
+    scalaNative.reformat()()
+    ()
+  }
+
+  object jvm extends FastMCPModule {
+
+    // JVM module reads from both shared/ and jvm/src/ (its own JVM-specific code)
+    override def sources = Task.Sources(moduleDir / "src", moduleDir / os.up / "shared" / "src")
+
+    override def mvnDeps = Seq(
+      // ZIO Core
+      mvn"dev.zio::zio:${Versions.zio}",
+      mvn"dev.zio::zio-json:${Versions.zioJson}",
+      // ZIO HTTP for HTTP transports (stateless + streamable)
+      mvn"dev.zio::zio-http:${Versions.zioHttp}"
+    )
+
+    object test extends ScalaTests with FastMCPTestModule {
+      override def mvnDeps = Seq(
+        mvn"org.scalatest::scalatest:${Versions.scalaTest}",
+        mvn"org.scalacheck::scalacheck:${Versions.scalaCheck}",
+        mvn"org.scalatestplus::mockito-5-12:3.2.19.0",
+        mvn"dev.zio::zio-test:${Versions.zio}",
+        mvn"dev.zio::zio-test-sbt:${Versions.zio}",
+        mvn"dev.zio::zio-test-magnolia:${Versions.zio}"
+      )
+    }
+  }
+
+  // Scala.js target — Bun transport adapters (Bun.serve + Node stdio) over the native MCP core
+  // in shared/. Cross-published to Maven Central as `com.tjclp:fast-mcp-scala_sjs1_3`.
+  object js extends BunScalaJSModule with BunPublishModule with ScalafmtModule
+      with FastMCPPublishingBase {
+    def scalaVersion = scala3Version
+
+    override def moduleKind = Task { ModuleKind.ESModule }
+
+    // JS module reads from shared/ (the whole MCP core, incl. the schema-derivation macros) and
+    // js/src/ (Bun transport + facades).
+    override def sources = Task.Sources(moduleDir / "src", moduleDir / os.up / "shared" / "src")
+
+    // Shared deps needed by shared/ sources and the JS macro/schema derivation path.
+    override def mvnDeps = Seq(
+      mvn"dev.zio::zio::${Versions.zio}",
+      mvn"dev.zio::zio-json::${Versions.zioJson}"
+    )
+
+    // WartRemover is a JVM-only compiler plugin, so this platform takes the cross-platform flags
+    // without the wart traversers.
+    override def scalacOptions = BuildConfig.crossScalacOptions
+
+    override def bunDeps = Task {
+      // The TS MCP SDK is NOT a production dependency — no production source `@JSImport`s it and
+      // the published Maven artifact is unaffected. It is declared (pinned) here because the bun
+      // test workspace links this module's node_modules (the plugin has no test-scoped deps yet):
+      // `js.test`'s conformance client resolves `@modelcontextprotocol/sdk` from it. Without the
+      // pin, Bun's runtime auto-install fetched *latest at test time* — a CI time bomb now that
+      // post-2026-07-28 SDK releases change initialize semantics. Production boundary = the
+      // import graph, enforced by RootImportSurface tests, not node_modules.
+      Seq("@modelcontextprotocol/sdk@1.29.0")
+    }
+
+    // bunJsEnv is what BunScalaJSTests uses for the Bun process env
+    override def bunJsEnv = Task {
+      // Use the same JVM that Mill resolves for fast-mcp-scala.jvm (respects javaHome/jvmVersion)
+      val serverJavaHome = jvm.javaHome().fold(os.Path(sys.props("java.home")))(_.path)
+      val serverJavaCmd = (serverJavaHome / "bin" / "java").toString
+      val serverClasspath =
+        jvm.runClasspath().map(_.path.toString).mkString(java.io.File.pathSeparator)
+      val serverJvmArgs =
+        ujson.write(jvm.forkArgs())
+
+      super.bunJsEnv() ++ Map(
+        "FAST_MCP_PROJECT_ROOT" -> BuildCtx.workspaceRoot.toString,
+        "FAST_MCP_SERVER_JAVA_CMD" -> serverJavaCmd,
+        "FAST_MCP_SERVER_CLASSPATH" -> serverClasspath,
+        "FAST_MCP_SERVER_JVM_ARGS_JSON" -> serverJvmArgs
+      )
+    }
+
+    object test extends BunScalaJSTests with TestModule.ScalaTest {
+      override def mvnDeps = Seq(
+        mvn"org.scalatest::scalatest::${Versions.scalaTest}"
+      )
+
+      // Force NODE_ENV=production inside the Bun test process so in-process
+      // `Bun.serve({...})` calls default `development: false`. Without this the
+      // dev-mode error overlay rewrites fetch-handler Promise rejections into a
+      // ~100 KB HTML `BunError` Response, which hides the real error from tests
+      // (see JsServerHttpTest's POST-initialize case).
+      override def bunTestJsEnv = Task {
+        super.bunTestJsEnv() + ("NODE_ENV" -> "production")
+      }
+    }
+  }
+
+  // Scala Native target (EXPERIMENTAL) — stdio transport over System.in/System.out compiled to
+  // a standalone binary via LLVM. HTTP is excluded BY DESIGN: zio-http is not published for
+  // Scala Native (upstream support is 4.x-milestoned, zio-http#2526), so this module provides
+  // only the `TransportBackend` given; `McpServerApp[Stdio]` programs compile and link while
+  // `McpServerApp[Http]` fails at the user's declaration site — the same seam that keeps netty
+  // out of GraalVM stdio images. Cross-published as `com.tjclp:fast-mcp-scala_native0.5_3`.
+  object scalaNative extends ScalaNativeModule with ScalafmtModule with FastMCPPublishingBase {
+    def scalaVersion = scala3Version
+    def scalaNativeVersion = Versions.scalaNative
+
+    // Mill module name stays `scalaNative` (the bare word "native" is claimed by the GraalVM
+    // nativeSmoke pipeline); the source directory follows the jvm/js sibling convention.
+    override def moduleDir = super.moduleDir / os.up / "native"
+
+    // Native module reads from native/src/ (the stdio backend) and shared/ — which carries the
+    // whole MCP core, the schema-derivation macros, and the platform-pure examples.
+    override def sources = Task.Sources(moduleDir / "src", moduleDir / os.up / "shared" / "src")
+
+    // `::` resolves the _native0.5_3 artifacts. zio-json transitively brings
+    // io.github.cquiroz:scala-java-time (compile scope), which links the java.time.Duration
+    // defaults in the shared McpServerSettings.
+    override def mvnDeps = Seq(
+      mvn"dev.zio::zio::${Versions.zio}",
+      mvn"dev.zio::zio-json::${Versions.zioJson}"
+    )
+
+    // Deterministic main for `nativeLink`: shared/ carries several example mains, and this is the
+    // one scripts/native-smoke.sh drives in CI.
+    override def mainClass = Some("com.tjclp.fastmcp.examples.AnnotatedServer")
+
+    // WartRemover is a JVM-only compiler plugin (same rationale as the js module).
+    override def scalacOptions = BuildConfig.crossScalacOptions
+
+    object test extends ScalaNativeTests with TestModule.ScalaTest {
+      override def mvnDeps = Seq(
+        mvn"org.scalatest::scalatest::${Versions.scalaTest}"
+      )
+    }
+  }
+
+  /** GraalVM native-image smoke binaries (NOT published — verify with `resolve __.publishArtifacts`).
+    *
+    * These exist so CI proves that a downstream `NativeImageModule` build against fast-mcp-scala
+    * needs zero hand-written reachability config (GH #66 / TJC-2114). One object per binary,
+    * because `NativeImageModule` builds from `finalMainClass`. Exercised by
+    * `scripts/native-smoke.sh` and `.github/workflows/native.yml`.
+    */
+  object nativeSmoke extends Module {
+
+    trait NativeSmokeModule extends ScalaModule with mill.javalib.NativeImageModule {
+      override def scalaVersion: T[String] = scala3Version
+      override def moduleDeps = Seq(jvm)
+
+      // GraalVM scoped to the smoke modules ONLY — setting jvmVersion on the published jvm
+      // module would silently change its compile/test JVM. Provisioned by Mill via the coursier
+      // JVM index; pinned exactly (bump deliberately, in step with docs/native-image.md).
+      override def jvmVersion: T[String] = Task { "graalvm-community:25.0.2" }
+
+      override def nativeImageOptions = Task {
+        super.nativeImageOptions() ++ Seq(
+          "--no-fallback" // fail the build rather than emit a JVM-hosted fallback image
+        )
+      }
+    }
+
+    /** Stdio smoke: AnnotatedServer covers the full surface a downstream stdio server hits at
+      * runtime — macro-registered tools/prompts/resources and native JSON-schema materialization
+      * at registration/tools-list time.
+      */
+    object stdio extends NativeSmokeModule {
+      override def mainClass = Some("com.tjclp.fastmcp.examples.AnnotatedServer")
+
+      // Neutralize Mill's GraalVM-reachability-metadata-repo integration FOR THIS MODULE: netty
+      // stays in the resolved deps (moduleDeps can't exclude it the way a downstream dependency
+      // exclusion does, only the classpath filter below), so Mill would otherwise inject stale
+      // 4.1.x-era netty repo configs referencing classes this image doesn't carry. A downstream
+      // stdio build that excludes zio-http needs NEITHER override — Mill's defaults are correct
+      // there (and other dependencies keep their repo metadata).
+      override def nativeMetadataConfigurations =
+        Task { Set.empty[mill.javalib.graalvm.MetadataResult] }
+      override def nativeExcludedConfigJars = Task { Seq.empty[PathRef] }
+
+      // A stdio-only server has no reachable path into the HTTP stack (the transport-seam split),
+      // so drop zio-http/netty from the image classpath — the same shape as a downstream
+      // stdio-only build that excludes the zio-http dependency. This isn't just size hygiene:
+      // netty's own in-jar reflect-config unconditionally registers methods whose signatures
+      // mention netty buffer types, forcing them reachable, and netty's
+      // `--initialize-at-build-time=io.netty` then allocates a native MemorySegment in
+      // EmptyByteBuf.<clinit> on JDK 25 — an image-heap error. Reachability truth is proven by
+      // the smoke run: any seam leak resurfaces as a linking/runtime failure.
+      override def nativeImageClasspath = Task {
+        super.nativeImageClasspath().filterNot { ref =>
+          val name = ref.path.last
+          name.startsWith("netty-") || name.startsWith("zio-http")
+        }
+      }
+    }
+
+    /** HTTP smoke: the conformance server over streamable HTTP — the strongest possible check
+      * (the official MCP conformance suite runs against the native binary; see
+      * `scripts/conformance.sh native`). Netty stays on the classpath here, so this module owns
+      * the netty-under-native-image flags.
+      */
+    object http extends NativeSmokeModule {
+      override def mainClass = Some("com.tjclp.fastmcp.examples.conformance.ConformanceServerJvm")
+
+      // Netty-scoped counter to the stale GraalVM-metadata-repo entries: the repo marks netty
+      // `override: true` but its newest netty configs are 4.1.x-era (predating netty 4.2's
+      // module renames). With the latest-config fallback off, the untested 4.2.3 gets no repo
+      // config and no `--exclude-config` stripping of its own (correct) in-jar metadata — while
+      // every other dependency keeps Mill's default repo-metadata behavior.
+      override def nativeUseLatestConfigWhenVersionIsUntested = Task { false }
+
+      override def nativeImageOptions = Task {
+        super.nativeImageOptions() ++ Seq(
+          // SIGINT/SIGTERM must terminate a long-running server binary.
+          "--install-exit-handlers",
+          // netty-codec-http ships a blanket `--initialize-at-build-time=io.netty`, which is
+          // incompatible with GraalVM on JDK 25: buffer/handler <clinit>s allocate native memory
+          // (FFM Arena via CleanerJava25) and bake response objects into the image heap. Equal
+          // specificity + later rule wins, so this CLI arg re-defaults the whole netty tree to
+          // run-time init (netty's own class-specific run-time entries are unaffected).
+          "--initialize-at-run-time=io.netty",
+          // netty's JDK-25 direct-buffer cleaner allocates via Arena.ofShared at RUNTIME; without
+          // this, the first cleaner allocation throws UnsupportedFeatureError, killing event-loop
+          // threads one by one (service limps along on the survivors) and deadlocking SIGTERM
+          // shutdown. Found by dogfooding; the conformance gate now greps the server log for it.
+          "-H:+UnlockExperimentalVMOptions",
+          "-H:+SharedArenaSupport"
+        )
+      }
+    }
+  }
+}
