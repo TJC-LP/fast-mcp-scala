@@ -306,8 +306,17 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
   private def isModernRequest(req: HttpRequest, message: JsonRpcMessage): Boolean =
     ModernHttpValidation.isModern(req.header, message)
 
-  /** Merge a heartbeat into an SSE stream so proxies / idle timeouts don't kill long-quiet
-    * connections. Halts with the data stream.
+  /** Add a heartbeat to an SSE stream so proxies / idle timeouts don't kill long-quiet connections:
+    * a `ping` frame is emitted whenever the stream has been quiet for `keepAliveInterval`, and the
+    * result ends exactly when the data stream does.
+    *
+    * Deliberately NOT `frames.mergeHaltLeft(ZStream.repeatWithSchedule(...))`: the merge's
+    * halt-and-interrupt path — a data stream that ends at once (an `initialize` reply) while the
+    * schedule-driven side is being pulled — nests ZIO's run loop deeply enough to overflow a Scala
+    * Native thread stack (ZIO trampolines only at depth 300; Native frames are large). Feeding a
+    * queue from one producer fiber and pulling it with a timeout is shallow, costs one fiber
+    * instead of the merge machinery, and — because `Queue.take` is atomic — never drops a frame
+    * when the timeout races an arrival.
     */
   private def withKeepAlive(
       frames: ZStream[Any, Nothing, SseFrame]
@@ -315,9 +324,25 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     settings.keepAliveInterval match
       case None => frames
       case Some(interval) =>
-        val pings =
-          ZStream.repeatWithSchedule(SseFrame.Ping, Schedule.spaced(Duration.fromJava(interval)))
-        frames.mergeHaltLeft(pings)
+        val quiet = Duration.fromJava(interval)
+        ZStream.unwrapScoped {
+          for
+            // `None` marks the end of the data stream.
+            buffer <- Queue.unbounded[Option[SseFrame]]
+            // The producer runs the data stream (and its finalizers) inside this scope: when the
+            // consumer stops pulling — stream end, client disconnect — the scope closes and the
+            // producer is interrupted, so `ensuring` hooks upstream still run.
+            _ <- (frames.runForeach(frame => buffer.offer(Some(frame))) *> buffer.offer(
+              None
+            )).forkScoped
+          yield ZStream.repeatZIOOption(
+            buffer.take.timeout(quiet).flatMap {
+              case Some(Some(frame)) => ZIO.succeed(frame)
+              case Some(None) => ZIO.fail(None)
+              case None => ZIO.succeed(SseFrame.Ping)
+            }
+          )
+        }
 
   private def isFinalReply(message: JsonRpcMessage, reqId: RequestId): Boolean =
     message match
