@@ -10,10 +10,8 @@ import com.tjclp.fastmcp.server.McpServerSettings
 import com.tjclp.fastmcp.server.router.McpRouter
 
 /** Scala Native [[TransportBackend]] — pure ZIO over `System.in`/`System.out`, compiled to a
-  * standalone binary via LLVM. Stdio only: zio-http is not published for Scala Native, so this
-  * platform provides no [[HttpTransportBackend]] given and `McpServerApp[Http]` programs fail to
-  * compile at the declaration site (by design — the same seam that keeps netty out of GraalVM stdio
-  * images).
+  * standalone binary via LLVM. The HTTP half of the seam is [[NativeHttpBackend]]: zio-http is not
+  * published for Scala Native, so streamable HTTP runs on the hand-rolled socket backend instead.
   *
   * The serving lifecycle is shared with the JVM ([[StdioLoop]]); only the two pieces that genuinely
   * differ on this platform live here:
