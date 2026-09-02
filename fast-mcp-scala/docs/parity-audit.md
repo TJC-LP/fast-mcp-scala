@@ -314,7 +314,7 @@ Gaps closed to get there (all shared logic, so both platforms benefit):
 |---------|------|----|----|---------|-----|-------|
 | Stdio framing (NDJSON) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Both JSON+newline |
 | Streamable HTTP POST (request/response + SSE notifications) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Both support stateful POST |
-| Streamable HTTP GET (SSE server→client push) | 2025-11-25 | ✓ | ⚠ PARTIAL | ⚠ PARTIAL | — | TS: supports; Scala JVM: supports (single stream, keepalives); Scala JS: 405 (by-design — per-request POST SSE carries server→client) |
+| Streamable HTTP GET (SSE server→client push) | 2025-11-25 | ✓ | ⚠ PARTIAL | ⚠ PARTIAL | — | TS: supports; Scala JVM and Scala Native: support (single stream, keepalives — both render the shared `StreamableHttpHandler`, TJC-2223); Scala JS: 405 (by-design — per-request POST SSE carries server→client) |
 | Streamable HTTP DELETE (session cleanup) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Both validate session, remove, shutdown queue |
 | mcp-session-id header (generation + echo) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Both mint UUID on initialize; echo on response |
 | Stateless HTTP mode (POST request/response, no SSE) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Both branch on config flag |

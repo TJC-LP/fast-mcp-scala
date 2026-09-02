@@ -12,14 +12,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Scala Native target (experimental)** (TJC-2188, #82):
   `com.tjclp:fast-mcp-scala_native0.5_3` — stdio MCP servers compiled to
   standalone binaries via Scala Native 0.5.12 (21MB debug links in
-  seconds). HTTP is excluded by design (zio-http has no Native
-  artifacts): the platform provides only the `TransportBackend` given,
-  so `McpServerApp[Http]` fails at compile time while
-  `McpServerApp[Stdio]` works unchanged. Session/task ids come from
+  seconds). Streamable HTTP followed in the same cycle over the socket
+  backend below (zio-http has no Native artifacts). Session/task ids come from
   `/dev/urandom` (javalib `UUID.randomUUID` doesn't link on SN); stdin
   reads via `ZStream.fromReader`. CI links the `AnnotatedServer` demo
   binary and drives it with the same stdio smoke script that gates the
   GraalVM images.
+
+- **Streamable HTTP on Scala Native + netty-free JVM opt-in** (TJC-2223,
+  #81): a hand-rolled HTTP/1.1 + SSE server over `java.net.ServerSocket`
+  (`fast-mcp-scala/jvm-native/`, compiled by both the JVM and Scala Native
+  modules) now backs `McpServerApp[Http]` / `runHttp()` on Scala Native
+  (`NativeHttpBackend`, exported by default) and ships on the JVM as the
+  explicit opt-in `JvmSocketHttpBackend` — the `JdkHttpBackend` scoped in
+  TJC-2114. Opt in with `given JvmSocketHttpBackend.type =
+  JvmSocketHttpBackend` and exclude `zio-http` to drop Netty. Keep-alive,
+  `Content-Length` and chunked request bodies, `Expect: 100-continue`,
+  HTTP/1.0 clients, chunked SSE with a reader-side disconnect watch; caps:
+  8 KiB head (431), 16 MiB body (413), 256 concurrent connections, 60 s
+  idle; plaintext only (no `javax.net.ssl` on Native). Held to the same
+  EMPTY conformance baseline as the JVM via the new
+  `scripts/conformance.sh scala-native` lane (73/0 locally, 2026-07-28
+  scenario set identical to the JVM's). `FASTMCP_HTTP_DEBUG=1` prints
+  per-connection failures to stderr.
 
 - **Mirror-based `McpEncoder` fallback**: `Out` case classes without any
   `JsonEncoder` in scope now encode (text + `structuredContent`)
@@ -31,6 +46,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   custom wire type.
 
 ### Changed
+
+- **`JvmHttpBackend` is now a zio-http adapter** over the shared
+  `StreamableHttpHandler` (`shared/.../server/transport/http/`), which owns
+  every streamable-HTTP MCP decision exactly once — session store and idle
+  sweeper, only-`initialize`-mints, request→SSE with the per-request sink
+  and close sentinel, the 2026-07-28 stateless path, GET push channel
+  (409 on a second stream), DELETE, keepalive, JSON-RPC transport errors
+  (TJC-2223, #81). Wire behaviour is unchanged: every HTTP test and the
+  conformance suite pass unmodified. The Scala.js backend still carries
+  its own rendering (follow-up). Keepalive pings are now emitted when a
+  stream has been quiet for `keepAliveInterval` (a queue-fed timed pull)
+  rather than merged in on a fixed schedule — the merge's halt path
+  overflowed a Scala Native thread stack.
 
 - **Build and source layout modularized** (TJC-2198): Mill 1.1.5 → 1.1.8;
   module definitions moved out of the monolithic `build.mill` into

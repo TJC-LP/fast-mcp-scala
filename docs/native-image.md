@@ -167,3 +167,25 @@ against the native binary, held to the unchanged (empty) JVM baseline. CI runs t
 enforces scenario-level JVM/native parity on the 2026 requirements run, requires a clean server
 log (no `UnsupportedFeatureError`), and requires the binary to exit within 15s of SIGTERM — on
 every PR.
+
+## Netty-free HTTP images (opt-in, not yet CI-verified)
+
+The JVM's default `HttpTransportBackend` is ZIO HTTP on Netty, which is why the HTTP image above
+needs the netty-specific flags. Since TJC-2223 (#81) the JVM can also serve streamable HTTP with
+`JvmSocketHttpBackend` — the same `java.net.ServerSocket` server that is the Scala Native HTTP
+backend, rendering the same shared `StreamableHttpHandler`. Opt in with a given of its singleton
+type and exclude `dev.zio::zio-http` from the dependency:
+
+```scala
+import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.server.transport.JvmSocketHttpBackend
+
+given JvmSocketHttpBackend.type = JvmSocketHttpBackend
+
+object MyServer extends McpServerApp[Http, MyServer.type]: ...
+```
+
+With zio-http excluded, none of the netty flags (`--initialize-at-run-time=io.netty`,
+`SharedArenaSupport`, the channel-type pin) apply — the image is the stdio recipe plus blocking
+sockets. This path is exercised by the JVM and Scala Native test suites but does not yet have its
+own native-image smoke job; treat it as a follow-up before relying on it in an image.
