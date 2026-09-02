@@ -4,7 +4,7 @@ package server.transport.http
 import java.io.{BufferedOutputStream, InputStream, OutputStream}
 import java.net.{InetSocketAddress, ServerSocket, Socket, SocketTimeoutException}
 import java.nio.charset.StandardCharsets
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import zio.*
 import zio.stm.TSemaphore
@@ -188,19 +188,49 @@ private[fastmcp] object SocketHttpServer:
       head.bodyFraming(MaxBodyBytes) match
         case Left(rejection) => reject(rejection).as(false)
         case Right(framing) =>
-          val interim =
-            if head.expectsContinue && framing != Framing.Empty then
-              blocking {
-                writeRaw("HTTP/1.1 100 Continue\r\n\r\n")
-                out.flush()
-              }
-            else ZIO.unit
-          interim *> readBody(framing).flatMap {
-            case Left(rejection) => reject(rejection).as(false)
-            case Right(body) =>
-              val request = HttpRequest(head.method, head.path, head.header, ZIO.succeed(body))
-              handle(request).flatMap(reply => writeReply(reply, head.version, head.wantsClose))
+          // The body is read lazily: the shared handler forces `request.body` only after its
+          // Host/Origin and Accept guards pass, so a request those guards reject never costs the
+          // read (up to 16 MiB) — the same ordering the zio-http adapter gets from its lazy body.
+          // `100 Continue`, which solicits the body, is sent at that same point; RFC 9110 lets a
+          // server answer on the head alone without ever asking for the body.
+          val consumed = new AtomicBoolean(false)
+          val failed = new AtomicReference[Option[Rejection]](None)
+          for
+            body <- deferredBody(head, framing, consumed, failed).memoize
+            reply <- handle(HttpRequest(head.method, head.path, head.header, body))
+            // A body read that failed mid-way keeps its own status (413 for an over-cap chunked
+            // body, 400 for truncation) rather than the handler's generic 400.
+            finalReply = failed.get.fold(reply)(r =>
+              StreamableHttpHandler.transportError(r.status, r.message)
+            )
+            // A declared body that was never consumed, or failed part-way, leaves unknown bytes on
+            // the socket: close after the reply so they are never parsed as the next request.
+            bodyClean = framing == Framing.Empty || (consumed.get && failed.get.isEmpty)
+            usable <- writeReply(finalReply, head.version, head.wantsClose || !bodyClean)
+          yield usable
+
+    private def deferredBody(
+        head: Head,
+        framing: Framing,
+        consumed: AtomicBoolean,
+        failed: AtomicReference[Option[Rejection]]
+    ): Task[String] =
+      val interim =
+        if head.expectsContinue && framing != Framing.Empty then
+          blocking {
+            writeRaw("HTTP/1.1 100 Continue\r\n\r\n")
+            out.flush()
           }
+        else ZIO.unit
+      interim *> readBody(framing).flatMap {
+        case Right(body) =>
+          ZIO.succeed(consumed.set(true)).as(body)
+        case Left(rejection) =>
+          ZIO.succeed {
+            consumed.set(true)
+            failed.set(Some(rejection))
+          } *> ZIO.fail(new java.io.IOException(rejection.message))
+      }
 
     private def readBody(framing: Framing): Task[Either[Rejection, String]] =
       framing match
@@ -260,7 +290,7 @@ private[fastmcp] object SocketHttpServer:
       val closeAfter = close || !chunked
       val stop = new AtomicBoolean(false)
       for
-        _ <- blocking {
+        headWritten <- blocking {
           writeHead(
             200,
             headers ++ List(
@@ -270,8 +300,14 @@ private[fastmcp] object SocketHttpServer:
             closeAfter
           )
           out.flush()
-        }
+        }.foldCause(_ => false, _ => true)
         dead <- Promise.make[Nothing, Unit]
+        // If the peer vanished before the head even went out, the stream must STILL run — halted
+        // at once through `dead` — because its finalizers are the only thing that interrupts the
+        // request's dispatch fiber, shuts its queue, and releases the session's GET slot. Skipping
+        // the stream here would leave a `subscriptions/listen` dispatch running forever and every
+        // later GET on the session answering 409.
+        _ <- ZIO.unless(headWritten)(dead.succeed(()))
         // The read side is otherwise silent while we stream, so a peer that vanishes would go
         // unnoticed until the next write — never, for a quiet GET channel. Watch it: EOF or an
         // error completes `dead`, which halts the stream and runs the MCP layer's finalizers.
@@ -295,8 +331,8 @@ private[fastmcp] object SocketHttpServer:
             _ => ZIO.succeed(true)
           )
         clientGone <- dead.isDone
-        usable = streamed && !clientGone && !closeAfter
-        _ <- ZIO.when(streamed && !clientGone && chunked)(blocking {
+        usable = headWritten && streamed && !clientGone && !closeAfter
+        _ <- ZIO.when(headWritten && streamed && !clientGone && chunked)(blocking {
           writeRaw("0\r\n\r\n")
           out.flush()
         })
@@ -335,7 +371,8 @@ private[fastmcp] object SocketHttpServer:
     */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private final class ConnectionInput(in: InputStream):
-    private var buf: Array[Byte] = new Array[Byte](8 * 1024)
+    private val InitialBufferBytes = 8 * 1024
+    private var buf: Array[Byte] = new Array[Byte](InitialBufferBytes)
     private var start = 0
     private var end = 0
 
@@ -348,6 +385,9 @@ private[fastmcp] object SocketHttpServer:
       if start == end then
         start = 0
         end = 0
+        // Drained: drop a buffer that a large body grew, so one 16 MiB request on a keep-alive
+        // connection does not pin 16 MiB for the connection's whole lifetime.
+        if buf.length > InitialBufferBytes then buf = new Array[Byte](InitialBufferBytes)
       else if end == buf.length then
         if start > 0 then
           java.lang.System.arraycopy(buf, start, buf, 0, end - start)
@@ -377,6 +417,11 @@ private[fastmcp] object SocketHttpServer:
       var scanned = 0 // bytes from `start` already scanned without finding the terminator
       var result: Option[Either[Rejection, Option[Array[Byte]]]] = None
       while result.isEmpty do
+        // RFC 9112 §2.2: ignore empty lines received before the request-line, so a stray extra
+        // CRLF from a proxy is not taken as an (empty) head terminator.
+        while start < end && (buf(start) == '\r' || buf(start) == '\n') do
+          start += 1
+          scanned = math.max(0, scanned - 1)
         headEnd(start + scanned) match
           case Some((headEnd, _)) if headEnd - start > max =>
             result = Some(Left(Rejection(431, s"Request head exceeds $max bytes")))

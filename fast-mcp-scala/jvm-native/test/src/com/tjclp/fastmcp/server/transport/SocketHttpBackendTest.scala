@@ -432,6 +432,45 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     }
   }
 
+  test("empty lines before the request line are ignored (RFC 9112 §2.2)") {
+    withServer() { port =>
+      // A stray extra CRLF ahead of the request, as some proxies emit: not an empty head.
+      request(port, "\r\n\r\n" + get(None)).status shouldBe 405
+    }
+  }
+
+  test("header guards answer before the body is read, and the unread body closes the connection") {
+    withServer(baseSettings.copy(allowedHosts = Some(Set("localhost")))) { port =>
+      val client = new RawClient(port)
+      // Spoofed Host with a large declared body that is never sent: the DNS-rebinding guard must
+      // reject on the head alone instead of blocking on (or buffering) the body first.
+      client.send(
+        "POST /mcp HTTP/1.1\r\nHost: evil.example\r\nContent-Type: application/json\r\n" +
+          "Accept: application/json, text/event-stream\r\nContent-Length: 100000\r\n\r\n"
+      )
+      val reply = client.readReply()
+      reply.status shouldBe 403
+      reply.header("connection") shouldBe Some("close")
+      client.atEof() shouldBe true
+      client.close()
+    }
+  }
+
+  test("a chunked body over the cap is rejected with 413 as soon as the chunk size says so") {
+    withServer() { port =>
+      val client = new RawClient(port)
+      client.send(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" +
+          "Accept: application/json, text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n" +
+          "1000001\r\n" // 16 MiB + 1, no data follows
+      )
+      val reply = client.readReply()
+      reply.status shouldBe 413
+      reply.header("connection") shouldBe Some("close")
+      client.close()
+    }
+  }
+
   test("unknown path → 404; unsupported method → 405 with Allow") {
     withServer() { port =>
       request(port, "GET /other HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").status shouldBe 404
