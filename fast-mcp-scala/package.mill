@@ -185,6 +185,14 @@ object `package` extends Module {
     // one scripts/native-smoke.sh drives in CI.
     override def mainClass = Some("com.tjclp.fastmcp.examples.AnnotatedServer")
 
+    /** The HTTP conformance binary (`scripts/conformance.sh scala-native`): this module's compiled
+      * NIR re-linked with `ConformanceServerNative` as the entry point — no second module, nothing
+      * published. Debug mode like `nativeLink`; `SCALANATIVE_MODE=release-fast` switches both.
+      */
+    def conformanceLink: T[PathRef] = Task {
+      nativeLinkOtherMain("com.tjclp.fastmcp.examples.conformance.ConformanceServerNative")()
+    }
+
     // WartRemover is a JVM-only compiler plugin (same rationale as the js module).
     override def scalacOptions = BuildConfig.crossScalacOptions
 

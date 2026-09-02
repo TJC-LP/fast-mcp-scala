@@ -2,7 +2,7 @@
 #
 # Run the official MCP conformance server suites against fast-mcp-scala.
 #
-#   scripts/conformance.sh [jvm|js|native] [port] [active|2026]
+#   scripts/conformance.sh [jvm|js|native|scala-native] [port] [active|2026]
 #
 # Boots the cross-platform ConformanceServer (com.tjclp.fastmcp.examples.conformance.*) over
 # streamable HTTP, then drives it with the official harness via `bunx`. Exit code follows the harness
@@ -18,6 +18,11 @@
 # (fast-mcp-scala.nativeSmoke.http.nativeImage; override with FAST_MCP_NATIVE_BIN) against the
 # UNCHANGED jvm baseline — the binary is behaviorally the same server, so any divergence is a
 # native-image bug to fix, never a new baseline.
+#
+# "scala-native" runs it as a Scala Native (LLVM) binary over the java.net.ServerSocket HTTP
+# backend (fast-mcp-scala.scalaNative.conformanceLink; override with FAST_MCP_SCALA_NATIVE_BIN),
+# again against the jvm baseline: the MCP semantics are the shared handler's, so any divergence is
+# a socket-layer bug, never a new baseline.
 set -euo pipefail
 
 PLATFORM="${1:-jvm}"
@@ -28,7 +33,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 URL="http://127.0.0.1:${PORT}/mcp"
 BASELINE="$ROOT/conformance/baseline-${PLATFORM}.yml"
-[ "$PLATFORM" = "native" ] && BASELINE="$ROOT/conformance/baseline-jvm.yml"
+# The GraalVM image (native) and the Scala Native binary (scala-native) serve the SAME shared
+# router and streamable-HTTP handler as the JVM, so both are held to the JVM's empty baseline.
+case "$PLATFORM" in
+  native|scala-native) BASELINE="$ROOT/conformance/baseline-jvm.yml" ;;
+esac
 LOG="$(mktemp -t fmcp-conf-log.XXXXXX)"
 SRV_PID=""
 SRV_STOPPED=""
@@ -105,11 +114,26 @@ start_native() {
   SRV_PID=$!
 }
 
+start_scala_native() {
+  local bin="${FAST_MCP_SCALA_NATIVE_BIN:-}"
+  if [ -z "$bin" ]; then
+    echo "→ linking Scala Native ConformanceServer (LLVM)" >&2
+    ./mill --no-server fast-mcp-scala.scalaNative.conformanceLink >/dev/null 2>&1
+    bin="$(./mill --no-server show fast-mcp-scala.scalaNative.conformanceLink 2>/dev/null |
+      python3 -c "import sys,json,re; print(re.sub(r'^q?ref:v\\d+:[0-9a-f]+:','',json.load(sys.stdin)))")"
+  fi
+  [ -x "$bin" ] || { echo "scala-native binary not found/executable: $bin" >&2; exit 1; }
+  echo "→ launching Scala Native ConformanceServer on :$PORT ($bin)" >&2
+  "$bin" "$PORT" >"$LOG" 2>&1 &
+  SRV_PID=$!
+}
+
 case "$PLATFORM" in
   jvm) start_jvm ;;
   js) start_js ;;
   native) start_native ;;
-  *) echo "usage: $0 [jvm|js|native] [port]" >&2; exit 2 ;;
+  scala-native) start_scala_native ;;
+  *) echo "usage: $0 [jvm|js|native|scala-native] [port] [active|2026]" >&2; exit 2 ;;
 esac
 
 echo "→ waiting for $URL" >&2
@@ -136,20 +160,25 @@ case "$MODE" in
     bunx "@modelcontextprotocol/conformance@${CONF_VERSION}" \
       server --url "$URL" --requirements 2026-07-28
     ;;
-  *) echo "usage: $0 [jvm|js|native] [port] [active|2026]" >&2; exit 2 ;;
+  *) echo "usage: $0 [jvm|js|native|scala-native] [port] [active|2026]" >&2; exit 2 ;;
 esac
 RC=$?
 set -e
 # Terminate BEFORE inspecting the log, so teardown-time failures are gated too.
 stop_server
 echo "→ server log: $LOG" >&2
+case "$PLATFORM" in
+  native|scala-native)
+    # Shutdown must actually work: a binary that survives 15s of SIGTERM is a bug. GraalVM needs
+    # --install-exit-handlers for this (dead event loops deadlocking shutdown was exactly the
+    # failure SharedArenaSupport fixed); Scala Native relies on the OS default action.
+    if [ "$SRV_STOPPED" = "hang" ]; then
+      echo "$PLATFORM FAIL: server did not exit within 15s of SIGTERM (suite verdict: $RC)" >&2
+      exit 1
+    fi
+    ;;
+esac
 if [ "$PLATFORM" = "native" ]; then
-  # --install-exit-handlers must actually work: a binary that survives 15s of SIGTERM is a bug
-  # (dead event loops deadlocking shutdown was exactly the failure SharedArenaSupport fixed).
-  if [ "$SRV_STOPPED" = "hang" ]; then
-    echo "native FAIL: server did not exit within 15s of SIGTERM (suite verdict: $RC)" >&2
-    exit 1
-  fi
   # Native binaries can shed threads on GraalVM UnsupportedFeatureError while the suite still
   # passes on the surviving event loops — treat any such error as a failure.
   if grep -q "UnsupportedFeatureError" "$LOG"; then
