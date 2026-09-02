@@ -11,8 +11,8 @@ import mill.scalajslib._
 import mill.scalajslib.api._
 import mill.scalajslib.bun._
 import mill.scalanativelib._
-import build.{BuildConfig, FastMCPModule, FastMCPPublishingBase, FastMCPTestModule, Versions,
-  scala3Version}
+import build.{BuildConfig, CrossPlatformTests, FastMCPModule, FastMCPPublishingBase,
+  FastMCPTestModule, Versions, scala3Version}
 
 // Namespace module. Aggregate tasks at this level fan out to all three platform children so
 // `./mill fast-mcp-scala.compile` and `./mill fast-mcp-scala.test` cover the whole project
@@ -53,8 +53,14 @@ object `package` extends Module {
 
   object jvm extends FastMCPModule {
 
-    // JVM module reads from both shared/ and jvm/src/ (its own JVM-specific code)
-    override def sources = Task.Sources(moduleDir / "src", moduleDir / os.up / "shared" / "src")
+    // JVM module reads from shared/ (the MCP core), jvm/src/ (ZIO HTTP + System.in/out), and
+    // jvm-native/src/ (the socket HTTP layer shared with Scala Native — it must satisfy the JVM
+    // WartRemover tiers, which is why it is compiled here under the full flag set).
+    override def sources = Task.Sources(
+      moduleDir / "src",
+      moduleDir / os.up / "shared" / "src",
+      moduleDir / os.up / "jvm-native" / "src"
+    )
 
     override def mvnDeps = Seq(
       // ZIO Core
@@ -64,7 +70,9 @@ object `package` extends Module {
       mvn"dev.zio::zio-http:${Versions.zioHttp}"
     )
 
-    object test extends ScalaTests with FastMCPTestModule {
+    // jvm/test/src plus the socket-HTTP tests in jvm-native/test/src (CrossPlatformTests), which the
+    // Scala Native test module compiles too — the same suite runs on both platforms.
+    object test extends ScalaTests with FastMCPTestModule with CrossPlatformTests {
       override def mvnDeps = Seq(
         mvn"org.scalatest::scalatest:${Versions.scalaTest}",
         mvn"org.scalacheck::scalacheck:${Versions.scalaCheck}",
@@ -143,12 +151,11 @@ object `package` extends Module {
     }
   }
 
-  // Scala Native target (EXPERIMENTAL) — stdio transport over System.in/System.out compiled to
-  // a standalone binary via LLVM. HTTP is excluded BY DESIGN: zio-http is not published for
-  // Scala Native (upstream support is 4.x-milestoned, zio-http#2526), so this module provides
-  // only the `TransportBackend` given; `McpServerApp[Stdio]` programs compile and link while
-  // `McpServerApp[Http]` fails at the user's declaration site — the same seam that keeps netty
-  // out of GraalVM stdio images. Cross-published as `com.tjclp:fast-mcp-scala_native0.5_3`.
+  // Scala Native target (EXPERIMENTAL) — stdio over System.in/System.out plus streamable HTTP
+  // over java.net.ServerSocket (jvm-native/), compiled to a standalone binary via LLVM. zio-http
+  // is not published for Scala Native (upstream support is 4.x-milestoned, zio-http#2526), so
+  // the HTTP given here is the hand-rolled socket backend around the shared
+  // StreamableHttpHandler. Cross-published as `com.tjclp:fast-mcp-scala_native0.5_3`.
   object scalaNative extends ScalaNativeModule with ScalafmtModule with FastMCPPublishingBase {
     def scalaVersion = scala3Version
     def scalaNativeVersion = Versions.scalaNative
@@ -157,9 +164,14 @@ object `package` extends Module {
     // nativeSmoke pipeline); the source directory follows the jvm/js sibling convention.
     override def moduleDir = super.moduleDir / os.up / "native"
 
-    // Native module reads from native/src/ (the stdio backend) and shared/ — which carries the
-    // whole MCP core, the schema-derivation macros, and the platform-pure examples.
-    override def sources = Task.Sources(moduleDir / "src", moduleDir / os.up / "shared" / "src")
+    // Native module reads from native/src/ (the platform backends), shared/ — the whole MCP core,
+    // the schema-derivation macros, and the platform-pure examples — and jvm-native/src/ (the
+    // socket HTTP layer shared with the JVM).
+    override def sources = Task.Sources(
+      moduleDir / "src",
+      moduleDir / os.up / "shared" / "src",
+      moduleDir / os.up / "jvm-native" / "src"
+    )
 
     // `::` resolves the _native0.5_3 artifacts. zio-json transitively brings
     // io.github.cquiroz:scala-java-time (compile scope), which links the java.time.Duration
@@ -176,7 +188,10 @@ object `package` extends Module {
     // WartRemover is a JVM-only compiler plugin (same rationale as the js module).
     override def scalacOptions = BuildConfig.crossScalacOptions
 
-    object test extends ScalaNativeTests with TestModule.ScalaTest {
+    // native/test/src plus the socket-HTTP tests shared with the JVM test module
+    // (CrossPlatformTests) — running them inside the linked native test binary is what proves the
+    // socket layer on SN's threads.
+    object test extends ScalaNativeTests with TestModule.ScalaTest with CrossPlatformTests {
       override def mvnDeps = Seq(
         mvn"org.scalatest::scalatest::${Versions.scalaTest}"
       )
