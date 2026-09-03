@@ -523,6 +523,50 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     }
   }
 
+  test("stray bytes on an open GET stream do not blind the disconnect watch") {
+    withServer() { port =>
+      val sid = initSession(port)
+      val stream = new RawClient(port)
+      stream.send(get(Some(sid)))
+      stream.readHead()._1 shouldBe 200
+      // Unsolicited bytes on the stream's connection (not a request), then vanish. The watcher
+      // must keep watching past them: otherwise the connection fiber parks forever, holding a
+      // connection permit and the session's GET slot, and the session can never be evicted.
+      stream.send("\r\n")
+      Thread.sleep(200)
+      stream.abort()
+
+      val deadline = java.lang.System.currentTimeMillis() + 5_000
+      var status = 409
+      while status == 409 && java.lang.System.currentTimeMillis() < deadline do
+        Thread.sleep(100)
+        val retry = new RawClient(port)
+        retry.send(get(Some(sid)))
+        status = retry.readHead()._1
+        retry.close()
+      status shouldBe 200
+    }
+  }
+
+  test("a request pipelined behind an open GET stream is served once the stream ends") {
+    withServer() { port =>
+      val sid = initSession(port)
+      val stream = new RawClient(port)
+      stream.send(get(Some(sid)))
+      stream.readHead()._1 shouldBe 200
+      // Pipeline the next request on the same connection while the stream is open ...
+      stream.send(post(initFrame))
+      // ... end the stream from elsewhere ...
+      request(port, delete(sid)).status shouldBe 200
+      stream.readChunk() shouldBe None
+      // ... and the buffered request is answered on the same connection.
+      val next = stream.readReply()
+      next.status shouldBe 200
+      next.header("mcp-session-id").isDefined shouldBe true
+      stream.close()
+    }
+  }
+
   test("concurrent connections are served independently") {
     withServer() { port =>
       val results = (1 to 8).map { _ =>

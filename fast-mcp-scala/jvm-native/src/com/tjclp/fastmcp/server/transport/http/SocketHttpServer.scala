@@ -58,6 +58,12 @@ private[fastmcp] object SocketHttpServer:
     */
   val AcceptPollMs: Int = 500
 
+  /** While an SSE reply streams, the read-side watcher polls this often, so it notices the stream
+    * ending and hands any bytes it buffered (a pipelined request) back to the request loop without
+    * waiting out the idle timeout.
+    */
+  val WatchPollMs: Int = 1_000
+
   final case class Bound(host: String, port: Int)
 
   /** A running server: its address and the accept-loop fiber (join it to serve "forever" — the loop
@@ -311,6 +317,9 @@ private[fastmcp] object SocketHttpServer:
         // The read side is otherwise silent while we stream, so a peer that vanishes would go
         // unnoticed until the next write — never, for a quiet GET channel. Watch it: EOF or an
         // error completes `dead`, which halts the stream and runs the MCP layer's finalizers.
+        // Short read timeouts while streaming: the watcher re-checks `stop` every poll instead of
+        // sitting in one idle-timeout-long read after the stream has already ended.
+        _ <- ZIO.attempt(socket.setSoTimeout(WatchPollMs)).ignore
         watcher <- blocking(input.awaitActivity(stop))
           .tap(outcome => ZIO.when(outcome == Watch.Dead)(dead.succeed(())))
           .catchAll(_ => dead.succeed(()).as(Watch.Dead))
@@ -341,6 +350,7 @@ private[fastmcp] object SocketHttpServer:
         // soon as the client sends its next request (bytes stay buffered), or on idle timeout /
         // EOF, both of which end the connection like any other idle keep-alive would.
         activity <- if usable then watcher.join else watcher.interrupt.as(Watch.Dead)
+        _ <- ZIO.attempt(socket.setSoTimeout(IdleReadTimeoutMs)).ignore
       yield usable && activity == Watch.Data
 
     private def writeHead(status: Int, headers: List[(String, String)], close: Boolean): Unit =
@@ -403,11 +413,27 @@ private[fastmcp] object SocketHttpServer:
       */
     def awaitActivity(stop: AtomicBoolean): Watch =
       var outcome: Option[Watch] = None
+      var idleSince = -1L
       while outcome.isEmpty do
         try
           val n = fill()
-          outcome = Some(if n < 0 then Watch.Dead else Watch.Data)
-        catch case _: SocketTimeoutException => if stop.get then outcome = Some(Watch.Timeout)
+          if n < 0 then outcome = Some(Watch.Dead)
+          else if stop.get then outcome = Some(Watch.Data)
+          else if available > MaxHeadBytes then
+            // More than a request head's worth of unsolicited bytes while we stream is not a
+            // pipelined request: treat the peer as broken rather than buffer without bound.
+            outcome = Some(Watch.Dead)
+          // Otherwise the bytes stay buffered (a pipelined request, served after the stream) and
+          // the watch continues — returning here would leave a peer that vanishes afterwards
+          // undetected, parking the connection (and its permit + GET slot) forever.
+        catch
+          case _: SocketTimeoutException =>
+            if stop.get then
+              if available > 0 then outcome = Some(Watch.Data)
+              else
+                val now = java.lang.System.currentTimeMillis()
+                if idleSince < 0 then idleSince = now
+                else if now - idleSince >= IdleReadTimeoutMs then outcome = Some(Watch.Timeout)
       outcome.getOrElse(Watch.Dead)
 
     /** Read a request head up to (excluding) its blank-line terminator (`CRLF CRLF`, or bare `LF
