@@ -9,7 +9,7 @@ fast-mcp-scala is a high-level Scala 3 library for building Model Context Protoc
 
 Both paths converge on the same `McpServer` trait and support `@Param` metadata on parameters/fields.
 
-Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **Scala Native** (stdio only, EXPERIMENTAL — published as `fast-mcp-scala_native0.5_3`; zio-http has no Native artifacts, so `McpServerApp[Http]` fails to compile there by design).
+Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **Scala Native** (stdio + HTTP, EXPERIMENTAL — published as `fast-mcp-scala_native0.5_3`). zio-http has no Native artifacts, so HTTP on Scala Native runs on a hand-rolled `java.net.ServerSocket` backend (`jvm-native/`) that renders the same shared streamable-HTTP handler as the JVM; the JVM can opt into that netty-free backend too (`JvmSocketHttpBackend`).
 
 ## Build System
 
@@ -31,6 +31,7 @@ Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **
 ./mill fast-mcp-scala.js.test.bunTest               # Scala.js conformance tests only
 ./mill fast-mcp-scala.scalaNative.test              # Scala Native tests (links a native binary)
 ./mill fast-mcp-scala.scalaNative.nativeLink        # Standalone LLVM binary of AnnotatedServer
+./mill fast-mcp-scala.scalaNative.conformanceLink   # LLVM binary of ConformanceServerNative (HTTP)
 ./mill fast-mcp-scala.jvm.test com.tjclp.fastmcp.macros.ToolProcessorTest
 
 # Publish
@@ -71,18 +72,26 @@ fast-mcp-scala/
 │   │           ├── manager/             # Tool/Prompt/Resource/Task managers
 │   │           ├── router/              # McpRouter, Builtins, Session, middleware
 │   │           └── transport/           # TransportBackend seam, StdioLoop, MessageLoop, HostGuard
+│   │           └── transport/http/      # StreamableHttpHandler: the streamable-HTTP semantics,
+│   │                                    #   rendered by every HTTP backend (neutral HttpRequest/HttpReply)
+│   ├── jvm-native/            # Compiled by BOTH jvm and scalaNative (no Scala.js)
+│   │   ├── src/               # SocketHttpServer (HTTP/1.1 + SSE over java.net.ServerSocket),
+│   │   │                      #   Http1 parser, SocketHttpBackend
+│   │   └── test/src/          # SocketHttpBackendTest + Http1ParserTest — run on both platforms
 │   ├── jvm/
 │   │   ├── src/               # JVM-specific code
 │   │   │   └── com/tjclp/fastmcp/
-│   │   │       ├── server/transport/        # JvmTransportBackend (stdio) + JvmHttpBackend (netty)
+│   │   │       ├── server/transport/        # JvmTransportBackend (stdio), JvmHttpBackend (netty,
+│   │   │       │                            #   default), JvmSocketHttpBackend (netty-free opt-in)
 │   │   │       └── examples/                # JVM-only: HttpServer, TaskManagerServer
 │   │   └── test/src/          # JVM test sources
 │   ├── js/                    # Scala.js code (Bun-first runtime)
 │   │   ├── src/               # JsTransportBackend (Bun.serve + Node stdio), facades, examples
 │   │   └── test/src/          # Conformance, HTTP, codec, contract surface tests
-│   └── native/                # Scala Native code (EXPERIMENTAL, stdio only)
-│       ├── src/               # NativeTransportBackend (System.in/out + /dev/urandom)
-│       └── test/src/          # Surface, contract, and stdio-lifecycle canaries
+│   └── native/                # Scala Native code (EXPERIMENTAL)
+│       ├── src/               # NativeTransportBackend (System.in/out + /dev/urandom),
+│       │                      #   NativeHttpBackend (socket HTTP), ConformanceServerNative
+│       └── test/src/          # Surface, contract, stdio-lifecycle and HTTP-surface canaries
 ```
 
 ## Key Concepts
@@ -179,7 +188,7 @@ server.tool(addTool)
 ### Transports
 
 - **Stdio** (`runStdio()`) — stdin/stdout, used by MCP clients
-- **HTTP** (`runHttp()`) — streamable (sessions + per-request SSE, GET push channel on JVM, DELETE termination) by default; set `stateless = true` for stateless. Binds `127.0.0.1` by default (set `host = "0.0.0.0"` for containers); only `initialize` mints a session; idle sessions evict after `sessionIdleTimeout`; `allowedHosts` enables the DNS-rebinding guard; `keepAliveInterval` enables SSE heartbeats
+- **HTTP** (`runHttp()`) — streamable (sessions + per-request SSE, GET push channel on JVM and Scala Native, DELETE termination) by default; set `stateless = true` for stateless. Binds `127.0.0.1` by default (set `host = "0.0.0.0"` for containers); only `initialize` mints a session; idle sessions evict after `sessionIdleTimeout`; `allowedHosts` enables the DNS-rebinding guard; `keepAliveInterval` enables SSE heartbeats (a `ping` event whenever a stream is quiet for the interval). The JVM serves it with ZIO HTTP (`JvmHttpBackend`); Scala Native — and the JVM when you opt in with `given JvmSocketHttpBackend.type = JvmSocketHttpBackend` — with the hand-rolled `SocketHttpServer` (`jvm-native/`). Both render the shared `StreamableHttpHandler`, so semantics are identical; the socket layer adds fixed caps (8 KiB head → 431, 16 MiB body → 413, 256 connections, 60 s idle) and is plaintext only
 
 ### Tasks (experimental, off by default)
 
@@ -229,11 +238,12 @@ The `tasks` capability is advertised on `initialize` only when `settings.tasks.e
 
 The codebase is split into three sibling trees under `fast-mcp-scala/`:
 - `shared/` — the entire native MCP core: annotations, wire types, JSON-RPC, ZIO JSON codecs, the router + built-in handlers + middleware, `McpServer[R]` + `McpServerCore`, typed contracts, and the `TransportBackend` seam
-- `jvm/` — the JVM `TransportBackend` (`System.in`/`System.out`), the `HttpTransportBackend` (ZIO HTTP), and JVM-only examples
+- `jvm-native/` — the HTTP/1.1 + SSE socket server (`SocketHttpServer`, `Http1`) and `SocketHttpBackend`, compiled by both the `jvm` and `scalaNative` modules (so it must satisfy the JVM WartRemover tiers); its tests in `jvm-native/test/src` run on both platforms through the `CrossPlatformTests` trait in `build.mill`
+- `jvm/` — the JVM `TransportBackend` (`System.in`/`System.out`), the default `HttpTransportBackend` (ZIO HTTP, `JvmHttpBackend`), the netty-free opt-in `JvmSocketHttpBackend`, and JVM-only examples
 - `js/` — the Scala.js `TransportBackend` (`Bun.serve` + Node stdio), small JS facades, and the Bun HTTP example
-- `native/` — the Scala Native `TransportBackend` (stdio only, EXPERIMENTAL)
+- `native/` — the Scala Native `TransportBackend` (stdio) and `NativeHttpBackend` (HTTP over the socket server), EXPERIMENTAL
 
-Every module reads exactly `shared/src/ + <platform>/src/`. Nothing reaches across platform trees: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/` compiles standalone on all three targets.
+Every module reads `shared/src/ + <platform>/src/`; `jvm` and `scalaNative` additionally read `jvm-native/src/`. Nothing else reaches across platform trees: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/` compiles standalone on all three targets.
 
 ### Native MCP core (no vendored SDK)
 
@@ -242,9 +252,9 @@ As of 0.5.0 there is **no wrapped SDK** — the MCP protocol layer is pure Scala
 - `core/wire/` + `core/Types.scala` — the 2025-11-25 wire types with ZIO JSON codecs
 - `server/router/` — `McpRouter`, `Builtins`, `Middleware`, `RouterBuilder`, `WireMapping`, Tasks
 - `codec/` — `DefaultDecodeContext` + `McpDecoders` (one ZIO JSON decode path for both platforms)
-- `server/transport/` — `TransportBackend` (the platform seam) + `MessageLoop` (parse → dispatch → encode)
+- `server/transport/` — `TransportBackend` + `HttpTransportBackend` (the platform seam), `MessageLoop` (parse → dispatch → encode), `StdioLoop`, and `http/StreamableHttpHandler` (every streamable-HTTP decision, over a neutral `HttpRequest`/`HttpReply`/`SseFrame` model that each HTTP backend renders)
 
-Each platform provides exactly one `given TransportBackend` (`JvmTransportBackend` / `JsTransportBackend`); everything else is shared. The TypeScript `@modelcontextprotocol/sdk` is used only as a test-time conformance client.
+Each platform provides exactly one `given TransportBackend` (`JvmTransportBackend` / `JsTransportBackend` / `NativeTransportBackend`) and one `given HttpTransportBackend` (`JvmHttpBackend` / `JsTransportBackend` / `NativeHttpBackend`); everything else is shared. The TypeScript `@modelcontextprotocol/sdk` is used only as a test-time conformance client.
 
 ## Code Quality
 

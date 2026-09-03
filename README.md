@@ -1,6 +1,6 @@
 # fast-mcp-scala
 
-**Scala 3 for MCP: annotation-driven and typed-contract APIs on both JVM and Scala.js/Bun.**
+**Scala 3 for MCP: annotation-driven and typed-contract APIs on the JVM, Scala.js/Bun, and Scala Native.**
 
 fast-mcp-scala is a developer-friendly library for building [Model Context Protocol](https://modelcontextprotocol.io/) servers. Extend one trait, declare your tools, done:
 
@@ -226,6 +226,20 @@ object MyHttpServer extends McpServerApp[Http, MyHttpServer.type]:
 
 Need lower-level control? Skip the sugar trait and construct directly — `val server = McpServer("name", "0.1.0")` returns the platform-appropriate server, and you can call `.tool(...)` / `.runHttp()` yourself inside your own `ZIOAppDefault`.
 
+**Netty-free on the JVM.** The JVM default is ZIO HTTP (Netty). The same `java.net.ServerSocket` server that serves Scala Native is available as an explicit opt-in — declare a given of the object's singleton type, which wins over the imported default on specificity, and exclude `dev.zio::zio-http` from your dependencies to drop Netty (20 of the 40 jars) from the classpath:
+
+```scala 3 raw
+import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.server.transport.JvmSocketHttpBackend
+
+given JvmSocketHttpBackend.type = JvmSocketHttpBackend
+
+object MyServer extends McpServerApp[Http, MyServer.type]:
+  @Tool() def add(a: Int, b: Int): Int = a + b
+```
+
+Wire behaviour is identical (both backends render the shared handler and pass the same conformance suite); the socket backend trades Netty's event loop for one blocking thread per idle connection (capped at 256), plaintext HTTP/1.1 only.
+
 | Setting | Default | Description |
 |---|---|---|
 | `host` | `127.0.0.1` | Bind address (**changed in 0.5.0** from `0.0.0.0` per the spec's bind-localhost guidance; set `"0.0.0.0"` explicitly for containers / external exposure) |
@@ -356,9 +370,11 @@ fast-mcp-scala is a single native MCP implementation. The entire protocol layer 
     ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
     │  stdio (NDJSON) │    │  HTTP stateless │    │ HTTP streamable │
     │  ZIO Stream /   │    │  ZIO HTTP /     │    │ ZIO HTTP /      │
-    │  Node stdin     │    │  Bun.serve      │    │ Bun.serve + SSE │
+    │  Node stdin     │    │  Bun / sockets  │    │ Bun, sockets+SSE│
     └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
+
+Every HTTP backend — ZIO HTTP on the JVM, `Bun.serve` on Scala.js, and the hand-rolled `java.net.ServerSocket` server on Scala Native (also the JVM's netty-free opt-in, `JvmSocketHttpBackend`) — is a thin adapter over the shared `StreamableHttpHandler`, so the streamable-HTTP semantics exist exactly once.
 
 Capabilities are **derived from the registered handler map** — a capability is advertised only when its handler is actually wired, so the server can never over-advertise (the root cause of #56 is gone by construction). `McpServerApp[T, Self]` is the declarative entry point on both targets; typed contracts (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) compile and mount unchanged on both.
 
@@ -378,16 +394,16 @@ Capabilities are **derived from the registered handler map** — a capability is
 | `ToolSchemaProvider[A]` auto-derivation from `@Param` | ✅ native macro | ✅ native macro | ✅ native macro |
 | `ToHandlerEffect[F]` — plain values / ZIO / Either / Try | ✅ | ✅ | ✅ |
 | Stdio transport | ✅ (native) | ✅ (native) | ✅ (LLVM binary) |
-| Streamable HTTP — stateful (sessions + per-request SSE) | ✅ (ZIO HTTP) | ✅ (Bun.serve) | ✗ by design¹ |
-| Streamable HTTP — stateless | ✅ | ✅ | ✗ by design¹ |
-| Standalone GET SSE push channel | ✅ | 405 (per-request SSE covers server→client) | ✗ by design¹ |
+| Streamable HTTP — stateful (sessions + per-request SSE) | ✅ (ZIO HTTP) | ✅ (Bun.serve) | ✅ (`java.net.ServerSocket`)¹ |
+| Streamable HTTP — stateless | ✅ | ✅ | ✅¹ |
+| Standalone GET SSE push channel | ✅ | 405 (per-request SSE covers server→client) | ✅¹ |
 | Custom decoders | ✅ `given JsonDecoder[T] → McpDecoder[T]` | ✅ same (shared zio-json path) | ✅ same |
 
-¹ zio-http is not published for Scala Native (upstream support is 4.x-milestoned). The platform provides no `HttpTransportBackend` given, so `McpServerApp[Http]` programs fail to compile — a compile-time property, not a runtime failure. A socket-based HTTP backend is planned as a follow-up ([#81](https://github.com/TJC-LP/fast-mcp-scala/issues/81)).
+¹ zio-http is not published for Scala Native (upstream support is 4.x-milestoned), so HTTP on Scala Native is served by a hand-rolled HTTP/1.1 + SSE server over `java.net.ServerSocket` ([#81](https://github.com/TJC-LP/fast-mcp-scala/issues/81)) that renders the same shared streamable-HTTP handler as the JVM — the official conformance suite holds it to the JVM's empty baseline. It is plaintext only (no `javax.net.ssl` on Native — terminate TLS at a proxy), blocking-socket based (one thread per idle connection or stream), and capped at 8 KiB request heads (431), 16 MiB bodies (413), 256 concurrent connections and a 60 s idle timeout. The same backend is available on the JVM as the netty-free opt-in `JvmSocketHttpBackend` (see [HTTP](#http-for-remote-clients-load-balancers-test-harnesses)).
 
 Node / Deno parity for the HTTP listener is a follow-up; only the `Bun.serve(...)` entry point is Bun-specific today.
 
-Proof: the official **MCP conformance suite** runs against both platforms in CI ([`scripts/conformance.sh`](scripts/conformance.sh) + [`.github/workflows/conformance.yml`](.github/workflows/conformance.yml)) at **42/42** with zero expected failures; [`ConformanceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/ConformanceTest.scala) additionally drives the official TS SDK client against the JVM server over stdio, and [`JsServerHttpTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/JsServerHttpTest.scala) verifies the Bun HTTP routing.
+Proof: the official **MCP conformance suite** runs against all three platforms in CI — the JVM, Bun, and the Scala Native binary ([`scripts/conformance.sh`](scripts/conformance.sh) + [`.github/workflows/conformance.yml`](.github/workflows/conformance.yml)) — with zero expected failures on every platform; [`ConformanceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/ConformanceTest.scala) additionally drives the official TS SDK client against the JVM server over stdio, and [`JsServerHttpTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/JsServerHttpTest.scala) verifies the Bun HTTP routing.
 
 ### Running on Bun
 
@@ -423,9 +439,11 @@ object HelloNative extends McpServerApp[Stdio, HelloNative.type]:
   def add(@Param("First operand") a: Int, @Param("Second operand") b: Int): Int = a + b
 ```
 
-Or in this repo: `./mill fast-mcp-scala.scalaNative.nativeLink` builds the `AnnotatedServer` demo binary, and `scripts/native-smoke.sh <binary>` drives it through the full MCP handshake — the same script that gates the GraalVM images.
+Swap `Stdio` for `Http` (and set `settings = McpServerSettings(port = 8090)`) and the same program serves **streamable HTTP** from the native binary: sessions, per-request SSE, the standalone GET push channel, DELETE, keepalive — everything the JVM does, because both render the shared handler (see the matrix footnote for the socket layer's limits).
 
-Caveats (experimental): stdio only (see the matrix footnote); session/task ids come from `/dev/urandom` (Unix-only); ZIO's signal handlers and shutdown hooks are no-ops on Scala Native — shutdown is EOF-driven (the client closing stdin ends the loop), and SIGINT falls back to the OS default; `java.util.regex` is RE2-backed (no lookaheads) — relevant only if your resource URI templates embed exotic regex.
+Or in this repo: `./mill fast-mcp-scala.scalaNative.nativeLink` builds the `AnnotatedServer` demo binary, and `scripts/native-smoke.sh <binary>` drives it through the full MCP handshake — the same script that gates the GraalVM images. `./mill fast-mcp-scala.scalaNative.conformanceLink` builds the HTTP conformance binary that `scripts/conformance.sh scala-native` holds to the JVM's baseline.
+
+Caveats (experimental): HTTP is plaintext HTTP/1.1 over blocking sockets — one thread per idle connection, capped at 256 (see the matrix footnote), `FASTMCP_HTTP_DEBUG=1` prints per-connection failures to stderr; session/task ids come from `/dev/urandom` (Unix-only); ZIO's signal handlers and shutdown hooks are no-ops on Scala Native — stdio shutdown is EOF-driven (the client closing stdin ends the loop), and for HTTP as for SIGINT the OS default action ends the process (no drain); `java.util.regex` is RE2-backed (no lookaheads) — relevant only if your resource URI templates embed exotic regex; ZIO trampolines its run loop only at depth 300, and Native frames are large — if you build deeply nested stream pipelines and hit a `StackOverflowError` on a `ZScheduler-Worker`, `SCALANATIVE_THREAD_STACK_SIZE=4m` raises the thread stack.
 
 ## Spec coverage
 

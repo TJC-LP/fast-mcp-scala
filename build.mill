@@ -128,3 +128,17 @@ trait FastMCPModule extends FastMCPModuleBase with FastMCPPublishingBase
 trait FastMCPTestModule extends TestModule.ScalaTest {
   override def forkArgs: T[Seq[String]] = BuildConfig.lazyValsJvmArgs
 }
+
+/** Test modules that also compile the cross-platform socket-HTTP tests in
+  * `fast-mcp-scala/jvm-native/test/src` next to their own `test/src` — the same suite then runs on
+  * the JVM and inside the linked Scala Native test binary. This is a named top-level trait rather
+  * than an inline `override def sources` in each nested `test` object because Mill's
+  * code-signature tracking cannot name a task overridden inside a nested object of a dash-named
+  * package module ("Could not detect the parent class of task ...") and aborts the build.
+  */
+trait CrossPlatformTests extends JavaModule {
+  override def sources = Task.Sources(
+    moduleDir / "src",
+    moduleDir / os.up / os.up / "jvm-native" / "test" / "src"
+  )
+}

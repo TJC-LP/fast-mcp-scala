@@ -4,7 +4,7 @@ A short tour of how the library is put together. For a user-facing overview see 
 
 ## One native core, one platform seam
 
-As of 0.5.0 the entire MCP protocol layer is native Scala 3 in `shared/` — JSON-RPC envelope, wire types, router, built-in handlers, middleware, and the Tasks state machine. There is exactly one server class, `McpServer[R]`, and one platform seam split along transport lines: `TransportBackend` (stdio + `randomId`) and `HttpTransportBackend` (HTTP) — split so stdio-only programs, and their GraalVM native images, never reach the HTTP stack. The JVM supplies `System.in/out` (`JvmTransportBackend`) and ZIO HTTP (`JvmHttpBackend`); Scala.js supplies Node stdio + `Bun.serve` (`JsTransportBackend`, both givens). No vendored SDK remains on either platform (the official TS SDK survives only as a test-time conformance client).
+As of 0.5.0 the entire MCP protocol layer is native Scala 3 in `shared/` — JSON-RPC envelope, wire types, router, built-in handlers, middleware, and the Tasks state machine. There is exactly one server class, `McpServer[R]`, and one platform seam split along transport lines: `TransportBackend` (stdio + `randomId`) and `HttpTransportBackend` (HTTP) — split so stdio-only programs, and their GraalVM native images, never reach the HTTP stack. The JVM supplies `System.in/out` (`JvmTransportBackend`) and ZIO HTTP (`JvmHttpBackend`); Scala.js supplies Node stdio + `Bun.serve` (`JsTransportBackend`, both givens); Scala Native supplies `System.in/out` (`NativeTransportBackend`) and a hand-rolled HTTP/1.1 + SSE server over `java.net.ServerSocket` (`NativeHttpBackend`), which the JVM can also opt into as the netty-free `JvmSocketHttpBackend`. Every streamable-HTTP decision — session store, only-`initialize`-mints, request→SSE, GET push channel, DELETE, keepalive, transport error bodies — lives once in the shared `StreamableHttpHandler` (`server/transport/http/`), which the JVM and socket backends render onto their own request/response types (the Scala.js backend still carries its own rendering — a follow-up). No vendored SDK remains on any platform (the official TS SDK survives only as a test-time conformance client).
 
 ```
                    ┌──────────────────────────────────────┐
@@ -35,7 +35,7 @@ As of 0.5.0 the entire MCP protocol layer is native Scala 3 in `shared/` — JSO
     ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
     │  stdio (NDJSON) │    │  HTTP stateless │    │ HTTP streamable │
     │  ZIO Stream /   │    │  ZIO HTTP /     │    │ ZIO HTTP /      │
-    │  Node stdin     │    │  Bun.serve      │    │ Bun.serve + SSE │
+    │  Node stdin     │    │  Bun / sockets  │    │ Bun, sockets+SSE│
     └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
@@ -65,11 +65,20 @@ fast-mcp-scala/
 │       ├── manager/                      # Tool/Prompt/Resource/Task managers
 │       ├── router/                       # McpRouter, Builtins, Session, middleware
 │       └── transport/                    # TransportBackend + HttpTransportBackend seam,
-│                                         #   StdioLoop, MessageLoop, HostGuard
+│           │                             #   StdioLoop, MessageLoop, HostGuard
+│           └── http/                     # StreamableHttpHandler + HttpRequest/HttpReply/SseFrame:
+│                                         #   the streamable-HTTP semantics, rendered by every backend
+│
+├── jvm-native/src/com/tjclp/fastmcp/    # compiled by BOTH jvm and scalaNative (not Scala.js)
+│   └── server/transport/
+│       ├── http/SocketHttpServer.scala   # HTTP/1.1 + SSE over java.net.ServerSocket
+│       ├── http/Http1.scala              # request-head parser (Locale-free, RE2-free)
+│       └── SocketHttpBackend.scala       # HttpTransportBackend = handler + socket server
 │
 ├── jvm/src/com/tjclp/fastmcp/           # JVM-specific
 │   ├── server/transport/JvmTransportBackend.scala   # System.in/out (stdio; netty-free)
-│   ├── server/transport/JvmHttpBackend.scala          # ZIO HTTP (streamable + stateless)
+│   ├── server/transport/JvmHttpBackend.scala          # ZIO HTTP adapter (default HTTP given)
+│   ├── server/transport/JvmSocketHttpBackend.scala    # netty-free opt-in (socket server)
 │   └── examples/                         # JVM-only examples (HttpServer, TaskManagerServer)
 │
 ├── js/src/com/tjclp/fastmcp/            # Scala.js (Bun-first)
@@ -78,11 +87,13 @@ fast-mcp-scala/
 │   ├── server/transport/JsTransportBackend.scala    # Bun.serve + Node stdio
 │   └── examples/                         # Bun HTTP example
 │
-└── native/src/com/tjclp/fastmcp/        # Scala Native (EXPERIMENTAL, stdio only)
-    └── server/transport/NativeTransportBackend.scala # System.in/out + /dev/urandom ids
+└── native/src/com/tjclp/fastmcp/        # Scala Native (EXPERIMENTAL)
+    ├── server/transport/NativeTransportBackend.scala # System.in/out + /dev/urandom ids
+    ├── server/transport/NativeHttpBackend.scala      # socket HTTP given (exported)
+    └── examples/conformance/ConformanceServerNative.scala
 ```
 
-Every module's sources are exactly `shared/src/` + its own platform tree — no module reaches across into another's. That is an invariant worth preserving: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/` compiles standalone on all three targets. Mill wires this in `fast-mcp-scala/package.mill` (module definitions live next to the code; the root `build.mill` holds only versions, compiler flags, and shared traits).
+Every module's sources are `shared/src/` + its own platform tree, and `jvm`/`scalaNative` additionally compile `jvm-native/src/` (the socket HTTP layer both share and Scala.js cannot use; its tests in `jvm-native/test/src` run on both platforms through the `CrossPlatformTests` trait). No module reaches across into another's tree otherwise. That is an invariant worth preserving: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/` compiles standalone on all three targets. Mill wires this in `fast-mcp-scala/package.mill` (module definitions live next to the code; the root `build.mill` holds only versions, compiler flags, and shared traits).
 
 The stdio serving lifecycle is shared too: `StdioLoop` owns the session, the single-writer stdout lock, the outbound drainer fiber, and EOF teardown, so the JVM and Scala Native backends contribute only their stdin stream and their `randomId` source. The JS backend drives Node's callback IO directly and does not use it.
 
@@ -132,11 +143,13 @@ Users only see the public methods on `McpServer` (`.tool`, `.prompt`, `.resource
 
 All transports are thin adapters over the shared `MessageLoop` + router:
 
-| Transport | Entry point | JVM | Scala.js |
-|---|---|---|---|
-| Stdio | `server.runStdio()` | `ZStream` over `System.in`, serialized writer on `System.out` | Node `process.stdin`/`stdout` |
-| Streamable HTTP (default) | `server.runHttp()` | ZIO HTTP | `Bun.serve` |
-| Stateless HTTP | `server.runHttp()` with `stateless = true` | ZIO HTTP | `Bun.serve` |
+| Transport | Entry point | JVM | Scala.js | Scala Native |
+|---|---|---|---|---|
+| Stdio | `server.runStdio()` | `ZStream` over `System.in`, serialized writer on `System.out` | Node `process.stdin`/`stdout` | `ZStream.fromReader` over `System.in`, same shared `StdioLoop` |
+| Streamable HTTP (default) | `server.runHttp()` | ZIO HTTP (or the `JvmSocketHttpBackend` opt-in) | `Bun.serve` | `SocketHttpServer` over `java.net.ServerSocket` |
+| Stateless HTTP | `server.runHttp()` with `stateless = true` | ZIO HTTP (or the opt-in) | `Bun.serve` | `SocketHttpServer` |
+
+The socket server (`jvm-native/`) is deliberately minimal: a blocking accept loop and one fiber per connection on ZIO's blocking executor (`attemptBlockingCancelable`, since closing the socket is the only way to unblock a read on Native), gated at 256 concurrent connections; HTTP/1.1 keep-alive with sequential requests; `Content-Length` and chunked request bodies; `Expect: 100-continue`; HTTP/1.0 close-delimited replies; SSE as chunked transfer-encoding with one flushed chunk per event and a reader-side watcher that notices a vanished peer on a quiet stream. Caps: 8 KiB head (431), 16 MiB body (413), 60 s idle. Plaintext only. `FASTMCP_HTTP_DEBUG=1` prints per-connection failures to stderr.
 
 Modern Streamable HTTP is identical on both platforms: every request is an independent POST, carries per-request protocol metadata plus `MCP-Protocol-Version`/`Mcp-Method`/conditional `Mcp-Name` headers, and receives JSON or a request-scoped SSE stream. There is no modern protocol session, GET endpoint, DELETE lifecycle, SSE event ID, replay, or redelivery. Closing a response stream interrupts its dispatch fiber; `subscriptions/listen` uses the same long-lived POST response. Header mismatches are HTTP 400/`-32020`, unsupported versions are HTTP 400/`-32022`, missing required client capabilities are HTTP 400/`-32021`, and unknown request methods are HTTP 404/`-32601`.
 
@@ -153,7 +166,7 @@ Tool handlers return `ZIO[Any, Throwable, Out]`. Handler failures surface in-ban
 Pinned in `build.mill`:
 
 - **Scala** 3.8.3
-- **ZIO** 2.1.20, **zio-json** 0.7.44 (the wire codec on both platforms), **zio-http** 3.4.0
+- **ZIO** 2.1.20, **zio-json** 0.7.44 (the wire codec on all platforms), **zio-http** 3.4.0 (JVM default HTTP backend only — the Scala Native / opt-in socket backend has no HTTP dependency)
 - **Native Scala 3 macros** for JSON Schema derivation, emitted as `zio-json` ASTs
 - **mill-bun-plugin** 0.2.1 (Scala.js + Bun integration)
 - **WartRemover** 3.5.6 (linting)

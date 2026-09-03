@@ -1,7 +1,9 @@
 name: Conformance
 
 # Runs the official MCP conformance "active" server suite (via `bunx @modelcontextprotocol/conformance`)
-# against the fast-mcp-scala ConformanceServer over streamable HTTP, on both platforms.
+# against the fast-mcp-scala ConformanceServer over streamable HTTP, on all three platforms: the JVM
+# (ZIO HTTP), Scala.js on Bun (Bun.serve), and Scala Native (the java.net.ServerSocket backend, as
+# a linked LLVM binary).
 on:
   pull_request:
   push:
@@ -13,8 +15,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [jvm, js]
-    runs-on: ubuntu-latest
+        platform: [jvm, js, scala-native]
+        include:
+          # Share the ci.yml Scala Native toolchain cache (nativelib/javalib/clib NIR jars) instead
+          # of churning the JDK-matrix cache.
+          - platform: scala-native
+            cache-prefix: scala-native
+    runs-on: ubuntu-latest # scala-native: clang preinstalled; SN 0.5 recommends LLVM >= 17
 
     steps:
       - uses: actions/checkout@v4
@@ -23,8 +30,10 @@ jobs:
         uses: ./.github/actions/setup-build
         with:
           bun: "true"
+          cache-prefix: ${{ matrix.cache-prefix || '' }}
 
       # Boots the server, drives it with the pinned conformance harness, and checks the result against
-      # conformance/baseline-${platform}.yml (both baselines are empty — full active-suite green).
+      # conformance/baseline-${platform}.yml (scala-native reuses baseline-jvm.yml; every baseline is
+      # empty — full active-suite green).
       - name: Run MCP conformance active suite (${{ matrix.platform }})
         run: ./scripts/conformance.sh ${{ matrix.platform }}
