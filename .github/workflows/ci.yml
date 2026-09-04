@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -17,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up build
         uses: ./.github/actions/setup-build
@@ -42,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest # clang + jq preinstalled; SN 0.5 recommends LLVM >= 17
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Separate cache prefix from the JDK-matrix builds so the Scala Native toolchain artifacts
       # (nativelib/javalib/clib NIR jars) don't churn the main cache.
