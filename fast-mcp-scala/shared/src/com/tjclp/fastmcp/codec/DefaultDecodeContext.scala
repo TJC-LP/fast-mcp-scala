@@ -7,6 +7,7 @@ import zio.json.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.core.McpDecodeContext
+import com.tjclp.fastmcp.server.LimitSettings
 
 /** The single, platform-neutral [[McpDecodeContext]] for the native core.
   *
@@ -14,12 +15,23 @@ import com.tjclp.fastmcp.core.McpDecodeContext
   * one zio-json implementation that compiles on JVM and Scala.js alike — the convergence the native
   * rewrite is after ("the SDK is identical regardless of platform").
   *
-  * Design: argument values flow as zio-json [[Json]] AST nodes (never Scala `null`), so
-  * `writeValueAsString` is just `.toJson` and parsing is just `fromJson`. Decoders re-serialize a
-  * shallow `Map[String, Json]` and let zio-json's derived `JsonDecoder` produce the typed value —
-  * no bespoke per-field reflection.
+  * Design: argument values flow as zio-json [[Json]] AST nodes (never Scala `null`). The default
+  * decoders ([[McpDecoders]] and the macro-generated per-parameter decoders) go through
+  * [[DefaultDecodeContext.decodeRaw]], which feeds the node straight into zio-json's guarded
+  * `fromJsonAST` — no intermediate string, no unguarded recursive re-encode of client input.
+  * `writeValueAsString` remains for custom contexts/decoders and converts a `StackOverflowError`
+  * into an `IllegalArgumentException` (-32602) instead of letting a fatal error reach the fiber.
+  *
+  * @param maxDepth
+  *   nesting bound for JSON embedded in STRING arguments parsed via [[parseJsonObject]] /
+  *   [[parseJsonArray]] — invisible to the frame-level limits, so bounded here
+  * @param maxObjectFields
+  *   per-object member bound for the same embedded JSON
   */
-final class DefaultDecodeContext extends McpDecodeContext:
+final class DefaultDecodeContext(
+    val maxDepth: Int = LimitSettings.DefaultMaxDepth,
+    val maxObjectFields: Int = LimitSettings.DefaultMaxObjectFields
+) extends McpDecodeContext:
 
   /** Best-effort cast — callers are almost always other decoders, not user code. */
   override def convertValue[T: ClassTag](name: String, rawValue: Any): T =
@@ -31,28 +43,97 @@ final class DefaultDecodeContext extends McpDecodeContext:
         )
 
   override def parseJsonArray(name: String, rawJson: String): List[Any] =
-    rawJson.fromJson[Json] match
-      case Right(Json.Arr(elems)) => elems.toList.map(DefaultDecodeContext.fromJsonAst)
-      case Right(other) =>
-        throw new RuntimeException(s"Expected JSON array for '$name', got: $other")
-      case Left(err) =>
-        throw new RuntimeException(s"Failed to parse JSON array for '$name': $err")
+    parseBounded(name, rawJson, "array") match
+      case Json.Arr(elems) => elems.toList.map(DefaultDecodeContext.fromJsonAst)
+      case other =>
+        throw new RuntimeException(
+          s"Expected JSON array for '$name', got: ${JsonLimits.typeName(other)}"
+        )
 
   override def parseJsonObject(name: String, rawJson: String): Map[String, Any] =
-    rawJson.fromJson[Json] match
-      case Right(Json.Obj(fields)) =>
+    parseBounded(name, rawJson, "object") match
+      case Json.Obj(fields) =>
         fields.iterator.map((k, v) => k -> DefaultDecodeContext.fromJsonAst(v)).toMap
-      case Right(other) =>
-        throw new RuntimeException(s"Expected JSON object for '$name', got: $other")
+      case other =>
+        throw new RuntimeException(
+          s"Expected JSON object for '$name', got: ${JsonLimits.typeName(other)}"
+        )
+
+  /** Parse (zio-json's guarded parser) and bound the AST BEFORE any recursive walk over it —
+    * `fromJsonAst` recurses per level. A violation is bad input: `IllegalArgumentException` maps to
+    * -32602 via `McpError.fromThrowable`.
+    */
+  private def parseBounded(name: String, rawJson: String, kind: String): Json =
+    rawJson.fromJson[Json] match
+      case Right(json) =>
+        JsonLimits.validate(json, maxDepth, maxObjectFields).foreach { violation =>
+          throw new IllegalArgumentException(
+            s"JSON $kind for '$name' rejected: ${violation.message}"
+          )
+        }
+        json
       case Left(err) =>
-        throw new RuntimeException(s"Failed to parse JSON object for '$name': $err")
+        throw new RuntimeException(s"Failed to parse JSON $kind for '$name': $err")
 
   override def writeValueAsString(value: Any): String =
-    DefaultDecodeContext.toJsonAst(value).toJson
+    DefaultDecodeContext.guardDepth(DefaultDecodeContext.toJsonAst(value).toJson)
 
 object DefaultDecodeContext:
 
-  lazy val default: DefaultDecodeContext = new DefaultDecodeContext
+  lazy val default: DefaultDecodeContext = new DefaultDecodeContext()
+
+  /** JVM / Scala Native: convert a `StackOverflowError` from a recursive walk over an argument
+    * value into -32602 material instead of letting it reach `ZIO.attempt` (where a
+    * `VirtualMachineError` is fatal and terminates the process). Scala.js throws a `RangeError`
+    * (`js.JavaScriptException`) that this clause never matches — there the depth bounds (frame and
+    * embedded) are the protection and this catch is inert.
+    */
+  private[fastmcp] inline def guardDepth[A](inline body: A): A =
+    try body
+    catch
+      case _: StackOverflowError =>
+        throw new IllegalArgumentException("argument value is nested too deeply to encode")
+
+  /** Decode a raw argument through zio-json's AST path: no intermediate string, inside zio-json's
+    * guarded `fromJsonAST`. `toJsonAst` is the identity for wire `Json` nodes and a shallow
+    * `Json.Obj` for the typed-contract `Map[String, Any]`. Custom [[McpDecodeContext]]
+    * implementations keep the legacy `writeValueAsString` + `decodeJson` path.
+    *
+    * PUBLIC and stable: it is the target of the inline `derivedZioJsonDecoder` given and of the
+    * macro-generated per-parameter decoders, so it is spliced into user compilation units.
+    */
+  def decodeRaw[T](
+      name: String,
+      rawValue: Any,
+      context: McpDecodeContext,
+      decoder: JsonDecoder[T]
+  ): T =
+    context match
+      case _: DefaultDecodeContext =>
+        val ast = guardDepth(toJsonAst(rawValue))
+        decoder.fromJsonAST(ast) match
+          case Right(value) => value
+          case Left(err) =>
+            throw new RuntimeException(
+              s"Failed to decode parameter '$name' from JSON: $err. Value: ${preview(ast)}"
+            )
+      case other =>
+        val json = other.writeValueAsString(rawValue)
+        decoder.decodeJson(json) match
+          case Right(value) => value
+          case Left(err) =>
+            throw new RuntimeException(
+              s"Failed to decode parameter '$name' from JSON: $err. Value: $json"
+            )
+
+  /** Render a failing value for the error message — guarded and truncated, so an error body never
+    * amplifies the offending input.
+    */
+  private def preview(ast: Json): String =
+    try
+      val s = ast.toJson
+      if s.length > 512 then s.take(512) + "…" else s
+    catch case _: StackOverflowError => "<too deep>"
 
   /** Coerce an arbitrary argument value into a [[Json]] AST. Handles the shapes that reach the
     * decode path: `Json` nodes (passthrough), shallow `Map`/`Iterable` structures produced by

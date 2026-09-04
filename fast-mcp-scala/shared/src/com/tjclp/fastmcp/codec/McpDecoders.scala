@@ -16,8 +16,9 @@ import com.tjclp.fastmcp.server.McpContext
   * no JS specifics) to `shared/`, so JVM and Scala.js share one decode surface. Pairs with
   * [[DefaultDecodeContext]]. This replaces the deleted JVM `JacksonConverter` derivation.
   *
-  *   - `given [T: JsonDecoder]: McpDecoder[T]` — re-serialize `rawValue` via the context and decode
-  *     with zio-json. Equivalent to Jackson's old automatic `convertValue` on the JVM.
+  *   - `given [T: JsonDecoder]: McpDecoder[T]` — decode `rawValue` with zio-json through
+  *     [[DefaultDecodeContext.decodeRaw]] (the AST path; no re-serialisation of client input).
+  *     Equivalent to Jackson's old automatic `convertValue` on the JVM.
   *   - low-priority `Mirror`-based fallback for case classes without an explicit `JsonDecoder`.
   *   - `given McpDecoder[McpContext]` — identity, for context-threading in the contract layer.
   *   - `given McpEncoder[Array[Byte]]` — binary → `ImageContent("application/octet-stream")`.
@@ -41,26 +42,14 @@ trait McpDecodersLowPriority:
     val jsonDecoder = macros.ZioJsonEnumDerivation.deriveDecoder[T](using m)
     new McpDecoder[T]:
       def decode(name: String, rawValue: Any, context: McpDecodeContext): T =
-        val json = context.writeValueAsString(rawValue)
-        jsonDecoder.decodeJson(json) match
-          case Right(value) => value
-          case Left(err) =>
-            throw new RuntimeException(
-              s"Failed to decode parameter '$name' from JSON: $err. Value: $json"
-            )
+        DefaultDecodeContext.decodeRaw[T](name, rawValue, context, jsonDecoder)
 
 object McpDecoders extends McpDecodersLowPriority:
 
   given zioJsonDecoder[T](using decoder: JsonDecoder[T]): McpDecoder[T] with
 
     def decode(name: String, rawValue: Any, context: McpDecodeContext): T =
-      val json = context.writeValueAsString(rawValue)
-      decoder.decodeJson(json) match
-        case Right(value) => value
-        case Left(err) =>
-          throw new RuntimeException(
-            s"Failed to decode parameter '$name' from JSON: $err. Value: $json"
-          )
+      DefaultDecodeContext.decodeRaw[T](name, rawValue, context, decoder)
 
   /** Identity decoder so the contract layer can thread the runtime context uniformly. */
   given McpDecoder[McpContext] with
