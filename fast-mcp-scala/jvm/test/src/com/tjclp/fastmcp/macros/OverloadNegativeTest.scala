@@ -48,6 +48,19 @@ object ApplyOverloadReq:
   def apply(x: Int, y: Boolean = true, z: String): ApplyOverloadReq =
     new ApplyOverloadReq(x, y)
 
+object NonLiteralNames:
+  val n: String = "runtime-name"
+  val flag: Boolean = true
+
+object NonLiteralToolName:
+  @Tool(name = Some(NonLiteralNames.n)) def t(a: Int): Int = a
+
+object NonLiteralHint:
+  @Tool(readOnlyHint = Some(NonLiteralNames.flag)) def t(a: Int): Int = a
+
+object NonLiteralResourceName:
+  @Resource("res://x", name = Some(NonLiteralNames.n)) def r(): String = ""
+
 /** Compile-time diagnostics for F4 (TJC-2298): duplicate registered keys within one scanned object,
   * non-object scan targets, and `required = false` gates that used to be satisfied by a same-named
   * sibling's (or a companion `apply` overload's) default getters.
@@ -77,8 +90,8 @@ class OverloadNegativeTest extends AnyFunSuite:
     assertSomeMessageContains(
       errs,
       "@Tool name 'dup'",
-      "dup(scala.Int)",
-      "dup(java.lang.String)",
+      "dup(a: Int)",
+      "dup(a: String)",
       "OverloadNegativeTest.scala"
     )
   }
@@ -88,7 +101,7 @@ class OverloadNegativeTest extends AnyFunSuite:
       val s = McpServer.typed[Any]("neg")
       s.scanAnnotations[DupExplicitNames.type]
     """)
-    assertSomeMessageContains(errs, "@Tool name 'same'", "one(scala.Int)", "two(java.lang.String)")
+    assertSomeMessageContains(errs, "@Tool name 'same'", "one(a: Int)", "two(a: String)")
   }
 
   test("two @Prompt overloads registering the same name are rejected") {
@@ -112,7 +125,7 @@ class OverloadNegativeTest extends AnyFunSuite:
       val s = McpServer.typed[Any]("neg")
       s.scanAnnotations[DupTemplates.type]
     """)
-    assertSomeMessageContains(errs, "@Resource uri 'users://{}'", "placeholder names")
+    assertSomeMessageContains(errs, "@Resource template 'users://{}'", "placeholder names")
   }
 
   test("scanning a class (not an object's singleton type) is rejected with a hint") {
@@ -141,6 +154,34 @@ class OverloadNegativeTest extends AnyFunSuite:
     )
   }
 
+  test("a non-literal @Tool name is a compile-time error, not a silent fallback to the method name") {
+    val errs: List[scala.compiletime.testing.Error] = typeCheckErrors("""
+      val s = McpServer.typed[Any]("neg")
+      s.scanAnnotations[NonLiteralToolName.type]
+    """)
+    assertSomeMessageContains(
+      errs,
+      "@Tool(name) must be a literal Option[String]",
+      "NonLiteralNames.n"
+    )
+  }
+
+  test("a non-literal @Tool hint is a compile-time error") {
+    val errs: List[scala.compiletime.testing.Error] = typeCheckErrors("""
+      val s = McpServer.typed[Any]("neg")
+      s.scanAnnotations[NonLiteralHint.type]
+    """)
+    assertSomeMessageContains(errs, "@Tool(readOnlyHint) must be a literal Option[Boolean]")
+  }
+
+  test("a non-literal @Resource name is a compile-time error") {
+    val errs: List[scala.compiletime.testing.Error] = typeCheckErrors("""
+      val s = McpServer.typed[Any]("neg")
+      s.scanAnnotations[NonLiteralResourceName.type]
+    """)
+    assertSomeMessageContains(errs, "@Resource(name) must be a literal Option[String]")
+  }
+
   test("control: the positive fixtures still compile (no false-positive collisions)") {
     val errs: List[scala.compiletime.testing.Error] = typeCheckErrors("""
       val s = McpServer.typed[Any]("ok")
@@ -148,6 +189,9 @@ class OverloadNegativeTest extends AnyFunSuite:
       val _ = s.scanAnnotations[DescriptionOnlyTools.type]
       val _ = s.scanAnnotations[OverloadedResources.type]
       val _ = s.scanAnnotations[OverloadedPrompts.type]
+      val _ = s.scanAnnotations[SpelledNames.type]
+      val _ = s.scanAnnotations[StaticBraceAndTemplate.type]
+      val _ = ToolInputSchema.derived[CaseWithCtorDefault]
     """)
     assert(errs == Nil, s"unexpected errors: ${messages(errs).mkString("\n---\n")}")
   }

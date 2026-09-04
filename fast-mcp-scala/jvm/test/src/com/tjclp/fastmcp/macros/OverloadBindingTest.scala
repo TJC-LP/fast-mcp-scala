@@ -68,6 +68,42 @@ object OverloadedPrompts:
   @Prompt(name = Some("ask"))
   def ask(@Param("Topic") topic: String): String = s"Tell me about $topic"
 
+object NameConsts:
+  final val Const = "constx"
+  final val Title = "Const title"
+
+/** Every literal `Option[String]` spelling must be honoured as the registered name — never dropped
+  * in favour of the method name (review finding on the exact-binding fix: only `Some("...")` with
+  * an unqualified `Some` used to parse).
+  */
+object SpelledNames:
+  @Tool(name = scala.Some("qualx")) def q1(@Param("a") a: Int): Int = a
+  @Tool(name = Option("optx")) def q2(@Param("a") a: Int): Int = a
+  @Tool(name = Some[String]("typedx")) def q3(@Param("a") a: Int): Int = a
+  @Tool(name = Some.apply("applyx")) def q4(@Param("a") a: Int): Int = a
+  @Tool(name = new Some("newx")) def q5(@Param("a") a: Int): Int = a
+  @Tool(name = Some(NameConsts.Const), readOnlyHint = scala.Some(true), title = Option(NameConsts.Title))
+  def q6(@Param("a") a: Int): Int = a
+  @Tool(Some("positionalx"), Some("positional description")) def q7(@Param("a") a: Int): Int = a
+  @Prompt(name = Option("promptx")) def p1(@Param("t") t: String): String = t
+  @Resource("res://named", Some("Positional resource name"), Option("positional desc"))
+  def r1(): String = "r1"
+
+/** A genuine primary-constructor default must still satisfy `required = false` on a case-class field
+  * (the companion-`apply`-overload lookup was replaced by the ctor param's `HasDefault` flag).
+  */
+case class CaseWithCtorDefault(
+    @Param("a") a: Int,
+    @Param(description = "flag", required = false) flag: Boolean = true
+)
+
+/** A static URI containing a literal `{}` is keyed apart from a single-placeholder template on the
+  * same stem: they never conflict at runtime, so they must not collide at compile time either.
+  */
+object StaticBraceAndTemplate:
+  @Resource("x://{}") def literal(): String = "static"
+  @Resource("x://{id}") def template(id: String): String = s"tpl:$id"
+
 /** Positive coverage for F4 (TJC-2298): the registered handler, its schema and its `@Param`
   * metadata must all come from the ANNOTATED declaration even when a same-named overload is
   * declared before it.
@@ -159,6 +195,41 @@ class OverloadBindingTest extends AnyFunSuite:
       .find(_.uri == "users://{userId}")
       .flatMap(_.arguments)
     assert(templateArgs == Some(List(ResourceArgument("userId", Some("The user id"), true))))
+  }
+
+  test("every literal Option[String] spelling of `name` is honoured, never the method name") {
+    val server = new McpServer[Any]("SpelledNamesServer", "0.1.0")
+    server.scanAnnotations[SpelledNames.type]
+
+    assert(
+      server.toolManager.listDefinitions().map(_.name).toSet ==
+        Set("qualx", "optx", "typedx", "applyx", "newx", "constx", "positionalx")
+    )
+    val q6 = server.toolManager.getToolDefinition("constx").get
+    assert(q6.annotations.flatMap(_.readOnlyHint) == Some(true))
+    assert(q6.annotations.flatMap(_.title) == Some("Const title"))
+    assert(
+      server.toolManager.getToolDefinition("positionalx").get.description ==
+        Some("positional description")
+    )
+    assert(server.promptManager.getPromptDefinition("promptx").isDefined)
+    val res = server.resourceManager.getResourceDefinition("res://named").get
+    assert(res.name == Some("Positional resource name"))
+    assert(res.description == Some("positional desc"))
+    assert(run(server.toolManager.callTool("qualx", Map("a" -> 7), None)) == 7)
+  }
+
+  test("required=false is satisfied by a genuine primary-constructor default on a case-class field") {
+    val schema = parse(ToolInputSchema.derived[CaseWithCtorDefault].toJsonString).toOption.get
+    assert(schema.hcursor.downField("required").as[List[String]] == Right(List("a")))
+    assert(schema.hcursor.downField("properties").keys.map(_.toSet) == Some(Set("a", "flag")))
+  }
+
+  test("a static uri with a literal `{}` does not collide with a single-placeholder template") {
+    val server = new McpServer[Any]("StaticBraceServer", "0.1.0")
+    server.scanAnnotations[StaticBraceAndTemplate.type]
+    assert(run(server.resourceManager.readResource("x://{}", None)) == "static")
+    assert(run(server.resourceManager.readResource("x://42", None)) == "tpl:42")
   }
 
   test("@Prompt binds to the annotated String overload") {

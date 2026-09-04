@@ -25,7 +25,9 @@ private[macros] trait AnnotationProcessorBase:
     * `NamedArg("name", v)` or the unnamed argument at index 0, and `description` is
     * `NamedArg("description", v)` or the unnamed argument at index 1; nothing else can ever be
     * taken as the registered name (a description-only annotation registers under the method name).
-    * Falls back to the method name and its Scaladoc.
+    * A present but non-literal `name` / `description` is a compile-time error (see
+    * [[MacroUtils.parseOptionStringLiteral]]) rather than a silent fallback. Falls back to the
+    * method name and its Scaladoc.
     */
   protected def nameAndDescription(using Quotes)(
       annot: quotes.reflect.Term,
@@ -33,15 +35,18 @@ private[macros] trait AnnotationProcessorBase:
   ): (String, Option[String]) =
     import quotes.reflect.*
 
+    val annotName = "@" + annot.tpe.typeSymbol.name
+    def parseName(v: Term) = MacroUtils.parseOptionStringLiteral(v, s"$annotName(name)")
+    def parseDesc(v: Term) = MacroUtils.parseOptionStringLiteral(v, s"$annotName(description)")
+
     val (maybeName, maybeDesc) = annot match
       case Apply(_, args) =>
         args.zipWithIndex.foldLeft((Option.empty[String], Option.empty[String])) {
-          case ((_, d), (NamedArg("name", v), _)) => (MacroUtils.parseOptionStringLiteral(v), d)
-          case ((n, _), (NamedArg("description", v), _)) =>
-            (n, MacroUtils.parseOptionStringLiteral(v))
+          case ((_, d), (NamedArg("name", v), _)) => (parseName(v), d)
+          case ((n, _), (NamedArg("description", v), _)) => (n, parseDesc(v))
           case (acc, (NamedArg(_, _), _)) => acc
-          case ((_, d), (v, 0)) => (MacroUtils.parseOptionStringLiteral(v), d)
-          case ((n, _), (v, 1)) => (n, MacroUtils.parseOptionStringLiteral(v))
+          case ((_, d), (v, 0)) => (parseName(v), d)
+          case ((n, _), (v, 1)) => (n, parseDesc(v))
           case (acc, _) => acc
         }
       case _ => (None, None)

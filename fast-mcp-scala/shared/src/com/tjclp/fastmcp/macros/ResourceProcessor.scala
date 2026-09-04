@@ -17,17 +17,28 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
 
   private[macros] val placeholderRegex = raw"\{([^{}]+)}".r
 
-  /** The URI (static) or placeholder-name-agnostic URI pattern (template) this method registers.
+  /** Kind label used in duplicate-registration diagnostics for static resources. */
+  private[macros] val StaticKind = "@Resource uri"
+
+  /** Kind label used in duplicate-registration diagnostics for resource templates. */
+  private[macros] val TemplateKind = "@Resource template"
+
+  /** `(kind, key)` this method registers: for a static resource the verbatim URI under
+    * [[StaticKind]]; for a template the placeholder-name-agnostic pattern under [[TemplateKind]].
     * `users://{id}` and `users://{userId}` produce the same key because `ResourceTemplatePattern`
     * builds the same match regex for both, so they would resolve nondeterministically at read time.
+    * Static and template resources are keyed apart, so a static URI that happens to contain a
+    * literal `{}` never collides with a single-placeholder template on the same stem.
     */
-  def registeredUriKey(using Quotes)(methodSym: quotes.reflect.Symbol): String =
+  def registeredUriKey(using Quotes)(methodSym: quotes.reflect.Symbol): (String, String) =
     import quotes.reflect.*
     val annot = findAnnotation[Resource](methodSym).getOrElse(
       report.errorAndAbort(s"No @Resource annotation found on method '${methodSym.name}'")
     )
     val (uri, _, _, _) = MacroUtils.parseResourceParams(annot)
-    placeholderRegex.replaceAllIn(uri, "{}")
+    if placeholderRegex.findFirstIn(uri).isDefined then
+      (TemplateKind, placeholderRegex.replaceAllIn(uri, "{}"))
+    else (StaticKind, uri)
 
   def processResourceAnnotation[R: Type](using Quotes)(
       server: Expr[McpServerCore[R]],
