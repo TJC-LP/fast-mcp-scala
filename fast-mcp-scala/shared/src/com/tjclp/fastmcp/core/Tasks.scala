@@ -67,6 +67,35 @@ object TaskSupport:
       case "required" => Right(TaskSupport.Required)
       case other => Left(s"Invalid taskSupport value: $other")
 
+/** Inputs available to [[TaskOwnerKey.Custom]] when deriving the per-client bucket of a modern
+  * bearer task. Only `transportClientKey` is trustworthy (it is supplied by the transport, e.g. the
+  * peer address); `clientInfo` and `meta` are attacker-controlled request content and must not be
+  * used as a bucket key unless an authenticating proxy rewrites them.
+  */
+final case class TaskOwnerContext(
+    transportClientKey: Option[String],
+    clientInfo: Option[wire.Implementation],
+    meta: Map[String, zio.json.ast.Json]
+)
+
+/** Policy for deriving the per-client bucket key of a modern (2026-07-28) bearer task. Legacy tasks
+  * are always bucketed by their protocol session id.
+  */
+sealed trait TaskOwnerKey
+
+object TaskOwnerKey:
+
+  /** Default: the transport-supplied `Session.clientKey`; `None` collapses to one anonymous bucket
+    * bounded by `TaskSettings.maxConcurrentPerSession`.
+    */
+  case object Transport extends TaskOwnerKey
+
+  /** Operator hook, e.g. an authenticated principal behind a reverse proxy. A throwing `f` fails
+    * the create with `-32603` — it never silently collapses to the shared bucket. Two `Custom`
+    * instances compare by reference.
+    */
+  final case class Custom(f: TaskOwnerContext => Option[String]) extends TaskOwnerKey
+
 /** Lifecycle status for a task. Terminal states are absorbing. */
 enum TaskStatus:
   case Working, InputRequired, Completed, Failed, Cancelled

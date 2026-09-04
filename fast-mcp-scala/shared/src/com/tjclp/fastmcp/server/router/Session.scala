@@ -24,6 +24,11 @@ final class Session private (
       * client each and keep the legacy task surface.
       */
     val supportsTasks: Boolean,
+    /** Transport-supplied client identity (peer address on the shipped HTTP backends), used to
+      * bucket modern bearer tasks per client. `None` when the transport cannot tell clients apart;
+      * never derived from request content.
+      */
+    val clientKey: Option[String],
     private val protocolVersionRef: Ref[String],
     private val logLevelRef: Ref[Option[LoggingLevel]],
     private val initializedRef: Ref[Boolean],
@@ -39,7 +44,8 @@ final class Session private (
     private val requestIdRef: FiberRef[Option[RequestId]],
     private val inputKeyOccurrencesRef: FiberRef[Option[Ref[Map[String, Int]]]],
     private val lastSeenRef: Ref[Long],
-    private val activeGetRef: Ref[Boolean]
+    private val activeGetRef: Ref[Boolean],
+    private val finalizersRef: Ref[Map[String, UIO[Unit]]]
 ):
 
   /** Millis timestamp of the last client activity (transports touch on every request). Drives idle
@@ -78,6 +84,24 @@ final class Session private (
   def subscribe(uri: String): UIO[Unit] = subscriptionsRef.update(_ + uri)
   def unsubscribe(uri: String): UIO[Unit] = subscriptionsRef.update(_ - uri)
   def isSubscribed(uri: String): UIO[Boolean] = subscriptionsRef.get.map(_.contains(uri))
+  def subscriptionCount: UIO[Int] = subscriptionsRef.get.map(_.size)
+
+  // --- termination ---
+
+  /** Register (or replace) a keyed finalizer run by [[terminate]]. Keyed so a component that
+    * re-registers on every request stays idempotent (e.g. the task manager releasing the session's
+    * tasks).
+    */
+  def addFinalizer(key: String)(f: UIO[Unit]): UIO[Unit] = finalizersRef.update(_.updated(key, f))
+
+  /** Terminate the session: run every registered finalizer once (failures ignored), then shut the
+    * outbound channel down. A strict superset of `outbound.shutdown`; transports call it on
+    * `DELETE` and idle eviction so session-bound state (tasks) does not outlive the session.
+    */
+  def terminate: UIO[Unit] =
+    finalizersRef
+      .getAndSet(Map.empty)
+      .flatMap(fs => ZIO.foreachDiscard(fs.values)(_.ignore)) *> outbound.shutdown
 
   /** Allocate the next id for a server-initiated request. Prefixed so server ids never collide with
     * client-issued ids on the same connection.
@@ -155,6 +179,11 @@ final class Session private (
 
   def clearInflight(id: RequestId): UIO[Unit] = inflight.update(_ - id)
 
+  /** Ids currently tracked in the in-flight registry (test seam: lets a cancellation test wait
+    * until `trackInflight` has run, since the dispatcher forks before tracking).
+    */
+  private[fastmcp] def inflightIds: UIO[Set[RequestId]] = inflight.get.map(_.keySet)
+
   /** Interrupt the in-flight fiber for `id`, if any (drives `notifications/cancelled`). The
     * `initialize` request is exempt — the spec forbids cancelling it.
     */
@@ -198,7 +227,11 @@ final class Session private (
 
 object Session:
 
-  def make(sessionId: String, supportsTasks: Boolean = true): UIO[Session] =
+  def make(
+      sessionId: String,
+      supportsTasks: Boolean = true,
+      clientKey: Option[String] = None
+  ): UIO[Session] =
     for
       pv <- Ref.make("")
       ll <- Ref.make(Option.empty[LoggingLevel])
@@ -220,9 +253,11 @@ object Session:
       )
       seen <- Ref.make(java.lang.System.currentTimeMillis())
       activeGet <- Ref.make(false)
+      finalizers <- Ref.make(Map.empty[String, UIO[Unit]])
     yield new Session(
       sessionId,
       supportsTasks,
+      clientKey,
       pv,
       ll,
       init,
@@ -238,5 +273,6 @@ object Session:
       requestId,
       inputOccurrences,
       seen,
-      activeGet
+      activeGet,
+      finalizers
     )

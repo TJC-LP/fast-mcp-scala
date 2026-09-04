@@ -14,6 +14,14 @@ import com.tjclp.fastmcp.core.Tasks
   * adapter — where all clients share one session identity — legacy task requests are refused with
   * `-32601`.
   *
+  * Store bounds. Every task is charged to an OWNER (the legacy protocol session id, or the modern
+  * client key derived by `ownerKey`) and to a POOL (legacy-session tasks and modern bearer tasks
+  * are counted separately, so a flood of freely minted legacy sessions can never starve bearer
+  * clients and vice versa). Running caps reject; stored caps first evict the oldest completed entry
+  * older than `minResultRetentionMs` and reject only when nothing is evictable. A legacy session's
+  * tasks are released (running ones interrupted) when the transport terminates the session
+  * (`DELETE`, idle eviction).
+  *
   * @param enabled
   *   Master switch. When false, `tasks` capability is not advertised and `params.task` is ignored.
   * @param defaultTtlMs
@@ -23,16 +31,45 @@ import com.tjclp.fastmcp.core.Tasks
   * @param pollIntervalMs
   *   `pollInterval` value advertised back to clients in `tasks/get` responses.
   * @param maxConcurrentPerSession
-  *   Resource cap; additional task creations beyond this are rejected with `-32602`. Legacy tasks
-  *   are counted per protocol session; modern bearer tasks all share one global bucket under this
-  *   same limit.
+  *   Running (non-terminal) tasks per OWNER: the legacy protocol session id, or the modern client
+  *   key derived by `ownerKey`; keyless modern requests share one anonymous bucket under this same
+  *   limit. Exceeding it is the caller's own fault: `-32602`.
+  * @param maxConcurrentTotal
+  *   Ceiling on running tasks per POOL (legacy-session pool and modern-bearer pool, counted
+  *   separately). Distinct from and larger than the per-owner cap. `-32003` when exceeded.
+  * @param maxStoredPerOwner
+  *   Stored entries per owner, terminal included. At the cap the owner's oldest terminal entry
+  *   older than `minResultRetentionMs` is evicted to admit the new task (its result becomes
+  *   unknown); if none qualifies the create is rejected with `-32003`. Normalised to `>=
+  *   maxConcurrentPerSession`.
+  * @param maxStoredTotal
+  *   Stored entries per pool, terminal included. At the cap the oldest eligible terminal entry of
+  *   the pool's LARGEST owner is evicted (the flooder pays); else `-32003`. Normalised to `>=
+  *   maxConcurrentTotal`.
+  * @param minResultRetentionMs
+  *   A terminal result younger than this is never evicted by a cap (only by its own TTL), so a
+  *   client always gets at least this long to collect a result (6x the default poll interval).
+  * @param sweepIntervalMs
+  *   Upper bound on the single TTL sweeper's sleep; a TTL is honoured within this slack.
+  * @param ownerKey
+  *   How modern bearer tasks are bucketed per client. `Transport` (default) uses the
+  *   transport-supplied `Session.clientKey` (the peer address on the shipped HTTP backends; `None`
+  *   -> one anonymous bucket). `Custom(f)` lets an operator behind an authenticating proxy derive a
+  *   key; `_meta`/`clientInfo` are client-controlled and must not be used as a key unless the proxy
+  *   rewrites them.
   */
 case class TaskSettings(
     enabled: Boolean = false,
     defaultTtlMs: Long = 3_600_000L,
     maxTtlMs: Long = 86_400_000L,
     pollIntervalMs: Long = Tasks.DefaultPollIntervalMs,
-    maxConcurrentPerSession: Int = 64
+    maxConcurrentPerSession: Int = 64,
+    maxConcurrentTotal: Int = 1024,
+    maxStoredPerOwner: Int = 256,
+    maxStoredTotal: Int = 4096,
+    minResultRetentionMs: Long = 30_000L,
+    sweepIntervalMs: Long = 1_000L,
+    ownerKey: com.tjclp.fastmcp.core.TaskOwnerKey = com.tjclp.fastmcp.core.TaskOwnerKey.Transport
 )
 
 /** Settings for an MCP server. HTTP-specific fields (`stateless`, `keepAliveInterval`,
