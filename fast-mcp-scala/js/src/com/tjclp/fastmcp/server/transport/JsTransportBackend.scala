@@ -80,10 +80,15 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     def dispatch(line: String): Unit =
       if line.nonEmpty then
         val _ = ZioJsPromise.zioToPromise(rt)(
-          MessageLoop.handleFrame(router, session, line).flatMap {
-            case Some(reply) => writeLine(reply)
-            case None => ZIO.unit
-          }
+          MessageLoop
+            .handleFrame(router, session, line)
+            .flatMap {
+              case Some(reply) => writeLine(reply)
+              case None => ZIO.unit
+            }
+            // Never surface a defect as an unhandled promise rejection — Bun terminates the whole
+            // process on those. The cause goes to stderr (the log); the client gets no frame.
+            .catchAllCause(cause => ZIO.logWarningCause("stdio dispatch failed", cause))
         )
     stdin.on(
       "data",
@@ -203,13 +208,23 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   ): URIO[R, js.Dynamic] =
     ZIO.suspendSucceed(effect).catchAllCause { cause =>
       val response = cause.failureOption match
-        case Some(t) if Option(t.getMessage).exists(_.contains("maxRequestBodySize")) =>
-          // Bun aborted the body read at its own cap; mirror the first-party 413.
+        case Some(BodyReadFailure(t))
+            if Option(t.getMessage).exists(_.contains("maxRequestBodySize")) =>
+          // Bun aborted the body read at its own cap (Bun 1.4.1 rejects `text()` with
+          // "... exceeds maxRequestBodySize"); mirror the first-party 413. Should the message
+          // ever change, the read failure still falls to the fixed 400 below.
           reject(HttpRequestGuards.bodyTooLargeRejection(settings))
-        case Some(_) => jsonRpcErrorResponse(400, "Body read error")
-        case None => jsonRpcErrorResponse(500, HttpRequestGuards.InternalErrorMessage)
+        case Some(_: BodyReadFailure) => jsonRpcErrorResponse(400, "Body read error")
+        // Any other typed failure is a server-side problem, not the client's body.
+        case _ => jsonRpcErrorResponse(500, HttpRequestGuards.InternalErrorMessage)
       ZIO.logWarningCause("HTTP handler failed", cause).as(response)
     }
+
+  /** Marks a failure raised while reading the request body (`req.text()`), so `guarded` can
+    * distinguish a client-side body problem (400/413) from every other failure (500).
+    */
+  private final case class BodyReadFailure(cause: Throwable)
+      extends Exception(Option(cause.getMessage).getOrElse("body read failed"), cause)
 
   /** Peer address of the request via `server.requestIP(req)` — the default owner key for
     * bearer-task buckets. `None` when the socket is already gone or the server handle is absent.
@@ -236,7 +251,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       router: McpRouter[R],
       runtime: Runtime[R],
       settings: McpServerSettings,
-      store: js.Dictionary[Session] = js.Dictionary.empty[Session] // Bun is single-threaded
+      store: js.Dictionary[Session] = js.Dictionary.empty[Session], // Bun is single-threaded
+      onStop: URIO[R, Any] = ZIO.unit // e.g. `TaskManager.shutdown` for the handle-based entries
   ): BunHttpHandle =
     HttpRequestGuards
       .validateSettings(settings)
@@ -249,7 +265,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       Unsafe.unsafe(implicit u => runtime.unsafe.fork(evictIdleSessions(store, settings)))
     new BunHttpHandle(
       server,
-      () => Unsafe.unsafe(implicit u => { val _ = runtime.unsafe.fork(sweeper.interrupt) })
+      () =>
+        Unsafe.unsafe(implicit u => { val _ = runtime.unsafe.fork(sweeper.interrupt *> onStop) })
     )
 
   private def handleFetch[R](
@@ -259,7 +276,14 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       req: js.Dynamic,
       clientKey: Option[String]
   ): ZIO[R, Throwable, js.Dynamic] =
-    if pathOf(req) != settings.httpEndpoint then ZIO.succeed(webResponse(404, "Not Found"))
+    // `new URL(req.url)` throws on an unparseable authority (e.g. `Host: 127.0.0.1:99999`): answer
+    // the host gate's 403 when the guard is on (JVM parity), else a plain 400 — never a defect.
+    val path = scala.util.Try(pathOf(req)).toOption
+    if path.isEmpty then
+      ZIO.succeed(
+        hostError(req, settings).getOrElse(jsonRpcErrorResponse(400, "Malformed request URL"))
+      )
+    else if !path.contains(settings.httpEndpoint) then ZIO.succeed(webResponse(404, "Not Found"))
     else
       val headerErr =
         if methodOf(req) == "POST" then postHeaderError(req, settings)
@@ -373,11 +397,13 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
 
   /** Mint a durable session for a header-less legacy `initialize`, bounded by
     * `settings.maxSessions` (JVM twin: `JvmHttpBackend.mintSession`). Bun is single-threaded, so
-    * the admission decision, the eviction and the insert happen in ONE synchronous `ZIO.succeed`
-    * block and the store never exceeds the cap even with N initializes in flight. At the cap the
-    * longest-idle session WITHOUT a live GET is evicted (queue shut down, WARN logged) and the
-    * newcomer admitted; only when every stored session holds a live GET is the request refused with
-    * 503.
+    * the idle/live snapshot, the admission decision, the eviction and the insert all happen in ONE
+    * synchronous `ZIO.succeed` block (`Session.idleStateUnsafe`, no fiber yield in between): the
+    * store never exceeds the cap with N initializes in flight, and a newcomer is never refused
+    * while an evictable session exists. At the cap the longest-idle session WITHOUT a live GET is
+    * evicted — terminated (`Session.terminate`: in-flight requests interrupted, its tasks released,
+    * queue shut down; WARN logged) — and the newcomer admitted; only when every stored session
+    * holds a live GET is the request refused with 503.
     */
   private def mintSession[R](
       router: McpRouter[R],
@@ -387,18 +413,18 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   ): ZIO[R, Throwable, js.Dynamic] =
     for
       sid <- randomId()
-      snapshot <-
-        if HttpRequestGuards.capReached(store.size, settings) then
-          ZIO.foreach(store.toList) { case (id, s) =>
-            (s.lastSeen zip s.hasActiveGet).map((seen, live) => (id, seen, live))
-          }
-        else ZIO.succeed(Nil)
       session <- Session.make(sid)
       outcome <- ZIO.succeed {
         if !HttpRequestGuards.capReached(store.size, settings) then
           store(sid) = session
           Right(None)
         else
+          val snapshot = Unsafe.unsafe { implicit u =>
+            store.toList.map { case (id, s) =>
+              val (seen, live) = s.idleStateUnsafe
+              (id, seen, live)
+            }
+          }
           HttpRequestGuards.pickEvictable(snapshot).flatMap(store.get) match
             case Some(victim) =>
               store -= victim.sessionId
@@ -658,7 +684,9 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     Option(req.headers.get(SessionIdHeader).asInstanceOf[String]).filter(_.nonEmpty)
 
   private def readBody(req: js.Dynamic): ZIO[Any, Throwable, String] =
-    ZioJsPromise.fromJsPromise(req.text().asInstanceOf[js.Promise[String]])
+    ZioJsPromise
+      .fromJsPromise(req.text().asInstanceOf[js.Promise[String]])
+      .mapError(BodyReadFailure(_))
 
   private def jsonResponse(
       body: String,
@@ -709,7 +737,9 @@ final class BunHttpHandle private[transport] (val server: BunServer, release: ()
   * instead of forking `runHttp()` (a `ZIO.never`) — integration tests and the shipped
   * `ConformanceServerJs`. They build the router eagerly on the default runtime, so they apply to
   * `McpServer[Any]`. Both run the idle-session sweeper and honour every HTTP hardening setting
-  * exactly like `runHttp()`; call `stop()` on the returned [[BunHttpHandle]] to tear down.
+  * exactly like `runHttp()`; `stop()` on the returned [[BunHttpHandle]] tears the listener, the
+  * sweeper and (when tasks are enabled) the `TaskManager` down. The two names are aliases kept for
+  * source compatibility: the mode comes from `settings.stateless`, not from the method called.
   */
 extension (server: McpServer[Any])
 
@@ -717,7 +747,12 @@ extension (server: McpServer[Any])
   def startStatefulHttp(): BunHttpHandle = startHttpHandle(server)
 
 private def startHttpHandle(server: McpServer[Any]): BunHttpHandle =
-  val router = Unsafe.unsafe(implicit u =>
-    Runtime.default.unsafe.run(server.buildRouter).getOrThrowFiberFailure()
+  val (router, taskManager) = Unsafe.unsafe(implicit u =>
+    Runtime.default.unsafe.run(server.buildRouterWithTasks).getOrThrowFiberFailure()
   )
-  JsTransportBackend.startBun(router, Runtime.default, server.settings)
+  JsTransportBackend.startBun(
+    router,
+    Runtime.default,
+    server.settings,
+    onStop = taskManager.fold(ZIO.unit)(_.shutdown)
+  )

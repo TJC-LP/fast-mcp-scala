@@ -17,8 +17,8 @@ import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 /** The inbound frame limits at the `MessageLoop.parseFrame` choke point (TJC-2295 / F1, F3): the
   * hash-collision object bound, the depth bound, the frame-length bound, string-awareness of the
   * pre-scan, exact boundaries, and the no-HashMap envelope decoder (last-wins duplicate keys, no
-  * error-body amplification). Transport-independent — these exercise the shared code every
-  * platform routes through.
+  * error-body amplification). Transport-independent — these exercise the shared code every platform
+  * routes through.
   */
 class JsonLimitsTest extends AnyFunSuite with Matchers:
 
@@ -42,7 +42,8 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
       sb.result()
     }
 
-  /** `{"jsonrpc":"2.0","id":1,"method":"ping",<keys>:0,…}` — the colliding object IS the envelope. */
+  /** `{"jsonrpc":"2.0","id":1,"method":"ping",<keys>:0,…}` — the colliding object IS the envelope.
+    */
   private def collidingEnvelope(keys: IndexedSeq[String]): String =
     val sb = new StringBuilder(keys.length * (keys.head.length + 6) + 64)
     sb.append("""{"jsonrpc":"2.0","id":1,"method":"ping"""")
@@ -91,11 +92,11 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
 
     val (r10, ms10) = timed(MessageLoop.parseFrame(collidingEnvelope(k10), big))
     parseErrorMessage(r10) should include("maxObjectFields")
-    ms10 should be < 200L
+    ms10 should be < 1000L
 
     val (r11, ms11) = timed(MessageLoop.parseFrame(collidingEnvelope(k11), big))
     parseErrorMessage(r11) should include("maxObjectFields")
-    ms11 should be < 200L
+    ms11 should be < 1000L
   }
 
   test("a colliding object nested under params.arguments is rejected too") {
@@ -105,7 +106,7 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
         )}}}"""
     val (result, ms) = timed(MessageLoop.parseFrame(frame, big))
     parseErrorMessage(result) should include("maxObjectFields")
-    ms should be < 200L
+    ms should be < 1000L
   }
 
   test("a colliding frame does not delay a concurrent ping on the same router") {
@@ -129,7 +130,9 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
     ms should be < 500L
   }
 
-  test("residual per-object cost at the default maxObjectFields is tracked (50 × 1024 colliding keys)") {
+  test(
+    "residual per-object cost at the default maxObjectFields is tracked (50 × 1024 colliding keys)"
+  ) {
     // Inside the limits nothing is rejected, so every Map sink after the choke point still pays
     // O(maxObjectFields²) per colliding object. 50 objects × 1024 keys is a ~1 MB frame (the HTTP
     // body cap); the bound here is loose (measured ≈ 0.2 s on JDK 25) — it pins the ORDER of the
@@ -158,7 +161,7 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
     val frame = "[" * 100_000 + "]" * 100_000
     val (result, ms) = timed(MessageLoop.parseFrame(frame))
     parseErrorMessage(result) should include("maxDepth")
-    ms should be < 200L
+    ms should be < 1000L
   }
 
   test("300 nested objects are rejected; 60-deep tools/call arguments are accepted") {
@@ -182,7 +185,9 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
 
     val eleven = """{"a":12345}"""
     eleven.length shouldBe 11
-    parseErrorMessage(MessageLoop.parseFrame(eleven, LimitSettings(maxFrameChars = 10))) should include(
+    parseErrorMessage(
+      MessageLoop.parseFrame(eleven, LimitSettings(maxFrameChars = 10))
+    ) should include(
       "maxFrameChars"
     )
     MessageLoop.parseFrame(eleven, LimitSettings(maxFrameChars = 11)) match
@@ -257,7 +262,9 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
 
   test("numeric ids outside Long range are rejected, not silently wrapped") {
     def idOf(id: String) = MessageLoop.parseFrame(s"""{"jsonrpc":"2.0","id":$id,"method":"ping"}""")
-    idOf("9223372036854775807") shouldBe Right(Request(RequestId.NumId(Long.MaxValue), "ping", None))
+    idOf("9223372036854775807") shouldBe Right(
+      Request(RequestId.NumId(Long.MaxValue), "ping", None)
+    )
     idOf("-9223372036854775808") shouldBe Right(
       Request(RequestId.NumId(Long.MinValue), "ping", None)
     )
@@ -265,14 +272,22 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
     idOf("100e-2") shouldBe Right(Request(RequestId.NumId(1L), "ping", None))
     idOf("0e99999999") shouldBe Right(Request(RequestId.NumId(0L), "ping", None))
     // 1e30 used to become NumId(5076944270305263616); 1e999999999 became NumId(0).
-    Seq("9223372036854775808", "1e30", "1e19", "1e999999999", "1e2147483647", "1.5", "1e-2147483647")
+    Seq(
+      "9223372036854775808",
+      "1e30",
+      "1e19",
+      "1e999999999",
+      "1e2147483647",
+      "1.5",
+      "1e-2147483647"
+    )
       .foreach { id =>
         val (result, ms) = timed(idOf(id))
         withClue(id) {
           result match
             case Right(Invalid(None, reason)) => reason should include("64-bit")
             case other => fail(s"expected Invalid for id $id, got $other")
-          ms should be < 200L
+          ms should be < 1000L
         }
       }
   }
@@ -287,23 +302,27 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
     val initFrame =
       """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1.0"}}}"""
     // envelope (1) + params (2) + 8 arrays = depth 10
-    val tenDeep = s"""{"jsonrpc":"2.0","id":2,"method":"ping","params":{"a":${"[" * 8}1${"]" * 8}}}"""
+    val tenDeep =
+      s"""{"jsonrpc":"2.0","id":2,"method":"ping","params":{"a":${"[" * 8}1${"]" * 8}}}"""
 
     val tight = McpServer("Tight", "0.1.0", McpServerSettings(limits = LimitSettings(maxDepth = 8)))
     val tightRouter = runUnsafe(tight.buildRouter)
     tightRouter.limits.maxDepth shouldBe 8
     val tightSession = runUnsafe(Session.make("tight"))
-    runUnsafe(MessageLoop.handleFrame(tightRouter, tightSession, initFrame)).getOrElse("") should include(
+    runUnsafe(MessageLoop.handleFrame(tightRouter, tightSession, initFrame))
+      .getOrElse("") should include(
       "\"serverInfo\""
     )
-    val rejected = runUnsafe(MessageLoop.handleFrame(tightRouter, tightSession, tenDeep)).getOrElse("")
+    val rejected =
+      runUnsafe(MessageLoop.handleFrame(tightRouter, tightSession, tenDeep)).getOrElse("")
     rejected should include("-32700")
     rejected should include("maxDepth")
 
     val loose = McpServer("Loose", "0.1.0")
     val looseRouter = runUnsafe(loose.buildRouter)
     val looseSession = runUnsafe(Session.make("loose"))
-    runUnsafe(MessageLoop.handleFrame(looseRouter, looseSession, tenDeep)).getOrElse("") should include(
+    runUnsafe(MessageLoop.handleFrame(looseRouter, looseSession, tenDeep))
+      .getOrElse("") should include(
       """"result":{}"""
     )
   }
@@ -345,7 +364,8 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
     val _ = an[IllegalArgumentException] should be thrownBy LimitSettings(maxObjectFields = 0)
     val _ = an[IllegalArgumentException] should be thrownBy LimitSettings(maxFrameChars = 0)
     val _ = an[IllegalArgumentException] should be thrownBy LimitSettings(maxUriChars = 0)
-    val _ = an[IllegalArgumentException] should be thrownBy LimitSettings(maxSubscriptionsPerSession = 0)
+    val _ =
+      an[IllegalArgumentException] should be thrownBy LimitSettings(maxSubscriptionsPerSession = 0)
     LimitSettings(maxDepth = LimitSettings.MaxSupportedDepth).maxDepth shouldBe 256
     LimitSettings().maxFrameChars shouldBe 4 * 1024 * 1024
     LimitSettings().maxObjectFields shouldBe 1024

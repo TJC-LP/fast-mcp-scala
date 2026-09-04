@@ -628,8 +628,9 @@ object JvmHttpBackend extends HttpTransportBackend:
             }
         }
 
-  /** DELETE terminates a session: drop it from the store and shut down its outbound queue (which
-    * ends any open `GET` SSE stream). `405` when delete is disallowed by settings.
+  /** DELETE terminates a session: drop it from the store and `Session.terminate` it (in-flight
+    * requests interrupted, its tasks released, outbound queue shut down — which ends any open `GET`
+    * SSE stream). `405` when delete is disallowed by settings.
     */
   private def handleStreamableDelete(
       store: Ref[Map[String, Session]],
@@ -669,7 +670,18 @@ object JvmHttpBackend extends HttpTransportBackend:
     * (full-origin match, see [[HostGuard]]).
     */
   private def hostError(req: Request, settings: McpServerSettings): Option[Response] =
-    HttpRequestGuards.hostGate(req.rawHeader, settings).map(reject)
+    HttpRequestGuards.hostGate(gateHeader(req), settings).map(reject)
+
+  /** Header lookup for the gates: a header sent more than once is seen as its `", "`-joined value
+    * (what Bun's `Headers.get` returns), so a duplicated `Host`/`Origin` fails the origin parser
+    * closed (403) on both backends instead of only the first value being checked.
+    */
+  private def gateHeader(req: Request)(name: String): Option[String] =
+    val values = req.headers.iterator
+      .filter(_.headerName.equalsIgnoreCase(name))
+      .map(_.renderedValue)
+      .toList
+    if values.isEmpty then None else Some(values.mkString(", "))
 
   /** POST guard, evaluated on headers only and BEFORE the body is read or any session is minted:
     * 403 Host/Origin → 415 unless `Content-Type` is `application/json` → 413 when the declared
@@ -685,7 +697,7 @@ object JvmHttpBackend extends HttpTransportBackend:
       settings: McpServerSettings,
       requireSse: Boolean
   ): Option[Response] =
-    HttpRequestGuards.postGate(req.rawHeader, settings, requireSse).map(reject)
+    HttpRequestGuards.postGate(gateHeader(req), settings, requireSse).map(reject)
 
   /** GET guard (SSE channel): `Accept` (if present) must allow `text/event-stream`. */
   private def getHeaderError(req: Request, settings: McpServerSettings): Option[Response] =

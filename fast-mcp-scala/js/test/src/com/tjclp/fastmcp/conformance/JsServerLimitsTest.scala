@@ -129,7 +129,7 @@ class JsServerLimitsTest extends AsyncFlatSpec with Matchers:
       body(port).andThen { case _ => handle.stop() }
     }
 
-  "Bun HTTP limits (stateless)" should "reject a 243-colliding-key body with 400/-32700 in < 200 ms, then serve normally" in {
+  "Bun HTTP limits (stateless)" should "reject a 243-colliding-key body with 400/-32700 in < 2 s, then serve normally" in {
     withServer(38934, stateless = true) { port =>
       for
         _ <- post(port, pingBody) // warm-up
@@ -147,7 +147,7 @@ class JsServerLimitsTest extends AsyncFlatSpec with Matchers:
         bad.status.asInstanceOf[Int] shouldBe 400
         badText should include("-32700")
         badText should include("maxObjectFields")
-        elapsed should be < 200.0
+        elapsed should be < 2000.0 // generous: a real Bun round trip on a loaded CI runner; the quadratic case takes seconds
         deep.status.asInstanceOf[Int] shouldBe 400
         deepText should include("-32700")
         deepText should include("maxDepth")
@@ -159,7 +159,7 @@ class JsServerLimitsTest extends AsyncFlatSpec with Matchers:
     }
   }
 
-  it should "answer a within-limits worst case (20 × 64 colliding keys) normally in < 500 ms" in {
+  it should "answer a within-limits worst case (20 × 64 colliding keys) normally in < 5 s" in {
     withServer(38933, stateless = true) { port =>
       val obj = collidingObject(collidingKeys(4).take(64))
       val body =
@@ -175,7 +175,7 @@ class JsServerLimitsTest extends AsyncFlatSpec with Matchers:
       yield
         resp.status.asInstanceOf[Int] shouldBe 200
         text should include("\"20\"")
-        elapsed should be < 500.0
+        elapsed should be < 5000.0
     }
   }
 

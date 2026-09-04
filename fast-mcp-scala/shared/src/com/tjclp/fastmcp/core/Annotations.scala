@@ -11,9 +11,11 @@ import scala.annotation.StaticAnnotation
   * `description` is `None` or omitted, the macro will attempt to use the method's Scaladoc comment
   * as the description.
   *
-  * Every `Option` argument (`name`, `description`, `title`, `taskSupport`, the hints) must be a
-  * literal — `Some("...")`, `Option("...")`, `None`, or a `final val` constant; a non-literal
-  * argument is a compile-time error rather than being silently dropped.
+  * The `Option` arguments the macro reads (`name`, `description`, `title`, `taskSupport` and the
+  * boolean hints) must be literals — `Some("...")`, `Option("...")`, `None`, or a `final val`
+  * constant; a non-literal argument is a compile-time error rather than being silently dropped.
+  * (`version`, `deprecationMessage` and `timeoutMillis` are metadata only and are not read by
+  * `scanAnnotations`.)
   *
   * @param name
   *   Optional name for the tool. Must be unique per scanned object (a duplicate is a compile-time

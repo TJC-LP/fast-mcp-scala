@@ -27,9 +27,21 @@ class FromJsonAstDecodeTest extends AnyFunSuite:
   private def now(): Double = scala.scalajs.js.Dynamic.global.performance.now().asInstanceOf[Double]
 
   test("McpDecoder decodes a Map of wire Json values (the AST path) on JS") {
-    assert(McpDecoder[Add].decode("add", Map("a" -> Json.Num(2), "b" -> Json.Num(3)), ctx) == Add(2, 3))
-    assert(McpDecoder[Point].decode("p", Map("x" -> Json.Num(1), "y" -> Json.Num(-1)), ctx) == Point(1, -1))
-    assert(McpDecoder[Add].decode("add", Json.Obj("a" -> Json.Num(5), "b" -> Json.Num(6)), ctx) == Add(5, 6))
+    assert(
+      McpDecoder[Add].decode("add", Map("a" -> Json.Num(2), "b" -> Json.Num(3)), ctx) == Add(2, 3)
+    )
+    assert(
+      McpDecoder[Point].decode("p", Map("x" -> Json.Num(1), "y" -> Json.Num(-1)), ctx) == Point(
+        1,
+        -1
+      )
+    )
+    assert(
+      McpDecoder[Add].decode("add", Json.Obj("a" -> Json.Num(5), "b" -> Json.Num(6)), ctx) == Add(
+        5,
+        6
+      )
+    )
   }
 
   test("a 64-deep Json argument decodes or fails with a RuntimeException — never a RangeError") {

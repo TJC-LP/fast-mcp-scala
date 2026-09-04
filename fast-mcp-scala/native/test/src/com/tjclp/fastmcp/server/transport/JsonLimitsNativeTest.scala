@@ -46,7 +46,9 @@ class JsonLimitsNativeTest extends AnyFunSuite with Matchers:
     keys.map(_.hashCode).distinct.size shouldBe 1
     val frame =
       s"""{"jsonrpc":"2.0","id":1,"method":"ping",${keys.map(k => s""""$k":0""").mkString(",")}}"""
-    message(MessageLoop.parseFrame(frame, LimitSettings(maxFrameChars = 8 * 1024 * 1024))) should include(
+    message(
+      MessageLoop.parseFrame(frame, LimitSettings(maxFrameChars = 8 * 1024 * 1024))
+    ) should include(
       "maxObjectFields"
     )
   }

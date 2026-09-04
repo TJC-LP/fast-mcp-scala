@@ -82,15 +82,22 @@ object SpelledNames:
   @Tool(name = Some[String]("typedx")) def q3(@Param("a") a: Int): Int = a
   @Tool(name = Some.apply("applyx")) def q4(@Param("a") a: Int): Int = a
   @Tool(name = new Some("newx")) def q5(@Param("a") a: Int): Int = a
-  @Tool(name = Some(NameConsts.Const), readOnlyHint = scala.Some(true), title = Option(NameConsts.Title))
+
+  @Tool(
+    name = Some(NameConsts.Const),
+    readOnlyHint = scala.Some(true),
+    title = Option(NameConsts.Title)
+  )
   def q6(@Param("a") a: Int): Int = a
   @Tool(Some("positionalx"), Some("positional description")) def q7(@Param("a") a: Int): Int = a
   @Prompt(name = Option("promptx")) def p1(@Param("t") t: String): String = t
+
   @Resource("res://named", Some("Positional resource name"), Option("positional desc"))
   def r1(): String = "r1"
 
-/** A genuine primary-constructor default must still satisfy `required = false` on a case-class field
-  * (the companion-`apply`-overload lookup was replaced by the ctor param's `HasDefault` flag).
+/** A genuine primary-constructor default must still satisfy `required = false` on a case-class
+  * field (the companion-`apply`-overload lookup was replaced by the ctor param's `HasDefault`
+  * flag).
   */
 case class CaseWithCtorDefault(
     @Param("a") a: Int,
@@ -129,13 +136,17 @@ class OverloadBindingTest extends AnyFunSuite:
     assert(a.downField("type").as[String] == Right("string"))
     assert(a.downField("description").as[String] == Right("Text to echo"))
     assert(schema.hcursor.downField("required").as[List[String]] == Right(List("a")))
-    assert(toolServer.toolManager.getToolDefinition("echo").get.description == Some("Echo a string"))
+    assert(
+      toolServer.toolManager.getToolDefinition("echo").get.description == Some("Echo a string")
+    )
 
     val result = run(toolServer.toolManager.callTool("echo", Map("a" -> "hi"), None))
     assert(result == "string:hi")
   }
 
-  test("(b) the un-annotated raw helper's extra parameter is not part of the registered signature") {
+  test(
+    "(b) the un-annotated raw helper's extra parameter is not part of the registered signature"
+  ) {
     val schema = schemaOf(toolServer, "safe")
     assert(schema.hcursor.downField("properties").keys.map(_.toSet) == Some(Set("a")))
     val result = run(toolServer.toolManager.callTool("safe", Map("a" -> "x"), None))
@@ -168,8 +179,10 @@ class OverloadBindingTest extends AnyFunSuite:
       run(toolServer.toolManager.callTool("sum-strings", Map("a" -> "x", "b" -> "y"), None)) ==
         "xy"
     )
-    assert(toolServer.toolManager.listDefinitions().map(_.name).toSet ==
-      Set("echo", "safe", "eff", "sum-ints", "sum-strings"))
+    assert(
+      toolServer.toolManager.listDefinitions().map(_.name).toSet ==
+        Set("echo", "safe", "eff", "sum-ints", "sum-strings")
+    )
   }
 
   test("description-only @Tool registers under the method name, never under the description") {
@@ -219,7 +232,9 @@ class OverloadBindingTest extends AnyFunSuite:
     assert(run(server.toolManager.callTool("qualx", Map("a" -> 7), None)) == 7)
   }
 
-  test("required=false is satisfied by a genuine primary-constructor default on a case-class field") {
+  test(
+    "required=false is satisfied by a genuine primary-constructor default on a case-class field"
+  ) {
     val schema = parse(ToolInputSchema.derived[CaseWithCtorDefault].toJsonString).toOption.get
     assert(schema.hcursor.downField("required").as[List[String]] == Right(List("a")))
     assert(schema.hcursor.downField("properties").keys.map(_.toSet) == Some(Set("a", "flag")))

@@ -19,7 +19,9 @@ class LimitsWiringTest extends AnyFunSuite with Matchers:
     Iterator
       .iterate(Paths.get(System.getProperty("user.dir")).toAbsolutePath)(_.getParent)
       .takeWhile(_ != null)
-      .find(p => Files.exists(p.resolve("build.mill")) && Files.isDirectory(p.resolve("fast-mcp-scala")))
+      .find(p =>
+        Files.exists(p.resolve("build.mill")) && Files.isDirectory(p.resolve("fast-mcp-scala"))
+      )
       .getOrElse(fail("could not locate the repository root (build.mill) from user.dir"))
 
   test("every parseFrame call site outside MessageLoop passes router.limits") {
@@ -38,7 +40,8 @@ class LimitsWiringTest extends AnyFunSuite with Matchers:
               .asScala
               .zipWithIndex
               .collect {
-                case (line, idx) if line.contains("parseFrame(") && !line.contains("router.limits") =>
+                case (line, idx)
+                    if line.contains("parseFrame(") && !line.contains("router.limits") =>
                   s"$file:${idx + 1}: $line"
               }
         }

@@ -43,8 +43,8 @@ final class Session private (
     private val requestContextRef: FiberRef[Option[RequestContext]],
     private val requestIdRef: FiberRef[Option[RequestId]],
     private val inputKeyOccurrencesRef: FiberRef[Option[Ref[Map[String, Int]]]],
-    private val lastSeenRef: Ref[Long],
-    private val activeGetRef: Ref[Boolean],
+    private val lastSeenRef: java.util.concurrent.atomic.AtomicLong,
+    private val activeGetRef: java.util.concurrent.atomic.AtomicBoolean,
     /** `Some(finalizers)` while live; `None` once [[terminate]] has run (the terminated latch). */
     private val finalizersRef: Ref[Option[Map[String, UIO[Unit]]]]
 ):
@@ -52,19 +52,26 @@ final class Session private (
   /** Millis timestamp of the last client activity (transports touch on every request). Drives idle
     * eviction of abandoned streamable sessions.
     */
-  def lastSeen: UIO[Long] = lastSeenRef.get
+  def lastSeen: UIO[Long] = ZIO.succeed(lastSeenRef.get())
+
+  /** `(lastSeen, hasActiveGet)` read synchronously — for a single-threaded runtime (Bun) that must
+    * snapshot every stored session and decide an eviction in ONE step, with no fiber yield between
+    * the snapshot and the decision.
+    */
+  private[fastmcp] def idleStateUnsafe(implicit unsafe: Unsafe): (Long, Boolean) =
+    (lastSeenRef.get(), activeGetRef.get())
 
   def touch: UIO[Unit] =
-    ZIO.succeed(java.lang.System.currentTimeMillis()).flatMap(lastSeenRef.set)
+    ZIO.succeed(lastSeenRef.set(java.lang.System.currentTimeMillis()))
 
   /** At most one standalone GET SSE stream may drain `outbound` — two would round-robin-steal
     * messages. `tryAcquireGet` is an atomic test-and-set (false = a stream is already live, answer
     * 409); the stream's finalizer must call [[releaseGet]]. Sessions with a live GET are exempt
     * from idle eviction (push-only consumers may never POST).
     */
-  def tryAcquireGet: UIO[Boolean] = activeGetRef.modify(active => (!active, true))
-  def releaseGet: UIO[Unit] = activeGetRef.set(false)
-  def hasActiveGet: UIO[Boolean] = activeGetRef.get
+  def tryAcquireGet: UIO[Boolean] = ZIO.succeed(activeGetRef.compareAndSet(false, true))
+  def releaseGet: UIO[Unit] = ZIO.succeed(activeGetRef.set(false))
+  def hasActiveGet: UIO[Boolean] = ZIO.succeed(activeGetRef.get())
 
   def protocolVersion: UIO[String] = protocolVersionRef.get
   def setProtocolVersion(v: String): UIO[Unit] = protocolVersionRef.set(v)
@@ -272,8 +279,8 @@ object Session:
       inputOccurrences = Unsafe.unsafe(implicit u =>
         FiberRef.unsafe.make(Option.empty[Ref[Map[String, Int]]])
       )
-      seen <- Ref.make(java.lang.System.currentTimeMillis())
-      activeGet <- Ref.make(false)
+      seen = new java.util.concurrent.atomic.AtomicLong(java.lang.System.currentTimeMillis())
+      activeGet = new java.util.concurrent.atomic.AtomicBoolean(false)
       finalizers <- Ref.make(Option(Map.empty[String, UIO[Unit]]))
     yield new Session(
       sessionId,

@@ -99,7 +99,9 @@ class HostGuardTest extends AnyFunSuite with Matchers:
     allowed(None, Some("http://localhost:8000")) shouldBe false
   }
 
-  test("a port-less Host accepts only the origin's scheme-default port (80 for http, 443 for https)") {
+  test(
+    "a port-less Host accepts only the origin's scheme-default port (80 for http, 443 for https)"
+  ) {
     allowed(Some("localhost"), Some("http://localhost")) shouldBe true
     allowed(Some("localhost"), Some("http://localhost:80")) shouldBe true
     // Documented allow row: a port-less Host admits BOTH scheme defaults (listener on 80 or 443).
@@ -227,7 +229,9 @@ class HostGuardTest extends AnyFunSuite with Matchers:
     HostGuard.isAllowed(sameHost, Some("http://localhost:3000"), McpServerSettings()) shouldBe true
   }
 
-  test("deprecated 3-arg overload keeps Host semantics and full-origin matching, no allowedOrigins") {
+  test(
+    "deprecated 3-arg overload keeps Host semantics and full-origin matching, no allowedOrigins"
+  ) {
     @annotation.nowarn("cat=deprecation")
     def legacy(host: Option[String], origin: Option[String]): Boolean =
       HostGuard.isAllowed(host, origin, hosts)
@@ -237,12 +241,16 @@ class HostGuardTest extends AnyFunSuite with Matchers:
   }
 
   test("parseOrigin normalises scheme/host case and defaults the port per scheme") {
-    HostGuard.parseOrigin("HTTP://LocalHost") shouldBe Some(HostGuard.Origin("http", "localhost", 80))
+    HostGuard.parseOrigin("HTTP://LocalHost") shouldBe Some(
+      HostGuard.Origin("http", "localhost", 80)
+    )
     HostGuard.parseOrigin("https://App.Example.com") shouldBe
       Some(HostGuard.Origin("https", "app.example.com", 443))
     HostGuard.parseOrigin(" https://app.example.com:8443 ") shouldBe
       Some(HostGuard.Origin("https", "app.example.com", 8443))
-    HostGuard.parseOrigin("http://[::1]:8000") shouldBe Some(HostGuard.Origin("http", "[::1]", 8000))
+    HostGuard.parseOrigin("http://[::1]:8000") shouldBe Some(
+      HostGuard.Origin("http", "[::1]", 8000)
+    )
     HostGuard.parseOrigin("http://[::1]") shouldBe Some(HostGuard.Origin("http", "[::1]", 80))
     HostGuard.parseOrigin("null") shouldBe None
     HostGuard.parseOrigin("") shouldBe None

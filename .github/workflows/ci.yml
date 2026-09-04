@@ -8,9 +8,6 @@ on:
 permissions:
   contents: read
 
-env:
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
 jobs:
   build:
     name: Build and Test
@@ -30,15 +27,23 @@ jobs:
 
       - name: Check Formatting
         run: ./mill fast-mcp-scala.checkFormat
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
 
       - name: Compile
         run: ./mill fast-mcp-scala.compile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
 
       - name: Test (JVM)
         run: ./mill -i fast-mcp-scala.jvm.test
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
 
       - name: Test (Scala.js on Bun)
         run: ./mill -i fast-mcp-scala.js.test
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
 
   scala-native:
     name: Scala Native (linux-x64)
@@ -56,12 +61,16 @@ jobs:
 
       - name: Test (Scala Native)
         run: ./mill -i fast-mcp-scala.scalaNative.test
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
 
       - name: Link demo binary (AnnotatedServer)
         run: |
           BIN="$(./mill --no-server show fast-mcp-scala.scalaNative.nativeLink 2>/dev/null |
             python3 -c "import sys,json,re; print(re.sub(r'^q?ref:v\d+:[0-9a-f]+:','',json.load(sys.stdin)))")"
           echo "BIN=$BIN" >> "$GITHUB_ENV"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
 
       - name: Stdio smoke over the Scala Native binary
         run: scripts/native-smoke.sh "$BIN"

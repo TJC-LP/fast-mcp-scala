@@ -36,7 +36,14 @@ import com.tjclp.fastmcp.core.Tasks
   *   limit. Exceeding it is the caller's own fault: `-32602`.
   * @param maxConcurrentTotal
   *   Ceiling on running tasks per POOL (legacy-session pool and modern-bearer pool, counted
-  *   separately). Distinct from and larger than the per-owner cap. `-32003` when exceeded.
+  *   separately). Must be >= the per-owner cap and should be well above it — equal values let one
+  *   owner fill the whole pool, removing cross-client isolation. `-32003` when exceeded. Residual
+  *   by design: a client controlling >= `maxConcurrentTotal / maxConcurrentPerSession` distinct
+  *   peer addresses (16 at the defaults) can still hold a pool at its ceiling (or, via
+  *   `maxStoredTotal`, keep it full of fresh stored entries inside the retention grace), answering
+  *   `-32003` to everyone else until its traffic stops; pair the peer-address key with edge rate
+  *   limiting / per-IP connection limits, or use `TaskOwnerKey.Custom` with an authenticated
+  *   principal.
   * @param maxStoredPerOwner
   *   Stored entries per owner, terminal included. At the cap the owner's oldest terminal entry
   *   older than `minResultRetentionMs` is evicted to admit the new task (its result becomes
@@ -85,8 +92,9 @@ case class TaskSettings(
   require(sweepIntervalMs >= 1L, "TaskSettings.sweepIntervalMs must be >= 1")
 
 /** Settings for an MCP server. HTTP-specific fields (`stateless`, `keepAliveInterval`,
-  * `disallowDelete`, `httpEndpoint`) are ignored under stdio transports. `limits` applies on every
-  * transport.
+  * `sessionIdleTimeout`, `disallowDelete`, `httpEndpoint`, `allowedHosts`, `allowedOrigins`,
+  * `maxRequestBodyBytes`, `maxSessions`) are ignored under stdio transports. `limits` and `tasks`
+  * apply on every transport.
   */
 case class McpServerSettings(
     debug: Boolean = false,
@@ -140,8 +148,9 @@ case class McpServerSettings(
     maxRequestBodyBytes: Int = 1024 * 1024,
     // Legacy streamable adapter only: cap on concurrently stored sessions. When a header-less
     // `initialize` arrives at the cap, the longest-idle session without a live GET stream is evicted
-    // (its queue shut down) to make room; only when every stored session has a live GET is the
-    // request refused with 503. Bounds memory without letting a flood lock new clients out.
+    // — terminated (`Session.terminate`: in-flight requests interrupted, its tasks released, queue
+    // shut down) — to make room; only when every stored session has a live GET is the request
+    // refused with 503. Bounds memory without letting a flood lock new clients out.
     // `None` disables. Modern 2026-07-28 requests never store sessions.
     maxSessions: Option[Int] = Some(1000),
     // Optional io.modelcontextprotocol/tasks extension. Off by default.

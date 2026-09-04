@@ -100,7 +100,9 @@ class UriTemplateMatcherTest extends AnyFunSuite with Matchers:
     ResourceTemplatePattern.parse("x://{a}/{a}").left.toOption.get should include("more than once")
   }
 
-  test("ResourceManager.addTemplateResource surfaces an invalid template as ResourceRegistrationError") {
+  test(
+    "ResourceManager.addTemplateResource surfaces an invalid template as ResourceRegistrationError"
+  ) {
     val rm = new ResourceManager[Any]
     val ex = runUnsafe(
       rm.addTemplateResource(
@@ -112,7 +114,10 @@ class UriTemplateMatcherTest extends AnyFunSuite with Matchers:
           None,
           isTemplate = true,
           arguments = Some(
-            List(ResourceArgument("a", None, required = true), ResourceArgument("b", None, required = true))
+            List(
+              ResourceArgument("a", None, required = true),
+              ResourceArgument("b", None, required = true)
+            )
           )
         )
       ).either
@@ -125,7 +130,8 @@ class UriTemplateMatcherTest extends AnyFunSuite with Matchers:
 
   // ---- greedy-regex equivalence ----
 
-  /** The former construction — `{name}` → `([^/]+)`, anchored — but with literals `Regex.quote`d. */
+  /** The former construction — `{name}` → `([^/]+)`, anchored — but with literals `Regex.quote`d.
+    */
   private def legacyMatcher(template: String): String => Option[Map[String, String]] =
     val placeholder = """\{([^{}]+)\}""".r
     val names = placeholder.findAllMatchIn(template).map(_.group(1)).toList
@@ -137,7 +143,10 @@ class UriTemplateMatcherTest extends AnyFunSuite with Matchers:
     }
     sb.append(Regex.quote(template.substring(last))).append("$")
     val regex = new Regex(sb.result())
-    uri => regex.findFirstMatchIn(uri).map(mt => names.zipWithIndex.map((n, i) => n -> mt.group(i + 1)).toMap)
+    uri =>
+      regex
+        .findFirstMatchIn(uri)
+        .map(mt => names.zipWithIndex.map((n, i) => n -> mt.group(i + 1)).toMap)
 
   test("matches equals the former greedy regex (with quoted literals) on randomised inputs") {
     val templates = List(
@@ -166,9 +175,10 @@ class UriTemplateMatcherTest extends AnyFunSuite with Matchers:
         if compiled.matches(uri).isDefined then matched += 1
       }
       // Targeted inputs that random text rarely hits.
-      List("x://v1.json", "x://vaaa.json", "x://aaaab", "x://aaaabaaab", "x://aaaaba", "x://a/b.c").foreach { uri =>
-        withClue(s"$template on '$uri'") { compiled.matches(uri) shouldBe legacy(uri) }
-      }
+      List("x://v1.json", "x://vaaa.json", "x://aaaab", "x://aaaabaaab", "x://aaaaba", "x://a/b.c")
+        .foreach { uri =>
+          withClue(s"$template on '$uri'") { compiled.matches(uri) shouldBe legacy(uri) }
+        }
       withClue(s"$template never matched — property vacuous") {
         (matched > 0 || template.contains("json") || template.contains("{a}/{b}")) shouldBe true
       }
@@ -195,7 +205,9 @@ class UriTemplateMatcherTest extends AnyFunSuite with Matchers:
       )
     }
 
-  test("100 KB adversarial URIs are matched in milliseconds, directly and through ResourceManager") {
+  test(
+    "100 KB adversarial URIs are matched in milliseconds, directly and through ResourceManager"
+  ) {
     val templates = List("x://{a}-{b}", "x://{a}.{b}.{c}", "x://{a}aaab{b}", "x://{id}/profile")
     val rm = new ResourceManager[Any]
     registerAll(rm, templates)
@@ -214,7 +226,11 @@ class UriTemplateMatcherTest extends AnyFunSuite with Matchers:
       // one separator, two needed: second lastIndexOf over the whole left window
       ("x://{a}.{b}.{c}", "x://" + "a" * 99_999 + ".", None),
       // matches — both windows exercised; last-occurrence binding
-      ("x://{a}.{b}.{c}", "x://" + "a." * 50_000 + "b", Some(Map("a" -> ("a." * 49_998 + "a"), "b" -> "a", "c" -> "b"))),
+      (
+        "x://{a}.{b}.{c}",
+        "x://" + "a." * 50_000 + "b",
+        Some(Map("a" -> ("a." * 49_998 + "a"), "b" -> "a", "c" -> "b"))
+      ),
       ("x://{a}.{b}.{c}", "x://" + "a." * 50_000 + "/", None),
       // self-overlapping literal worst case
       ("x://{a}aaab{b}", "x://" + aaa, None)

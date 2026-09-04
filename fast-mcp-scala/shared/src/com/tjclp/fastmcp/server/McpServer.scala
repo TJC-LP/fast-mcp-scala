@@ -122,9 +122,10 @@ final class McpServer[R](
     buildRouterWithTasks.map(_._1)
 
   /** [[buildRouter]] that also hands back the [[TaskManager]] (when tasks are enabled) so the serve
-    * loops can stop its sweeper and interrupt running tasks on shutdown.
+    * loops (and the JS `startStatefulHttp()` / `startStatelessHttp()` handles) can stop its sweeper
+    * and interrupt running tasks on shutdown.
     */
-  private def buildRouterWithTasks: IO[Throwable, (McpRouter[R], Option[TaskManager[R]])] =
+  private[fastmcp] def buildRouterWithTasks: IO[Throwable, (McpRouter[R], Option[TaskManager[R]])] =
     val taskMgr: UIO[Option[TaskManager[R]]] =
       if settings.tasks.enabled then
         TaskManager.make[R](settings.tasks, backend.randomId()).map(Some(_))
