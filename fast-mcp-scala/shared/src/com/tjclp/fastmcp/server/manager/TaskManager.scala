@@ -515,18 +515,22 @@ class TaskManager[R] private[manager] (
             ZIO.foreachDiscard(mine.filter(!_.status.isTerminal))(_.fiber.interruptFork)
           )
 
-  /** Drain the store (interrupting running tasks) and stop the sweeper, awaiting its exit. For
+  /** Stop the sweeper (awaiting its exit), then drain the store, interrupting running tasks. For
     * embedders that stop a server without exiting the process, and for test cleanup — the sweeper
     * is a daemon fiber and otherwise exits on its own once the store drains.
+    *
+    * Order matters against a racing `create`: the drain resets `sweeperActive`, so a create that
+    * lands afterwards starts a fresh sweeper, and one that landed in between is drained here.
+    * Draining first could leave `sweeperActive = true` with no live sweeper.
     */
   def shutdown: UIO[Unit] =
     for
+      sweeper <- sweeperRef.getAndSet(None)
+      _ <- ZIO.foreachDiscard(sweeper)(_.interrupt)
       drained <- storeRef.getAndSet(TaskStore.empty)
       _ <- ZIO.foreachDiscard(drained.entries.values.filter(!_.status.isTerminal))(
         _.fiber.interruptFork
       )
-      sweeper <- sweeperRef.getAndSet(None)
-      _ <- ZIO.foreachDiscard(sweeper)(_.interrupt)
     yield ()
 
   /** Resolve the bucket key of a modern bearer task per `settings.ownerKey`. */
