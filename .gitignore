@@ -64,6 +64,8 @@ build/
 node_modules/
 bun.lockb
 bun.lock
+# The js module's lock is source-controlled: mill-bun 0.3 installs with --frozen-lockfile.
+!fast-mcp-scala/js/bun.lock
 *.class
 *.tasty
 

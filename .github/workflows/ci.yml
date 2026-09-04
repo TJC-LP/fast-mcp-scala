@@ -13,7 +13,7 @@ jobs:
     name: Build and Test
     strategy:
       matrix:
-        java: [17, 21, 24]
+        java: [17, 21, 25] # LTS releases only
     runs-on: ubuntu-latest
 
     steps:
@@ -35,7 +35,7 @@ jobs:
         run: ./mill -i fast-mcp-scala.jvm.test
 
       - name: Test (Scala.js on Bun)
-        run: ./mill -i fast-mcp-scala.js.test.bunTest
+        run: ./mill -i fast-mcp-scala.js.test
 
   scala-native:
     name: Scala Native (linux-x64)

@@ -22,7 +22,7 @@ reflection need, the smoke goes red on the PR that introduces it, and only then 
 
 ```scala
 object server extends ScalaModule with mill.javalib.NativeImageModule {
-  def scalaVersion = "3.8.3"
+  def scalaVersion = "3.9.0"
   // fast-mcp-scala's annotation macros are @experimental; consumers compile with -experimental
   // (same requirement as the scala-cli quickstart in the README)
   def scalacOptions = Seq("-experimental")
@@ -119,7 +119,7 @@ build override and four extra flags:
 
 ```scala
 object server extends ScalaModule with mill.javalib.NativeImageModule {
-  def scalaVersion = "3.8.3"
+  def scalaVersion = "3.9.0"
   def scalacOptions = Seq("-experimental")                      // annotation macros require it
   def mainClass = Some("com.example.MyHttpServer")
   def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:1.0.0-RC3")   // zio-http stays

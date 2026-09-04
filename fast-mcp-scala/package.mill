@@ -11,8 +11,8 @@ import mill.scalajslib._
 import mill.scalajslib.api._
 import mill.scalajslib.bun._
 import mill.scalanativelib._
-import build.{BuildConfig, FastMCPModule, FastMCPPublishingBase, FastMCPTestModule, Versions,
-  scala3Version}
+import build.{BuildConfig, FastMCPModule, FastMCPPublishingBase, FastMCPTestModule,
+  ScalaJSTestDepsFix, Versions, scala3Version}
 
 // Namespace module. Aggregate tasks at this level fan out to all three platform children so
 // `./mill fast-mcp-scala.compile` and `./mill fast-mcp-scala.test` cover the whole project
@@ -30,7 +30,7 @@ object `package` extends Module {
   /** Run the JVM test suite, the Scala.js/Bun conformance tests, and the Scala Native tests. */
   def test: T[Unit] = Task {
     jvm.test.testForked()()
-    js.test.bunTest(mill.api.Args())()
+    js.test.testForked()()
     scalaNative.test.testForked()()
     ()
   }
@@ -81,6 +81,7 @@ object `package` extends Module {
   object js extends BunScalaJSModule with BunPublishModule with ScalafmtModule
       with FastMCPPublishingBase {
     def scalaVersion = scala3Version
+    def scalaJSVersion = Versions.scalaJs
 
     override def moduleKind = Task { ModuleKind.ESModule }
 
@@ -98,14 +99,16 @@ object `package` extends Module {
     // without the wart traversers.
     override def scalacOptions = BuildConfig.crossScalacOptions
 
-    override def bunDeps = Task {
-      // The TS MCP SDK is NOT a production dependency — no production source `@JSImport`s it and
-      // the published Maven artifact is unaffected. It is declared (pinned) here because the bun
-      // test workspace links this module's node_modules (the plugin has no test-scoped deps yet):
-      // `js.test`'s conformance client resolves `@modelcontextprotocol/sdk` from it. Without the
-      // pin, Bun's runtime auto-install fetched *latest at test time* — a CI time bomb now that
-      // post-2026-07-28 SDK releases change initialize semantics. Production boundary = the
-      // import graph, enforced by RootImportSurface tests, not node_modules.
+    override def bunDevDeps = Task {
+      // The TS MCP SDK is NOT a production dependency — no production source `@JSImport`s it, and
+      // as a dev dependency it stays out of the published bun dependency manifest (mill-bun 0.3
+      // schema v2). It is declared (pinned) here because the bun test workspace links this
+      // module's node_modules: `js.test`'s conformance client resolves `@modelcontextprotocol/sdk`
+      // from it. Without the pin, Bun's runtime auto-install fetched *latest at test time* — a CI
+      // time bomb now that post-2026-07-28 SDK releases change initialize semantics. Resolution is
+      // frozen by the committed `js/bun.lock` (regenerate with `./mill fast-mcp-scala.js.bunLock`).
+      // Production boundary = the import graph, enforced by RootImportSurface tests, not
+      // node_modules.
       Seq("@modelcontextprotocol/sdk@1.29.0")
     }
 
@@ -127,7 +130,8 @@ object `package` extends Module {
       )
     }
 
-    object test extends BunScalaJSTests with TestModule.ScalaTest {
+    // ScalaJSTestDepsFix: see build.mill — keeps the Scala 2.13 stdlib out of the test link.
+    object test extends BunScalaJSTests with TestModule.ScalaTest with ScalaJSTestDepsFix {
       override def mvnDeps = Seq(
         mvn"org.scalatest::scalatest::${Versions.scalaTest}"
       )
