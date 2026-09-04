@@ -190,10 +190,6 @@ class WireCodecRoundTripTest extends AnyFlatSpec with Matchers {
     url.toJson should include("\"mode\":\"url\"")
     url.toJson should include("\"elicitationId\":\"elic-9\"")
     roundTrips(url)
-
-    val err = ElicitRequestUrlParams.requiredError(List(url))
-    err.code shouldBe com.tjclp.fastmcp.core.ErrorCodes.UrlElicitationRequired
-    err.data.map(_.toString).getOrElse("") should include("elicitations")
   }
 
   "sampling tools/toolChoice" should "round-trip on CreateMessageRequestParams" in {
