@@ -54,8 +54,10 @@ object JvmHttpBackend extends HttpTransportBackend:
 
   /** Periodically drop streamable sessions idle past `settings.sessionIdleTimeout` — abandoned
     * clients would otherwise grow the store forever. Sessions with a live GET stream are exempt
-    * (push-only consumers may never POST). Eviction shuts the outbound queue down. The store is
-    * additionally bounded by `settings.maxSessions` at mint time (see [[streamablePostDispatch]]).
+    * (push-only consumers may never POST). Eviction calls `session.terminate`, which interrupts the
+    * session's in-flight requests, releases (interrupts) its tasks and shuts the outbound queue
+    * down. The store is additionally bounded by `settings.maxSessions` at mint time (see
+    * [[streamablePostDispatch]]).
     */
   private[fastmcp] def evictIdleSessions(
       store: Ref[Map[String, Session]],
@@ -73,7 +75,7 @@ object JvmHttpBackend extends HttpTransportBackend:
               (s.lastSeen zip s.hasActiveGet).map((seen, live) => !live && now - seen > timeoutMs)
             }
             _ <- store.update(_ -- expired.map(_.sessionId))
-            _ <- ZIO.foreachDiscard(expired)(_.outbound.shutdown)
+            _ <- ZIO.foreachDiscard(expired)(_.terminate)
           yield ()
         val interval = Duration.fromMillis(math.max(timeoutMs / 4, 1000L))
         sweep.repeat(Schedule.spaced(interval)).unit
@@ -323,8 +325,9 @@ object JvmHttpBackend extends HttpTransportBackend:
     * insert all run inside ONE `store.modifyZIO` on the `Ref.Synchronized` store, so concurrent
     * initializes are serialised at the cap: the store never exceeds it, and a newcomer is never
     * refused while an evictable session exists. When the store is full the longest-idle session
-    * WITHOUT a live GET is evicted — its queue shut down — and the newcomer admitted; only when
-    * every stored session holds a live GET is the request refused with 503.
+    * WITHOUT a live GET is evicted — terminated, so its in-flight requests and tasks are released
+    * along with its queue — and the newcomer admitted; only when every stored session holds a live
+    * GET is the request refused with 503.
     */
   private def mintSession[R](
       router: McpRouter[R],
@@ -354,10 +357,10 @@ object JvmHttpBackend extends HttpTransportBackend:
         case Right(Some(victim)) =>
           ZIO.logWarning(
             s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted idle session ${victim.sessionId}"
-          ) *> victim.outbound.shutdown *>
+          ) *> victim.terminate *>
             respondStreamable(router, session, message, isNew = true, settings)
         case Left(()) =>
-          session.outbound.shutdown
+          session.terminate
             .as(errorResponse(Status.ServiceUnavailable, HttpRequestGuards.SessionLimitMessage))
     yield resp
 
@@ -489,14 +492,13 @@ object JvmHttpBackend extends HttpTransportBackend:
                 .status(status)
             )
           case Right(_) =>
-            // Peer address of the request — the default owner key for bearer-task buckets.
-            // TODO(TJC-2294 merge): pass as `clientKey = clientKey` to `Session.make` once Arc C's
-            // `Session.make(sessionId, supportsTasks, clientKey)` lands.
-            val clientKey: Option[String] = clientKeyOf(request)
-            val _ = clientKey
-            Session.make(s"request-${req.id.toString}").flatMap { session =>
-              streamRequest(router, session, req, isNew = false, settings, modern = true)
-            }
+            // Peer address of the request — the default owner key for bearer-task buckets
+            // (`TaskOwnerKey.Transport`); behind a reverse proxy use `TaskOwnerKey.Custom`.
+            Session
+              .make(s"request-${req.id.toString}", clientKey = clientKeyOf(request))
+              .flatMap { session =>
+                streamRequest(router, session, req, isNew = false, settings, modern = true)
+              }
       case _: JsonRpcMessage.Invalid =>
         val failure: JsonRpcMessage = JsonRpcMessage.Failure(
           None,
@@ -645,7 +647,7 @@ object JvmHttpBackend extends HttpTransportBackend:
             ZIO.succeed(Response.status(Status.MethodNotAllowed))
           case Some(id) =>
             store.modify(sessions => (sessions.get(id), sessions - id)).flatMap {
-              case Some(session) => session.outbound.shutdown.as(Response.status(Status.Ok))
+              case Some(session) => session.terminate.as(Response.status(Status.Ok))
               case None => ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
             }
 

@@ -16,7 +16,7 @@ import com.tjclp.fastmcp.core.{
   Tasks
 }
 import com.tjclp.fastmcp.core.wire.EmptyResult
-import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError}
+import com.tjclp.fastmcp.jsonrpc.{JsonFields, JsonRpcMessage, McpError}
 import com.tjclp.fastmcp.server.manager.{TaskManager, TaskScope, TaskSnapshot, ToolManager}
 
 private case class TaskIdParams(taskId: String)
@@ -72,9 +72,7 @@ final class TaskMiddleware[R](
           .getToolDefinition(name)
           .map(_.effectiveTaskSupport)
           .getOrElse(TaskSupport.Forbidden)
-        val taskRequested = params match
-          case Json.Obj(fields) => fields.toMap.contains("task")
-          case _ => false
+        val taskRequested = JsonFields.get(params, "task").isDefined
         val ttl = params.as[CallToolRequestParamsLite].toOption.flatMap(_.task).flatMap(_.ttl)
 
         (taskRequested, support) match
@@ -137,9 +135,7 @@ final class TaskMiddleware[R](
           .getToolDefinition(name)
           .map(_.effectiveTaskSupport)
           .getOrElse(TaskSupport.Forbidden)
-        val hasLegacyAugmentation = params match
-          case Json.Obj(fields) => fields.toMap.contains("task")
-          case _ => false
+        val hasLegacyAugmentation = JsonFields.get(params, "task").isDefined
         val clientSupportsTasks =
           context.clientCapabilities.extensions.exists(_.contains(Tasks.ExtensionId))
 
@@ -190,7 +186,7 @@ final class TaskMiddleware[R](
   private def decodeName(params: Json): Either[McpError, String] =
     params match
       case Json.Obj(fields) =>
-        fields.toMap.get("name") match
+        JsonFields.get(fields, "name") match
           case Some(Json.Str(name)) => Right(name)
           case _ => Left(McpError.invalidParams("tools/call: missing `name`"))
       case _ => Left(McpError.invalidParams("tools/call: params must be an object"))

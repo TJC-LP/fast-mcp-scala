@@ -70,23 +70,42 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   ): Unit =
     val stdin = NodeProcess.stdin
     stdin.setEncoding("utf8")
-    var buffer = "" // accumulates partial lines across `data` chunks
+    // Same contract as the JVM/Native `BoundedLines`: keep at most `maxFrameChars + 1` chars of
+    // an over-long line (so `parseFrame` still answers -32700 FrameTooLong for it), discard the
+    // rest of that line as it streams in, and never let the accumulator grow past the cap.
+    val max = router.limits.maxFrameChars
+    val cap = if max == Int.MaxValue then Int.MaxValue else max + 1
+    var buffer = "" // accumulates partial lines across `data` chunks (bounded at `cap`)
+    var discarding = false // inside an over-long line: drop input until the next newline
+    def dispatch(line: String): Unit =
+      if line.nonEmpty then
+        val _ = ZioJsPromise.zioToPromise(rt)(
+          MessageLoop.handleFrame(router, session, line).flatMap {
+            case Some(reply) => writeLine(reply)
+            case None => ZIO.unit
+          }
+        )
     stdin.on(
       "data",
       (chunk: js.Any) =>
-        buffer += chunk.asInstanceOf[String]
-        var nl = buffer.indexOf("\n")
+        val text = chunk.asInstanceOf[String]
+        var from = 0
+        var nl = text.indexOf("\n")
         while nl >= 0 do
-          val line = buffer.substring(0, nl).trim
-          buffer = buffer.substring(nl + 1)
-          if line.nonEmpty then
-            val _ = ZioJsPromise.zioToPromise(rt)(
-              MessageLoop.handleFrame(router, session, line).flatMap {
-                case Some(reply) => writeLine(reply)
-                case None => ZIO.unit
-              }
-            )
-          nl = buffer.indexOf("\n")
+          if !discarding then
+            val room = cap - buffer.length // >= 0; avoid `from + room` overflow at Int.MaxValue
+            buffer += text.substring(from, if nl - from <= room then nl else from + room)
+          dispatch(buffer.trim)
+          buffer = ""
+          discarding = false
+          from = nl + 1
+          nl = text.indexOf("\n", from)
+        if !discarding && from < text.length then
+          val room = cap - buffer.length
+          if text.length - from <= room then buffer += text.substring(from)
+          else
+            buffer += text.substring(from, from + room)
+            discarding = true
     )
     stdin.on("end", (_: js.Any) => done(ZIO.unit))
 
@@ -138,7 +157,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
               (s.lastSeen zip s.hasActiveGet).map((seen, live) => !live && now - seen > timeoutMs)
             }
             _ <- ZIO.foreachDiscard(expired) { case (sid, s) =>
-              ZIO.succeed(store -= sid) *> s.outbound.shutdown
+              ZIO.succeed(store -= sid) *> s.terminate
             }
           yield ()
         val interval = Duration.fromMillis(math.max(timeoutMs / 4, 1000L))
@@ -341,7 +360,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             case Some(sid) =>
               store.get(sid) match
                 case Some(session) =>
-                  ZIO.succeed { store -= sid } *> session.outbound.shutdown.as(webResponse(200, ""))
+                  ZIO.succeed { store -= sid } *> session.terminate.as(webResponse(200, ""))
                 case None =>
                   ZIO.succeed(jsonRpcErrorResponse(404, s"Session not found: $sid"))
 
@@ -392,10 +411,10 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         case Right(Some(victim)) =>
           ZIO.logWarning(
             s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted idle session ${victim.sessionId}"
-          ) *> victim.outbound.shutdown *>
+          ) *> victim.terminate *>
             respondStreamable(router, session, message, isNew = true, settings)
         case Left(()) =>
-          session.outbound.shutdown
+          session.terminate
             .as(jsonRpcErrorResponse(503, HttpRequestGuards.SessionLimitMessage))
     yield resp
 
@@ -521,10 +540,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       settings: McpServerSettings,
       clientKey: Option[String]
   ): ZIO[R, Throwable, js.Dynamic] =
-    // Peer address (`server.requestIP`) — the default owner key for bearer-task buckets.
-    // TODO(TJC-2294 merge): pass as `clientKey = clientKey` to `Session.make` once Arc C's
-    // `Session.make(sessionId, supportsTasks, clientKey)` lands.
-    val _ = clientKey
+    // `clientKey` is the peer address (`server.requestIP`) — the default owner key for bearer-task
+    // buckets (`TaskOwnerKey.Transport`); behind a reverse proxy use `TaskOwnerKey.Custom`.
     message match
       case rpc: JsonRpcMessage.Request =>
         validateModernRequest(router, req, rpc) match
@@ -534,7 +551,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             ZIO.succeed(jsonResponse(failure.toJson, Map.empty, status))
           case Right(_) =>
             for
-              session <- Session.make(s"request-${rpc.id.toString}")
+              session <- Session.make(s"request-${rpc.id.toString}", clientKey = clientKey)
               reqQueue <- Queue.unbounded[JsonRpcMessage]
               fiber <- session
                 .runWithSink(reqQueue)(router.dispatch(session, rpc))

@@ -1,6 +1,7 @@
 package com.tjclp.fastmcp
 package server.manager
 
+import java.lang.System as JSystem
 import java.util.concurrent.ConcurrentHashMap
 
 import scala.jdk.CollectionConverters.*
@@ -66,6 +67,12 @@ class PromptManager[R] extends Manager[PromptDefinition]:
   ): ZIO[Any, Throwable, Unit] =
     ZIO
       .attempt {
+        // Mirrors ToolManager: duplicates within ONE scanned object are a compile-time error, but
+        // a second object (or a typed contract) registering the same name still lands here.
+        if prompts.containsKey(name) then
+          JSystem.err.println(
+            s"[PromptManager] Warning: Prompt '$name' already exists and will be overwritten"
+          )
         prompts.put(name, (definition, handler))
         ()
       }

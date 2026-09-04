@@ -39,8 +39,8 @@ the original audit snapshot; current disposition:
 ## Status — Full MCP conformance (active suite), JVM + JS (2026-06-01)
 
 The native core **passes the official MCP conformance suite** (`@modelcontextprotocol/conformance`,
-`--suite active`, spec 2025-11-25) on **both JVM and JS — 42/42 checks, no baseline**. Reproduce with
-`scripts/conformance.sh [jvm|js]` (drives the harness via `bunx` against the cross-platform
+`--suite active`, spec 2025-11-25) on **both JVM and JS — 73/73 checks across both protocol eras, no baseline**. Reproduce with
+`scripts/conformance.sh [jvm|js]` (drives the pinned harness installed under `conformance/` from its frozen lockfile against the cross-platform
 `examples.conformance.ConformanceServer`); CI runs both in `.github/workflows/conformance.yml`.
 
 Gaps closed to get there (all shared logic, so both platforms benefit):

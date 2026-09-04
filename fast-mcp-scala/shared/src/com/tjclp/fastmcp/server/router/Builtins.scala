@@ -199,10 +199,18 @@ final class Builtins[R](
     for
       req <- decodeParams[SubscribeRequestParams](params, "resources/subscribe")
       _ <- checkUriLength("resources/subscribe", req.uri)
-      // TODO(TJC-2294 merge): once Session exposes `subscriptionCount: UIO[Int]` (Arc C), refuse
-      // new distinct URIs beyond `limits.maxSubscriptionsPerSession` with -32602
-      // ("resources/subscribe: subscription limit reached (limits.maxSubscriptionsPerSession = N)")
-      // before `session.subscribe`; re-subscribing an already-held URI must stay OK.
+      // Bound the per-session subscription set: a NEW distinct URI beyond
+      // `limits.maxSubscriptionsPerSession` is refused with -32602; re-subscribing a URI the
+      // session already holds is always fine (it adds nothing to the set).
+      held <- session.isSubscribed(req.uri)
+      count <- session.subscriptionCount
+      _ <- ZIO
+        .fail(
+          McpError.invalidParams(
+            s"resources/subscribe: subscription limit reached (limits.maxSubscriptionsPerSession = ${limits.maxSubscriptionsPerSession})"
+          )
+        )
+        .when(!held && count >= limits.maxSubscriptionsPerSession)
       _ <- session.subscribe(req.uri)
       json <- ok(EmptyResult())
     yield json

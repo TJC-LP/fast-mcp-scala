@@ -11,8 +11,14 @@ import scala.annotation.StaticAnnotation
   * `description` is `None` or omitted, the macro will attempt to use the method's Scaladoc comment
   * as the description.
   *
+  * Every `Option` argument (`name`, `description`, `title`, `taskSupport`, the hints) must be a
+  * literal — `Some("...")`, `Option("...")`, `None`, or a `final val` constant; a non-literal
+  * argument is a compile-time error rather than being silently dropped.
+  *
   * @param name
-  *   Optional name for the tool (defaults to method name)
+  *   Optional name for the tool. Must be unique per scanned object (a duplicate is a compile-time
+  *   error), so overloaded annotated methods need explicit names. When omitted, the method name is
+  *   used (a description-only annotation still registers under the method name).
   * @param description
   *   Optional description for the tool. If None, Scaladoc will be used.
   * @param examples
@@ -76,7 +82,8 @@ class Tool(
   * @param required
   *   Whether the parameter is required (defaults to true)
   * @param schema
-  *   Optional JSON schema override for the parameter type
+  *   Optional JSON schema override for the parameter type. Literal values only (`Some("...")` /
+  *   `None` / a `final val`); a non-literal argument is a compile-time error.
   * @since 0.2.1
   */
 class Param(
@@ -93,13 +100,17 @@ class Param(
   *
   * @param uri
   *   The URI or URI template for the resource (e.g., "file:///data.txt" or
-  *   "users://{userId}/profile")
+  *   "users://{userId}/profile"). Template URIs are identified by their placeholder POSITIONS, not
+  *   names: `users://{id}` and `users://{userId}` are the same pattern and may not both be
+  *   registered from one object (compile-time error); a static URI may be registered once per
+  *   object. Literal text is matched verbatim (not as a regex) and placeholders in one path segment
+  *   must be separated by literal text.
   * @param name
-  *   Optional name for the resource (defaults to method name)
+  *   Optional name for the resource (defaults to method name). Literal values only.
   * @param description
-  *   Optional description for the resource (defaults to Scaladoc)
+  *   Optional description for the resource (defaults to Scaladoc). Literal values only.
   * @param mimeType
-  *   Optional MIME type for the resource (defaults to "text/plain")
+  *   Optional MIME type for the resource (defaults to "text/plain"). Literal values only.
   */
 class Resource(
     val uri: String,
@@ -111,9 +122,12 @@ class Resource(
 /** Marker annotation for methods representing MCP Prompts
   *
   * @param name
-  *   Optional name for the prompt (defaults to method name)
+  *   Optional name for the prompt. Must be a literal `Some("...")` / `Option("...")` / `None` (or a
+  *   `final val` constant) and unique per scanned object (a duplicate is a compile-time error), so
+  *   overloaded annotated methods need explicit names. When omitted, the method name is used (a
+  *   description-only annotation still registers under the method name).
   * @param description
-  *   Optional description for the prompt (defaults to Scaladoc)
+  *   Optional description for the prompt (defaults to Scaladoc). Literal values only.
   */
 class Prompt(
     val name: Option[String] = None,

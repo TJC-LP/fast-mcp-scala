@@ -4,7 +4,7 @@ package server.transport
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.tjclp.fastmcp.server.McpServerSettings
+import com.tjclp.fastmcp.server.{LimitSettings, McpServerSettings}
 import com.tjclp.fastmcp.server.transport.HttpRequestGuards.Rejection
 
 /** Unit coverage of the shared transport admission decisions (F1 §2, F5, F12): the POST gate order,
@@ -96,7 +96,9 @@ class HttpRequestGuardsTest extends AnyFunSuite with Matchers:
       "content-type" -> "application/json"
     )
     HttpRequestGuards.postGate(crossPort, McpServerSettings(), requireSse = true) shouldBe None
-    HttpRequestGuards.postGate(crossPort, guarded, requireSse = true).map(_.status) shouldBe Some(403)
+    HttpRequestGuards.postGate(crossPort, guarded, requireSse = true).map(_.status) shouldBe Some(
+      403
+    )
   }
 
   test("hostGate: 403 with the DNS-rebinding message; None when allowed") {
@@ -158,7 +160,9 @@ class HttpRequestGuardsTest extends AnyFunSuite with Matchers:
     HttpRequestGuards.declaredLengthExceeds(Some("99999999999999"), guarded) shouldBe true
   }
 
-  test("bodyTooLarge: strictly above the cap in UTF-16 code units; rejection message names the cap") {
+  test(
+    "bodyTooLarge: strictly above the cap in UTF-16 code units; rejection message names the cap"
+  ) {
     HttpRequestGuards.bodyTooLarge("a" * 64, guarded) shouldBe false
     HttpRequestGuards.bodyTooLarge("a" * 65, guarded) shouldBe true
     HttpRequestGuards.bodyTooLargeRejection(guarded) shouldBe
@@ -188,12 +192,16 @@ class HttpRequestGuardsTest extends AnyFunSuite with Matchers:
   test("validateSettings: accepts defaults and parseable origins") {
     HttpRequestGuards.validateSettings(McpServerSettings()) shouldBe Right(())
     HttpRequestGuards.validateSettings(
-      McpServerSettings(allowedOrigins = Some(Set("https://app.example.com", "http://localhost:3000")))
+      McpServerSettings(allowedOrigins =
+        Some(Set("https://app.example.com", "http://localhost:3000"))
+      )
     ) shouldBe Right(())
     HttpRequestGuards.validateSettings(McpServerSettings(maxSessions = None)) shouldBe Right(())
   }
 
-  test("validateSettings: rejects unparseable origins, non-positive body cap and non-positive cap") {
+  test(
+    "validateSettings: rejects unparseable origins, non-positive body cap and non-positive cap"
+  ) {
     val badOrigins = HttpRequestGuards.validateSettings(
       McpServerSettings(allowedOrigins = Some(Set("https//app.example.com", "app.example.com")))
     )
@@ -204,5 +212,19 @@ class HttpRequestGuardsTest extends AnyFunSuite with Matchers:
       Left("maxRequestBodyBytes must be positive")
     HttpRequestGuards.validateSettings(McpServerSettings(maxRequestBodyBytes = -1)).isLeft shouldBe
       true
-    HttpRequestGuards.validateSettings(McpServerSettings(maxSessions = Some(0))).isLeft shouldBe true
+    HttpRequestGuards
+      .validateSettings(McpServerSettings(maxSessions = Some(0)))
+      .isLeft shouldBe true
+  }
+
+  test("validateSettings: the body cap must not exceed limits.maxFrameChars") {
+    // Default 1 MiB body cap inside the default 4 MiB frame cap: fine.
+    HttpRequestGuards.validateSettings(McpServerSettings()) shouldBe Right(())
+    // Equal is allowed (413 still fires first on a body over the cap; the frame cap is the backstop).
+    HttpRequestGuards.validateSettings(
+      McpServerSettings(maxRequestBodyBytes = 4096, limits = LimitSettings(maxFrameChars = 4096))
+    ) shouldBe Right(())
+    HttpRequestGuards.validateSettings(
+      McpServerSettings(maxRequestBodyBytes = 4097, limits = LimitSettings(maxFrameChars = 4096))
+    ) shouldBe Left("maxRequestBodyBytes must not exceed limits.maxFrameChars")
   }

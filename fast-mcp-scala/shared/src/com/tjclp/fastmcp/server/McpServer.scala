@@ -40,7 +40,9 @@ final class McpServer[R](
 
   val dependencies: List[String] = settings.dependencies
 
-  protected val decodeContext: McpDecodeContext = DefaultDecodeContext.default
+  // Embedded-JSON bounds (objects/arrays inside string arguments) follow the server's own limits.
+  protected val decodeContext: McpDecodeContext =
+    new DefaultDecodeContext(settings.limits.maxDepth, settings.limits.maxObjectFields)
 
   val toolManager: ToolManager[R] = new ToolManager[R]()
   val resourceManager: ResourceManager[R] = new ResourceManager[R]()
@@ -117,12 +119,18 @@ final class McpServer[R](
     * [[TaskManager]] only when tasks are enabled.
     */
   private[fastmcp] def buildRouter: IO[Throwable, McpRouter[R]] =
+    buildRouterWithTasks.map(_._1)
+
+  /** [[buildRouter]] that also hands back the [[TaskManager]] (when tasks are enabled) so the serve
+    * loops can stop its sweeper and interrupt running tasks on shutdown.
+    */
+  private def buildRouterWithTasks: IO[Throwable, (McpRouter[R], Option[TaskManager[R]])] =
     val taskMgr: UIO[Option[TaskManager[R]]] =
       if settings.tasks.enabled then
         TaskManager.make[R](settings.tasks, backend.randomId()).map(Some(_))
       else ZIO.none
     taskMgr.map { tm =>
-      RouterBuilder.build[R](
+      val router = RouterBuilder.build[R](
         serverInfo = Implementation(name = name, version = version),
         instructions = None,
         toolManager = toolManager,
@@ -132,13 +140,18 @@ final class McpServer[R](
         taskManager = tm,
         completionHandler = completionRef.get()
       )
+      (router, tm)
     }
 
   override def runStdio(): ZIO[R, Throwable, Unit] =
-    buildRouter.flatMap(backend.serveStdio(_, settings))
+    buildRouterWithTasks.flatMap { (router, tm) =>
+      backend.serveStdio(router, settings).ensuring(tm.fold(ZIO.unit)(_.shutdown))
+    }
 
   override def runHttp()(using http: HttpTransportBackend): ZIO[R, Throwable, Unit] =
-    buildRouter.flatMap(http.serveHttp(_, settings))
+    buildRouterWithTasks.flatMap { (router, tm) =>
+      http.serveHttp(router, settings).ensuring(tm.fold(ZIO.unit)(_.shutdown))
+    }
 
 /** The public `McpServer` factory — one definition for both platforms (replaces the per-platform
   * `McpServerBuilders`). Each platform need only provide a `given TransportBackend` in scope.
