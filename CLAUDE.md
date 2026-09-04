@@ -4,8 +4,8 @@
 
 fast-mcp-scala is a high-level Scala 3 library for building Model Context Protocol (MCP) servers. It provides two registration paths:
 
-1. **Annotation-driven** (`@Tool`, `@Resource`, `@Prompt` + `scanAnnotations`) — zero-boilerplate on JVM and Scala.js/Bun
-2. **Typed contracts** (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) — explicit, cross-platform (JVM + Scala.js)
+1. **Annotation-driven** (`@Tool`, `@Resource`, `@Prompt` + `scanAnnotations`) — zero-boilerplate on JVM, Scala.js/Bun, and Scala Native
+2. **Typed contracts** (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) — explicit, first-class values, all three platforms
 
 Both paths converge on the same `McpServer` trait and support `@Param` metadata on parameters/fields.
 
@@ -20,9 +20,9 @@ Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **
 ### Common Commands
 
 ```bash
-# Aggregates (run across JVM + Scala.js)
+# Aggregates (JVM + Scala.js + Scala Native)
 ./mill fast-mcp-scala.compile                       # Compile all platforms
-./mill fast-mcp-scala.test                          # All tests (JVM + Bun conformance)
+./mill fast-mcp-scala.test                          # All tests, all three platforms
 ./mill fast-mcp-scala.reformat                      # Auto-format every Scala source
 ./mill fast-mcp-scala.checkFormat                   # Scalafmt check (CI uses this)
 
@@ -37,7 +37,7 @@ Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **
 # Publish
 ./mill fast-mcp-scala.jvm.publishLocal              # Publish JVM artifact to ~/.ivy2/local
 ./mill fast-mcp-scala.js.publishLocal               # Publish Scala.js artifact to ~/.ivy2/local
-./mill -i __.publishLocal                           # Publish both artifacts
+./mill -i __.publishLocal                           # Publish all three artifacts
 ```
 
 ## Project Structure
@@ -55,8 +55,8 @@ fast-mcp-scala/
 │   │       │   ├── Types.scala          # ToolDefinition, Content, ToolInputSchema, etc.
 │   │       │   ├── Contracts.scala      # McpTool, McpPrompt, McpDecoder, McpEncoder
 │   │       │   ├── Protocol.scala       # protocol versions + JSON-RPC error codes
-│   │       │   ├── Tasks.scala          # MCP Tasks wire types (spec 2025-11-25)
-│   │       │   └── wire/                # 2025-11-25 wire shapes (capabilities, tools, ...)
+│   │       │   ├── Tasks.scala          # Tasks extension (2026-07-28) + legacy task wire types
+│   │       │   └── wire/                # 2026-07-28 wire shapes + compatibility-adapter shapes
 │   │       ├── jsonrpc/                 # JSON-RPC 2.0 envelope + McpError
 │   │       ├── codec/                   # DefaultDecodeContext + McpDecoders (zio-json)
 │   │       ├── macros/                  # scanAnnotations, @Tool/@Resource/@Prompt processors,
@@ -65,7 +65,7 @@ fast-mcp-scala/
 │   │       ├── examples/                # cross-platform examples (HelloWorld, AnnotatedServer,
 │   │       │                            #   ContractServer, ContextEchoServer, ConformanceServer)
 │   │       └── server/
-│   │           ├── McpServer.scala      # THE server class (both platforms)
+│   │           ├── McpServer.scala      # THE server class (all platforms)
 │   │           ├── McpServerCore.scala  # abstract API the macros target
 │   │           ├── McpContext.scala     # request context incl. server→client requests
 │   │           ├── McpServerSettings.scala
@@ -88,7 +88,7 @@ fast-mcp-scala/
 
 ## Key Concepts
 
-### Annotation Path (JVM + Scala.js/Bun)
+### Annotation Path (all platforms)
 
 ```scala
 object MyServer extends ZIOAppDefault:
@@ -146,9 +146,9 @@ server.tool(addTool)
 
 | | Annotations | Typed Contracts |
 |---|---|---|
-| Platform | JVM + Scala.js | JVM + Scala.js |
+| Platform | JVM + Scala.js + Scala Native | JVM + Scala.js + Scala Native |
 | Boilerplate | Zero (macro-driven) | Minimal (case class + builder) |
-| Schema | Auto from method signature | Auto from case class via `ToolSchemaProvider` on JVM and JS |
+| Schema | Auto from method signature | Auto from case class via `ToolSchemaProvider` on every platform |
 | `@Param` | On method parameters | On case class fields |
 | Composability | Methods on an object | First-class values |
 | Best for | Quick servers, prototyping | Libraries, cross-platform, production |
@@ -162,7 +162,7 @@ server.tool(addTool)
 - `@Prompt` - Marks a method as an MCP prompt
 - `@Param` - Describes parameters/fields with metadata:
   - `description: String` - Parameter description
-  - `example: Option[String]` - Example value
+  - `examples: List[String]` - Example values (JSON Schema `examples` array)
   - `required: Boolean` - Override required status
   - `schema: Option[String]` - Custom JSON Schema override
 
@@ -180,11 +180,11 @@ server.tool(addTool)
 ### Transports
 
 - **Stdio** (`runStdio()`) — stdin/stdout, used by MCP clients
-- **HTTP** (`runHttp()`) — streamable (sessions + per-request SSE, GET push channel on JVM, DELETE termination) by default; set `stateless = true` for stateless. Binds `127.0.0.1` by default (set `host = "0.0.0.0"` for containers); only `initialize` mints a session; idle sessions evict after `sessionIdleTimeout`; `allowedHosts` enables the DNS-rebinding guard; `keepAliveInterval` enables SSE heartbeats
+- **HTTP** (`runHttp()`) — MCP 2026-07-28 is stateless: one JSON-RPC message per `POST /mcp`, answered with JSON or a request-scoped SSE stream; no sessions, GET stream, or DELETE on the modern path. Older protocol versions are routed to the legacy initialize/session/GET/DELETE adapter, which is on by default; `stateless = true` disables only that adapter's session store. Binds `127.0.0.1` by default (set `host = "0.0.0.0"` for containers); idle legacy sessions evict after `sessionIdleTimeout`; `allowedHosts` enables the DNS-rebinding guard; `keepAliveInterval` enables SSE heartbeats. Full reference: `docs/transports.md`
 
 ### Tasks (experimental, off by default)
 
-MCP Tasks (spec **2025-11-25**) wrap long-running `tools/call` invocations in a durable, polled state machine. Clients send `params.task: {ttl}`, get a `CreateTaskResult` immediately, then poll `tasks/get` / `tasks/result` / `tasks/list` / `tasks/cancel`.
+MCP Tasks are the official **`io.modelcontextprotocol/tasks` extension** (MCP 2026-07-28). A client declares the extension in its per-request capabilities; the server may return a flat `resultType: "task"` bearer handle, and the client polls `tasks/get`, cancels with `tasks/cancel`, and uses `tasks/update` only when a task waits for input. `params.task`, `tasks/list`, and `tasks/result` belong to the 2025-11-25 compatibility adapter and are rejected on modern requests. Full reference: `docs/tasks.md`.
 
 **Enable per server**:
 
@@ -209,22 +209,21 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   .withTaskSupport(TaskSupport.Optional)
 ```
 
-`taskSupport` values: `"forbidden"` (default — no tasks), `"optional"` (clients may augment with a task), `"required"` (clients must — bare calls return `-32601`).
+`taskSupport` values: `"forbidden"` (default — always synchronous), `"optional"` (may return a task when the client supports the extension), `"required"` (requires the extension; otherwise `-32021`). Modern `tools/list` does not expose `execution.taskSupport`; legacy clients still see it.
 
-**Transport policy** (both platforms):
+**Transport policy** (all platforms):
 
 - Tasks dispatch is native **router middleware** (no transport-layer special-casing).
-- Modern 2026-07-28 **bearer tasks work on every transport**, including stateless HTTP; bearer
-  tasks are invisible to legacy protocol sessions (and vice versa).
+- Modern **bearer tasks work on every transport**, including stateless HTTP and stdio; possession
+  of an id grants access, so authorization belongs in front of the endpoint. Bearer tasks are
+  invisible to legacy protocol sessions (and vice versa).
 - The **legacy task surface** (`params.task`, `tasks/get|list|cancel|result`) works on any
-  transport whose session outlives a single request: **streamable HTTP** (`runHttp()`, the
-  default) and **stdio** (one durable session per process). On the **stateless legacy adapter**
-  all clients share one session identity, so legacy task requests there are rejected at runtime
-  with `-32601`.
-- Task ids come from the platform CSPRNG; a task that outlives its TTL is interrupted (not
-  orphaned); terminal results stay pollable until the TTL sweeps the entry.
-
-The `tasks` capability is advertised on `initialize` only when `settings.tasks.enabled` is true. The `execution.taskSupport` field is injected on `tools/list` entries that opt in.
+  transport whose session outlives a single request (legacy streamable HTTP, stdio). On the
+  **stateless legacy adapter** all clients share one session identity, so legacy task requests
+  there are rejected with `-32601`.
+- Task ids come from the platform CSPRNG (`/dev/urandom` on Scala Native); a task that outlives
+  its TTL is interrupted (not orphaned); terminal results stay pollable until the TTL sweeps them.
+- Not yet implemented: `input_required` suspension and task-status notifications.
 
 ### Cross-Platform Architecture
 
@@ -240,12 +239,12 @@ Every module reads exactly `shared/src/ + <platform>/src/`. Nothing reaches acro
 
 As of 0.5.0 there is **no wrapped SDK** — the MCP protocol layer is pure Scala 3 in `shared/`:
 - `jsonrpc/` — `JsonRpcMessage` + `McpError` (the JSON-RPC 2.0 envelope)
-- `core/wire/` + `core/Types.scala` — the 2025-11-25 wire types with ZIO JSON codecs
+- `core/wire/` + `core/Types.scala` — the 2026-07-28 wire types (plus compatibility-adapter shapes) with ZIO JSON codecs
 - `server/router/` — `McpRouter`, `Builtins`, `Middleware`, `RouterBuilder`, `WireMapping`, Tasks
 - `codec/` — `DefaultDecodeContext` + `McpDecoders` (one ZIO JSON decode path for both platforms)
 - `server/transport/` — `TransportBackend` (the platform seam) + `MessageLoop` (parse → dispatch → encode)
 
-Each platform provides exactly one `given TransportBackend` (`JvmTransportBackend` / `JsTransportBackend`); everything else is shared. The TypeScript `@modelcontextprotocol/sdk` is used only as a test-time conformance client.
+Each platform provides exactly one `given TransportBackend` (`JvmTransportBackend` / `JsTransportBackend` / `NativeTransportBackend`) and, where HTTP exists, an `HttpTransportBackend` (`JvmHttpBackend`; the JS backend provides both givens; Scala Native provides none, so `runHttp()` does not compile there); everything else is shared. The TypeScript `@modelcontextprotocol/sdk` is used only as a test-time conformance client.
 
 ## Code Quality
 
@@ -271,7 +270,7 @@ Key test classes:
 - `TaskHttpTransportTest` - the full MCP Tasks lifecycle over streamable HTTP
 - `StdioLoopLifecycleTest` - stdin-EOF / interruption contracts for the stdio loop
 - `JsonRpcEnvelopeTest` / `McpErrorMappingTest` - envelope discrimination + wire error codes
-- `WireCodecRoundTripTest` - wire-type codec round-trips (2025-11-25 shapes)
+- `WireCodecRoundTripTest` - wire-type codec round-trips (2026-07-28 + legacy shapes)
 - `StructuredOutputTest` - outputSchema + structuredContent + ServerHooks
 - `ConformanceGapsTest` / `ParityFixesTest` - regression nets for closed spec gaps
 - `ConformanceTest` (JS) - 17 cross-platform conformance tests against AnnotatedServer (real TS SDK client over stdio)
@@ -280,7 +279,7 @@ Key test classes:
 ## CI/CD
 
 - **CI** (`.github/workflows/ci.yml`): Runs on PRs and main pushes, tests on the LTS JDKs 17, 21, 25
-- **Conformance** (`.github/workflows/conformance.yml`): official `@modelcontextprotocol/conformance` suite against both platforms — 42/42, with expected-failure baselines at `conformance/baseline-{jvm,js}.yml` kept EMPTY (any regression fails the gate). Run locally via `scripts/conformance.sh {jvm|js}`.
+- **Conformance** (`.github/workflows/conformance.yml`): official `@modelcontextprotocol/conformance` suite (oracle pinned in `scripts/conformance.sh`, currently `0.2.0-alpha.11`) against the JVM and Bun servers, with expected-failure baselines at `conformance/baseline-{jvm,js}.yml` kept EMPTY (any regression fails the gate). `native.yml` runs the same suite against the GraalVM HTTP image. Run locally via `scripts/conformance.sh {jvm|js|native} [port] [active|2026]`.
 - **Release** (`.github/workflows/release.yml`): Triggered by `v*` tags, publishes to Maven Central
 
 ## Common Tasks
@@ -310,7 +309,7 @@ rm -rf out/fast-mcp-scala && ./mill fast-mcp-scala.compile
 ./mill -i __.publishLocal
 ```
 
-Then in your project use version `1.0.0-RC4-SNAPSHOT`.
+Then use the version printed by `./mill show fast-mcp-scala.jvm.publishVersion` (the `build.mill` default, a `-SNAPSHOT` during development). Contributor workflow, quality gates, and release steps: `CONTRIBUTING.md`.
 
 ## Dependencies
 
