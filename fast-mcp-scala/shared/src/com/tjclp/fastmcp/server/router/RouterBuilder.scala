@@ -82,7 +82,8 @@ object RouterBuilder:
       tasksEnabled = tasksOn,
       exposeTemplates = exposeTemplates,
       completionHandler = completionHandler,
-      hooks = hooks
+      hooks = hooks,
+      limits = settings.limits
     )
 
     val taskHandlers = taskManager.map(tm => new TaskHandlers[R](tm))
@@ -154,5 +155,6 @@ object RouterBuilder:
         toolManager.listDefinitions().map(d => d.name -> d.inputSchema.toAst).toMap,
       tasksEnabled = tasksOn,
       resourcesSubscribe = resourcesSubscribe,
-      listChanged = listChanged
+      listChanged = listChanged,
+      limits = settings.limits
     )

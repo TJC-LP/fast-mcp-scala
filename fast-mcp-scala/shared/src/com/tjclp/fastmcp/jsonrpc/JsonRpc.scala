@@ -1,9 +1,25 @@
 package com.tjclp.fastmcp.jsonrpc
 
+import zio.Chunk
 import zio.json.*
 import zio.json.ast.Json
 
+import com.tjclp.fastmcp.codec.JsonLimits
 import com.tjclp.fastmcp.core.Protocol
+
+/** Linear field lookup over a decoded JSON object. Last occurrence wins — the semantics
+  * `Chunk.toMap` gave duplicate keys — so behaviour is unchanged while no HashMap is ever built
+  * from client-chosen keys (N hash-colliding keys used to cost O(N²) comparisons per `toMap`).
+  */
+private[fastmcp] object JsonFields:
+
+  def get(fields: Chunk[(String, Json)], key: String): Option[Json] =
+    val idx = fields.lastIndexWhere(_._1 == key)
+    if idx < 0 then None else Some(fields(idx)._2)
+
+  def get(json: Json, key: String): Option[Json] = json match
+    case Json.Obj(fields) => get(fields, key)
+    case _ => None
 
 /** A JSON-RPC 2.0 request/response id. The spec allows `string | number`; we keep numbers as `Long`
   * (the spec discourages fractional ids) and preserve the original kind so responses echo the
@@ -24,7 +40,8 @@ object RequestId:
       case Json.Str(s) => Right(StrId(s))
       // Json.Num wraps java.math.BigDecimal — wrap in scala BigDecimal for isWhole/toLong.
       case Json.Num(n) if BigDecimal(n).isWhole => Right(NumId(BigDecimal(n).toLong))
-      case other => Left(s"JSON-RPC id must be a string or whole number, got: $other")
+      case other =>
+        Left(s"JSON-RPC id must be a string or whole number, got: ${JsonLimits.typeName(other)}")
     }
   )
 
@@ -42,6 +59,9 @@ object JsonRpcErrorObject:
   * `params`/`data` precisely).
   *
   * Batching was dropped from the spec at 2025-06-18, so there is no array case.
+  *
+  * The decoder looks the envelope members up by linear scan ([[JsonFields]]); unknown top-level
+  * fields are tolerated and never materialised into a map.
   */
 sealed trait JsonRpcMessage
 
@@ -94,17 +114,17 @@ object JsonRpcMessage:
 
   given JsonDecoder[JsonRpcMessage] = JsonDecoder[Json].mapOrFail {
     case Json.Obj(fields) =>
-      val m = fields.toMap
-      val idField = m.get("id")
+      def field(key: String): Option[Json] = JsonFields.get(fields, key)
+      val idField = field("id")
       // Best-effort id for echoing back on -32600 (null / fractional ids echo as null).
       val idOpt = idField.filter(_ != Json.Null).flatMap(_.as[RequestId].toOption)
       def invalid(reason: String): Right[String, JsonRpcMessage] = Right(Invalid(idOpt, reason))
-      if !m.get("jsonrpc").contains(Json.Str(V)) then
+      if !field("jsonrpc").contains(Json.Str(V)) then
         invalid(s"""missing or invalid `jsonrpc` version (expected "$V")""")
       else
-        (m.get("method"), m.get("result"), m.get("error")) match
+        (field("method"), field("result"), field("error")) match
           case (Some(Json.Str(method)), _, _) =>
-            val params = m.get("params")
+            val params = field("params")
             idField match
               case None => Right(Notification(method, params))
               case Some(Json.Null) => invalid("request `id` must not be null")
@@ -115,7 +135,7 @@ object JsonRpcMessage:
           case (Some(_), _, _) =>
             invalid("`method` must be a string")
           case (_, Some(result), _) =>
-            m.get("id")
+            idField
               .toRight("JSON-RPC success response missing `id`")
               .flatMap(_.as[RequestId])
               .map(Success(_, result))
@@ -123,7 +143,8 @@ object JsonRpcMessage:
             err.as[JsonRpcErrorObject].map(Failure(idOpt, _))
           case _ =>
             invalid("missing `method`, `result`, and `error`")
-    case other => Left(s"JSON-RPC message must be a JSON object, got: $other")
+    case other =>
+      Left(s"JSON-RPC message must be a JSON object, got: ${JsonLimits.typeName(other)}")
   }
 
   given JsonCodec[JsonRpcMessage] =

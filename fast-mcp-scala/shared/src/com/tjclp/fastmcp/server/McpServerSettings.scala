@@ -85,7 +85,8 @@ case class TaskSettings(
   require(sweepIntervalMs >= 1L, "TaskSettings.sweepIntervalMs must be >= 1")
 
 /** Settings for an MCP server. HTTP-specific fields (`stateless`, `keepAliveInterval`,
-  * `disallowDelete`, `httpEndpoint`) are ignored under stdio transports.
+  * `disallowDelete`, `httpEndpoint`) are ignored under stdio transports. `limits` applies on every
+  * transport.
   */
 case class McpServerSettings(
     debug: Boolean = false,
@@ -123,5 +124,62 @@ case class McpServerSettings(
     // `None` (default) disables host checking, preserving prior behavior.
     allowedHosts: Option[Set[String]] = None,
     // Optional io.modelcontextprotocol/tasks extension. Off by default.
-    tasks: TaskSettings = TaskSettings()
+    tasks: TaskSettings = TaskSettings(),
+    // Inbound input limits (frame size, JSON depth, object width, URI length, subscriptions).
+    // Enforced on every transport before any dispatch work; see [[LimitSettings]].
+    limits: LimitSettings = LimitSettings()
 )
+
+/** Input limits applied to every inbound JSON-RPC frame on every transport (stdio and HTTP; JVM,
+  * Scala.js, Scala Native), plus the resource-URI and per-session subscription bounds.
+  *
+  * Frame-limit violations (`maxFrameChars`, `maxDepth`, `maxObjectFields`) answer JSON-RPC `-32700`
+  * (HTTP 400) before any dispatch work and never mint a session; the URI and subscription bounds
+  * answer `-32602`. Limits cannot be disabled, only moved inside the documented bounds — the
+  * constructor `require`s make a misconfiguration fail fast at construction.
+  *
+  * @param maxFrameChars
+  *   Max length of ONE decoded frame (one stdio line / one HTTP body) in UTF-16 chars. On HTTP the
+  *   transport body cap (`McpServerSettings.maxRequestBodyBytes`) should be <= this so oversized
+  *   bodies get 413 first; this is the transport-independent backstop. Note: sampling/createMessage
+  *   results carrying base64 images must fit — raise for image-heavy stdio deployments, e.g.
+  *   `LimitSettings(maxFrameChars = 16 * 1024 * 1024)`.
+  * @param maxDepth
+  *   Max JSON nesting depth. Depth 1 = the envelope object; every nested `{` / `[` adds one. A
+  *   legacy `initialize` is depth 4, a `tools/call` with one nested argument object is depth 4-5;
+  *   values below 8 break normal clients. The hard ceiling [[LimitSettings.MaxSupportedDepth]]
+  *   keeps every recursive walk (encode / equals / toString) far inside the smallest supported
+  *   stack, so no configuration can re-open the stack-overflow window.
+  * @param maxObjectFields
+  *   Max members of any single JSON object anywhere in a frame. Bounds the worst case of building a
+  *   Scala `Map` from attacker-chosen hash-colliding keys (cost grows quadratically per object).
+  * @param maxUriChars
+  *   Max length (chars) of a client-supplied resource URI: `resources/read`, `resources/subscribe`,
+  *   `resources/unsubscribe`, and `subscriptions/listen` entries.
+  * @param maxSubscriptionsPerSession
+  *   Max distinct URIs one legacy session may hold via `resources/subscribe`; further distinct
+  *   subscriptions are refused with `-32602`.
+  */
+case class LimitSettings(
+    maxFrameChars: Int = 4 * 1024 * 1024,
+    maxDepth: Int = 64,
+    maxObjectFields: Int = 1024,
+    maxUriChars: Int = 8192,
+    maxSubscriptionsPerSession: Int = 1024
+):
+  require(maxFrameChars >= 1, "limits.maxFrameChars must be >= 1")
+  require(
+    maxDepth >= 1 && maxDepth <= LimitSettings.MaxSupportedDepth,
+    s"limits.maxDepth must be in 1..${LimitSettings.MaxSupportedDepth}"
+  )
+  require(maxObjectFields >= 1, "limits.maxObjectFields must be >= 1")
+  require(maxUriChars >= 1, "limits.maxUriChars must be >= 1")
+  require(maxSubscriptionsPerSession >= 1, "limits.maxSubscriptionsPerSession must be >= 1")
+
+object LimitSettings:
+  /** Hard ceiling for `maxDepth`: the stack safety of every later recursive walk over client JSON
+    * (zio-json encode, `equals`, `toString`, AST unwrapping) depends on it.
+    */
+  val MaxSupportedDepth: Int = 256
+  val DefaultMaxDepth: Int = 64
+  val DefaultMaxObjectFields: Int = 1024
