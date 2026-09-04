@@ -33,7 +33,7 @@ object JvmTransportBackend extends TransportBackend:
       ZStream
         .fromInputStream(java.lang.System.in)
         .via(ZPipeline.utf8Decode)
-        .via(ZPipeline.splitLines)
+        .via(BoundedLines.pipeline(router.limits.maxFrameChars))
         .map(_.trim)
         .filter(_.nonEmpty)
     )

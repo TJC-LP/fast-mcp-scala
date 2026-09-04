@@ -59,7 +59,7 @@ object NativeTransportBackend extends TransportBackend:
         .fromReader(new java.io.InputStreamReader(java.lang.System.in, StandardCharsets.UTF_8))
         .chunks
         .map(chunk => new String(chunk.toArray))
-        .via(ZPipeline.splitLines)
+        .via(BoundedLines.pipeline(router.limits.maxFrameChars))
         .map(_.trim)
         .filter(_.nonEmpty)
     )
