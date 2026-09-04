@@ -54,6 +54,14 @@ class BoundedLinesTest extends AnyFunSuite with Matchers:
     out.map(_.length) shouldBe Chunk(11)
   }
 
+  test("pipeline(Int.MaxValue) — the 'unbounded' configuration — passes lines through unchanged") {
+    // maxChars + 1 must not wrap to Int.MinValue (a negative cap threw IndexOutOfBounds on the
+    // first line and killed the stdio stream).
+    split(Int.MaxValue, "abc\ndef\n") shouldBe Chunk("abc", "def")
+    split(Int.MaxValue, "x" * 100_000 + "\r\n", "tail") shouldBe Chunk("x" * 100_000, "tail")
+    LimitSettings(maxFrameChars = Int.MaxValue).maxFrameChars shouldBe Int.MaxValue
+  }
+
   test("the truncated frame is rejected by parseFrame as maxFrameChars") {
     val frame = split(10, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n").head
     frame.length shouldBe 11

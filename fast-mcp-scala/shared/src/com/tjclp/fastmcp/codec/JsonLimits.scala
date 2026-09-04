@@ -17,6 +17,19 @@ import zio.json.ast.Json
   */
 private[fastmcp] object JsonLimits:
 
+  /** Hard ceiling for any configured depth bound: the stack safety of every later recursive walk
+    * over client JSON (zio-json encode, `equals`, `toString`, AST unwrapping) depends on it.
+    * `server.LimitSettings.MaxSupportedDepth` re-exports it; it lives here so `codec` never depends
+    * on `server`.
+    */
+  val MaxSupportedDepth: Int = 256
+
+  /** Defaults shared by `server.LimitSettings` (frame level) and [[DefaultDecodeContext]] (JSON
+    * embedded in string arguments).
+    */
+  val DefaultMaxDepth: Int = 64
+  val DefaultMaxObjectFields: Int = 1024
+
   enum Violation:
     case FrameTooLong(length: Int, max: Int)
     case TooDeep(max: Int)

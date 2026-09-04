@@ -60,6 +60,19 @@ class JsonLimitsNativeTest extends AnyFunSuite with Matchers:
       DefaultDecodeContext.default.parseJsonArray("blob", "[" * 300 + "]" * 300)
     )
     ex.getMessage should include("maxDepth")
+    // 50 000 levels would overflow the native stack inside zio-json's recursive parser (not
+    // catchable on Scala Native) — the linear pre-scan rejects the text before the parser runs.
+    val ex2 = intercept[IllegalArgumentException](
+      DefaultDecodeContext.default.parseJsonArray("blob", "[" * 50_000 + "]" * 50_000)
+    )
+    ex2.getMessage should include("maxDepth")
+    val ex3 = intercept[IllegalArgumentException](
+      DefaultDecodeContext.default.parseJsonObject(
+        "blob",
+        (1 to 1100).map(i => s""""k$i":$i""").mkString("{", ",", "}")
+      )
+    )
+    ex3.getMessage should include("maxObjectFields")
   }
 
   test("the template matcher handles a 100 KB adversarial URI without regex") {

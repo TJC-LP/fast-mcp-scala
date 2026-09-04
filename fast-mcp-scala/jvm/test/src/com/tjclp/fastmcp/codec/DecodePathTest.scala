@@ -126,11 +126,12 @@ class DecodePathTest extends AnyFunSuite with Matchers:
     val ex = intercept[IllegalArgumentException](ctx.parseJsonArray("blob", deep300))
     ex.getMessage should include("maxDepth")
 
-    // Far past what the parser itself can take: zio-json's guarded parser fails first (Left →
-    // RuntimeException). Either way the test JVM is still here — no StackOverflowError escaped.
+    // Far past what the parser itself can take: the linear pre-scan rejects the text before
+    // zio-json's recursive parser ever runs (so this is safe on Scala Native too, where a parser
+    // stack overflow would not be catchable).
     val deep50k = "[" * 50_000 + "]" * 50_000
-    val ex2 = intercept[RuntimeException](ctx.parseJsonArray("blob", deep50k))
-    ex2 should not be a[java.lang.Error]
+    val ex2 = intercept[IllegalArgumentException](ctx.parseJsonArray("blob", deep50k))
+    ex2.getMessage should include("maxDepth")
 
     val wide = (1 to 1100).map(i => s""""k$i":$i""").mkString("{", ",", "}")
     val ex3 = intercept[IllegalArgumentException](ctx.parseJsonObject("blob", wide))

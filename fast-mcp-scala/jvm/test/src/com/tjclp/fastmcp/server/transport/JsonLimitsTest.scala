@@ -129,6 +129,29 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
     ms should be < 500L
   }
 
+  test("residual per-object cost at the default maxObjectFields is tracked (50 × 1024 colliding keys)") {
+    // Inside the limits nothing is rejected, so every Map sink after the choke point still pays
+    // O(maxObjectFields²) per colliding object. 50 objects × 1024 keys is a ~1 MB frame (the HTTP
+    // body cap); the bound here is loose (measured ≈ 0.2 s on JDK 25) — it pins the ORDER of the
+    // residual so a regression to the pre-fix quadratic-in-frame behaviour is caught.
+    val keys = collidingKeys(7).take(1024) // 2187 available, exactly maxObjectFields used
+    keys.size shouldBe 1024
+    val obj = collidingObject(keys)
+    val list = Seq.fill(50)(obj).mkString("[", ",", "]")
+    val frame =
+      s"""{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{"xs":$list}}}"""
+    val (parsed, parseMs) = timed(MessageLoop.parseFrame(frame))
+    val xs = parsed match
+      case Right(Request(_, _, Some(Json.Obj(params)))) =>
+        JsonFields.get(params, "arguments").flatMap(JsonFields.get(_, "xs")).getOrElse(fail("xs"))
+      case other => fail(s"unexpected $other")
+    parseMs should be < 1000L
+    val (decoded, decodeMs) = timed(JsonDecoder[List[Map[String, Int]]].fromJsonAST(xs))
+    decoded.map(_.size) shouldBe Right(50)
+    decoded.map(_.head.size) shouldBe Right(1024)
+    decodeMs should be < 3000L
+  }
+
   // ---- F3: depth ----
 
   test("100 000 nested arrays are rejected as maxDepth before the parser runs") {
@@ -232,6 +255,28 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
     JsonFields.get(Json.Str("not an object"), "a") shouldBe None
   }
 
+  test("numeric ids outside Long range are rejected, not silently wrapped") {
+    def idOf(id: String) = MessageLoop.parseFrame(s"""{"jsonrpc":"2.0","id":$id,"method":"ping"}""")
+    idOf("9223372036854775807") shouldBe Right(Request(RequestId.NumId(Long.MaxValue), "ping", None))
+    idOf("-9223372036854775808") shouldBe Right(
+      Request(RequestId.NumId(Long.MinValue), "ping", None)
+    )
+    idOf("1e3") shouldBe Right(Request(RequestId.NumId(1000L), "ping", None))
+    idOf("100e-2") shouldBe Right(Request(RequestId.NumId(1L), "ping", None))
+    idOf("0e99999999") shouldBe Right(Request(RequestId.NumId(0L), "ping", None))
+    // 1e30 used to become NumId(5076944270305263616); 1e999999999 became NumId(0).
+    Seq("9223372036854775808", "1e30", "1e19", "1e999999999", "1e2147483647", "1.5", "1e-2147483647")
+      .foreach { id =>
+        val (result, ms) = timed(idOf(id))
+        withClue(id) {
+          result match
+            case Right(Invalid(None, reason)) => reason should include("64-bit")
+            case other => fail(s"expected Invalid for id $id, got $other")
+          ms should be < 200L
+        }
+      }
+  }
+
   test("unknown top-level fields are tolerated and never materialised") {
     MessageLoop.parseFrame(
       """{"jsonrpc":"2.0","id":1,"method":"ping","extra":{"x":[1,2,3]},"more":true}"""
@@ -304,4 +349,9 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
     LimitSettings(maxDepth = LimitSettings.MaxSupportedDepth).maxDepth shouldBe 256
     LimitSettings().maxFrameChars shouldBe 4 * 1024 * 1024
     LimitSettings().maxObjectFields shouldBe 1024
+    // LimitSettings' literal defaults and the codec-level constants (DefaultDecodeContext's
+    // embedded-JSON bounds) must not drift apart.
+    LimitSettings().maxDepth shouldBe JsonLimits.DefaultMaxDepth
+    LimitSettings().maxObjectFields shouldBe JsonLimits.DefaultMaxObjectFields
+    LimitSettings.MaxSupportedDepth shouldBe JsonLimits.MaxSupportedDepth
   }

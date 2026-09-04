@@ -45,7 +45,9 @@ object BoundedLines:
     */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private final class State(maxChars: Int):
-    private val cap = maxChars + 1
+    // `maxChars + 1` would wrap for LimitSettings(maxFrameChars = Int.MaxValue) — a legal
+    // "unbounded" configuration — so saturate instead of overflowing into a negative cap.
+    private val cap = if maxChars == Int.MaxValue then Int.MaxValue else maxChars + 1
     private val line = new java.lang.StringBuilder
     private var discarding = false
 
@@ -53,10 +55,9 @@ object BoundedLines:
     private def append(s: String, from: Int, until: Int): Unit =
       if !discarding && until > from then
         val room = cap - line.length
-        if until - from <= room then line.append(s, from, until)
-        else
-          line.append(s, from, from + room)
-          discarding = true
+        val take = if until - from <= room then until else from + room
+        line.append(s, from, take)
+        if take < until then discarding = true
 
     /** Emit the current line (with one trailing `\\r` stripped — CRLF), reset. */
     private def emit(): String =

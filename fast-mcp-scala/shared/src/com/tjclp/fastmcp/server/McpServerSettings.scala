@@ -152,7 +152,14 @@ case class McpServerSettings(
   *   stack, so no configuration can re-open the stack-overflow window.
   * @param maxObjectFields
   *   Max members of any single JSON object anywhere in a frame. Bounds the worst case of building a
-  *   Scala `Map` from attacker-chosen hash-colliding keys (cost grows quadratically per object).
+  *   Scala `Map` from attacker-chosen hash-colliding keys: every `Map` sink after the frame check
+  *   (zio-json `Map` decoders, `_meta` lookups, tool-argument maps) costs up to `maxObjectFields² /
+  *   2` string comparisons per colliding object, so a frame can cost roughly `maxFrameChars / 20 /
+  *   maxObjectFields` objects × `maxObjectFields² / 2` comparisons — linear in the frame but with a
+  *   constant that grows quadratically in this knob (at the defaults about 0.4 s per 4 MiB frame on
+  *   the JVM, several times that on single-threaded Bun). Operators exposing a Bun server to
+  *   untrusted networks should lower it (e.g. 256); the 2025-11-25 wire shapes never need more than
+  *   a few dozen members per object.
   * @param maxUriChars
   *   Max length (chars) of a client-supplied resource URI: `resources/read`, `resources/subscribe`,
   *   `resources/unsubscribe`, and `subscriptions/listen` entries.
@@ -162,8 +169,8 @@ case class McpServerSettings(
   */
 case class LimitSettings(
     maxFrameChars: Int = 4 * 1024 * 1024,
-    maxDepth: Int = 64,
-    maxObjectFields: Int = 1024,
+    maxDepth: Int = 64, // = codec.JsonLimits.DefaultMaxDepth (pinned by JsonLimitsTest)
+    maxObjectFields: Int = 1024, // = codec.JsonLimits.DefaultMaxObjectFields
     maxUriChars: Int = 8192,
     maxSubscriptionsPerSession: Int = 1024
 ):
@@ -178,8 +185,8 @@ case class LimitSettings(
 
 object LimitSettings:
   /** Hard ceiling for `maxDepth`: the stack safety of every later recursive walk over client JSON
-    * (zio-json encode, `equals`, `toString`, AST unwrapping) depends on it.
+    * (zio-json encode, `equals`, `toString`, AST unwrapping) depends on it. Defined in
+    * `codec.JsonLimits` (shared with `DefaultDecodeContext`'s embedded-JSON bounds) and re-exported
+    * here.
     */
-  val MaxSupportedDepth: Int = 256
-  val DefaultMaxDepth: Int = 64
-  val DefaultMaxObjectFields: Int = 1024
+  val MaxSupportedDepth: Int = com.tjclp.fastmcp.codec.JsonLimits.MaxSupportedDepth

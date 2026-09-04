@@ -38,12 +38,27 @@ object RequestId:
     },
     JsonDecoder[Json].mapOrFail {
       case Json.Str(s) => Right(StrId(s))
-      // Json.Num wraps java.math.BigDecimal — wrap in scala BigDecimal for isWhole/toLong.
-      case Json.Num(n) if BigDecimal(n).isWhole => Right(NumId(BigDecimal(n).toLong))
+      case Json.Num(n) =>
+        longId(n)
+          .map(NumId(_))
+          .toRight("JSON-RPC id must be a string or a whole number in 64-bit range")
       case other =>
         Left(s"JSON-RPC id must be a string or whole number, got: ${JsonLimits.typeName(other)}")
     }
   )
+
+  /** A numeric id is accepted only if it is whole and fits a `Long` — an out-of-range id would
+    * otherwise be wrapped by `toLong` and the reply would echo a different id than the client sent.
+    * Cheap on any exponent: a negative scale below -19 means |n| >= 10^20 (past `Long`), so
+    * `longValueExact`'s `setScale(0)` (which would materialise 10^|scale|) is never reached for a
+    * huge exponent; for the remaining scales it is O(digits), and zio-json caps the mantissa.
+    */
+  private def longId(n: java.math.BigDecimal): Option[Long] =
+    if n.signum == 0 then Some(0L)
+    else if n.scale < -19 then None
+    else
+      try Some(n.longValueExact)
+      catch case _: ArithmeticException => None
 
 /** A JSON-RPC 2.0 error object (the `error` member of an error response). */
 case class JsonRpcErrorObject(code: Int, message: String, data: Option[Json] = None)
