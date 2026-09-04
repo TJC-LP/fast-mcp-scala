@@ -125,6 +125,8 @@ def search(
 - `required = false` — combined with `Option[...]` or a default value, marks the field optional
 - `schema` — raw JSON Schema fragment that overrides the derived schema entirely (useful for enum constraints, patterns, or numeric bounds Scala types can't express)
 
+Overloading is fine: only the annotated overload is registered, and its schema and handler come from that exact declaration; two annotated overloads must register distinct `name`s — duplicate names or resource URI patterns within one object are a compile-time error. Annotation arguments such as `name`, `description` and the hints must be literals (`Some("...")`, `Option("...")`, `None`, or a `final val` constant); anything else is a compile-time error.
+
 Full demo in [`AnnotatedServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala).
 
 ## Tool hints
@@ -172,6 +174,8 @@ Templated resources use `{placeholders}` in the URI, matched against method para
 )
 def userProfile(@Param("The user id") userId: String): String = ...
 ```
+
+Placeholders match one non-empty path segment (no `/`); literal text is matched verbatim (not as a regex); placeholders in the same segment must be separated by literal text. Client URIs longer than `limits.maxUriChars` (8192) are rejected with `-32602`.
 
 ## Prompts
 
@@ -234,11 +238,15 @@ Need lower-level control? Skip the sugar trait and construct directly — `val s
 | `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity (live legacy GET streams are exempt); `None` disables |
 | `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies don't kill long calls |
-| `allowedHosts` | `None` | DNS-rebinding guard: reject requests whose `Host`/`Origin` isn't in the set (403) |
+| `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` hostname must be listed (port ignored); a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null` and malformed `Host`/`Origin` ports are refused (403) |
+| `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted alongside the request's own authority; malformed entries fail startup |
+| `maxRequestBodyBytes` | `1 MiB` | Request body cap on every backend; larger bodies get 413 before decoding (empty 413 on the wire from netty/Bun, JSON-RPC `-32000` on first-party paths); must not exceed `limits.maxFrameChars` |
+| `maxSessions` | `Some(1000)` | Cap on stored legacy sessions; at the cap the longest-idle session without a live GET is evicted (unauthenticated initializes can evict idle sessions — front non-loopback deployments with auth), 503 only if none is evictable; `None` disables |
+| `limits` | `LimitSettings()` | Input bounds on every transport: `maxFrameChars` 4 MiB, `maxDepth` 64, `maxObjectFields` 1024 (`-32700` / HTTP 400 before dispatch), `maxUriChars` 8192 and `maxSubscriptionsPerSession` 1024 (`-32602`) |
 | `loggingEnabled` | `false` | Advertise logging; use per-request `_meta` levels in 2026 and `logging/setLevel` for legacy clients |
 | `resourcesSubscribe` | `false` | Enable legacy `resources/subscribe`; modern clients use `subscriptions/listen` |
 
-Modern POST requests must include `Content-Type: application/json`, an `Accept` header listing both JSON and SSE, `MCP-Protocol-Version: 2026-07-28`, and `Mcp-Method`; tool calls, resource reads, and prompt gets also require `Mcp-Name`. The protocol version and client capabilities are repeated in every request's `params._meta`. Header/body mismatches return HTTP 400 with `-32020`; unsupported versions return `-32022`; unknown request methods return HTTP 404 with `-32601`. The complete wire-behavior and review matrix is in the [2026-07-28 upgrade guide](docs/2026-07-28-upgrade.md).
+Every POST — legacy and modern — must carry `Content-Type: application/json` (415 otherwise); modern POST requests must additionally include an `Accept` header listing both JSON and SSE, `MCP-Protocol-Version: 2026-07-28`, and `Mcp-Method`; tool calls, resource reads, and prompt gets also require `Mcp-Name`. The protocol version and client capabilities are repeated in every request's `params._meta`. Header/body mismatches return HTTP 400 with `-32020`; unsupported versions return `-32022`; unknown request methods return HTTP 404 with `-32601`. The complete wire-behavior and review matrix is in the [2026-07-28 upgrade guide](docs/2026-07-28-upgrade.md).
 
 ## Native image (GraalVM)
 
@@ -297,7 +305,7 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
 
 **Transport policy**: modern task IDs are bearer handles, so task creation and polling work over stdio and both HTTP settings on JVM and Bun. Keep them secret and enforce authorization around the MCP endpoint: possession of an ID grants access to that task. Legacy task IDs remain scoped to their initialized session.
 
-Task IDs come from the platform CSPRNG, a task that outlives its TTL is interrupted (not orphaned), and terminal results stay pollable until the TTL sweeps them. The current server creates working/completed/failed/cancelled tool tasks; it implements `tasks/update` validation but does not yet suspend a task in `input_required`, and task-status notifications are not emitted. The extension remains off by default.
+Task IDs come from the platform CSPRNG, a task that outlives its TTL is interrupted (not orphaned), and terminal results stay pollable until the TTL sweeps them or, after a 30 s grace, the owner/pool stored-entry cap evicts the oldest completed task (`TaskSettings.maxStoredPerOwner` 256 / `maxStoredTotal` 4096; a create with nothing evictable is refused with `-32003`). Modern bearer tasks are bucketed per client by the transport-supplied peer address (`TaskOwnerKey.Transport`); behind a reverse proxy use `TaskOwnerKey.Custom`. The current server creates working/completed/failed/cancelled tool tasks; it implements `tasks/update` validation but does not yet suspend a task in `input_required`, and task-status notifications are not emitted. The extension remains off by default.
 
 ## Customizing input types (zio-json)
 
@@ -387,7 +395,7 @@ Capabilities are **derived from the registered handler map** — a capability is
 
 Node / Deno parity for the HTTP listener is a follow-up; only the `Bun.serve(...)` entry point is Bun-specific today.
 
-Proof: the official **MCP conformance suite** runs against both platforms in CI ([`scripts/conformance.sh`](scripts/conformance.sh) + [`.github/workflows/conformance.yml`](.github/workflows/conformance.yml)) at **42/42** with zero expected failures; [`ConformanceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/ConformanceTest.scala) additionally drives the official TS SDK client against the JVM server over stdio, and [`JsServerHttpTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/JsServerHttpTest.scala) verifies the Bun HTTP routing.
+Proof: the official **MCP conformance suite** runs against both platforms in CI ([`scripts/conformance.sh`](scripts/conformance.sh) + [`.github/workflows/conformance.yml`](.github/workflows/conformance.yml)) at **73/73** checks with zero expected failures (harness pinned and lock-frozen under `conformance/`); [`ConformanceTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/ConformanceTest.scala) additionally drives the official TS SDK client against the JVM server over stdio, and [`JsServerHttpTest.scala`](fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/JsServerHttpTest.scala) verifies the Bun HTTP routing.
 
 ### Running on Bun
 
@@ -404,7 +412,7 @@ object HelloBun extends McpServerApp[Stdio, HelloBun.type]:
 
 Same shape as the JVM — the `McpServerApp` trait picks up the shared `McpServerCoreFactory` given and builds the one shared `McpServer` over the Bun `TransportBackend`. Typed contracts auto-generate their input schemas on Scala.js as well, with no schema-library import.
 
-Link with `./mill fast-mcp-scala.js.fastLinkJS`, then `bun run out/fast-mcp-scala/js/fastLinkJS.dest/main.js`. See [`HelloWorld.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/HelloWorld.scala) (shared across platforms) and [`HttpServerJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HttpServerJs.scala) for runnable references.
+The Bun listener runs with `development: false`, an `error` callback and a first-party `catchAllCause` boundary (`NODE_ENV` is not security-relevant); `startStatefulHttp()` / `startStatelessHttp()` return a `BunHttpHandle` (call `.stop()`), and idle-session eviction plus the `maxSessions` cap run on every entry. Link with `./mill fast-mcp-scala.js.fastLinkJS`, then `bun run out/fast-mcp-scala/js/fastLinkJS.dest/main.js`. See [`HelloWorld.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/HelloWorld.scala) (shared across platforms) and [`HttpServerJs.scala`](fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HttpServerJs.scala) for runnable references.
 
 ### Running on Scala Native (experimental)
 
@@ -425,7 +433,7 @@ object HelloNative extends McpServerApp[Stdio, HelloNative.type]:
 
 Or in this repo: `./mill fast-mcp-scala.scalaNative.nativeLink` builds the `AnnotatedServer` demo binary, and `scripts/native-smoke.sh <binary>` drives it through the full MCP handshake — the same script that gates the GraalVM images.
 
-Caveats (experimental): stdio only (see the matrix footnote); session/task ids come from `/dev/urandom` (Unix-only); ZIO's signal handlers and shutdown hooks are no-ops on Scala Native — shutdown is EOF-driven (the client closing stdin ends the loop), and SIGINT falls back to the OS default; `java.util.regex` is RE2-backed (no lookaheads) — relevant only if your resource URI templates embed exotic regex.
+Caveats (experimental): stdio only (see the matrix footnote); session/task ids come from `/dev/urandom` (Unix-only); ZIO's signal handlers and shutdown hooks are no-ops on Scala Native — shutdown is EOF-driven (the client closing stdin ends the loop), and SIGINT falls back to the OS default.
 
 ## Spec coverage
 
