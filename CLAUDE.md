@@ -15,7 +15,7 @@ Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **
 
 **Build tool**: Mill 1.1.8 (configured in `.mill-version`)
 **Scala**: 3.9.0 (LTS)
-**Plugins**: mill-bun-plugin 0.3.1 (Scala.js + Bun integration; explicit `scalaJSVersion`, managed Bun 1.4.0, frozen `js/bun.lock`)
+**Plugins**: mill-bun-plugin 0.3.1 (Scala.js + Bun integration; explicit `scalaJSVersion`, managed Bun 1.4.1, frozen `js/bun.lock`)
 
 ### Common Commands
 

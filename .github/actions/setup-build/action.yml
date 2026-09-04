@@ -32,7 +32,7 @@ runs:
       if: inputs.bun == 'true'
       uses: oven-sh/setup-bun@v2
       with:
-        bun-version: 1.4.0 # same Bun the mill-bun plugin manages for the Scala.js tests
+        bun-version: 1.4.1 # same Bun the mill-bun plugin manages for the Scala.js tests
 
     # Keys hash every *.mill file (build.mill plus each package.mill) and .mill-version — the
     # latter selects the Mill distribution that lands in the Mill cache. A key hashing only

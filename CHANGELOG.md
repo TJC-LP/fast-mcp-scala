@@ -44,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and installs are frozen (regenerate via `./mill fast-mcp-scala.js.bunLock`);
   the test-only TS SDK moved from `bunDeps` to `bunDevDeps`, so the published
   `_sjs1_3` JAR no longer advertises it in a bun dependency manifest; the
-  plugin manages Bun 1.4.0 itself (CI's system Bun moves to 1.4.0 to match);
+  plugin manages Bun 1.4.1 itself (CI's system Bun moves to 1.4.1 to match);
   `js.test.bunTest` is replaced by the inherited `js.test` (`testForked`).
   The js test module also drops the Scala 2.13 `scalajs-scalalib` that Mill's
   isolated test-bridge resolution prepends to the test link on Scala 3.8+ —
