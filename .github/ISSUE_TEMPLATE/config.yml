@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/TJC-LP/fast-mcp-scala/security/advisories/new
+    about: Report security issues privately. Never in a public issue.
+  - name: MCP protocol questions
+    url: https://github.com/modelcontextprotocol/modelcontextprotocol/discussions
+    about: Questions about the Model Context Protocol itself, rather than this library, belong with the MCP community.
