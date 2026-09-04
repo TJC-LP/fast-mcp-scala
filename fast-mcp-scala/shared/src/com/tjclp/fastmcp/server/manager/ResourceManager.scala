@@ -3,7 +3,6 @@ package com.tjclp.fastmcp.server.manager
 import java.util.concurrent.ConcurrentHashMap
 
 import scala.jdk.CollectionConverters.*
-import scala.util.matching.Regex
 
 import zio.*
 
@@ -23,8 +22,11 @@ type ResourceTemplateHandler[R] = Map[String, String] => ZIO[R, Throwable, Strin
 
 /** Manager for MCP resources.
   *
-  * Since we assume scheme-based URIs such as `users://{id}/profile`, template match patterns are
-  * anchored with `^` and `$` so only exact matches pass.
+  * Templates such as `users://{id}/profile` are compiled ONCE at registration into a
+  * [[ResourceTemplatePattern]] — a regex-free, linear-time matcher where literal text is matched
+  * verbatim and each placeholder matches one non-empty path segment (no `/`); a URI matches only as
+  * a whole. Client URIs are bounded upstream (`limits.maxUriChars`, enforced in the built-in
+  * handlers) before they reach [[findMatchingTemplate]].
   *
   * @tparam R
   *   the ZIO environment all stored handlers may require; supplied by the server at `runHttp[R]()`
@@ -36,7 +38,10 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
     new ConcurrentHashMap[String, (ResourceDefinition, ResourceHandler[R])]()
 
   private val templateResources =
-    new ConcurrentHashMap[String, (ResourceDefinition, ResourceTemplateHandler[R])]()
+    new ConcurrentHashMap[
+      String,
+      (ResourceTemplatePattern, ResourceDefinition, ResourceTemplateHandler[R])
+    ]()
 
   def addStaticResource(
       uri: String,
@@ -86,7 +91,21 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
           java.lang.System.err.println(
             s"[ResourceManager] Warning: Resource template with pattern '$uriPattern' already exists. Overwriting."
           )
-        templateResources.put(uriPattern, (templateDefinition, handler))
+        else
+          // Same shape under different placeholder names (`users://{id}` vs `users://{userId}`)
+          // matches the same URIs; whichever the map iterates first wins at read time.
+          val shape = ResourceManager.placeholderShape(uriPattern)
+          templateResources
+            .keySet()
+            .asScala
+            .find(ResourceManager.placeholderShape(_) == shape)
+            .foreach { existing =>
+              java.lang.System.err.println(
+                s"[ResourceManager] Warning: Resource template '$uriPattern' matches the same URIs as " +
+                  s"already-registered '$existing'."
+              )
+            }
+        templateResources.put(uriPattern, (pattern, templateDefinition, handler))
         ()
       }
       .mapError(e =>
@@ -106,13 +125,13 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
 
   override def listDefinitions(): List[ResourceDefinition] =
     (staticResources.values().asScala.map(_._1) ++
-      templateResources.values().asScala.map(_._1)).toList
+      templateResources.values().asScala.map(_._2)).toList
 
   def listStaticResources(): List[ResourceDefinition] =
     staticResources.values().asScala.map(_._1).toList
 
   def listTemplateResources(): List[ResourceDefinition] =
-    templateResources.values().asScala.map(_._1).toList
+    templateResources.values().asScala.map(_._2).toList
 
   def getStaticResourceHandler(uri: String): Option[ResourceHandler[R]] =
     Option(staticResources.get(uri)).map(_._2)
@@ -121,35 +140,32 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
   def getResourceHandler(uri: String): Option[ResourceHandler[R]] = getStaticResourceHandler(uri)
 
   def getTemplateResourceHandler(uriPattern: String): Option[ResourceTemplateHandler[R]] =
-    Option(templateResources.get(uriPattern)).map(_._2)
+    Option(templateResources.get(uriPattern)).map(_._3)
 
   def getResourceDefinition(uri: String): Option[ResourceDefinition] =
     Option(staticResources.get(uri)).map(_._1)
 
   def listTemplateDefinitions(): List[ResourceDefinition] = listTemplateResources()
 
-  /** Extract parameters from a URI matching a template pattern */
+  /** Extract parameters from a URI matching a template pattern (convenience / test API — compiles
+    * the template on every call; registered templates are compiled once and stored).
+    */
   def extractTemplateParams(
       template: String,
       uri: String
   ): Option[Map[String, String]] =
-    val pattern = ResourceTemplatePattern(template)
-    pattern.matches(uri).map(pattern.extractParams(uri, _))
+    ResourceTemplatePattern.parse(template).toOption.flatMap(_.matches(uri))
 
+  /** Find the registered template matching `uri`, using the patterns compiled at registration. */
   def findMatchingTemplate(uri: String): Option[
     (ResourceTemplatePattern, ResourceDefinition, ResourceTemplateHandler[R], Map[String, String])
   ] =
     templateResources
-      .entrySet()
+      .values()
       .asScala
       .iterator
-      .map { entry =>
-        val patternString = entry.getKey
-        val pattern = ResourceTemplatePattern(patternString)
-        val (definition, handler) = entry.getValue
-        pattern
-          .matches(uri)
-          .map(regexMatch => (pattern, definition, handler, pattern.extractParams(uri, regexMatch)))
+      .map { case (pattern, definition, handler) =>
+        pattern.matches(uri).map(params => (pattern, definition, handler, params))
       }
       .collectFirst { case Some(result) => result }
 
@@ -179,27 +195,19 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
 
 end ResourceManager
 
-/** Represents a URI pattern with placeholders. */
-case class ResourceTemplatePattern(pattern: String):
-  private val paramRegex = """\{([^{}]+)\}""".r
-  val paramNames = paramRegex.findAllMatchIn(pattern).map(_.group(1)).toList
+object ResourceManager:
 
-  private val matchRegex = {
-    val regexString = paramRegex.replaceAllIn(pattern, _ => "([^/]+)")
-    new Regex("^" + regexString + "$")
-  }
-
-  @scala.annotation.nowarn("msg=unused explicit parameter")
-  def extractParams(
-      uri: String,
-      regexMatch: Regex.Match
-  ): Map[String, String] =
-    paramNames.zipWithIndex.map { case (name, idx) =>
-      name -> regexMatch.group(idx + 1)
-    }.toMap
-
-  def matches(uri: String): Option[Regex.Match] =
-    matchRegex.findFirstMatchIn(uri)
+  /** `users://{userId}/x` → `users://{}/x`: the URI shape independent of placeholder names. */
+  private[fastmcp] def placeholderShape(pattern: String): String =
+    ResourceTemplatePattern.parse(pattern) match
+      case Right(compiled) =>
+        compiled.segments
+          .map(_.map {
+            case ResourceTemplatePattern.Part.Literal(t) => t
+            case ResourceTemplatePattern.Part.Variable(_) => "{}"
+          }.mkString)
+          .mkString("/")
+      case Left(_) => pattern
 
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
 class ResourceError(message: String, cause: Option[Throwable] = None)
