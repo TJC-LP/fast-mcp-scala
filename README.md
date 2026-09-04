@@ -175,7 +175,7 @@ Templated resources use `{placeholders}` in the URI, matched against method para
 def userProfile(@Param("The user id") userId: String): String = ...
 ```
 
-Placeholders match one non-empty path segment (no `/`); literal text is matched verbatim (not as a regex); placeholders in the same segment must be separated by literal text. Client URIs longer than `limits.maxUriChars` (8192) are rejected with `-32602`.
+A placeholder matches a non-empty run of characters within one path segment (never `/`); literal text is matched verbatim (not as a regex); placeholders in the same segment must be separated by literal text. Client URIs longer than `limits.maxUriChars` (8192) are rejected with `-32602`.
 
 ## Prompts
 

@@ -19,8 +19,11 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   `-32700` (HTTP 400) before any dispatch work and never mint a session; the check is a linear,
   string-aware pre-scan of the raw text followed by an iterative AST re-check, so a 100 000-deep or
   2^17-key frame costs one character scan. The JSON-RPC envelope decoder, request-context and
-  validation middleware (and the header-validation / task-routing single-key lookups) no longer
-  build a `HashMap` from client-chosen keys (fixes the quadratic hash-collision DoS on Bun), and
+  validation middleware and the header-validation / task-routing single-key lookups no longer
+  build a `HashMap` from client-chosen keys just to read one field (`JsonFields.get`); the maps
+  that remain (`_meta`, `inputResponses`, header-parameter paths) are built only from objects
+  already bounded by `limits.maxObjectFields`, which turns the unbounded hash-collision DoS on Bun
+  into a bounded per-object constant (see the `LimitSettings.maxObjectFields` scaladoc), and
   parse-error bodies name the offending JSON type instead of echoing the value (fixes response
   amplification). Numeric JSON-RPC ids must fit a 64-bit integer — an out-of-range or fractional id
   is rejected with `-32600` instead of being silently wrapped and echoed back as a different id.
@@ -46,9 +49,9 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   `http://127.0.0.1:1`, `null`) is refused with 403 when `allowedHosts` is set, and a `Host` header
   with a malformed port (`h:99999`, `h:abc`) refuses every Origin instead of degrading to the
   port-less rule. Unparseable `allowedOrigins` entries fail `runHttp()` at startup (F5). Every POST
-  — legacy and modern — must carry `Content-Type: application/json` (parameters such as
-  `charset=utf-8` allowed); anything else is refused 415 before the body is read or a session is
-  minted; gate order 403 → 415 → 413 → 406 (F5). New `maxRequestBodyBytes` (default 1 MiB; must not
+  — legacy and modern — must carry `Content-Type: application/json` (media-type parameters are
+  allowed, but a `charset` other than utf-8 is refused); anything else is refused 415 before the
+  body is read or a session is minted; gate order 403 → 415 → 413 → 406 (F5). New `maxRequestBodyBytes` (default 1 MiB; must not
   exceed `limits.maxFrameChars`, checked at startup) bounds request bodies on every backend —
   zio-http `disableRequestStreaming`, `Bun.serve` `maxRequestBodySize`, plus first-party
   `Content-Length` and post-read checks → 413 (over TCP netty and Bun answer an empty 413;
@@ -58,6 +61,15 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   exception text, trace or path regardless of `NODE_ENV`; the JVM answers the same JSON-RPC 500 for
   non-interrupt defects, including a synchronous throw while the handler is built (tool-handler
   defects are still answered in-band by the router as `-32603` with the handler's message) (F10).
+  A `Host` or `Origin` header sent more than once is evaluated as its `", "`-joined value on both
+  backends (the JVM used to check only the first), so the fail-closed origin parser refuses it with
+  403; a request whose URL cannot be parsed on Bun (e.g. `Host: 127.0.0.1:99999`) answers the host
+  gate's 403 (guard on) or a JSON-RPC 400 instead of a 500 defect. The Bun session mint takes its
+  idle/live snapshot in the same synchronous step as the eviction and insert, so concurrent
+  header-less initializes at `maxSessions` are never refused while an evictable session exists
+  (JVM parity, F12). The Bun stdio dispatch bridge gained the same `catchAllCause` boundary as the
+  HTTP handler, so a defect can no longer surface as an unhandled promise rejection (which
+  terminates the Bun process).
   `HttpHeaderValidation`: sentinel-shaped header values shorter than `=?base64?` + `?=` yield
   `-32020 Malformed Base64 header sentinel` instead of throwing (F10). New `maxSessions` (default
   `Some(1000)`, `None` disables) caps the legacy streamable session store on both platforms: at the
@@ -85,7 +97,11 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   `remoteAddress`, Bun `server.requestIP`) — and `TaskOwnerKey.Custom(f)` lets operators behind an
   authenticating reverse proxy (where every peer collapses to one address) derive a key; keyless
   requests share one anonymous bucket bounded by the per-owner cap; `_meta` / `clientInfo` are
-  attacker-controlled and must never be used as a key unless the proxy rewrites them (F9). Per-task
+  attacker-controlled and must never be used as a key unless the proxy rewrites them (F9). The
+  pool ceilings are a documented residual: a client controlling >= `maxConcurrentTotal /
+  maxConcurrentPerSession` distinct peer addresses (16 at the defaults) can still fill a pool and
+  cause `-32003` for everyone else — pair the peer-address key with edge rate limiting, or use
+  `TaskOwnerKey.Custom` with an authenticated principal. Per-task
   TTL eviction fibers were replaced by a single lazily started, self-terminating sweeper
   (`sweepIntervalMs`, 1 s); expiry, the retention grace and eviction order are measured on the
   monotonic clock, so an NTP step or VM resume neither cuts running tasks short nor extends
@@ -95,13 +111,17 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   — now used by DELETE, idle eviction and session-cap eviction on both backends — is a latch that
   interrupts the session's in-flight requests, runs the registered finalizers once (releasing,
   i.e. interrupting, that session's tasks) and shuts the outbound queue; `McpServer.runStdio` /
-  `runHttp` stop the sweeper and running tasks on shutdown. Additive API: `Session.clientKey`,
+  `runHttp` stop the sweeper and running tasks on shutdown (the Bun `BunHttpHandle.stop()` too);
+  should the sweeper fiber ever die with a defect, it releases its claim and logs, so the next
+  create starts a fresh one instead of TTL expiry silently stopping. Additive API:
+  `Session.clientKey`,
   `Session.addFinalizer`, `Session.terminate`, `Session.isTerminated`, `Session.subscriptionCount`,
   `TaskScope`, `TaskManager.create(scope, ...)`, `TaskManager.releaseScope`, `TaskManager.shutdown`,
   `TaskManager.ownerKeyFor`, `TaskOwnerContext`, `TaskOwnerKey`, `TaskCapacityExceeded`,
   `ErrorCodes.CapacityExceeded`; `TaskManager`'s primary constructor is no longer public (use
-  `TaskManager.make`); `TaskSettings(...)` throws `IllegalArgumentException` on non-positive or
-  inconsistent bounds.
+  `TaskManager.make`); `TaskSettings(...)` throws `IllegalArgumentException` when
+  `maxConcurrentPerSession`, `maxStoredPerOwner`, `maxStoredTotal` or `sweepIntervalMs` is < 1,
+  `minResultRetentionMs` is negative, or `maxConcurrentTotal` < `maxConcurrentPerSession`.
 - **Annotation macros bind to the exact annotated overload** (TJC-2298, F4 / CWE-706) — see
   *Fixed* below; duplicate registrations and non-literal annotation arguments within a scanned
   object are now compile-time errors — see *Changed*.
@@ -122,7 +142,9 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   SHA-256s (`.github/mill-dist.sha256`, `.github/scripts/install-mill.sh`) in every CI job before
   the first `./mill` (Mill's own jars still come from coursier: SHA-1-checked on download,
   cache-trusted only in non-release jobs); setup-bun's executable cache is disabled and
-  harness-running jobs restore the shared Mill/coursier cache read-only.
+  harness-running jobs restore the shared Mill/coursier cache read-only. `ci.yml` no longer exports
+  `GITHUB_TOKEN` workflow-wide: it is scoped to the Mill steps that need it (as `native.yml`
+  already did), so the third-party setup actions never see it.
 
 ### Added
 
@@ -173,8 +195,11 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   - Bun: `startStatefulHttp()` / `startStatelessHttp()` return a `BunHttpHandle` (`port`,
     `hostname`, `url`, `server`, `stop()`) instead of a `BunServer` and run the idle-session
     sweeper for the listener's lifetime; `startBun` is internal; `BunServeOptions.apply` now takes
-    `fetch: js.Function2[Request, Server, Promise[Response]]`, `maxRequestBodySize`, `development`
-    and `error` (source-breaking for the JS helpers and the facade).
+    `fetch: js.Function2[js.Dynamic, js.Dynamic, js.Promise[js.Dynamic]]` (Bun calls
+    `fetch(request, server)`), `maxRequestBodySize: Int`, `development: Boolean` and
+    `error: js.Function1[js.Dynamic, js.Dynamic]` (source-breaking for the JS helpers and the
+    facade). `startStatefulHttp()` / `startStatelessHttp()` are aliases (the mode comes from
+    `settings.stateless`); their handle's `stop()` also shuts the `TaskManager` down.
   - HTTP `DELETE` and idle/session-cap eviction now call `Session.terminate`: a request still in
     flight on that session is interrupted (no reply) and its running legacy tasks are released
     (interrupted); previously tasks survived eviction until their own TTL.
@@ -233,6 +258,13 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 - JSON Schema derivation is now a native Scala 3 macro that emits `zio-json`
   AST values directly on JVM and Scala.js. Typed contracts no longer require
   `sttp.tapir.generic.auto.*` at call sites.
+
+### Deprecated
+
+- `HostGuard.isAllowed(host, origin, allowed: Set[String])` (TJC-2296): use the new
+  `HostGuard.isAllowed(host, origin, settings: McpServerSettings)` overload, which matches `Origin`
+  as a full origin and honours `allowedOrigins`; the 3-arg form still works but never consults
+  `allowedOrigins`. Slated for removal in 1.0.0.
 
 ### Fixed
 
