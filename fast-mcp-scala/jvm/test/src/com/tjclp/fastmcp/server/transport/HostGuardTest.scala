@@ -99,11 +99,36 @@ class HostGuardTest extends AnyFunSuite with Matchers:
     allowed(None, Some("http://localhost:8000")) shouldBe false
   }
 
-  test("a port-less Host accepts only the scheme-default origin port") {
+  test("a port-less Host accepts only the origin's scheme-default port (80 for http, 443 for https)") {
     allowed(Some("localhost"), Some("http://localhost")) shouldBe true
     allowed(Some("localhost"), Some("http://localhost:80")) shouldBe true
-    allowed(Some("localhost"), Some("https://localhost")) shouldBe true // :443 vs port-less Host
+    // Documented allow row: a port-less Host admits BOTH scheme defaults (listener on 80 or 443).
+    allowed(Some("localhost"), Some("https://localhost")) shouldBe true
+    allowed(Some("localhost"), Some("https://localhost:443")) shouldBe true
     allowed(Some("localhost"), Some("http://localhost:8000")) shouldBe false
+    allowed(Some("localhost"), Some("http://localhost:443")) shouldBe false
+    allowed(Some("localhost"), Some("https://localhost:80")) shouldBe false
+  }
+
+  test("a Host with a malformed port is fail-closed, never treated as port-less") {
+    for badHost <- List(
+        "localhost:99999",
+        "localhost:abc",
+        "localhost:",
+        "localhost:0",
+        "localhost:-1",
+        "localhost:8000x",
+        "localhost:٨٠٠٠"
+      )
+    do
+      withClue(badHost) {
+        allowed(Some(badHost), Some("http://localhost")) shouldBe false
+        allowed(Some(badHost), Some("https://localhost")) shouldBe false
+        allowed(Some(badHost), Some("http://localhost:8000")) shouldBe false
+        allowed(Some(badHost), Some("http://localhost:99999")) shouldBe false
+        // Host-only matching (no Origin) is unchanged: the hostname is listed.
+        allowed(Some(badHost), None) shouldBe true
+      }
   }
 
   test("scheme is not compared in the same-authority rule (TLS-terminating proxy) — documented") {

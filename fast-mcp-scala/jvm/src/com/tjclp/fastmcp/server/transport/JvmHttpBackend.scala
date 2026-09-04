@@ -44,7 +44,7 @@ object JvmHttpBackend extends HttpTransportBackend:
         else
           // The idle-session sweeper is forked here (scoped to the server's lifetime), NOT in
           // httpRoutes — tests drive httpRoutes directly and must not leak a sweeper fiber each.
-          Ref.make(Map.empty[String, Session]).flatMap { store =>
+          Ref.Synchronized.make(Map.empty[String, Session]).flatMap { store =>
             val routes = streamableRoutes(router, ep, env, store, settings)
             ZIO.scoped {
               evictIdleSessions(store, settings).forkScoped *> serve(routes, settings)
@@ -90,7 +90,7 @@ object JvmHttpBackend extends HttpTransportBackend:
     val ep = settings.httpEndpoint.stripPrefix("/")
     if settings.stateless then ZIO.succeed(statelessRoutes(router, env, settings))
     else
-      Ref
+      Ref.Synchronized
         .make(Map.empty[String, Session])
         .map(store => streamableRoutes(router, ep, env, store, settings))
 
@@ -172,10 +172,12 @@ object JvmHttpBackend extends HttpTransportBackend:
 
   /** First-party error boundary: any non-interrupt Cause (a defect, or a failure no handler mapped)
     * becomes a JSON-RPC 500 with a fixed message; the full cause is logged server-side only.
-    * Interrupts (client disconnect) keep zio-http's own 408 path.
+    * Interrupts (client disconnect) keep zio-http's own 408 path. `effect` is by-name and suspended
+    * so a synchronous throw while the handler effect is BUILT (the eager header gates) is caught
+    * too — parity with the Bun boundary.
     */
-  private[fastmcp] def guarded[R](effect: URIO[R, Response]): URIO[R, Response] =
-    effect.catchSomeCause {
+  private[fastmcp] def guarded[R](effect: => URIO[R, Response]): URIO[R, Response] =
+    ZIO.suspendSucceed(effect).catchSomeCause {
       case cause if !cause.isInterruptedOnly =>
         ZIO
           .logWarningCause("HTTP handler failed", cause)
@@ -239,7 +241,7 @@ object JvmHttpBackend extends HttpTransportBackend:
       router: McpRouter[R],
       ep: String,
       env: ZEnvironment[R],
-      store: Ref[Map[String, Session]],
+      store: Ref.Synchronized[Map[String, Session]],
       settings: McpServerSettings
   ): Routes[Any, Response] =
     Routes(
@@ -266,7 +268,7 @@ object JvmHttpBackend extends HttpTransportBackend:
     */
   private def handleStreamablePost[R](
       router: McpRouter[R],
-      store: Ref[Map[String, Session]],
+      store: Ref.Synchronized[Map[String, Session]],
       request: Request,
       settings: McpServerSettings
   ): ZIO[R, Nothing, Response] =
@@ -276,7 +278,7 @@ object JvmHttpBackend extends HttpTransportBackend:
 
   private def streamablePostDispatch[R](
       router: McpRouter[R],
-      store: Ref[Map[String, Session]],
+      store: Ref.Synchronized[Map[String, Session]],
       request: Request,
       settings: McpServerSettings
   ): ZIO[R, Nothing, Response] =
@@ -317,35 +319,35 @@ object JvmHttpBackend extends HttpTransportBackend:
     }
 
   /** Mint a durable session for a header-less legacy `initialize`, bounded by
-    * `settings.maxSessions`. The admission decision and the insert are one atomic `store.modify`,
-    * so the store never exceeds the cap even under concurrent initializes. When the store is full
-    * the longest-idle session WITHOUT a live GET (snapshot taken just before the modify) is evicted
-    * — its queue shut down — and the newcomer admitted; only when every stored session holds a live
-    * GET is the request refused with 503. A victim `touch`ed in the tiny snapshot→modify window may
-    * still be evicted: it was the longest-idle session a moment earlier, and the cap is preserved.
+    * `settings.maxSessions`. The cap check, the idle/live snapshot, the victim choice and the
+    * insert all run inside ONE `store.modifyZIO` on the `Ref.Synchronized` store, so concurrent
+    * initializes are serialised at the cap: the store never exceeds it, and a newcomer is never
+    * refused while an evictable session exists. When the store is full the longest-idle session
+    * WITHOUT a live GET is evicted — its queue shut down — and the newcomer admitted; only when
+    * every stored session holds a live GET is the request refused with 503.
     */
   private def mintSession[R](
       router: McpRouter[R],
-      store: Ref[Map[String, Session]],
+      store: Ref.Synchronized[Map[String, Session]],
       message: JsonRpcMessage,
       settings: McpServerSettings
   ): URIO[R, Response] =
     for
       id <- JvmTransportBackend.randomId()
-      snapshot <- store.get.flatMap { all =>
-        if HttpRequestGuards.capReached(all.size, settings) then
-          ZIO.foreach(all.values.toList) { s =>
-            (s.lastSeen zip s.hasActiveGet).map((seen, live) => (s.sessionId, seen, live))
-          }
-        else ZIO.succeed(Nil)
-      }
       session <- Session.make(id)
-      outcome <- store.modify { m =>
-        if !HttpRequestGuards.capReached(m.size, settings) then (Right(None), m + (id -> session))
+      outcome <- store.modifyZIO { m =>
+        if !HttpRequestGuards.capReached(m.size, settings) then
+          ZIO.succeed((Right(None), m + (id -> session)))
         else
-          HttpRequestGuards.pickEvictable(snapshot).filter(m.contains) match
-            case Some(victim) => (Right(Some(m(victim))), (m - victim) + (id -> session))
-            case None => (Left(()), m)
+          ZIO
+            .foreach(m.values.toList) { s =>
+              (s.lastSeen zip s.hasActiveGet).map((seen, live) => (s.sessionId, seen, live))
+            }
+            .map { snapshot =>
+              HttpRequestGuards.pickEvictable(snapshot) match
+                case Some(victim) => (Right(Some(m(victim))), (m - victim) + (id -> session))
+                case None => (Left(()), m)
+            }
       }
       resp <- outcome match
         case Right(None) => respondStreamable(router, session, message, isNew = true, settings)

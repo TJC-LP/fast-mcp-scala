@@ -629,6 +629,27 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     post(routes, listFrame, Some(sid2)).status shouldBe Status.Ok
   }
 
+  test("maxSessions: concurrent header-less initializes at the cap all admit while idle sessions exist") {
+    val routes = buildRoutes(stateless = false, maxSessions = Some(2))
+    val idle = List(initSid(routes), initSid(routes))
+    val initReq = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(initFrame))
+      .addHeader(Header.Custom("content-type", "application/json"))
+      .addHeader(Header.Custom("accept", "application/json, text/event-stream"))
+    // 16 initializes race for the two slots: admission + eviction are one serialised modifyZIO, so
+    // nobody sees a stale snapshot and nobody is refused while an idle (GET-less) session exists.
+    val responses = runUnsafe(
+      ZIO.foreachPar((1 to 16).toList)(_ => ZIO.scoped(routes.runZIO(initReq)))
+    )
+    responses.map(_.status.code).distinct shouldBe List(200)
+    val minted = responses.map(r => r.rawHeader(SessionIdHeader).getOrElse(fail("no session id")))
+    minted.distinct.size shouldBe 16
+    // The cap held: exactly two sessions survive (the idle pair was evicted first).
+    val alive = (idle ++ minted).count(sid => post(routes, listFrame, Some(sid)).status == Status.Ok)
+    alive shouldBe 2
+    idle.foreach(sid => post(routes, listFrame, Some(sid)).status shouldBe Status.NotFound)
+  }
+
   test("maxSessions = None disables the cap") {
     val routes = buildRoutes(stateless = false, maxSessions = None)
     val sids = (1 to 5).map(_ => initSid(routes))

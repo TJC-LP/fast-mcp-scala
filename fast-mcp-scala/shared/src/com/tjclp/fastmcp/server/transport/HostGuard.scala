@@ -18,30 +18,35 @@ import com.tjclp.fastmcp.server.McpServerSettings
   *     admitted for `Host: h:p`. Use `allowedOrigins` for a stricter list.
   *
   * Parsing is fail-closed: `null`, empty, non-http(s) schemes, userinfo/path/query characters, an
-  * empty host, or an explicit port that is not 1..65535 decimal digits all refuse the request.
+  * empty host, or an explicit port that is not 1..65535 decimal digits all refuse the request — on
+  * the `Origin` AND on the `Host` side (a malformed `Host` port never degrades to "port-less"). A
+  * genuinely port-less `Host` (a listener on 80 or 443) admits the origin whose port is ITS scheme
+  * default, i.e. both `http://h` and `https://h`; use `allowedOrigins` for a stricter list.
   *
   * Truth table (server on `127.0.0.1:8000`, `allowedHosts = Some(Set("127.0.0.1", "localhost"))`,
   * `allowedOrigins = None`, request `Host: localhost:8000` unless stated):
   *
-  * | Origin header                                                              | Result |
-  * |:---------------------------------------------------------------------------|:-------|
-  * | absent                                                                     | allow  |
-  * | `http://localhost:8000`, `HTTP://LocalHost:8000`                           | allow  |
-  * | `http://localhost:3000` (port differs)                                     | 403    |
-  * | `https://localhost` (default 443 != 8000)                                  | 403    |
-  * | `http://127.0.0.1:1`                                                       | 403    |
-  * | `null` / empty                                                             | 403    |
-  * | `http://evil.example.com`                                                  | 403    |
-  * | `http://localhost:99999`, `http://localhost:`, `:abc`, `:0`                | 403    |
-  * | `http://localhost:8000/x`, `http://user@localhost:8000`, `ftp://...`       | 403    |
-  * | `http://127.0.0.1:8000` with `Host: localhost:8000` (cross-origin)         | 403    |
-  * | `http://localhost:8000` with `Host` absent                                 | 403    |
-  * | `http://localhost` with `Host: localhost` (port-less Host = default)       | allow  |
-  * | `https://localhost:8000` with `Host: localhost:8000` (scheme not compared) | allow  |
-  * | `http://[::1]:8000` with `Host: [::1]:8000`, `[::1]` listed                | allow  |
-  * | listed in `allowedOrigins` (any/no Host)                                   | allow  |
-  * | `allowedHosts = None`, `allowedOrigins = Some(...)`, Origin not listed     | 403    |
-  * | both `None`                                                                | allow  |
+  * | Origin header                                                               | Result |
+  * |:----------------------------------------------------------------------------|:-------|
+  * | absent                                                                      | allow  |
+  * | `http://localhost:8000`, `HTTP://LocalHost:8000`                            | allow  |
+  * | `http://localhost:3000` (port differs)                                      | 403    |
+  * | `https://localhost` (default 443 != 8000)                                   | 403    |
+  * | `http://127.0.0.1:1`                                                        | 403    |
+  * | `null` / empty                                                              | 403    |
+  * | `http://evil.example.com`                                                   | 403    |
+  * | `http://localhost:99999`, `http://localhost:`, `:abc`, `:0`                 | 403    |
+  * | `http://localhost:8000/x`, `http://user@localhost:8000`, `ftp://...`        | 403    |
+  * | `http://127.0.0.1:8000` with `Host: localhost:8000` (cross-origin)          | 403    |
+  * | `http://localhost:8000` with `Host` absent                                  | 403    |
+  * | `http://localhost` with `Host: localhost` (port-less Host = default)        | allow  |
+  * | `https://localhost` with `Host: localhost` (port-less Host admits :443 too) | allow  |
+  * | `http://localhost` with `Host: localhost:99999` (malformed Host port)       | 403    |
+  * | `https://localhost:8000` with `Host: localhost:8000` (scheme not compared)  | allow  |
+  * | `http://[::1]:8000` with `Host: [::1]:8000`, `[::1]` listed                 | allow  |
+  * | listed in `allowedOrigins` (any/no Host)                                    | allow  |
+  * | `allowedHosts = None`, `allowedOrigins = Some(...)`, Origin not listed      | 403    |
+  * | both `None`                                                                 | allow  |
   *
   * The guard closes the browser CSRF / DNS-rebinding path only; a non-browser client that omits
   * `Origin` is not authenticated by it.
@@ -137,17 +142,23 @@ object HostGuard:
         sameAuthority(o, hostHeader)
 
   /** Origin host:port must equal the request's Host authority. Host with an explicit port → both
-    * equal; Host without a port → hosts equal and the origin port is the scheme default; Host
-    * absent → false. The SCHEME is deliberately not compared (TLS-terminating proxies).
+    * equal; Host without a port → hosts equal and the origin port is the ORIGIN's scheme default
+    * (so a port-less `Host: h` admits both `http://h` and `https://h`); Host with a malformed port
+    * (`h:99999`, `h:abc`, `h:`) → false (fail-closed, mirroring [[parseOrigin]]); Host absent →
+    * false. The SCHEME is deliberately not compared (TLS-terminating proxies).
     */
   private def sameAuthority(o: Origin, hostHeader: Option[String]): Boolean =
     hostHeader.map(_.trim.toLowerCase) match
       case None => false
       case Some(h) =>
         val hn = hostnameOf(h)
-        val hp = portOf(h) // None when Host has no (valid) port
+        val portPart = h.substring(hn.length) // "" | ":<port>" | junk
         val schemeDefault = if o.scheme == "https" then 443 else 80
-        hn == o.host && hp.forall(_ == o.port) && (hp.nonEmpty || o.port == schemeDefault)
+        hn == o.host && {
+          if portPart.isEmpty then o.port == schemeDefault
+          else if portPart.startsWith(":") then parsePort(portPart.substring(1)).contains(o.port)
+          else false
+        }
 
   private def hostAllowed(hostHeader: String, allowedLower: Set[String]): Boolean =
     val h = hostHeader.trim.toLowerCase
@@ -161,13 +172,6 @@ object HostGuard:
     else
       val colon = hostPort.indexOf(':')
       if colon >= 0 then hostPort.substring(0, colon) else hostPort
-
-  /** Explicit port of a `host[:port]` authority, bracket-aware; `None` when absent or not 1..65535
-    * decimal digits.
-    */
-  private def portOf(hostPort: String): Option[Int] =
-    val rest = hostPort.substring(hostnameOf(hostPort).length)
-    if rest.startsWith(":") then parsePort(rest.substring(1)) else None
 
   private def parsePort(digits: String): Option[Int] =
     if digits.nonEmpty && digits.length <= 5 && digits.forall(ch => ch >= '0' && ch <= '9') then
