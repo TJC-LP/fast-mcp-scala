@@ -15,27 +15,43 @@ import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
 /** The task lifecycle over streamable HTTP, end to end through the in-memory routes harness —
   * successor to the deleted `TaskAugmentedHttpTransportTest`. Covers capability advertisement,
-  * per-tool `execution.taskSupport` negotiation (both `-32601` rejections), create → poll →
-  * result, error/multi-content preservation through a task, cancellation, the per-session
-  * concurrency cap, unknown-task codes (`-32602` — 0.4.0 parity, regressed pre-C1), and
-  * cross-session isolation.
+  * per-tool `execution.taskSupport` negotiation (both `-32601` rejections), create → poll → result,
+  * error/multi-content preservation through a task, cancellation, the per-session concurrency cap,
+  * unknown-task codes (`-32602` — 0.4.0 parity, regressed pre-C1), and cross-session isolation.
   */
 class TaskHttpTransportTest extends AnyFunSuite with Matchers:
 
   object TaskServer:
-    @Tool(name = Some("slow"), description = Some("Completes after a beat"), taskSupport = Some("optional"))
+
+    @Tool(
+      name = Some("slow"),
+      description = Some("Completes after a beat"),
+      taskSupport = Some("optional")
+    )
     def slow(): ZIO[Any, Throwable, String] = ZIO.sleep(200.millis).as("slow done")
 
-    @Tool(name = Some("must-task"), description = Some("Requires task augmentation"), taskSupport = Some("required"))
+    @Tool(
+      name = Some("must-task"),
+      description = Some("Requires task augmentation"),
+      taskSupport = Some("required")
+    )
     def mustTask(): String = "must done"
 
     @Tool(name = Some("plain"), description = Some("No task support"))
     def plain(): String = "plain done"
 
-    @Tool(name = Some("rich-content"), description = Some("Multi-content result"), taskSupport = Some("optional"))
+    @Tool(
+      name = Some("rich-content"),
+      description = Some("Multi-content result"),
+      taskSupport = Some("optional")
+    )
     def richContent(): List[Content] = List(TextContent("a"), TextContent("b"))
 
-    @Tool(name = Some("broken-task"), description = Some("Always throws"), taskSupport = Some("optional"))
+    @Tool(
+      name = Some("broken-task"),
+      description = Some("Always throws"),
+      taskSupport = Some("optional")
+    )
     def brokenTask(): String = throw new RuntimeException("task boom")
 
     @Tool(name = Some("blocky"), description = Some("Long-running"), taskSupport = Some("optional"))
@@ -352,7 +368,8 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     val routes = buildRoutes(maxConcurrent = 8, maxStoredPerOwner = 8, minResultRetentionMs = 0L)
     val sid = initSession(routes)
     val ids = (1 to 20).map { i =>
-      val taskId = extractTaskId(bodyOf(post(routes, augmentedCall(600 + i, "rich-content"), Some(sid))))
+      val taskId =
+        extractTaskId(bodyOf(post(routes, augmentedCall(600 + i, "rich-content"), Some(sid))))
       // Fence: tasks/result returns only once the entry is terminal, so the next create sees an
       // evictable predecessor rather than racing the tool body.
       bodyOf(post(routes, tasksResult(700 + i, taskId), Some(sid))) should include(""""text":"a"""")

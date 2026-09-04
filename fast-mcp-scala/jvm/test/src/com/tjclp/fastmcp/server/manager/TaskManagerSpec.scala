@@ -129,8 +129,11 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
   it should "record terminal status for immediately completed effects" in {
     val tm = newManager()
     val createResult = runUnsafe(
-      tm.create(sessionId = Some("s1"), requestedTtlMs = None, run = ZIO.succeed("done"), _ =>
-        ZIO.unit
+      tm.create(
+        sessionId = Some("s1"),
+        requestedTtlMs = None,
+        run = ZIO.succeed("done"),
+        _ => ZIO.unit
       )
     )
     val taskId = createResult.task.taskId
@@ -339,7 +342,13 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
 
   it should "bound the store across owners at the pool cap and charge the largest owner" in {
     // Stored caps normalise to >= the running caps, so the running ceilings are lowered too.
-    val tm = newManager(maxConcurrent = 8, maxConcurrentTotal = 8, maxStoredPerOwner = 8, maxStoredTotal = 8, minResultRetentionMs = 0L)
+    val tm = newManager(
+      maxConcurrent = 8,
+      maxConcurrentTotal = 8,
+      maxStoredPerOwner = 8,
+      maxStoredTotal = 8,
+      minResultRetentionMs = 0L
+    )
     try
       val a = TaskScope.session("A")
       val b = TaskScope.session("B")
@@ -361,8 +370,94 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     finally runUnsafe(tm.shutdown)
   }
 
+  it should "charge the creating owner's own stale results before anyone else's at the pool cap" in {
+    val tm = newManager(
+      maxConcurrent = 8,
+      maxConcurrentTotal = 8,
+      maxStoredPerOwner = 8,
+      maxStoredTotal = 8,
+      minResultRetentionMs = 0L
+    )
+    try
+      val a = TaskScope.session("A")
+      val b = TaskScope.session("B")
+      val aIds = (1 to 5).map(_ => completed(tm, a))
+      val bIds = (1 to 3).map(_ => completed(tm, b))
+      runUnsafe(tm.stats).total shouldBe 8
+      // B is NOT the largest owner, but B's own oldest result pays for B's next task.
+      val bNew = completed(tm, b)
+      val stats = runUnsafe(tm.stats)
+      stats.total shouldBe 8
+      stats.perOwner(a.ownerKey).total shouldBe 5
+      stats.perOwner(b.ownerKey).total shouldBe 3
+      runUnsafe(tm.get(bIds.head, Some("B"))) shouldBe None
+      bIds.tail.foreach(id => runUnsafe(tm.get(id, Some("B"))).isDefined shouldBe true)
+      aIds.foreach(id => runUnsafe(tm.get(id, Some("A"))).isDefined shouldBe true)
+      runUnsafe(tm.get(bNew, Some("B"))).isDefined shouldBe true
+    finally runUnsafe(tm.shutdown)
+  }
+
+  it should "never pick an owner whose results are all inside the grace as the pool-cap victim" in {
+    // Victim V holds 2 results older than the grace; flooders F1..F3 hold 2 fresh results each (6 >
+    // 2, so a 'largest owner by total' rule would have charged V). Owners are ranked by STALE
+    // entries only, so a flooder's fresh entries never nominate V — the only stale entries are V's
+    // own two, and once they are gone the pool is full of ungraced results and admission is
+    // refused rather than evicting anything younger than the grace.
+    val tm = newManager(
+      maxConcurrent = 8,
+      maxConcurrentTotal = 8,
+      maxStoredPerOwner = 8,
+      maxStoredTotal = 8,
+      minResultRetentionMs = 400L
+    )
+    try
+      val v = TaskScope.session("V")
+      val vIds = (1 to 2).map(_ => completed(tm, v))
+      runUnsafe(ZIO.sleep(500.millis)) // V's results age past the grace
+      val flooders = (1 to 3).map(i => TaskScope.session(s"F$i"))
+      flooders.foreach(f => (1 to 2).foreach(_ => completed(tm, f)))
+      runUnsafe(tm.stats).total shouldBe 8
+      // 9th and 10th creates: only V's two stale results are evictable, so V pays twice...
+      val n1 = completed(tm, TaskScope.session("F1"))
+      val n2 = completed(tm, TaskScope.session("F2"))
+      runUnsafe(tm.stats).total shouldBe 8
+      vIds.foreach(id => runUnsafe(tm.get(id, Some("V"))) shouldBe None)
+      runUnsafe(tm.get(n1, Some("F1"))).isDefined shouldBe true
+      runUnsafe(tm.get(n2, Some("F2"))).isDefined shouldBe true
+      // ...and then nothing is: every remaining result is inside the grace, so the flood is refused
+      // with -32003 rather than evicting a fresh result of anyone.
+      val err = failureOf(
+        exitOf(tm.create(TaskScope.session("F3"), None, ZIO.succeed("x"), _ => ZIO.unit))
+      )
+      err match
+        case e: TaskCapacityExceeded =>
+          e.kind shouldBe "stored"
+          e.limit shouldBe 8
+        case other => fail(s"expected TaskCapacityExceeded but got $other")
+      runUnsafe(tm.stats).total shouldBe 8
+    finally runUnsafe(tm.shutdown)
+  }
+
+  "TaskSettings" should "reject non-positive or inconsistent store bounds at construction" in {
+    an[IllegalArgumentException] should be thrownBy TaskSettings(maxConcurrentPerSession = 0)
+    an[IllegalArgumentException] should be thrownBy
+      TaskSettings(maxConcurrentPerSession = 4, maxConcurrentTotal = 3)
+    an[IllegalArgumentException] should be thrownBy TaskSettings(maxStoredPerOwner = 0)
+    an[IllegalArgumentException] should be thrownBy TaskSettings(maxStoredTotal = -1)
+    an[IllegalArgumentException] should be thrownBy TaskSettings(minResultRetentionMs = -1L)
+    an[IllegalArgumentException] should be thrownBy TaskSettings(sweepIntervalMs = 0L)
+    // Equal running caps are fine; stored caps below the running caps are normalised, not rejected.
+    noException should be thrownBy
+      TaskSettings(maxConcurrentPerSession = 2, maxConcurrentTotal = 2, maxStoredTotal = 1)
+  }
+
   it should "reject when nothing is evictable" in {
-    val tm = newManager(maxConcurrent = 2, maxConcurrentTotal = 2, maxStoredTotal = 2, minResultRetentionMs = 60_000L)
+    val tm = newManager(
+      maxConcurrent = 2,
+      maxConcurrentTotal = 2,
+      maxStoredTotal = 2,
+      minResultRetentionMs = 60_000L
+    )
     val gate = runUnsafe(Promise.make[Nothing, Unit])
     try
       val never: ZIO[Any, Throwable, Any] = gate.await
@@ -384,7 +479,13 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
       runUnsafe(tm.shutdown)
 
     // Stored cap with a completed-but-young entry: rejected as "stored", store unchanged.
-    val tm2 = newManager(maxConcurrent = 3, maxConcurrentTotal = 3, maxStoredPerOwner = 3, maxStoredTotal = 3, minResultRetentionMs = 60_000L)
+    val tm2 = newManager(
+      maxConcurrent = 3,
+      maxConcurrentTotal = 3,
+      maxStoredPerOwner = 3,
+      maxStoredTotal = 3,
+      minResultRetentionMs = 60_000L
+    )
     val gate2 = runUnsafe(Promise.make[Nothing, Unit])
     try
       val never: ZIO[Any, Throwable, Any] = gate2.await
@@ -450,9 +551,7 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     val before = rootFibers
     try
       val scope = TaskScope.session("drain")
-      (1 to 3).foreach(_ =>
-        runUnsafe(tm.create(scope, Some(50L), ZIO.succeed("x"), _ => ZIO.unit))
-      )
+      (1 to 3).foreach(_ => runUnsafe(tm.create(scope, Some(50L), ZIO.succeed("x"), _ => ZIO.unit)))
       runUnsafe(tm.stats).sweeperActive shouldBe true
       val drained = awaitStats(tm)(s => s.total == 0 && !s.sweeperActive)
       drained.perOwner shouldBe empty
@@ -469,7 +568,12 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     val before = rootFibers
     val interrupted = runUnsafe(Ref.make(false))
     runUnsafe(
-      tm.create(TaskScope.session("s"), None, ZIO.never.onInterrupt(interrupted.set(true)), _ => ZIO.unit)
+      tm.create(
+        TaskScope.session("s"),
+        None,
+        ZIO.never.onInterrupt(interrupted.set(true)),
+        _ => ZIO.unit
+      )
     )
     completed(tm, TaskScope.bearer(Some("k")))
     runUnsafe(tm.shutdown)
@@ -556,7 +660,8 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
       runUnsafe(tm.create(TaskScope.bearer(Some("A")), None, never, _ => ZIO.unit))
       runUnsafe(tm.create(TaskScope.bearer(Some("A")), None, never, _ => ZIO.unit))
       runUnsafe(tm.create(TaskScope.bearer(Some("B")), None, never, _ => ZIO.unit))
-      val err = failureOf(exitOf(tm.create(TaskScope.bearer(Some("C")), None, never, _ => ZIO.unit)))
+      val err =
+        failureOf(exitOf(tm.create(TaskScope.bearer(Some("C")), None, never, _ => ZIO.unit)))
       err match
         case e: TaskCapacityExceeded =>
           e.kind shouldBe "running"
@@ -613,14 +718,22 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     for stage <- List("forked", "registered") do
       val latch = runUnsafe(Promise.make[Nothing, Unit])
       val gate = runUnsafe(Promise.make[Nothing, Unit])
-      val hook: String => UIO[Unit] = s => if s == stage then latch.succeed(()) *> gate.await else ZIO.unit
+      val hook: String => UIO[Unit] =
+        s => if s == stage then latch.succeed(()) *> gate.await else ZIO.unit
       val tm = newManager(checkpoint = hook)
       val before = rootFibers
       val started = runUnsafe(Ref.make(false))
       try
         val exit = runUnsafe(
           for
-            fiber <- tm.create(TaskScope.session("atomic"), None, started.set(true) *> ZIO.never, _ => ZIO.unit).fork
+            fiber <- tm
+              .create(
+                TaskScope.session("atomic"),
+                None,
+                started.set(true) *> ZIO.never,
+                _ => ZIO.unit
+              )
+              .fork
             _ <- latch.await
             // The interrupt is RECORDED while the create is masked; opening the gate lets the
             // create observe it at its next check and roll back.
@@ -652,7 +765,9 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
       val outcomes = runUnsafe(
         ZIO.foreach((1 to 200).toList) { i =>
           for
-            fiber <- tm.create(TaskScope.session(s"race-${i % 7}"), None, ZIO.unit, _ => ZIO.unit).fork
+            fiber <- tm
+              .create(TaskScope.session(s"race-${i % 7}"), None, ZIO.unit, _ => ZIO.unit)
+              .fork
             _ <- ZIO.succeed(java.util.concurrent.locks.LockSupport.parkNanos((i % 50) * 1_000L))
             _ <- fiber.interruptFork
             exit <- fiber.await
@@ -681,7 +796,8 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "still sweep an entry whose create is held past its TTL and stop counting it" in {
-    val hook: String => UIO[Unit] = s => if s == "registered" then ZIO.sleep(400.millis) else ZIO.unit
+    val hook: String => UIO[Unit] =
+      s => if s == "registered" then ZIO.sleep(400.millis) else ZIO.unit
     val tm = newManager(maxConcurrent = 1, sweepIntervalMs = 50L, checkpoint = hook)
     val before = rootFibers
     try
@@ -689,13 +805,10 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
       val fiber = runUnsafe(
         tm.create(TaskScope.session("held"), Some(100L), ZIO.never, _ => ZIO.unit).forkDaemon
       )
-      // The sweeper is claimed by the insert itself, so the TTL fires while the create is parked.
-      runUnsafe(ZIO.sleep(250.millis))
-      val held = runUnsafe(tm.stats)
-      withClue(s"stats while held: $held: ") {
-        held.total shouldBe 0
-        held.running shouldBe 0
-      }
+      // The sweeper is claimed by the insert itself, so the TTL fires while the create is still
+      // parked in the hook (400 ms); poll rather than sleep so a scheduling stall cannot flake it.
+      val held = awaitStats(tm)(s => s.total == 0 && s.running == 0)
+      held.sweeperActive shouldBe false
       // The owner's slot is free again — a concurrent create is admitted despite maxConcurrent = 1.
       val other = runUnsafe(
         tm.create(TaskScope.session("held"), Some(60_000L), ZIO.succeed("free"), _ => ZIO.unit)

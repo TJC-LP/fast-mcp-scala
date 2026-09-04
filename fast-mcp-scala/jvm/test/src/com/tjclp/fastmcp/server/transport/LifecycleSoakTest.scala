@@ -20,10 +20,15 @@ import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 class LifecycleSoakTest extends AnyFunSuite with Matchers:
 
   object SoakServer:
+
     @Tool(name = Some("blocky"), description = Some("Long-running"), taskSupport = Some("optional"))
     def blocky(): ZIO[Any, Throwable, String] = ZIO.sleep(30.seconds).as("blocky")
 
-    @Tool(name = Some("quick"), description = Some("Completes at once"), taskSupport = Some("optional"))
+    @Tool(
+      name = Some("quick"),
+      description = Some("Completes at once"),
+      taskSupport = Some("optional")
+    )
     def quick(): String = "quick"
 
   private val SessionIdHeader = "mcp-session-id"
@@ -167,4 +172,3 @@ class LifecycleSoakTest extends AnyFunSuite with Matchers:
       (after - before) should be <= 5
     }
   }
-

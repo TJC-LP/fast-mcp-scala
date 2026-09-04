@@ -5,8 +5,8 @@ import org.scalatest.matchers.should.Matchers
 import zio.*
 import zio.json.ast.Json
 
-import com.tjclp.fastmcp.{given, *}
-import com.tjclp.fastmcp.core.{Tasks, TaskSupport}
+import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.core.{TaskSupport, Tasks}
 import com.tjclp.fastmcp.core.wire.Implementation
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, RequestId}
 import com.tjclp.fastmcp.server.manager.TaskManager
@@ -50,7 +50,9 @@ class TaskTransportGuardTest extends AnyFunSuite with Matchers:
     val server = McpServer.typed[Any]("GuardServer", "0.1.0", McpServerSettings(tasks = settings))
     runUnsafe(
       server.tool(
-        McpTool[NoArgs, String](name = "blocky")(_ => gate.await.onInterrupt(onInterrupt).as("blocky"))
+        McpTool[NoArgs, String](name = "blocky")(_ =>
+          gate.await.onInterrupt(onInterrupt).as("blocky")
+        )
           .withTaskSupport(TaskSupport.Optional)
       )
     )
@@ -151,7 +153,8 @@ class TaskTransportGuardTest extends AnyFunSuite with Matchers:
           else ZIO.sleep(5.millis) *> awaitPendingInterrupt(n - 1)
         )
     val hook: String => UIO[Unit] =
-      stage => if stage == "registered" then latch.succeed(()) *> awaitPendingInterrupt(1000) else ZIO.unit
+      stage =>
+        if stage == "registered" then latch.succeed(()) *> awaitPendingInterrupt(1000) else ZIO.unit
     val (router, tm) = build(TaskSettings(enabled = true), gate, hook)
     try
       val session = initialized(router, "cancel-race")
@@ -193,7 +196,11 @@ class TaskTransportGuardTest extends AnyFunSuite with Matchers:
       stats.total shouldBe 0
       stats.running shouldBe 0
       stats.perOwner shouldBe empty
-      frame(router, session, """{"jsonrpc":"2.0","id":78,"method":"tasks/list","params":{}}""") should include(
+      frame(
+        router,
+        session,
+        """{"jsonrpc":"2.0","id":78,"method":"tasks/list","params":{}}"""
+      ) should include(
         """"tasks":[]"""
       )
       runUnsafe(session.inflightIds) shouldBe empty
@@ -238,6 +245,74 @@ class TaskTransportGuardTest extends AnyFunSuite with Matchers:
       runUnsafe(interrupted.get) shouldBe 1
       // A session that never created a task terminates cleanly too.
       runUnsafe(runUnsafe(Session.make("idle")).terminate)
+    finally
+      runUnsafe(gate.succeed(()))
+      runUnsafe(tm.shutdown)
+  }
+
+  test("a finalizer registered after terminate runs immediately instead of being parked") {
+    val session = runUnsafe(Session.make("late"))
+    val ran = runUnsafe(Ref.make(List.empty[String]))
+    runUnsafe(session.addFinalizer("a")(ran.update("a" :: _)))
+    runUnsafe(session.isTerminated) shouldBe false
+    runUnsafe(session.terminate)
+    runUnsafe(session.isTerminated) shouldBe true
+    runUnsafe(ran.get) shouldBe List("a")
+    // Late registration: runs now, is not stored, and a second terminate does not re-run anything.
+    runUnsafe(session.addFinalizer("b")(ran.update("b" :: _)))
+    runUnsafe(ran.get) shouldBe List("b", "a")
+    runUnsafe(session.terminate)
+    runUnsafe(ran.get) shouldBe List("b", "a")
+  }
+
+  test("session.terminate racing a task-augmented legacy call leaves no task behind") {
+    val gate = runUnsafe(Promise.make[Nothing, Unit])
+    val latch = runUnsafe(Promise.make[Nothing, Unit])
+    val proceed = runUnsafe(Promise.make[Nothing, Unit])
+    // Park the create AFTER admission (entry registered, gate closed) until the test has
+    // terminated the session — the worst-case interleaving for a DELETE racing a POST.
+    val hook: String => UIO[Unit] =
+      stage => if stage == "registered" then latch.succeed(()) *> proceed.await else ZIO.unit
+    val (router, tm) = build(TaskSettings(enabled = true), gate, hook)
+    try
+      val session = initialized(router, "delete-race")
+      val id = RequestId.NumId(79)
+      val call = JsonRpcMessage.Request(
+        id,
+        "tools/call",
+        Some(
+          Json.Obj(
+            "name" -> Json.Str("blocky"),
+            "arguments" -> Json.Obj(),
+            "task" -> Json.Obj("ttl" -> Json.Num(60000))
+          )
+        )
+      )
+      val (response, stats) = runUnsafe(
+        for
+          fiber <- router.dispatch(session, call).fork
+          _ <- latch.await
+          _ <- (ZIO.sleep(5.millis) *> session.inflightIds.map(_.contains(id)))
+            .repeatUntil(identity)
+            .timeoutFail(new RuntimeException("request never tracked"))(10.seconds)
+          registered <- tm.stats
+          _ <- ZIO.succeed(registered.total shouldBe 1)
+          // terminate: latches, interrupts the in-flight pipeline fiber, runs the release hook
+          // that was registered BEFORE the create.
+          _ <- session.terminate
+          _ <- proceed.succeed(())
+          response <- fiber.join
+          stats <- tm.stats
+        yield (response, stats)
+      )
+      // Either the pending interrupt rolled the create back, or the post-create re-registration
+      // ran the release on the terminated session — in both cases nothing survives.
+      response shouldBe None
+      stats.total shouldBe 0
+      stats.running shouldBe 0
+      stats.perOwner shouldBe empty
+      runUnsafe(session.inflightIds) shouldBe empty
+      runUnsafe(session.isTerminated) shouldBe true
     finally
       runUnsafe(gate.succeed(()))
       runUnsafe(tm.shutdown)
