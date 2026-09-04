@@ -5,14 +5,22 @@
 #   scripts/conformance.sh [jvm|js|native] [port] [active|2026]
 #
 # Boots the cross-platform ConformanceServer (com.tjclp.fastmcp.examples.conformance.*) over
-# streamable HTTP, then drives it with the official harness via `bunx`. Exit code follows the harness
-# (0 = all scored scenarios pass or match the platform baseline; 1 = regression / stale baseline).
+# streamable HTTP, then drives it with the official harness installed from the committed,
+# integrity-hashed lockfile in conformance/ (bun install --frozen-lockfile — never bunx). Exit code
+# follows the harness (0 = all scored scenarios pass or match the platform baseline; 1 = regression /
+# stale baseline).
 #
 # Modes: "active" (default) runs the active suite across both protocol eras with the per-platform
 # baseline; "2026" runs `--requirements 2026-07-28` — exactly the scenarios that revision requires,
 # frozen at its release (extension/pending scenarios are reported but not scored by the harness).
 #
-# Requires: a JDK (jvm), bun (both). No vendored conformance checkout — the engine is fetched by bunx.
+# Requires: a JDK (jvm) and Bun >= 1.4 (every platform). The script prefers the Mill-managed Bun
+# (fast-mcp-scala.js.bunExecutable — the same SHA-256-verified 1.4.1 that generated conformance/bun.lock),
+# then $FAST_MCP_BUN, then PATH. The harness is resolved ONLY from conformance/package.json +
+# conformance/bun.lock: a run whose resolution differs from the committed lock fails before the suite
+# starts. To bump: edit the version in conformance/package.json, then
+#   "$(./mill --no-server show fast-mcp-scala.js.bunExecutable | tr -d '"')" install --cwd conformance
+# and review the bun.lock diff (it, not package.json, is what --frozen-lockfile enforces).
 #
 # "native" runs the SAME conformance server compiled to a GraalVM native image
 # (fast-mcp-scala.nativeSmoke.http.nativeImage; override with FAST_MCP_NATIVE_BIN) against the
@@ -23,9 +31,11 @@ set -euo pipefail
 PLATFORM="${1:-jvm}"
 PORT="${2:-8077}"
 MODE="${3:-active}"
-CONF_VERSION="0.2.0-alpha.11" # RC1 oracle: first release with the 2026-07-28 scenario set; bump deliberately
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+HARNESS_DIR="$ROOT/conformance"   # committed package.json + bun.lock: the ONLY source of the harness
+BUN=""                            # resolved by resolve_bun
+BUN_CACHE=""                      # fresh per-run Bun install cache, removed in cleanup
 URL="http://127.0.0.1:${PORT}/mcp"
 BASELINE="$ROOT/conformance/baseline-${PLATFORM}.yml"
 [ "$PLATFORM" = "native" ] && BASELINE="$ROOT/conformance/baseline-jvm.yml"
@@ -55,8 +65,66 @@ stop_server() {
 cleanup() {
   stop_server
   [ -n "$ENTRY" ] && rm -f "$ENTRY" 2>/dev/null || true
+  [ -n "$BUN_CACHE" ] && rm -rf "$BUN_CACHE" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+# Pick the Bun that runs the harness (and the JS server). conformance/bun.lock is lockfileVersion 2,
+# which Bun < 1.4 cannot read (it prints UnknownLockfileVersion and then 'lockfile had changes'), so
+# prefer the Mill-managed 1.4.1 — the binary that generated the lock and that js.test uses — and
+# gate the fallbacks on version.
+resolve_bun() {
+  local b="${FAST_MCP_BUN:-}"
+  if [ -n "$b" ] && [ ! -x "$b" ]; then
+    # An explicit pin that does not resolve is an error, never a silent fallback to another Bun.
+    echo "FAST_MCP_BUN=$b is not executable" >&2
+    exit 2
+  fi
+  if [ -z "$b" ]; then
+    b="$(./mill --no-server show fast-mcp-scala.js.bunExecutable 2>/dev/null | tr -d '"' || true)"
+  fi
+  if [ -z "$b" ] || [ ! -x "$b" ]; then b="$(command -v bun || true)"; fi
+  [ -n "$b" ] || { echo "bun not found (Mill-managed, \$FAST_MCP_BUN, or PATH) — cannot install the conformance harness" >&2; exit 2; }
+  local v; v="$("$b" --version)"
+  case "$v" in
+    0.*|1.[0-3].*) echo "bun $v at $b is too old for conformance/bun.lock (lockfileVersion 2 needs Bun >= 1.4); use the Mill-managed Bun or set FAST_MCP_BUN" >&2; exit 2 ;;
+  esac
+  BUN="$b"
+  echo "→ bun $v ($BUN)" >&2
+}
+
+# Install the harness from the committed lockfile — never from a floating registry resolution.
+#  * --frozen-lockfile does NOT fail when bun.lock is absent: Bun resolves from the registry and
+#    installs anyway (rc=0, no lock written). The lock's presence is therefore asserted first.
+#  * Bun verifies sha512 only when it EXTRACTS a tarball; a warm ~/.bun/install/cache entry for
+#    name@version is reused unverified. A fresh, empty cache per run forces every tarball through
+#    the integrity check (~118 small packages; a few seconds).
+#  * node_modules is wiped first: a failed install leaves a partial tree behind.
+install_harness() {
+  if [ ! -s "$HARNESS_DIR/bun.lock" ]; then
+    echo "conformance/bun.lock is missing — refusing to resolve the harness from the registry" >&2
+    exit 2
+  fi
+  # Informational only (the lock is authoritative); best-effort so a box without python3 still installs.
+  local want; want="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dependencies"]["@modelcontextprotocol/conformance"])' "$HARNESS_DIR/package.json" 2>/dev/null || echo '?')"
+  echo "→ installing conformance harness @${want} (frozen lockfile, fresh install cache)" >&2
+  BUN_CACHE="$(mktemp -d -t fmcp-bun-cache.XXXXXX)"
+  rm -rf "$HARNESS_DIR/node_modules"
+  ( cd "$HARNESS_DIR" && BUN_INSTALL_CACHE_DIR="$BUN_CACHE" "$BUN" install --frozen-lockfile --ignore-scripts --no-summary )
+}
+
+# Exec the bin the frozen install put in node_modules/.bin — deterministically that file. `bun run
+# conformance` would fall back to a same-named executable on PATH when no package bin matches, and
+# `bunx` would auto-install a same-named package from the registry; neither is an acceptable sink.
+# The bin's shebang is `#!/usr/bin/env node`, so the harness runs under Node exactly as before.
+run_harness() {
+  local bin="$HARNESS_DIR/node_modules/.bin/conformance"
+  if [ ! -x "$bin" ]; then
+    echo "conformance harness bin missing after frozen install ($bin)" >&2
+    exit 2
+  fi
+  ( cd "$HARNESS_DIR" && exec "$bin" "$@" )
+}
 
 # Refuse to run if ANYTHING already listens on the port — the readiness poll below would
 # otherwise happily bless a foreign server and the suite would test the wrong process.
@@ -65,6 +133,11 @@ if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
   echo "port $PORT is already in use — refusing to test an unknown server" >&2
   exit 2
 fi
+
+# Resolve Bun and install the pinned harness BEFORE any server starts: a lock/Bun failure then needs
+# no teardown and cannot be confused with a server failure.
+resolve_bun
+install_harness
 
 jvm_classpath() {
   ./mill --no-server show fast-mcp-scala.jvm.runClasspath 2>/dev/null |
@@ -87,7 +160,7 @@ start_js() {
   ENTRY="$(mktemp -t fmcp-conf-entry.XXXXXX).mjs"
   printf 'import { startConformance } from "%s/main.js";\nstartConformance(Number(process.argv[2] ?? %s));\n' "$dest" "$PORT" >"$ENTRY"
   echo "→ launching ConformanceServerJs on :$PORT (Bun)" >&2
-  bun run "$ENTRY" "$PORT" >"$LOG" 2>&1 &
+  "$BUN" run "$ENTRY" "$PORT" >"$LOG" 2>&1 &
   SRV_PID=$!
 }
 
@@ -128,13 +201,11 @@ set +e
 case "$MODE" in
   active)
     echo "→ conformance active suite ($PLATFORM, baseline $(basename "$BASELINE"))" >&2
-    bunx "@modelcontextprotocol/conformance@${CONF_VERSION}" \
-      server --url "$URL" --suite active --expected-failures "$BASELINE"
+    run_harness server --url "$URL" --suite active --expected-failures "$BASELINE"
     ;;
   2026)
     echo "→ conformance 2026-07-28 requirements ($PLATFORM)" >&2
-    bunx "@modelcontextprotocol/conformance@${CONF_VERSION}" \
-      server --url "$URL" --requirements 2026-07-28
+    run_harness server --url "$URL" --requirements 2026-07-28
     ;;
   *) echo "usage: $0 [jvm|js|native] [port] [active|2026]" >&2; exit 2 ;;
 esac

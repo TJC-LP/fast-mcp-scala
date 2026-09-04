@@ -10,30 +10,60 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: write
+# Every job declares exactly what it needs. Only github-release may write, and it holds no
+# publishing secret; publish holds the publishing secrets and may not write.
+permissions: {}
 
 jobs:
-  release:
-    name: Publish to Maven Central
+  verify:
+    name: Test
     runs-on: ubuntu-latest
     # Only run on the main repository, not forks
     if: github.repository == 'TJC-LP/fast-mcp-scala'
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # cache "false": the release workflow never restores (or saves) a cache written by main-scope
+      # jobs; everything comes fresh from Maven Central with coursier's checksum check and the Mill
+      # distribution is verified against .github/mill-dist.sha256. bun stays at its default "false":
+      # js.test uses the mill-bun managed, SHA-256-verified Bun.
+      - name: Set up build
+        uses: ./.github/actions/setup-build
+        with:
+          cache: "false"
+
+      - name: Run Tests
+        run: ./mill -i fast-mcp-scala.test
+
+  publish:
+    name: Publish to Maven Central
+    needs: verify
+    runs-on: ubuntu-latest
+    if: github.repository == 'TJC-LP/fast-mcp-scala'
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Set up build
         uses: ./.github/actions/setup-build
         with:
-          bun: "true"
+          cache: "false"   # never restore a cache written by main-scope jobs; fresh Maven Central downloads only
 
       - name: Fetch annotated tags
-        run: git fetch --tags --force
+        run: git fetch --tags --force   # unauthenticated: public repo
 
       - name: Extract version
         id: version
@@ -45,10 +75,7 @@ jobs:
             echo "Error: Tag must be a valid semver version (e.g., v0.1.0, v1.0.0-RC1)"
             exit 1
           fi
-          echo "version=$TAG_VERSION" >> $GITHUB_OUTPUT
-
-      - name: Run Tests
-        run: ./mill -i fast-mcp-scala.test
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Verify Publishing Setup
         run: |
@@ -57,6 +84,9 @@ jobs:
         env:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
 
+      # LAST step of the job. The only code that runs after the secrets appear is actions/checkout's
+      # GitHub-owned, SHA-pinned post step (credential cleanup — a no-op with persist-credentials:
+      # false); coursier/setup-action has no post hook and setup-bun is not used in this job.
       - name: Publish to Maven Central
         run: ./mill -i mill.javalib.SonatypeCentralPublishModule/
         env:
@@ -66,13 +96,29 @@ jobs:
           MILL_PGP_SECRET_BASE64: ${{ secrets.PGP_SECRET }}
           MILL_PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
 
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    if: github.repository == 'TJC-LP/fast-mcp-scala'
+    permissions:
+      contents: write   # the ONLY write grant in the workflow
+
+    steps:
+      # No checkout, no third-party action: gh is preinstalled and GitHub-owned. References no
+      # Sonatype/PGP secret — only the job token.
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          generate_release_notes: true
-          draft: false
-          # Any tag with a qualifier (v0.3.0-rc1, v0.3.0-beta2) is flagged as a prerelease;
-          # final tags like v0.3.0 are treated as regular releases.
-          prerelease: ${{ contains(github.ref_name, '-') }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists"
+            exit 0
+          fi
+          # Any tag with a qualifier (v1.0.0-RC4, v0.3.0-beta2) is flagged as a prerelease;
+          # final tags like v1.0.0 are treated as regular releases.
+          PRE=()
+          [[ "$TAG" == *-* ]] && PRE=(--prerelease)
+          gh release create "$TAG" --verify-tag --generate-notes "${PRE[@]}"
