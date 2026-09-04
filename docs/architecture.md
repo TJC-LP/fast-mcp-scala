@@ -1,10 +1,10 @@
 # fast-mcp-scala Architecture
 
-A short tour of how the library is put together. For a user-facing overview see the [README](../README.md); this document is for people who want to understand what happens between "I wrote a `@Tool`" and "an MCP client can call it."
+A short tour of how the library is put together. For a user-facing overview see the [README](../README.md), for platform specifics [platforms.md](./platforms.md), and for transport behavior [transports.md](./transports.md); this document is for people who want to understand what happens between "I wrote a `@Tool`" and "an MCP client can call it."
 
 ## One native core, one platform seam
 
-As of 0.5.0 the entire MCP protocol layer is native Scala 3 in `shared/` — JSON-RPC envelope, wire types, router, built-in handlers, middleware, and the Tasks state machine. There is exactly one server class, `McpServer[R]`, and one platform seam split along transport lines: `TransportBackend` (stdio + `randomId`) and `HttpTransportBackend` (HTTP) — split so stdio-only programs, and their GraalVM native images, never reach the HTTP stack. The JVM supplies `System.in/out` (`JvmTransportBackend`) and ZIO HTTP (`JvmHttpBackend`); Scala.js supplies Node stdio + `Bun.serve` (`JsTransportBackend`, both givens). No vendored SDK remains on either platform (the official TS SDK survives only as a test-time conformance client).
+As of 0.5.0 the entire MCP protocol layer is native Scala 3 in `shared/` — JSON-RPC envelope, wire types, router, built-in handlers, middleware, and the Tasks state machine. There is exactly one server class, `McpServer[R]`, and one platform seam split along transport lines: `TransportBackend` (stdio + `randomId`) and `HttpTransportBackend` (HTTP) — split so stdio-only programs, and their GraalVM native images, never reach the HTTP stack. The JVM supplies `System.in/out` (`JvmTransportBackend`) and ZIO HTTP (`JvmHttpBackend`); Scala.js supplies Node stdio + `Bun.serve` (`JsTransportBackend`, both givens); Scala Native supplies `System.in/out` with `/dev/urandom` ids (`NativeTransportBackend`, stdio only). No vendored SDK remains on any platform (the official TS SDK survives only as a test-time conformance client).
 
 ```
                    ┌──────────────────────────────────────┐
@@ -33,9 +33,9 @@ As of 0.5.0 the entire MCP protocol layer is native Scala 3 in `shared/` — JSO
               ┌──────────────────────┼──────────────────────┐
               ▼                      ▼                      ▼
     ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-    │  stdio (NDJSON) │    │  HTTP stateless │    │ HTTP streamable │
-    │  ZIO Stream /   │    │  ZIO HTTP /     │    │ ZIO HTTP /      │
-    │  Node stdin     │    │  Bun.serve      │    │ Bun.serve + SSE │
+    │  stdio (NDJSON) │    │ HTTP 2026-07-28 │    │ HTTP legacy     │
+    │  ZIO Stream /   │    │ stateless POST  │    │ adapter: init/  │
+    │  Node stdin     │    │ + per-req SSE   │    │ session/GET/DEL │
     └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
@@ -45,7 +45,7 @@ As of 0.5.0 the entire MCP protocol layer is native Scala 3 in `shared/` — JSO
 
 ```
 fast-mcp-scala/
-├── shared/src/com/tjclp/fastmcp/        # platform-independent (JVM + Scala.js)
+├── shared/src/com/tjclp/fastmcp/        # platform-independent (JVM + Scala.js + Scala Native)
 │   ├── core/
 │   │   ├── Annotations.scala             # @Tool, @Resource, @Prompt, @Param
 │   │   ├── Contracts.scala               # McpTool, McpPrompt, McpDecoder, McpEncoder
@@ -132,11 +132,11 @@ Users only see the public methods on `McpServer` (`.tool`, `.prompt`, `.resource
 
 All transports are thin adapters over the shared `MessageLoop` + router:
 
-| Transport | Entry point | JVM | Scala.js |
-|---|---|---|---|
-| Stdio | `server.runStdio()` | `ZStream` over `System.in`, serialized writer on `System.out` | Node `process.stdin`/`stdout` |
-| Streamable HTTP (default) | `server.runHttp()` | ZIO HTTP | `Bun.serve` |
-| Stateless HTTP | `server.runHttp()` with `stateless = true` | ZIO HTTP | `Bun.serve` |
+| Transport | Entry point | JVM | Scala.js | Scala Native |
+|---|---|---|---|---|
+| Stdio | `server.runStdio()` | `ZStream` over `System.in`, serialized writer on `System.out` | Node `process.stdin`/`stdout` | `ZStream.fromReader` over `System.in`, ids from `/dev/urandom` |
+| Streamable HTTP, MCP 2026-07-28 (stateless POST + request-scoped SSE) | `server.runHttp()` | ZIO HTTP | `Bun.serve` | not available (no `HttpTransportBackend` given; `runHttp()` does not compile) |
+| Legacy HTTP adapter (initialize, `Mcp-Session-Id`, GET stream, DELETE) | `server.runHttp()`; `stateless = true` disables its session store | ZIO HTTP | `Bun.serve` (GET answers 405) | not available |
 
 Modern Streamable HTTP is identical on both platforms: every request is an independent POST, carries per-request protocol metadata plus `MCP-Protocol-Version`/`Mcp-Method`/conditional `Mcp-Name` headers, and receives JSON or a request-scoped SSE stream. There is no modern protocol session, GET endpoint, DELETE lifecycle, SSE event ID, replay, or redelivery. Closing a response stream interrupts its dispatch fiber; `subscriptions/listen` uses the same long-lived POST response. Header mismatches are HTTP 400/`-32020`, unsupported versions are HTTP 400/`-32022`, missing required client capabilities are HTTP 400/`-32021`, and unknown request methods are HTTP 404/`-32601`.
 
@@ -161,8 +161,18 @@ Pinned in `build.mill`:
 
 ## Further reading
 
-- [`../README.md`](../README.md) — user-facing feature tour
-- [`../CHANGELOG.md`](../CHANGELOG.md) — release notes
+- [`../README.md`](../README.md) — user-facing overview and quickstart
+- [`./transports.md`](./transports.md) — stdio, modern Streamable HTTP, the legacy adapter, every setting
+- [`./platforms.md`](./platforms.md) — parity matrix, running on Bun and Scala Native
+- [`./tasks.md`](./tasks.md) — the MCP Tasks extension
+- [`./custom-types.md`](./custom-types.md) — customizing input and output types
+- [`./spec-coverage.md`](./spec-coverage.md) — MCP 2026-07-28 coverage matrix and verification
+- [`./examples.md`](./examples.md) — example servers and how to run them
+- [`./native-image.md`](./native-image.md) — GraalVM native-image recipes
+- [`./2026-07-28-upgrade.md`](./2026-07-28-upgrade.md) — wire behavior, review matrix, gate ledgers
 - [`./native-core-design.md`](./native-core-design.md) — the native-core design record (M0–M9)
 - [`../fast-mcp-scala/docs/parity-audit.md`](../fast-mcp-scala/docs/parity-audit.md) — TS SDK parity audit + closure status
+- [`../CHANGELOG.md`](../CHANGELOG.md) — release notes
+- [`../CONTRIBUTING.md`](../CONTRIBUTING.md) — build, test, quality gates, releasing
+- [`../SECURITY.md`](../SECURITY.md) — reporting vulnerabilities
 - [`../CLAUDE.md`](../CLAUDE.md) — contributor quick reference for the Mill build
