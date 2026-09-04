@@ -152,11 +152,11 @@ Tool handlers return `ZIO[Any, Throwable, Out]`. Handler failures surface in-ban
 
 Pinned in `build.mill`:
 
-- **Scala** 3.8.3
+- **Scala** 3.9.0 LTS
 - **ZIO** 2.1.20, **zio-json** 0.7.44 (the wire codec on both platforms), **zio-http** 3.4.0
 - **Native Scala 3 macros** for JSON Schema derivation, emitted as `zio-json` ASTs
-- **mill-bun-plugin** 0.2.1 (Scala.js + Bun integration)
-- **WartRemover** 3.5.6 (linting)
+- **mill-bun-plugin** 0.3.1 (Scala.js + Bun integration)
+- **WartRemover** 3.6.1 (linting)
 - Test-time only: **`@modelcontextprotocol/sdk` 1.29.0** (conformance client), **ScalaTest** 3.2.19
 
 ## Further reading

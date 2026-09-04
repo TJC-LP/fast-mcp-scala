@@ -46,14 +46,14 @@ libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "1.0.0-RC3"
 libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "1.0.0-RC3"
 ```
 
-Built against Scala 3.8.3. JVM requires JDK 17+. Scala.js artifact is published for `sjs1_3` (Scala.js 1.x); runs on Bun (first-class) and Node 18+.
+Built against Scala 3.9.0 LTS. JVM requires JDK 17+ (CI tests the LTS releases 17, 21, and 25). Scala.js artifact is published for `sjs1_3` (Scala.js 1.x); runs on Bun (first-class) and Node 18+.
 
 ## Quickstart
 
 A single-file server with one tool — the same code lives in [`HelloWorld.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/HelloWorld.scala):
 
 ```scala 3 raw
-//> using scala 3.8.3
+//> using scala 3.9.0
 //> using dep com.tjclp::fast-mcp-scala:1.0.0-RC3
 //> using options "-Xcheck-macros" "-experimental"
 
@@ -249,7 +249,7 @@ stdio-only images entirely (~35 MB, instant startup, no JVM in the container):
 
 ```scala
 object server extends ScalaModule with mill.javalib.NativeImageModule {
-  def scalaVersion = "3.8.3"
+  def scalaVersion = "3.9.0"
   def scalacOptions = Seq("-experimental")   // the annotation macros require it
   def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:1.0.0-RC3".exclude("dev.zio" -> "zio-http_3"))
   def mainClass = Some("com.example.MyServer")
@@ -392,7 +392,7 @@ Proof: the official **MCP conformance suite** runs against both platforms in CI 
 ### Running on Bun
 
 ```scala 3 raw
-//> using scala 3.8.3
+//> using scala 3.9.0
 //> using dep com.tjclp::fast-mcp-scala_sjs1:1.0.0-RC3
 
 import com.tjclp.fastmcp.{*, given}
@@ -411,7 +411,7 @@ Link with `./mill fast-mcp-scala.js.fastLinkJS`, then `bun run out/fast-mcp-scal
 The same shared core compiles to a standalone LLVM binary — no JVM, no JS runtime (~21 MB in a debug link, single-digit-second link times):
 
 ```scala 3 raw
-//> using scala 3.8.3
+//> using scala 3.9.0
 //> using platform native
 //> using nativeVersion 0.5.12
 //> using dep com.tjclp::fast-mcp-scala::1.0.0-RC4
@@ -532,7 +532,7 @@ For architectural detail, see [`docs/architecture.md`](docs/architecture.md).
 ./mill fast-mcp-scala.checkFormat                               # Scalafmt check (all sources)
 ./mill fast-mcp-scala.reformat                                  # Auto-format (all sources)
 ./mill fast-mcp-scala.jvm.test                                  # JVM tests only
-./mill fast-mcp-scala.js.test.bunTest                           # Scala.js conformance tests only
+./mill fast-mcp-scala.js.test                                   # Scala.js conformance tests only
 ./mill fast-mcp-scala.jvm.publishLocal                          # Publish JVM artifact to ~/.ivy2/local
 ```
 
@@ -555,7 +555,7 @@ def ivyDeps = Agg(
 Or point `scala-cli` at a built JAR directly:
 
 ```scala 3 ignore
-//> using scala 3.8.3
+//> using scala 3.9.0
 //> using jar "/absolute/path/to/out/fast-mcp-scala/jvm/jar.dest/out.jar"
 //> using options "-Xcheck-macros" "-experimental"
 ```

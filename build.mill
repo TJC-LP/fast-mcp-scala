@@ -1,5 +1,5 @@
-//| mvnDeps: ["com.lihaoyi::mill-contrib-scoverage:$MILL_VERSION", "com.tjclp::mill-bun_mill1:0.2.1"]
-// Mill 1.1.8 (latest stable) — Scala 3.8.x support and mill-bun-plugin compatibility.
+//| mvnDeps: ["com.lihaoyi::mill-contrib-scoverage:$MILL_VERSION", "com.tjclp::mill-bun_mill1:0.3.1"]
+// Mill 1.1.8 (latest stable) — Scala 3.9.x support and mill-bun-plugin compatibility.
 // Version is controlled via .mill-version file.
 //
 // This file holds only cross-cutting build vocabulary: versions, compiler flags, and the module
@@ -13,9 +13,10 @@ import mill._
 import mill.scalalib._
 import mill.scalalib.publish._
 import mill.scalalib.scalafmt._
+import mill.scalajslib.TestScalaJSModule
 import contrib.scoverage.ScoverageModule
 
-val scala3Version = "3.8.3"
+val scala3Version = "3.9.0" // Scala 3.9 LTS
 val organization = "com.tjclp"
 
 /** Version constants - centralized for maintenance */
@@ -24,7 +25,11 @@ object Versions {
   val zioJson = "0.7.44"
   val zioHttp = "3.4.0"
   val scalaTest = "3.2.19"
-  val scalaNative = "0.5.12" // officially supports Scala 3.8.3
+  // Scala 3.9.0 emits Scala.js 1.22 IR, so the linker must be at least 1.22. mill-bun 0.3.x
+  // delegates to Mill's standard ScalaJSModule and makes this pin explicit (Mill 1.1.x's own
+  // bundled linker stops at IR 1.20 and cannot link Scala 3.9 output).
+  val scalaJs = "1.22.0"
+  val scalaNative = "0.5.12" // publishes scala3lib for Scala 3.9.0 (3.9.0+0.5.12)
   val scalaCheck = "1.18.1"
 }
 
@@ -83,7 +88,7 @@ trait FastMCPModuleBase extends ScalaModule with ScalafmtModule with ScoverageMo
 
   // WartRemover compiler plugin for enhanced code quality
   def scalacPluginMvnDeps = Seq(
-    mvn"org.wartremover:::wartremover:3.5.6"
+    mvn"org.wartremover:::wartremover:3.6.1"
   )
 
   override def scalacOptions = BuildConfig.crossScalacOptions ++ BuildConfig.wartRemoverOptions
@@ -127,4 +132,20 @@ trait FastMCPModule extends FastMCPModuleBase with FastMCPPublishingBase
 /** Test module trait */
 trait FastMCPTestModule extends TestModule.ScalaTest {
   override def forkArgs: T[Seq[String]] = BuildConfig.lazyValsJvmArgs
+}
+
+/** Scala.js test-link fix for Scala 3.8+. Mill's `TestScalaJSModule.scalaJSTestDeps` resolves the
+  * test bridge in isolation; with nothing there to pin `scalajs-scalalib` to the Scala 3 stdlib,
+  * that resolution drags in the *Scala 2.13* one and prepends it to the test link inputs, where it
+  * shadows the real `scalajs-scalalib_2.13:<scala version>` (on 3.9.0 the linker then reports the
+  * new parameterless `Option.orNull()` as non-existent). Keep the bridge, drop the stray stdlib —
+  * the module classpath already carries the right one. Only the test link was ever affected.
+  *
+  * A top-level trait, not an inline override: a `super.<task>()` override inside a nested test
+  * object under the dash-named package aborts Mill with "Could not detect the parent class".
+  */
+trait ScalaJSTestDepsFix extends TestScalaJSModule {
+  override def scalaJSTestDeps = Task {
+    super.scalaJSTestDeps().filterNot(_.path.last.startsWith("scalajs-scalalib_2.13-2.13"))
+  }
 }

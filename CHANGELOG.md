@@ -32,6 +32,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Scala 3.9.0 LTS** (TJC-2273): all three platforms now build with Scala 3.9.0
+  (LTS, released 2026-09-03), up from 3.8.3. Companion bumps: WartRemover
+  3.5.6 → 3.6.1 (first release for the 3.9.0 compiler) and the Scala.js
+  linker to 1.22.0 (Scala 3.9.0 emits 1.22 IR); Scala Native stays on 0.5.12.
+  CI now tests LTS JDKs only (17, 21, 25 — the non-LTS 24 is dropped).
+- **mill-bun-plugin 0.2.1 → 0.3.1** (TJC-2274): Mill 1.1.x's bundled Scala.js
+  linker stops at IR 1.20 and cannot link Scala 3.9 output, so the js module
+  now pins `scalaJSVersion` explicitly (1.22.0) through the plugin's 0.3
+  `ScalaJSModule` path. With it: `fast-mcp-scala/js/bun.lock` is committed
+  and installs are frozen (regenerate via `./mill fast-mcp-scala.js.bunLock`);
+  the test-only TS SDK moved from `bunDeps` to `bunDevDeps`, so the published
+  `_sjs1_3` JAR no longer advertises it in a bun dependency manifest; the
+  plugin manages Bun 1.4.1 itself (CI's system Bun moves to 1.4.1 to match);
+  `js.test.bunTest` is replaced by the inherited `js.test` (`testForked`).
+  The js test module also drops the Scala 2.13 `scalajs-scalalib` that Mill's
+  isolated test-bridge resolution prepends to the test link on Scala 3.8+ —
+  it shadowed the 3.9.0 stdlib and made the linker report the new
+  `Option.orNull()` as non-existent.
 - **Build and source layout modularized** (TJC-2198): Mill 1.1.5 → 1.1.8;
   module definitions moved out of the monolithic `build.mill` into
   `fast-mcp-scala/package.mill`, next to the code they build (task paths such

@@ -14,8 +14,8 @@ Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **
 ## Build System
 
 **Build tool**: Mill 1.1.8 (configured in `.mill-version`)
-**Scala**: 3.8.3
-**Plugins**: mill-bun-plugin 0.2.1 (Scala.js + Bun integration)
+**Scala**: 3.9.0 (LTS)
+**Plugins**: mill-bun-plugin 0.3.1 (Scala.js + Bun integration; explicit `scalaJSVersion`, managed Bun 1.4.1, frozen `js/bun.lock`)
 
 ### Common Commands
 
@@ -28,7 +28,8 @@ Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **
 
 # Single-platform
 ./mill fast-mcp-scala.jvm.test                      # JVM tests only
-./mill fast-mcp-scala.js.test.bunTest               # Scala.js conformance tests only
+./mill fast-mcp-scala.js.test                       # Scala.js conformance tests only (Bun)
+./mill fast-mcp-scala.js.bunLock                    # Regenerate js/bun.lock after changing bunDevDeps
 ./mill fast-mcp-scala.scalaNative.test              # Scala Native tests (links a native binary)
 ./mill fast-mcp-scala.scalaNative.nativeLink        # Standalone LLVM binary of AnnotatedServer
 ./mill fast-mcp-scala.jvm.test com.tjclp.fastmcp.macros.ToolProcessorTest
@@ -250,7 +251,7 @@ Each platform provides exactly one `given TransportBackend` (`JvmTransportBacken
 
 ### WartRemover
 
-Configured in `build.mill` (v3.5.6):
+Configured in `build.mill` (v3.6.1):
 - **Errors** (fail build): `Null`, `TryPartial`, `TripleQuestionMark`, `ArrayEquals`
 - **Warnings**: `Var`, `Return`, `AsInstanceOf`, `IsInstanceOf`
 
@@ -278,7 +279,7 @@ Key test classes:
 
 ## CI/CD
 
-- **CI** (`.github/workflows/ci.yml`): Runs on PRs and main pushes, tests on JDK 17, 21, 24
+- **CI** (`.github/workflows/ci.yml`): Runs on PRs and main pushes, tests on the LTS JDKs 17, 21, 25
 - **Conformance** (`.github/workflows/conformance.yml`): official `@modelcontextprotocol/conformance` suite against both platforms — 42/42, with expected-failure baselines at `conformance/baseline-{jvm,js}.yml` kept EMPTY (any regression fails the gate). Run locally via `scripts/conformance.sh {jvm|js}`.
 - **Release** (`.github/workflows/release.yml`): Triggered by `v*` tags, publishes to Maven Central
 
@@ -314,12 +315,12 @@ Then in your project use version `1.0.0-RC4-SNAPSHOT`.
 ## Dependencies
 
 Key dependencies (versions in `build.mill`):
-- Scala 3.8.3
+- Scala 3.9.0 LTS
 - ZIO 2.1.20 - Effect system
 - ZIO JSON 0.7.44 - JSON codecs (shared)
 - ZIO HTTP 3.4.0 - HTTP transport
 - Native Scala 3 macros - Compile-time JSON Schema derivation
-- mill-bun-plugin 0.2.1 - Scala.js + Bun build integration
-- `@modelcontextprotocol/sdk` 1.29.0 - TS MCP SDK, pinned in the js module's `bunDeps`; consumed only by the `js.test` conformance client (zero production `@JSImport`s)
-- WartRemover 3.5.6 - Code quality
+- mill-bun-plugin 0.3.1 - Scala.js + Bun build integration (Scala.js 1.22.0 pinned via `Versions.scalaJs`)
+- `@modelcontextprotocol/sdk` 1.29.0 - TS MCP SDK, pinned in the js module's `bunDevDeps` and frozen by the committed `fast-mcp-scala/js/bun.lock`; consumed only by the `js.test` conformance client (zero production `@JSImport`s, absent from the published bun manifest)
+- WartRemover 3.6.1 - Code quality
 - ScalaTest 3.2.19 - Testing
