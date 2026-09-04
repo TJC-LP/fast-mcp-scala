@@ -119,10 +119,31 @@ case class McpServerSettings(
     // Legacy adapter only: advertise and wire resources/subscribe + resources/unsubscribe.
     // Modern subscriptions use subscriptions/listen. Off by default.
     resourcesSubscribe: Boolean = false,
-    // DNS-rebinding protection (Streamable/stateless HTTP). When `Some`, an HTTP request whose
-    // `Host` (or `Origin`) hostname — port ignored — is not in the set is rejected with 403.
-    // `None` (default) disables host checking, preserving prior behavior.
+    // DNS-rebinding / CSRF guard for the HTTP transports. When `Some`, a request whose `Host`
+    // hostname (port ignored; a verbatim `host:port` entry also matches) is not listed is refused
+    // with 403. A present `Origin` header is matched as a FULL origin (scheme://host:port, default
+    // port per scheme): it must appear in `allowedOrigins`, or its hostname must be listed here AND
+    // its host:port must equal the request's `Host` authority. `null`, empty, malformed, cross-port
+    // and cross-scheme-default-port origins are refused; an absent `Host`/`Origin` passes (not the
+    // browser threat this guards). `None` here and in `allowedOrigins` disables the guard.
     allowedHosts: Option[Set[String]] = None,
+    // Explicit browser origins (`https://app.example.com`, `http://localhost:5173`) admitted in
+    // addition to the request's own authority. Needed for front-ends served from another origin or
+    // behind a TLS-terminating proxy whose Origin differs from the listener's Host. Entries that do
+    // not parse as `scheme://host[:port]` fail `runHttp()` at startup. `None` (default) = none.
+    allowedOrigins: Option[Set[String]] = None,
+    // Maximum HTTP request body accepted on the MCP endpoint, in bytes, on every backend. Enforced
+    // by the platform server (zio-http request aggregator / Bun.serve maxRequestBodySize) AND by a
+    // first-party Content-Length + post-read check, so oversized bodies answer 413 before any JSON
+    // decoding. 1 MiB default (the JVM was implicitly ~100 KiB; Bun was 128 MiB); raise it for
+    // tools that legitimately take large payloads. Must be > 0.
+    maxRequestBodyBytes: Int = 1024 * 1024,
+    // Legacy streamable adapter only: cap on concurrently stored sessions. When a header-less
+    // `initialize` arrives at the cap, the longest-idle session without a live GET stream is evicted
+    // (its queue shut down) to make room; only when every stored session has a live GET is the
+    // request refused with 503. Bounds memory without letting a flood lock new clients out.
+    // `None` disables. Modern 2026-07-28 requests never store sessions.
+    maxSessions: Option[Int] = Some(1000),
     // Optional io.modelcontextprotocol/tasks extension. Off by default.
     tasks: TaskSettings = TaskSettings(),
     // Inbound input limits (frame size, JSON depth, object width, URI length, subscriptions).
