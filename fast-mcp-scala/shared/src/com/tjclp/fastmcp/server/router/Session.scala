@@ -45,7 +45,8 @@ final class Session private (
     private val inputKeyOccurrencesRef: FiberRef[Option[Ref[Map[String, Int]]]],
     private val lastSeenRef: Ref[Long],
     private val activeGetRef: Ref[Boolean],
-    private val finalizersRef: Ref[Map[String, UIO[Unit]]]
+    /** `Some(finalizers)` while live; `None` once [[terminate]] has run (the terminated latch). */
+    private val finalizersRef: Ref[Option[Map[String, UIO[Unit]]]]
 ):
 
   /** Millis timestamp of the last client activity (transports touch on every request). Drives idle
@@ -90,18 +91,38 @@ final class Session private (
 
   /** Register (or replace) a keyed finalizer run by [[terminate]]. Keyed so a component that
     * re-registers on every request stays idempotent (e.g. the task manager releasing the session's
-    * tasks).
+    * tasks). A finalizer registered AFTER the session was terminated runs immediately instead of
+    * being parked on a dead session — so a request whose registration completes after a racing
+    * `DELETE` / idle eviction still gets its state released.
     */
-  def addFinalizer(key: String)(f: UIO[Unit]): UIO[Unit] = finalizersRef.update(_.updated(key, f))
+  def addFinalizer(key: String)(f: UIO[Unit]): UIO[Unit] =
+    finalizersRef
+      .modify {
+        case Some(fs) => (false, Some(fs.updated(key, f)))
+        case None => (true, None)
+      }
+      .flatMap(late => ZIO.when(late)(f.ignore).unit)
 
-  /** Terminate the session: run every registered finalizer once (failures ignored), then shut the
-    * outbound channel down. A strict superset of `outbound.shutdown`; transports call it on
-    * `DELETE` and idle eviction so session-bound state (tasks) does not outlive the session.
+  /** True once [[terminate]] has run. */
+  def isTerminated: UIO[Boolean] = finalizersRef.get.map(_.isEmpty)
+
+  /** Terminate the session: latch the terminated flag, interrupt the session's in-flight request
+    * fibers (a request cannot outlive its session; `interruptFork` so a fiber parked in an
+    * uninterruptible region never blocks the caller), run every registered finalizer once (failures
+    * ignored), then shut the outbound channel down. Idempotent. A strict superset of
+    * `outbound.shutdown`; transports call it on `DELETE` and idle eviction so session-bound state
+    * (tasks) does not outlive the session.
     */
   def terminate: UIO[Unit] =
-    finalizersRef
-      .getAndSet(Map.empty)
-      .flatMap(fs => ZIO.foreachDiscard(fs.values)(_.ignore)) *> outbound.shutdown
+    finalizersRef.getAndSet(None).flatMap {
+      case None => ZIO.unit
+      case Some(fs) =>
+        inflight
+          .getAndSet(Map.empty)
+          .flatMap(fibers => ZIO.foreachDiscard(fibers.values)(_._2.interruptFork)) *>
+          ZIO.foreachDiscard(fs.values)(_.ignore) *>
+          outbound.shutdown
+    }
 
   /** Allocate the next id for a server-initiated request. Prefixed so server ids never collide with
     * client-issued ids on the same connection.
@@ -253,7 +274,7 @@ object Session:
       )
       seen <- Ref.make(java.lang.System.currentTimeMillis())
       activeGet <- Ref.make(false)
-      finalizers <- Ref.make(Map.empty[String, UIO[Unit]])
+      finalizers <- Ref.make(Option(Map.empty[String, UIO[Unit]]))
     yield new Session(
       sessionId,
       supportsTasks,

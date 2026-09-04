@@ -92,19 +92,28 @@ final class TaskMiddleware[R](
             // runWithoutSink: the task fiber (forked inside create) outlives this POST, whose
             // sink queue is shut down when the SSE response ends — sends must go to outbound.
             val scope = TaskScope.session(session.sessionId)
-            session
-              .runWithoutSink(
-                taskManager.create(
-                  scope = scope,
-                  requestedTtlMs = ttl,
-                  run = next(session, params),
-                  onStatusChange = task => session.send(statusNotification(task))
+            // Session termination (DELETE / idle eviction) releases the session's tasks instead
+            // of pinning entries nobody can see until their TTL. Keyed (idempotent), registered
+            // BEFORE the create so an interrupt landing after registration can never leave a
+            // task without its release hook, and again AFTER it: on a session terminated in the
+            // meantime the late registration runs the release immediately.
+            val release = session.addFinalizer("tasks")(taskManager.releaseScope(scope))
+            (release *>
+              session
+                .runWithoutSink(
+                  taskManager.create(
+                    scope = scope,
+                    requestedTtlMs = ttl,
+                    run = next(session, params),
+                    onStatusChange = task => session.send(statusNotification(task))
+                  )
                 )
-              )
-              // Session termination (DELETE / idle eviction) releases the session's tasks instead
-              // of pinning entries nobody can see until their TTL. Keyed, so re-registering per
-              // create is idempotent.
-              .tap(_ => session.addFinalizer("tasks")(taskManager.releaseScope(scope)))
+                .tap(_ => release))
+              // Everything here is non-blocking Ref/Promise work: keeping the whole branch
+              // uninterruptible shrinks the window in which a registered task's handle is lost
+              // to the dispatcher's continuation. `create` still detects a pending interrupt and
+              // rolls back before the mask ends.
+              .uninterruptible
               .mapBoth(
                 McpError.fromThrowable,
                 created => created.toJsonAST.getOrElse(Json.Obj())
@@ -167,6 +176,7 @@ final class TaskMiddleware[R](
                         onStatusChange = _ => ZIO.unit
                       )
                     )
+                    .uninterruptible // see the legacy branch
                     .mapBoth(
                       McpError.fromThrowable,
                       created =>
