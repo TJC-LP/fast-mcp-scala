@@ -43,14 +43,17 @@ import com.tjclp.fastmcp.core.Tasks
   *   unknown); if none qualifies the create is rejected with `-32003`. Normalised to `>=
   *   maxConcurrentPerSession`.
   * @param maxStoredTotal
-  *   Stored entries per pool, terminal included. At the cap the oldest eligible terminal entry of
-  *   the pool's LARGEST owner is evicted (the flooder pays); else `-32003`. Normalised to `>=
+  *   Stored entries per pool, terminal included. At the cap the creating owner's own oldest
+  *   eligible entry is evicted first, then the oldest eligible entry of the owner holding the MOST
+  *   eligible (stale, terminal) entries — the flooder pays for its own flood, and an owner whose
+  *   results are all inside the retention grace is never a victim; else `-32003`. Normalised to `>=
   *   maxConcurrentTotal`.
   * @param minResultRetentionMs
   *   A terminal result younger than this is never evicted by a cap (only by its own TTL), so a
   *   client always gets at least this long to collect a result (6x the default poll interval).
   * @param sweepIntervalMs
-  *   Upper bound on the single TTL sweeper's sleep; a TTL is honoured within this slack.
+  *   Upper bound on the single TTL sweeper's sleep; a TTL is honoured within this slack. Expiry and
+  *   the retention grace are measured on the monotonic clock (wire timestamps stay wall-clock).
   * @param ownerKey
   *   How modern bearer tasks are bucketed per client. `Transport` (default) uses the
   *   transport-supplied `Session.clientKey` (the peer address on the shipped HTTP backends; `None`
@@ -70,7 +73,16 @@ case class TaskSettings(
     minResultRetentionMs: Long = 30_000L,
     sweepIntervalMs: Long = 1_000L,
     ownerKey: com.tjclp.fastmcp.core.TaskOwnerKey = com.tjclp.fastmcp.core.TaskOwnerKey.Transport
-)
+):
+  require(maxConcurrentPerSession >= 1, "TaskSettings.maxConcurrentPerSession must be >= 1")
+  require(
+    maxConcurrentTotal >= maxConcurrentPerSession,
+    "TaskSettings.maxConcurrentTotal must be >= maxConcurrentPerSession"
+  )
+  require(maxStoredPerOwner >= 1, "TaskSettings.maxStoredPerOwner must be >= 1")
+  require(maxStoredTotal >= 1, "TaskSettings.maxStoredTotal must be >= 1")
+  require(minResultRetentionMs >= 0L, "TaskSettings.minResultRetentionMs must be >= 0")
+  require(sweepIntervalMs >= 1L, "TaskSettings.sweepIntervalMs must be >= 1")
 
 /** Settings for an MCP server. HTTP-specific fields (`stateless`, `keepAliveInterval`,
   * `disallowDelete`, `httpEndpoint`) are ignored under stdio transports.

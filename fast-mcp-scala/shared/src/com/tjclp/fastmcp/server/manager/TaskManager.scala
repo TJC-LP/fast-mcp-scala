@@ -51,8 +51,13 @@ private final case class TaskEntry(
     pool: PoolKind,
     createdAtMs: Long,
     lastUpdatedAtMs: Long,
+    /** Monotonic ([[TaskManager.monotonicMs]]) twin of `lastUpdatedAtMs`; drives the retention
+      * grace and eviction order so a wall-clock step never reorders or un-ages entries.
+      */
+    lastUpdatedMonoMs: Long,
     ttlMs: Option[Long],
-    expiresAtMs: Long,
+    /** Monotonic deadline; the sweeper compares it against [[TaskManager.monotonicMs]]. */
+    expiresAtMonoMs: Long,
     pollIntervalMs: Long,
     status: TaskStatus,
     statusMessage: Option[String],
@@ -125,21 +130,28 @@ private final case class TaskStore(
         )
     }
 
-  /** Oldest terminal entry of `owner` (any owner of `pool` when `owner` is `None`) whose last
-    * update is at or before `cutoff`, ordered by (lastUpdatedAtMs, insertion order).
+  /** Terminal entries of `pool` whose last update (monotonic) is at or before `cutoff` — the only
+    * entries a stored cap may evict.
+    */
+  private def stale(pool: PoolKind, cutoff: Long): Iterator[TaskEntry] =
+    entries.values.iterator.filter(e =>
+      e.pool == pool && e.status.isTerminal && e.lastUpdatedMonoMs <= cutoff
+    )
+
+  /** Oldest stale entry of `owner` (any owner of `pool` when `owner` is `None`), ordered by
+    * (lastUpdatedMonoMs, insertion order).
     */
   def evictable(pool: PoolKind, owner: Option[Option[String]], cutoff: Long): Option[TaskEntry] =
-    val candidates = entries.values.iterator.filter { e =>
-      e.pool == pool && e.status.isTerminal && e.lastUpdatedAtMs <= cutoff &&
-      owner.forall(_ == e.ownerKey)
-    }
+    val candidates = stale(pool, cutoff).filter(e => owner.forall(_ == e.ownerKey))
     if candidates.isEmpty then None
-    else Some(candidates.minBy(e => (e.lastUpdatedAtMs, e.seq)))
+    else Some(candidates.minBy(e => (e.lastUpdatedMonoMs, e.seq)))
 
-  /** Owner with the most stored entries in `pool` (ties broken lexicographically on the key). */
-  def largestOwner(pool: PoolKind): Option[Option[String]] =
-    val totals = entries.values.iterator
-      .filter(_.pool == pool)
+  /** Owner holding the most STALE (evictable) entries in `pool`, ties broken lexicographically on
+    * the key. Ranking on evictable rather than total entries means an owner whose entries are all
+    * running or still inside the retention grace never nominates a victim.
+    */
+  def largestStaleOwner(pool: PoolKind, cutoff: Long): Option[Option[String]] =
+    val totals = stale(pool, cutoff)
       .foldLeft(Map.empty[Option[String], Int])((acc, e) =>
         acc.updated(e.ownerKey, acc.getOrElse(e.ownerKey, 0) + 1)
       )
@@ -182,8 +194,14 @@ private object TaskStore:
   * Bounds. Every task is charged to an owner ([[TaskScope.ownerKey]]) and a pool ([[PoolKind]]).
   * Admission is a single `Ref.modify`: per-owner running cap (`-32602`), per-pool running ceiling
   * (`-32003`), per-owner and per-pool stored caps that evict the oldest terminal entry older than
-  * `minResultRetentionMs` (the pool cap charges the pool's largest owner) and reject with `-32003`
-  * when nothing is evictable. Rejections never mutate the store.
+  * `minResultRetentionMs` and reject with `-32003` when nothing is evictable. The pool cap charges
+  * the creating owner's own stale results first, then the owner holding the most stale results — so
+  * the flooder pays for its own flood, and an owner whose entries are all running or inside the
+  * grace is never a victim. Rejections never mutate the store.
+  *
+  * Clocks. Wire timestamps (`createdAt`, `lastUpdatedAt`) are wall-clock; expiry, the retention
+  * grace and eviction order use the monotonic clock ([[TaskManager.monotonicMs]]) so an NTP step or
+  * VM resume neither sweeps running tasks early nor extends retention.
   *
   * Atomicity. `create` runs under `uninterruptibleMask`; an interrupt of the creating fiber (client
   * abort, `notifications/cancelled`) is detected before admission and again after registration and
@@ -250,6 +268,7 @@ class TaskManager[R] private[manager] (
         promise <- Promise.make[Throwable, Any]
         start <- Promise.make[Nothing, Boolean]
         nowMs <- ZIO.succeed(System.currentTimeMillis())
+        nowMono <- ZIO.succeed(TaskManager.monotonicMs())
         ttlMs = effectiveTtl(requestedTtlMs)
         // acquireReleaseExitWith runs the release uninterruptibly, so the status update + promise
         // completion always happen, even if the fiber is interrupted via tasks/cancel. A closed
@@ -265,7 +284,7 @@ class TaskManager[R] private[manager] (
         // A child forked inside the mask inherits the mask's uninterruptibility; `.interruptible`
         // is mandatory or tasks/cancel and TTL expiry would never land.
         fiber <- wrapped.interruptible.forkDaemon
-        result <- registerOrRollback(taskId, scope, ttlMs, nowMs, fiber, promise, start)
+        result <- registerOrRollback(taskId, scope, ttlMs, nowMs, nowMono, fiber, promise, start)
           .onExit(exit => ZIO.unless(exit.isSuccess)(rollback(taskId) *> start.succeed(false)).unit)
       yield result
     }
@@ -291,6 +310,7 @@ class TaskManager[R] private[manager] (
       scope: TaskScope,
       ttlMs: Option[Long],
       nowMs: Long,
+      nowMono: Long,
       fiber: Fiber.Runtime[Throwable, Any],
       promise: Promise[Throwable, Any],
       start: Promise[Nothing, Boolean]
@@ -307,15 +327,16 @@ class TaskManager[R] private[manager] (
         pool = scope.pool,
         createdAtMs = nowMs,
         lastUpdatedAtMs = nowMs,
+        lastUpdatedMonoMs = nowMono,
         ttlMs = ttlMs,
-        expiresAtMs = nowMs + ttlMs.getOrElse(settings.defaultTtlMs),
+        expiresAtMonoMs = nowMono + ttlMs.getOrElse(settings.defaultTtlMs),
         pollIntervalMs = settings.pollIntervalMs,
         status = TaskStatus.Working,
         statusMessage = Some("The operation is now in progress."),
         fiber = fiber,
         result = promise
       )
-      admission <- storeRef.modify(admit(entry, nowMs))
+      admission <- storeRef.modify(admit(entry, nowMono))
       result <- admission match
         case Left(err) => promise.fail(err) *> ZIO.fail(err)
         case Right(startSweeper) =>
@@ -345,14 +366,14 @@ class TaskManager[R] private[manager] (
   /** Single-`modify` admission. `Right(startSweeper)` when the entry was inserted (after any cap
     * evictions), `Left(err)` when rejected — in which case the store is returned untouched.
     */
-  private def admit(entry: TaskEntry, nowMs: Long)(
+  private def admit(entry: TaskEntry, nowMono: Long)(
       s: TaskStore
   ): (Either[Throwable, Boolean], TaskStore) =
     val owner = entry.ownerKey
     val pool = entry.pool
     val oc = s.owners.getOrElse(owner, Counts(0, 0))
     val pc = s.pools.getOrElse(pool, Counts(0, 0))
-    val cutoff = nowMs - settings.minResultRetentionMs
+    val cutoff = nowMono - settings.minResultRetentionMs
     if s.entries.contains(entry.taskId) then
       (Left(new IllegalStateException(s"duplicate task id ${entry.taskId}")), s)
     else if oc.running >= perOwnerRunning then
@@ -367,11 +388,16 @@ class TaskManager[R] private[manager] (
       else
         val s1 = s.remove(ownerEvict.toList)
         val p1 = s1.pools.getOrElse(pool, Counts(0, 0))
+        // Pool cap: the creator's own stale results pay first, then the owner holding the most
+        // stale results. Never the owner with the most entries — a distributed flood of fresh
+        // entries must not be able to nominate a legitimate heavy user as the victim.
         val poolEvict =
           if p1.total >= poolStored then
-            s1.largestOwner(pool)
-              .flatMap(big => s1.evictable(pool, Some(big), cutoff))
-              .orElse(s1.evictable(pool, None, cutoff))
+            s1.evictable(pool, Some(owner), cutoff)
+              .orElse(
+                s1.largestStaleOwner(pool, cutoff)
+                  .flatMap(big => s1.evictable(pool, Some(big), cutoff))
+              )
           else None
         if p1.total >= poolStored && poolEvict.isEmpty then
           (Left(TaskCapacityExceeded("stored", poolStored)), s)
@@ -386,13 +412,13 @@ class TaskManager[R] private[manager] (
     * the same `modify` that observes the drain, when the store is empty.
     */
   private def sweepLoop: UIO[Unit] =
-    ZIO.succeed(System.currentTimeMillis()).flatMap { now =>
+    ZIO.succeed(TaskManager.monotonicMs()).flatMap { now =>
       storeRef
         .modify { s =>
-          val expired = s.entries.values.filter(_.expiresAtMs <= now).toList
+          val expired = s.entries.values.filter(_.expiresAtMonoMs <= now).toList
           val rest = s.remove(expired)
           if rest.entries.isEmpty then ((expired, None), rest.copy(sweeperActive = false))
-          else ((expired, Some(rest.entries.values.iterator.map(_.expiresAtMs).min)), rest)
+          else ((expired, Some(rest.entries.values.iterator.map(_.expiresAtMonoMs).min)), rest)
         }
         .flatMap { case (expired, next) =>
           // interruptFork: never block the sweeper on a task body; the task's release then no-ops
@@ -577,6 +603,7 @@ class TaskManager[R] private[manager] (
         val firstFailureMsg = cause.failureOption.flatMap(t => Option(t.getMessage))
         (TaskStatus.Failed, firstFailureMsg.filter(_.nonEmpty))
     val nowMs = System.currentTimeMillis()
+    val nowMono = TaskManager.monotonicMs()
     for
       updated <- storeRef.modify { s =>
         s.entries.get(taskId) match
@@ -585,7 +612,8 @@ class TaskManager[R] private[manager] (
             val next = entry.copy(
               status = status,
               statusMessage = message,
-              lastUpdatedAtMs = nowMs
+              lastUpdatedAtMs = nowMs,
+              lastUpdatedMonoMs = nowMono
             )
             (Some(next), s.markTerminal(entry, next))
       }
@@ -631,6 +659,11 @@ final class TaskNotFoundError(val taskId: String)
 object TaskManager:
 
   private val noCheckpoint: String => UIO[Unit] = _ => ZIO.unit
+
+  /** Monotonic milliseconds (`System.nanoTime`, available on JVM, Scala.js and Scala Native). Only
+    * differences are meaningful; never persisted or put on the wire.
+    */
+  private[manager] def monotonicMs(): Long = System.nanoTime() / 1_000_000L
 
   /** Allocate a new manager with empty state. `newId` supplies task ids; production passes the
     * platform backend's CSPRNG (`TransportBackend.randomId()`) because task ids are bearer handles
