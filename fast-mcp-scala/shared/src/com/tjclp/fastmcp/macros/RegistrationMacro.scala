@@ -56,6 +56,59 @@ object RegistrationMacro:
         report.warning(s"No @Tool, @Prompt, or @Resource annotations found in ${Type.show[T]}")
       server
     else
+      if !sym.flags.is(Flags.Module) then
+        report.errorAndAbort(
+          s"scanAnnotations[${Type.show[T]}] ${MacroUtils.NotAnObjectHint}; ${sym.fullName} is a " +
+            "class. Annotated methods can only be registered from an object."
+        )
+
+      // (kind label, registered key, method). Mirrors the collectFirst order used below so a method
+      // carrying several annotations is keyed by the one that actually gets registered.
+      val keyed: List[(String, String, Symbol)] = annotatedMethods.flatMap { method =>
+        method.annotations.collectFirst {
+          case a if a.tpe <:< TypeRepr.of[Tool] =>
+            ("@Tool name", ToolProcessor.registeredName(method), method)
+          case a if a.tpe <:< TypeRepr.of[Prompt] =>
+            ("@Prompt name", PromptProcessor.registeredName(method), method)
+          case a if a.tpe <:< TypeRepr.of[Resource] =>
+            ("@Resource uri", ResourceProcessor.registeredUriKey(method), method)
+        }
+      }
+
+      def describe(m: Symbol): String =
+        val where = m.pos.map(p => s" @ ${p.sourceFile.name}:${p.startLine + 1}").getOrElse("")
+        m.name + m.signature.paramSigs.mkString("(", ", ", ")") + where
+
+      val collisions: List[((String, String), List[Symbol])] = keyed
+        .groupBy { case (kind, key, _) => (kind, key) }
+        .collect { case (k, ms) if ms.sizeIs > 1 => (k, ms.map(_._3)) }
+        .toList
+        .sortBy { case ((kind, key), _) => (kind, key) }
+
+      val objectName = sym.companionModule.fullName
+      collisions.foreach { case ((kind, key), methods) =>
+        val remedy =
+          if kind.startsWith("@Resource") then
+            "a distinct uri (placeholder names alone do not distinguish templates)"
+          else "an explicit name = Some(\"...\")"
+        val msg =
+          s"$kind '$key' is registered by ${methods.size} annotated methods in $objectName: " +
+            s"${methods.map(describe).mkString(", ")}. Each annotated method must register a " +
+            s"unique $kind — give one of them $remedy or remove its annotation."
+        // One error per colliding declaration so IDEs navigate to each; the summary below lands
+        // at the scanAnnotations call site (the scanned object usually lives in another file).
+        methods.foreach(m => report.error(msg, m.pos.getOrElse(Position.ofMacroExpansion)))
+      }
+      if collisions.nonEmpty then
+        report.errorAndAbort(
+          s"scanAnnotations[${Type.show[T]}]: ${collisions.size} duplicate registration(s) in " +
+            s"$objectName — " + collisions
+              .map { case ((kind, key), ms) =>
+                s"$kind '$key' <- ${ms.map(describe).mkString(" | ")}"
+              }
+              .mkString("; ")
+        )
+
       val registrationExprs: List[Expr[McpServerCore[R]]] = annotatedMethods.flatMap { method =>
         method.annotations.collectFirst {
           case toolAnnot if toolAnnot.tpe <:< TypeRepr.of[Tool] =>

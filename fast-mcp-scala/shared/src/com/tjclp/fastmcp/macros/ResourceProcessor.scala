@@ -15,6 +15,20 @@ import com.tjclp.fastmcp.server.manager.ResourceTemplateHandler
   */
 private[macros] object ResourceProcessor extends AnnotationProcessorBase:
 
+  private[macros] val placeholderRegex = raw"\{([^{}]+)}".r
+
+  /** The URI (static) or placeholder-name-agnostic URI pattern (template) this method registers.
+    * `users://{id}` and `users://{userId}` produce the same key because `ResourceTemplatePattern`
+    * builds the same match regex for both, so they would resolve nondeterministically at read time.
+    */
+  def registeredUriKey(using Quotes)(methodSym: quotes.reflect.Symbol): String =
+    import quotes.reflect.*
+    val annot = findAnnotation[Resource](methodSym).getOrElse(
+      report.errorAndAbort(s"No @Resource annotation found on method '${methodSym.name}'")
+    )
+    val (uri, _, _, _) = MacroUtils.parseResourceParams(annot)
+    placeholderRegex.replaceAllIn(uri, "{}")
+
   def processResourceAnnotation[R: Type](using Quotes)(
       server: Expr[McpServerCore[R]],
       ownerSym: quotes.reflect.Symbol,
@@ -32,7 +46,6 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
     val finalName = nameOpt.orElse(Some(methodName))
     val finalDesc = descOpt.orElse(methodSym.docstring)
 
-    val placeholderRegex = raw"\{([^{}]+)}".r
     val placeholders = placeholderRegex.findAllMatchIn(uri).map(_.group(1)).toList
     val isTemplate = placeholders.nonEmpty
 

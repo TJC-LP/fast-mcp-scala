@@ -47,18 +47,31 @@ private[macros] object MacroUtils:
     val annotTpe = TypeRepr.of[A]
     sym.annotations.filter(_.tpe <:< annotTpe)
 
-  // Gets a reference to the method within its owner object
+  /** Wording shared by the two "not an object" diagnostics so tests can assert one substring. */
+  private[macros] val NotAnObjectHint: String =
+    "requires the singleton type of an object (e.g. scanAnnotations[MyServer.type])"
+
+  /** Emit `owner.<method>` eta-expanded to a `FunctionN`, denoting EXACTLY `methodSym`.
+    *
+    * `Select(qualifier, symbol)` builds a symbol-designated `TermRef` whose denotation is the
+    * symbol's own (not a by-name member lookup), so overloads declared on the same object can never
+    * be confused: schema derivation, argument decoding and invocation all see the annotated
+    * declaration. The eta-expansion yields `Block(DefDef($anonfun(<original param names>)),
+    * Closure(Ident($anonfun)))`, the shape read by `MapToFunctionMacro.tryGetRealParamNames` and
+    * `FunctionAnalyzer.maybeRealParamNames`.
+    */
   def getMethodRefExpr(using
       quotes: Quotes
   )(ownerSym: quotes.reflect.Symbol, methodSym: quotes.reflect.Symbol): Expr[Any] =
     import quotes.reflect.*
-    val companionSym = ownerSym.companionModule
-    val methodSymOpt = companionSym.declaredMethod(methodSym.name).headOption.getOrElse {
+    // Defensive backstop only: RegistrationMacro reports this first with the full T-aware message.
+    if !ownerSym.flags.is(Flags.Module) then
       report.errorAndAbort(
-        s"Could not find method symbol for '${methodSym.name}' in ${companionSym.fullName}"
+        s"Cannot bind annotated method '${methodSym.name}' on ${ownerSym.fullName}: annotation " +
+          s"scanning $NotAnObjectHint."
       )
-    }
-    Select(Ref(companionSym), methodSymOpt).etaExpand(Symbol.spliceOwner).asExprOf[Any]
+    val moduleSym = ownerSym.companionModule // module class -> its module value (the Ref target)
+    Select(Ref(moduleSym), methodSym).etaExpand(Symbol.spliceOwner).asExprOf[Any]
 
   private def stripTerm(using quotes: Quotes)(term: quotes.reflect.Term): quotes.reflect.Term =
     import quotes.reflect.*
@@ -275,15 +288,6 @@ private[macros] object MacroUtils:
 
     val tpe = rawTpe.dealias.simplified
 
-    def hasDefaultValue(owner: Symbol, fieldIndex: Int): Boolean =
-      if owner == Symbol.noSymbol then false
-      else
-        val candidateNames = List(
-          s"$$lessinit$$greater$$default$$${fieldIndex + 1}",
-          s"apply$$default$$${fieldIndex + 1}"
-        )
-        candidateNames.exists(name => owner.methodMember(name).nonEmpty)
-
     def fieldAnnotation(fieldSym: Symbol, ctorParams: List[Symbol]): Option[Term] =
       extractAnnotation[com.tjclp.fastmcp.core.Param](fieldSym).orElse {
         ctorParams
@@ -313,16 +317,19 @@ private[macros] object MacroUtils:
         if !isProduct then None
         else
           val ctorParams = tpeSym.primaryConstructor.paramSymss.flatten
-          val companion = tpeSym.companionModule
 
-          val entries = tpeSym.caseFields.zipWithIndex.flatMap { case (fieldSym, idx) =>
+          val entries = tpeSym.caseFields.flatMap { fieldSym =>
             val fieldTpe = tpe.memberType(fieldSym)
             val nested = schemaMetadataForTypeRepr(fieldTpe)
             val parsedMeta = fieldAnnotation(fieldSym, ctorParams).map { annot =>
               val (desc, examples, required, schema) = parseToolParam(Some(annot))
               if !required then
                 val isOption = fieldTpe <:< TypeRepr.of[Option[?]]
-                val hasDefault = hasDefaultValue(companion, idx)
+                // `HasDefault` lives on the primary-constructor parameter itself (pickled), so a
+                // hand-written companion `apply` overload with defaults can no longer satisfy the
+                // gate on behalf of a field that has none.
+                val hasDefault =
+                  ctorParams.find(_.name == fieldSym.name).exists(_.flags.is(Flags.HasDefault))
                 if !isOption && !hasDefault then
                   report.errorAndAbort(
                     s"Field '${fieldSym.name}' in typed request ${tpeSym.name} is marked as required=false " +
@@ -407,7 +414,7 @@ private[macros] object MacroUtils:
     (uri, resourceName, resourceDesc, mimeType)
 
   // Helper to parse Option[String] literals from annotation arguments
-  private def parseOptionStringLiteral(using quotes: Quotes)(
+  private[macros] def parseOptionStringLiteral(using quotes: Quotes)(
       argTerm: quotes.reflect.Term
   ): Option[String] =
     import quotes.reflect.*
