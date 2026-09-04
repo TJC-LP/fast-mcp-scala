@@ -1,7 +1,12 @@
 name: Set up build
 description: >-
-  JDK, optional Bun, and the coursier/Mill caches every fast-mcp-scala workflow needs.
-  Replaces the setup block that was copy-pasted across ci/release/native/conformance.
+  JDK, optional Bun, the coursier/Mill caches, and a checksum-verified Mill distribution for every
+  fast-mcp-scala workflow. Replaces the setup block that was copy-pasted across
+  ci/release/native/conformance. `cache: "false"` registers no cache step at all (the release
+  workflow); `cache-write: "false"` restores read-only (jobs that execute the npm conformance
+  harness). The last step pre-installs the exact Mill distribution the ./mill launcher would
+  download and verifies it against .github/mill-dist.sha256 — a cache-restored binary that does
+  not match the pin fails the job instead of running.
 
 inputs:
   java-version:
@@ -19,26 +24,58 @@ inputs:
       the main cache.
     required: false
     default: ""
+  cache:
+    description: >-
+      "false" registers NO actions/cache step (no restore, no post-job save). The release workflow
+      passes it so the credentialed jobs never consume a cache written by main-scope jobs.
+    required: false
+    default: "true"
+  cache-write:
+    description: >-
+      "false" swaps actions/cache for actions/cache/restore (restore-only, no post-job save). Set on
+      jobs that execute third-party run-time code (the npm conformance harness) so that code can
+      never write into the shared Mill/coursier cache.
+    required: false
+    default: "true"
 
 runs:
   using: composite
   steps:
     - name: Set up JDK ${{ inputs.java-version }}
-      uses: coursier/setup-action@v1
+      uses: coursier/setup-action@039f736548afa5411c1382f40a5bd9c2d30e0383 # v1.3.9
       with:
         jvm: temurin:${{ inputs.java-version }}
 
+    # no-cache: setup-bun's post step would otherwise save ~/.bun/bin/bun to the shared cache after
+    # the job's own code ran (and restore an unverified binary before it); the download is ~2s.
     - name: Set up Bun
       if: inputs.bun == 'true'
-      uses: oven-sh/setup-bun@v2
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       with:
         bun-version: 1.4.1 # same Bun the mill-bun plugin manages for the Scala.js tests
+        no-cache: true
 
     # Keys hash every *.mill file (build.mill plus each package.mill) and .mill-version — the
     # latter selects the Mill distribution that lands in the Mill cache. A key hashing only
     # build.mill would go stale silently now that modules live in package.mill files.
+    #
+    # NEVER add ~/.bun/install/cache to a cache path: Bun verifies lockfile sha512 only when
+    # extracting a tarball, so a warm install cache bypasses the frozen-lockfile integrity check
+    # that scripts/conformance.sh relies on.
     - name: Cache Coursier
-      uses: actions/cache@v4
+      if: inputs.cache == 'true' && inputs.cache-write == 'true'
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          ~/.cache/coursier
+          ~/.ivy2/cache
+        key: ${{ runner.os }}-coursier-${{ inputs.cache-prefix }}-${{ hashFiles('**/*.mill', '.mill-version') }}
+        restore-keys: |
+          ${{ runner.os }}-coursier-${{ inputs.cache-prefix }}-
+
+    - name: Restore Coursier (read-only)
+      if: inputs.cache == 'true' && inputs.cache-write != 'true'
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: |
           ~/.cache/coursier
@@ -50,7 +87,8 @@ runs:
     # Both locations: Mill 1.x resolves its distribution under ~/.cache/mill (XDG), while older
     # launchers used ~/.mill. Caching both keeps every job on one warm path.
     - name: Cache Mill
-      uses: actions/cache@v4
+      if: inputs.cache == 'true' && inputs.cache-write == 'true'
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: |
           ~/.cache/mill
@@ -58,3 +96,23 @@ runs:
         key: ${{ runner.os }}-mill-${{ inputs.cache-prefix }}-${{ hashFiles('**/*.mill', '.mill-version') }}
         restore-keys: |
           ${{ runner.os }}-mill-${{ inputs.cache-prefix }}-
+
+    - name: Restore Mill (read-only)
+      if: inputs.cache == 'true' && inputs.cache-write != 'true'
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          ~/.cache/mill
+          ~/.mill
+        key: ${{ runner.os }}-mill-${{ inputs.cache-prefix }}-${{ hashFiles('**/*.mill', '.mill-version') }}
+        restore-keys: |
+          ${{ runner.os }}-mill-${{ inputs.cache-prefix }}-
+
+    # Always last, before any `./mill` in the caller: the launcher skips its own unverified download
+    # whenever the final path is non-empty, so after this step every ./mill execs verified bytes.
+    - name: Install Mill (checksum-verified)
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        MILL_CACHE_KEY_HINT: ${{ runner.os }}-mill-${{ inputs.cache-prefix }}-
+      run: bash "$GITHUB_ACTION_PATH/../../scripts/install-mill.sh"
