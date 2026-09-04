@@ -2,8 +2,10 @@
 # Pre-install the exact Mill distribution the ./mill launcher would download, verified against the
 # SHA-256 pinned in .github/mill-dist.sha256. The launcher skips its own unverified download
 # whenever the final path is non-empty (`[ ! -s "$MILL" ]`), so after this step every `./mill`
-# execs verified bytes — and a restored cache whose Mill binary does not match the pin fails the
-# job instead of running.
+# execs a verified launcher — and a restored cache whose Mill binary does not match the pin fails
+# the job instead of running. Scope: the launcher distribution only. Mill's own jars are resolved
+# by coursier (SHA-1-checked on download; trusted from the restored cache in non-release CI jobs —
+# the release workflow restores no cache).
 #
 # Runs as the last step of .github/actions/setup-build in every CI job. Portable to bash 3.2
 # (macOS /bin/bash) — no mapfile, no associative arrays.

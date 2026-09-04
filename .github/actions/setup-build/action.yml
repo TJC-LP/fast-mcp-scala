@@ -109,7 +109,9 @@ runs:
           ${{ runner.os }}-mill-${{ inputs.cache-prefix }}-
 
     # Always last, before any `./mill` in the caller: the launcher skips its own unverified download
-    # whenever the final path is non-empty, so after this step every ./mill execs verified bytes.
+    # whenever the final path is non-empty, so after this step every ./mill execs a verified LAUNCHER.
+    # Mill's own jars still come from coursier: SHA-1-checked on download, trusted from the restored
+    # ~/.cache/coursier on a cache hit (non-release jobs only — release.yml passes cache: "false").
     - name: Install Mill (checksum-verified)
       shell: bash
       working-directory: ${{ github.workspace }}

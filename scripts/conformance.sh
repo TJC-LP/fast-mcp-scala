@@ -75,6 +75,11 @@ trap cleanup EXIT
 # gate the fallbacks on version.
 resolve_bun() {
   local b="${FAST_MCP_BUN:-}"
+  if [ -n "$b" ] && [ ! -x "$b" ]; then
+    # An explicit pin that does not resolve is an error, never a silent fallback to another Bun.
+    echo "FAST_MCP_BUN=$b is not executable" >&2
+    exit 2
+  fi
   if [ -z "$b" ]; then
     b="$(./mill --no-server show fast-mcp-scala.js.bunExecutable 2>/dev/null | tr -d '"' || true)"
   fi
@@ -100,17 +105,25 @@ install_harness() {
     echo "conformance/bun.lock is missing — refusing to resolve the harness from the registry" >&2
     exit 2
   fi
-  local want; want="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dependencies"]["@modelcontextprotocol/conformance"])' "$HARNESS_DIR/package.json")"
+  # Informational only (the lock is authoritative); best-effort so a box without python3 still installs.
+  local want; want="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dependencies"]["@modelcontextprotocol/conformance"])' "$HARNESS_DIR/package.json" 2>/dev/null || echo '?')"
   echo "→ installing conformance harness @${want} (frozen lockfile, fresh install cache)" >&2
   BUN_CACHE="$(mktemp -d -t fmcp-bun-cache.XXXXXX)"
   rm -rf "$HARNESS_DIR/node_modules"
   ( cd "$HARNESS_DIR" && BUN_INSTALL_CACHE_DIR="$BUN_CACHE" "$BUN" install --frozen-lockfile --ignore-scripts --no-summary )
 }
 
-# `bun run` only executes what the frozen install put in node_modules/.bin (rc=1 'Script not
-# found' otherwise); `bunx` would auto-install a same-named package from the registry.
+# Exec the bin the frozen install put in node_modules/.bin — deterministically that file. `bun run
+# conformance` would fall back to a same-named executable on PATH when no package bin matches, and
+# `bunx` would auto-install a same-named package from the registry; neither is an acceptable sink.
+# The bin's shebang is `#!/usr/bin/env node`, so the harness runs under Node exactly as before.
 run_harness() {
-  ( cd "$HARNESS_DIR" && exec "$BUN" run conformance "$@" )
+  local bin="$HARNESS_DIR/node_modules/.bin/conformance"
+  if [ ! -x "$bin" ]; then
+    echo "conformance harness bin missing after frozen install ($bin)" >&2
+    exit 2
+  fi
+  ( cd "$HARNESS_DIR" && exec "$bin" "$@" )
 }
 
 # Refuse to run if ANYTHING already listens on the port — the readiness poll below would

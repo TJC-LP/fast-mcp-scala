@@ -5,8 +5,10 @@ version: 2
 updates:
   - package-ecosystem: github-actions
     directories:
-      - "/"                    # .github/workflows/*.yml
-      - "/.github/actions/*"   # the setup-build composite ("/" alone covers only a root action.yml)
+      - "/"                            # .github/workflows/*.yml
+      - "/.github/actions/setup-build" # the composite ("/" alone covers only a root action.yml);
+                                       # listed explicitly — no reliance on glob support for this
+                                       # ecosystem. Add a line per new composite action.
     schedule:
       interval: weekly
     cooldown:
