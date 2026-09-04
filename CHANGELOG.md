@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-10
+<!-- TAG DATE: re-date at merge -->
+
+Highlights since 0.5.0: **MCP 2026-07-28** is the primary protocol (stateless
+requests, `server/discover`, MRTR for roots/sampling/elicitation,
+`subscriptions/listen`, the Tasks extension) with an initialization-based
+compatibility adapter for 2025-11-25 and earlier (RC1); `Option` parameter
+decoding via zio-json (RC2); **GraalVM native images** for stdio and HTTP
+servers on a split transport seam (RC3); and, new in this final release, the
+**Scala Native target**, native JSON Schema derivation replacing Tapir,
+zero-boilerplate enum support, Scala 3.9.0 LTS, and the modularized build. See
+the `[1.0.0-RC1]`–`[1.0.0-RC3]` sections below for the cumulative RC changes
+rolled into this release. `com.tjclp:fast-mcp-scala_native0.5_3` is published
+for the first time with 1.0.0.
+
 ### Security
 
 Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Umbrella for TJC-2295 (core input limits), TJC-2296 (HTTP transport), TJC-2297 (tasks), TJC-2298 (macro binding) and TJC-2299 (CI supply chain).
@@ -149,6 +164,13 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   already did), so the third-party setup actions never see it.
 
 ### Added
+
+- **Project governance for 1.0** (TJC-2277, #86): `CONTRIBUTING.md`,
+  `SECURITY.md` (private vulnerability reporting enabled), `CODE_OF_CONDUCT.md`
+  (Contributor Covenant 2.1), `DEPENDENCY_POLICY.md`, `ROADMAP.md`, issue
+  templates, and the MCP SDK-tiering triage labels. The README is slimmed to a
+  quickstart plus index; transports, Tasks, custom types, platforms, spec
+  coverage, and examples each have a page under `docs/`.
 
 - **Scala Native target (experimental)** (TJC-2188, #82):
   `com.tjclp:fast-mcp-scala_native0.5_3` — stdio MCP servers compiled to
@@ -302,6 +324,11 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 - Tapir, ApiSpec, Circe, and Cats production dependencies. Existing
   `sttp.tapir.Schema` overrides should migrate to `McpInputCodec`,
   `McpSchema`, `@Param(schema = ...)`, or `McpTool.withSchema`.
+- The members deprecated at RC1, neither of which shipped in a stable release
+  (TJC-2277): `ErrorCodes.ResourceNotFound` (modern resource misses use
+  `InvalidParams`, `-32602`; legacy sessions keep `LegacyResourceNotFound`,
+  `-32002`) and `ElicitRequestUrlParams.requiredError` (the legacy `-32042`
+  helper; modern handlers use `McpContext.elicitUrl` and MRTR).
 
 ## [1.0.0-RC3] - 2026-08-31
 
