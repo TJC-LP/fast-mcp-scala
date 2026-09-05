@@ -191,15 +191,21 @@ private[fastmcp] object HttpHeaderValidation:
 
   private def decodeHeaderValue(value: String): Either[McpError, String] =
     if value.startsWith(EncodedPrefix) && value.endsWith(EncodedSuffix) then
-      val payload = value.substring(EncodedPrefix.length, value.length - EncodedSuffix.length)
-      Try(Base64.getDecoder.decode(payload)).toEither.left
-        .map(_ => McpError.headerMismatch("Malformed Base64 header sentinel"))
-        .flatMap { bytes =>
-          val decoded = new String(bytes, StandardCharsets.UTF_8)
-          if java.util.Arrays.equals(bytes, decoded.getBytes(StandardCharsets.UTF_8)) then
-            Right(decoded)
-          else Left(McpError.headerMismatch("Base64 header value is not valid UTF-8"))
-        }
+      // `=?base64?=` (10 chars, prefix and suffix overlap on the `?`) and the empty-payload
+      // `=?base64??=` (11 chars) are malformed sentinels, not plain values; the substring below
+      // would throw StringIndexOutOfBounds for the first, so refuse before slicing.
+      if value.length <= EncodedPrefix.length + EncodedSuffix.length then
+        Left(McpError.headerMismatch("Malformed Base64 header sentinel"))
+      else
+        val payload = value.substring(EncodedPrefix.length, value.length - EncodedSuffix.length)
+        Try(Base64.getDecoder.decode(payload)).toEither.left
+          .map(_ => McpError.headerMismatch("Malformed Base64 header sentinel"))
+          .flatMap { bytes =>
+            val decoded = new String(bytes, StandardCharsets.UTF_8)
+            if java.util.Arrays.equals(bytes, decoded.getBytes(StandardCharsets.UTF_8)) then
+              Right(decoded)
+            else Left(McpError.headerMismatch("Base64 header value is not valid UTF-8"))
+          }
     else validatePlainValue(value)
 
   private def validatePlainValue(value: String): Either[McpError, String] =

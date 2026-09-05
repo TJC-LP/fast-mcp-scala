@@ -38,6 +38,10 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
       ZIO.foreachDiscard(ctx.progressToken)(t => ctx.sendProgress(t, 0.5)) *>
         ZIO.sleep(30.seconds).as("done")
 
+    @Tool(name = Some("boom"), description = Some("Dies with a defect (error-boundary target)"))
+    def boom(): ZIO[Any, Throwable, String] =
+      ZIO.succeed(throw new IllegalStateException("boom: secret handler state"))
+
   private val SessionIdHeader = "mcp-session-id"
 
   private val initFrame =
@@ -58,7 +62,10 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
   private def buildRoutes(
       stateless: Boolean,
       keepAlive: Option[java.time.Duration] = None,
-      allowedHosts: Option[Set[String]] = None
+      allowedHosts: Option[Set[String]] = None,
+      allowedOrigins: Option[Set[String]] = None,
+      maxRequestBodyBytes: Int = 1024 * 1024,
+      maxSessions: Option[Int] = Some(1000)
   ): Routes[Any, Response] =
     val server = McpServer.typed[Any](
       "T",
@@ -66,7 +73,10 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
       McpServerSettings(
         stateless = stateless,
         keepAliveInterval = keepAlive,
-        allowedHosts = allowedHosts
+        allowedHosts = allowedHosts,
+        allowedOrigins = allowedOrigins,
+        maxRequestBodyBytes = maxRequestBodyBytes,
+        maxSessions = maxSessions
       )
     )
     val _ = server.scanAnnotations[TestServer.type]
@@ -82,10 +92,32 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
   private def run(routes: Routes[Any, Response], req: Request): Response =
     runUnsafe(ZIO.scoped(routes.runZIO(req)))
 
+  /** A legacy POST as a compliant client sends it: JSON media type and an Accept covering both the
+    * JSON and SSE reply shapes (every POST needs `Content-Type: application/json` — 415 otherwise).
+    */
   private def post(routes: Routes[Any, Response], body: String, sid: Option[String]): Response =
-    val base = Request.post(URL(Path.root / "mcp"), Body.fromString(body))
+    val base = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(body))
+      .addHeader(Header.Custom("content-type", "application/json"))
+      .addHeader(Header.Custom("accept", "application/json, text/event-stream"))
     val req = sid.fold(base)(s => base.addHeader(Header.Custom(SessionIdHeader, s)))
     run(routes, req)
+
+  /** A raw POST with exactly the given headers — for the transport-gate tests. */
+  private def rawPost(
+      routes: Routes[Any, Response],
+      body: String,
+      headers: (String, String)*
+  ): Response =
+    val req = headers.foldLeft(Request.post(URL(Path.root / "mcp"), Body.fromString(body))) {
+      case (r, (k, v)) => r.addHeader(Header.Custom(k, v))
+    }
+    run(routes, req)
+
+  private val JsonHeaders = List(
+    "content-type" -> "application/json",
+    "accept" -> "application/json, text/event-stream"
+  )
 
   private def bodyOf(resp: Response): String = runUnsafe(resp.body.asString)
 
@@ -232,6 +264,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
             routes.runZIO(
               Request
                 .post(URL(Path.root / "mcp"), Body.fromString(slowFrame))
+                .addHeader(Header.Custom("content-type", "application/json"))
                 .addHeader(Header.Custom(SessionIdHeader, sid))
             )
           )
@@ -242,6 +275,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
           routes.runZIO(
             Request
               .post(URL(Path.root / "mcp"), Body.fromString(cancelFrame))
+              .addHeader(Header.Custom("content-type", "application/json"))
               .addHeader(Header.Custom(SessionIdHeader, sid))
           )
         )
@@ -274,6 +308,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val routes = buildRoutes(stateless = false)
     val req = Request
       .post(URL(Path.root / "mcp"), Body.fromString(initFrame))
+      .addHeader(Header.Custom("content-type", "application/json"))
       .addHeader(Header.Custom("accept", "application/json"))
     run(routes, req).status shouldBe Status.NotAcceptable
 
@@ -376,6 +411,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
       buildRoutes(stateless = false, allowedHosts = Some(Set("localhost", "127.0.0.1")))
     val evilPost = Request
       .post(URL(Path.root / "mcp"), Body.fromString(initFrame))
+      .addHeader(Header.Custom("content-type", "application/json"))
       .addHeader(Header.Custom("host", "evil.example.com"))
     run(routes, evilPost).status shouldBe Status.Forbidden
 
@@ -385,30 +421,277 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
       .addHeader(Header.Custom(SessionIdHeader, "whatever"))
     run(routes, evilGet).status shouldBe Status.Forbidden
 
+    val evilDelete = Request
+      .delete(URL(Path.root / "mcp"))
+      .addHeader(Header.Custom("host", "evil.example.com"))
+      .addHeader(Header.Custom(SessionIdHeader, "whatever"))
+    run(routes, evilDelete).status shouldBe Status.Forbidden
+
     // Allowed host proceeds to normal processing (mints a session on initialize).
     val okPost = Request
       .post(URL(Path.root / "mcp"), Body.fromString(initFrame))
+      .addHeader(Header.Custom("content-type", "application/json"))
       .addHeader(Header.Custom("host", "127.0.0.1:8000"))
     run(routes, okPost).status shouldBe Status.Ok
   }
 
-  test("idle streamable sessions are swept; live-GET sessions are exempt") {
-    val settings = McpServerSettings(sessionIdleTimeout = Some(java.time.Duration.ofMillis(200)))
-    runUnsafe(
-      for
-        idle <- Session.make("idle")
-        live <- Session.make("live")
-        _ <- live.tryAcquireGet
-        store <- Ref.make(Map("idle" -> idle, "live" -> live))
-        sweeper <- JvmHttpBackend.evictIdleSessions(store, settings).fork
-        _ <- (ZIO.sleep(50.millis) *> store.get)
-          .map(m => !m.contains("idle") && m.contains("live"))
-          .repeatUntil(identity)
-          .timeoutFail(new RuntimeException("sweeper did not evict the idle session"))(10.seconds)
-        shutdown <- idle.outbound.isShutdown
-        _ <- sweeper.interrupt
-      yield shutdown shouldBe true
+  // ---- F5 §1: Origin is a full origin, matched against the request's Host authority ----
+
+  test("Origin route table: cross-port / cross-scheme / null / foreign origins are 403, same authority 200") {
+    val routes =
+      buildRoutes(stateless = true, allowedHosts = Some(Set("localhost", "127.0.0.1")))
+    def withOrigin(origin: String): Response =
+      rawPost(
+        routes,
+        listFrame,
+        ("host" -> "localhost:8000") :: ("origin" -> origin) :: JsonHeaders*
+      )
+    for refused <- List(
+        "http://localhost:3000",
+        "https://localhost",
+        "http://127.0.0.1:1",
+        "null",
+        "",
+        "http://evil.example.com",
+        "http://localhost:99999",
+        "http://localhost:",
+        "http://localhost:abc",
+        "http://localhost:0",
+        "http://localhost:8000/x",
+        "http://user@localhost:8000",
+        "ftp://localhost:8000",
+        "http://127.0.0.1:8000" // listed hostname, same port, but not the request's authority
+      )
+    do
+      withClue(s"Origin: $refused") {
+        val resp = withOrigin(refused)
+        resp.status shouldBe Status.Forbidden
+        bodyOf(resp) should include("-32000")
+        resp.rawHeader(SessionIdHeader) shouldBe None
+      }
+    withOrigin("http://localhost:8000").status shouldBe Status.Ok
+    withOrigin("HTTP://LocalHost:8000").status shouldBe Status.Ok
+    withOrigin("https://localhost:8000").status shouldBe Status.Ok // scheme not compared (documented)
+    // No Origin at all: non-browser client, still fine.
+    rawPost(routes, listFrame, ("host" -> "localhost:8000") :: JsonHeaders*).status shouldBe Status.Ok
+  }
+
+  test("allowedOrigins admits an explicitly listed origin that is not the request's authority") {
+    val routes = buildRoutes(
+      stateless = true,
+      allowedHosts = Some(Set("localhost", "127.0.0.1")),
+      allowedOrigins = Some(Set("http://localhost:3000", "https://app.example.com"))
     )
+    def withOrigin(origin: String): Response =
+      rawPost(
+        routes,
+        listFrame,
+        ("host" -> "localhost:8000") :: ("origin" -> origin) :: JsonHeaders*
+      )
+    withOrigin("http://localhost:3000").status shouldBe Status.Ok
+    withOrigin("https://app.example.com:443").status shouldBe Status.Ok
+    withOrigin("http://localhost:3001").status shouldBe Status.Forbidden
+    withOrigin("http://app.example.com").status shouldBe Status.Forbidden
+  }
+
+  test("serveHttp refuses to start on an unparseable allowedOrigins entry") {
+    val server = McpServer.typed[Any](
+      "BadOrigins",
+      "0.1.0",
+      McpServerSettings(allowedOrigins = Some(Set("app.example.com")))
+    )
+    val outcome = runUnsafe(
+      server.buildRouter.flatMap(r => JvmHttpBackend.serveHttp(r, server.settings)).either
+    )
+    outcome.isLeft shouldBe true
+    outcome.swap.map(_.getMessage).getOrElse("") should include("allowedOrigins")
+  }
+
+  // ---- F5 §2: every POST needs Content-Type: application/json, before body read or minting ----
+
+  test("415 for a legacy POST with text/plain or no Content-Type, on stateless and streamable, no session minted") {
+    for stateless <- List(true, false) do
+      val routes = buildRoutes(stateless = stateless)
+      withClue(s"stateless=$stateless text/plain") {
+        val resp = rawPost(
+          routes,
+          initFrame,
+          "content-type" -> "text/plain",
+          "accept" -> "application/json, text/event-stream"
+        )
+        resp.status.code shouldBe 415
+        bodyOf(resp) should include("-32000")
+        bodyOf(resp) should include("application/json")
+        resp.rawHeader(SessionIdHeader) shouldBe None
+      }
+      withClue(s"stateless=$stateless absent") {
+        val resp = rawPost(routes, initFrame, "accept" -> "application/json, text/event-stream")
+        resp.status.code shouldBe 415
+        resp.rawHeader(SessionIdHeader) shouldBe None
+      }
+      withClue(s"stateless=$stateless tools/call text/plain") {
+        val resp = rawPost(routes, callFrame, "content-type" -> "text/plain")
+        resp.status.code shouldBe 415
+        bodyOf(resp) should not include "42"
+      }
+    // A CORS-simple no-Content-Type initialize on the streamable route did not mint anything: a
+    // guessed follow-up session id is unknown.
+    val streamable = buildRoutes(stateless = false)
+    val _ = rawPost(streamable, initFrame)
+    post(streamable, listFrame, Some("guessed-session-id")).status shouldBe Status.NotFound
+  }
+
+  test("application/json with a charset parameter is accepted; JSON-ish other types are not") {
+    val routes = buildRoutes(stateless = true)
+    rawPost(routes, listFrame, "content-type" -> "application/json; charset=utf-8").status shouldBe
+      Status.Ok
+    rawPost(routes, listFrame, "content-type" -> "application/json-patch+json").status.code shouldBe
+      415
+    rawPost(routes, listFrame, "content-type" -> "application/json; charset=utf-16").status.code shouldBe
+      415
+  }
+
+  // ---- F1 §2: operator-configurable body cap, 413 before parsing ----
+
+  test("413 when the declared Content-Length exceeds maxRequestBodyBytes (before the body is read)") {
+    val routes = buildRoutes(stateless = false, maxRequestBodyBytes = 64)
+    val resp = rawPost(routes, initFrame, ("content-length" -> "200") :: JsonHeaders*)
+    resp.status.code shouldBe 413
+    val body = bodyOf(resp)
+    body should include("-32000")
+    body should include("64 bytes")
+    resp.rawHeader(SessionIdHeader) shouldBe None
+  }
+
+  test("413 for an oversized NON-JSON body: the cap fires before parseFrame (not -32700)") {
+    for stateless <- List(true, false) do
+      val routes = buildRoutes(stateless = stateless, maxRequestBodyBytes = 64)
+      val resp = rawPost(routes, "x" * 200, JsonHeaders*)
+      withClue(s"stateless=$stateless") {
+        resp.status.code shouldBe 413
+        val body = bodyOf(resp)
+        body should include("-32000")
+        body should not include "-32700"
+        resp.rawHeader(SessionIdHeader) shouldBe None
+      }
+    // At or under the cap the request proceeds normally.
+    val ok = buildRoutes(stateless = true, maxRequestBodyBytes = listFrame.length)
+    post(ok, listFrame, None).status shouldBe Status.Ok
+  }
+
+  // ---- F12: bounded legacy session store ----
+
+  test("maxSessions: at the cap the longest-idle session without a live GET is evicted, not the newcomer") {
+    val routes = buildRoutes(stateless = false, maxSessions = Some(2))
+    val sid1 = initSid(routes)
+    Thread.sleep(5)
+    val sid2 = initSid(routes)
+    Thread.sleep(5)
+    // Touch sid2 so sid1 is unambiguously the longest-idle session.
+    post(routes, listFrame, Some(sid2)).status shouldBe Status.Ok
+
+    val third = post(routes, initFrame, None)
+    third.status shouldBe Status.Ok
+    val sid3 = third.rawHeader(SessionIdHeader).getOrElse(fail("third initialize minted nothing"))
+    val _ = bodyOf(third)
+
+    post(routes, listFrame, Some(sid1)).status shouldBe Status.NotFound // evicted
+    post(routes, listFrame, Some(sid2)).status shouldBe Status.Ok
+    post(routes, listFrame, Some(sid3)).status shouldBe Status.Ok
+
+    // DELETE frees a slot; the next initialize is admitted without evicting.
+    run(
+      routes,
+      Request.delete(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid3))
+    ).status shouldBe Status.Ok
+    val fourth = initSid(routes)
+    post(routes, listFrame, Some(sid2)).status shouldBe Status.Ok
+    post(routes, listFrame, Some(fourth)).status shouldBe Status.Ok
+  }
+
+  test("maxSessions: 503 only when every stored session holds a live GET stream") {
+    val routes = buildRoutes(stateless = false, maxSessions = Some(2))
+    val sid1 = initSid(routes)
+    val sid2 = initSid(routes)
+    for sid <- List(sid1, sid2) do
+      // Open (and never drain) the GET SSE channel: the session now has a live GET.
+      run(routes, Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid)))
+        .status shouldBe Status.Ok
+
+    val refused = post(routes, initFrame, None)
+    refused.status.code shouldBe 503
+    val body = bodyOf(refused)
+    body should include("-32000")
+    body should include("Session limit reached")
+    refused.rawHeader(SessionIdHeader) shouldBe None
+    // Neither stored session was touched.
+    post(routes, listFrame, Some(sid1)).status shouldBe Status.Ok
+    post(routes, listFrame, Some(sid2)).status shouldBe Status.Ok
+  }
+
+  test("maxSessions: concurrent header-less initializes at the cap all admit while idle sessions exist") {
+    val routes = buildRoutes(stateless = false, maxSessions = Some(2))
+    val idle = List(initSid(routes), initSid(routes))
+    val initReq = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(initFrame))
+      .addHeader(Header.Custom("content-type", "application/json"))
+      .addHeader(Header.Custom("accept", "application/json, text/event-stream"))
+    // 16 initializes race for the two slots: admission + eviction are one serialised modifyZIO, so
+    // nobody sees a stale snapshot and nobody is refused while an idle (GET-less) session exists.
+    val responses = runUnsafe(
+      ZIO.foreachPar((1 to 16).toList)(_ => ZIO.scoped(routes.runZIO(initReq)))
+    )
+    responses.map(_.status.code).distinct shouldBe List(200)
+    val minted = responses.map(r => r.rawHeader(SessionIdHeader).getOrElse(fail("no session id")))
+    minted.distinct.size shouldBe 16
+    // The cap held: exactly two sessions survive (the idle pair was evicted first).
+    val alive = (idle ++ minted).count(sid => post(routes, listFrame, Some(sid)).status == Status.Ok)
+    alive shouldBe 2
+    idle.foreach(sid => post(routes, listFrame, Some(sid)).status shouldBe Status.NotFound)
+  }
+
+  test("maxSessions = None disables the cap") {
+    val routes = buildRoutes(stateless = false, maxSessions = None)
+    val sids = (1 to 5).map(_ => initSid(routes))
+    sids.foreach(sid => post(routes, listFrame, Some(sid)).status shouldBe Status.Ok)
+  }
+
+  // ---- F10 §1: first-party error boundary ----
+
+  test("guarded: a defect becomes a JSON-RPC 500 with a fixed message; interrupts pass through") {
+    val dead = JvmHttpBackend.guarded[Any](ZIO.die(new IllegalStateException("boom: secret state")))
+    val resp = runUnsafe(dead)
+    resp.status shouldBe Status.InternalServerError
+    resp.rawHeader("content-type").getOrElse("") should include("application/json")
+    val body = bodyOf(resp)
+    body should include("-32000")
+    body should include("Internal server error")
+    body should not include "boom"
+    body should not include "IllegalStateException"
+    body should not include "secret"
+
+    // A client disconnect interrupts the handler fiber: zio-http keeps its own 408 path, so the
+    // boundary must not swallow interrupts into a 500.
+    val interrupted = runUnsafe(JvmHttpBackend.guarded[Any](ZIO.interrupt).exit)
+    interrupted.isInterrupted shouldBe true
+
+    val fine = runUnsafe(JvmHttpBackend.guarded[Any](ZIO.succeed(Response.status(Status.Accepted))))
+    fine.status shouldBe Status.Accepted
+  }
+
+  test("a tool that dies is answered in-band by the router (JSON -32603), never a raw 500 or HTML") {
+    // The router's dispatch awaits the handler fiber's Exit and maps defects to -32603, so the
+    // transport boundary above is defence in depth behind it. Pin the contract at the route level.
+    val routes = buildRoutes(stateless = true)
+    val frame =
+      """{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"boom","arguments":{}}}"""
+    val resp = post(routes, frame, None)
+    resp.status shouldBe Status.Ok
+    resp.rawHeader("content-type").getOrElse("") should include("application/json")
+    val body = bodyOf(resp)
+    body should include("\"jsonrpc\"")
+    body should not include "<html"
+    body should not include "\tat "
   }
 
   test("stateless: a single POST initialize returns capabilities without logging") {
@@ -429,6 +712,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val routes = buildRoutes(stateless = true)
     val req = Request
       .post(URL(Path.root / "mcp"), Body.fromString(initFrame))
+      .addHeader(Header.Custom("content-type", "application/json"))
       .addHeader(Header.Custom("accept", "text/plain"))
     run(routes, req).status shouldBe Status.NotAcceptable
   }
