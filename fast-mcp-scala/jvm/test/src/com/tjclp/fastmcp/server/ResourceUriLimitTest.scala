@@ -159,3 +159,28 @@ class ResourceUriLimitTest extends AnyFunSuite with Matchers:
     call(router, session, 14, "resources/subscribe", "x://three") should include(""""result":{}""")
     runUnsafe(session.isSubscribed("x://three")) shouldBe true
   }
+
+  test("concurrent distinct subscriptions cannot exceed the session cap") {
+    val (router, _, _) = fixture(LimitSettings(maxSubscriptionsPerSession = 1))
+    runUnsafe(ZIO.foreachDiscard(1 to 16) { round =>
+      for
+        session <- Session.make(s"concurrent-subscriptions-$round")
+        _ <- MessageLoop.handleFrame(router, session, initFrame)
+        gate <- Promise.make[Nothing, Unit]
+        fibers <- ZIO.foreach(1 to 128) { id =>
+          val frame =
+            s"""{"jsonrpc":"2.0","id":$id,"method":"resources/subscribe","params":{"uri":"x://$id"}}"""
+          (gate.await *> MessageLoop.handleFrame(router, session, frame)).fork
+        }
+        _ <- gate.succeed(())
+        replies <- ZIO.foreach(fibers)(_.join)
+        count <- session.subscriptionCount
+        _ <- ZIO.succeed {
+          count shouldBe 1
+          replies.count(_.exists(_.contains("\"result\":{}"))) shouldBe 1
+          replies.count(_.exists(_.contains("-32602"))) shouldBe 127
+        }
+        _ <- session.terminate
+      yield ()
+    })
+  }

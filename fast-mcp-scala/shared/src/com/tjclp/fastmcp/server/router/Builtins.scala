@@ -202,16 +202,14 @@ final class Builtins[R](
       // Bound the per-session subscription set: a NEW distinct URI beyond
       // `limits.maxSubscriptionsPerSession` is refused with -32602; re-subscribing a URI the
       // session already holds is always fine (it adds nothing to the set).
-      held <- session.isSubscribed(req.uri)
-      count <- session.subscriptionCount
+      admitted <- session.trySubscribe(req.uri, limits.maxSubscriptionsPerSession)
       _ <- ZIO
         .fail(
           McpError.invalidParams(
             s"resources/subscribe: subscription limit reached (limits.maxSubscriptionsPerSession = ${limits.maxSubscriptionsPerSession})"
           )
         )
-        .when(!held && count >= limits.maxSubscriptionsPerSession)
-      _ <- session.subscribe(req.uri)
+        .when(!admitted)
       json <- ok(EmptyResult())
     yield json
 

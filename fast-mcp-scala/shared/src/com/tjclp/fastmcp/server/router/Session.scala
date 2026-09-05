@@ -90,6 +90,15 @@ final class Session private (
   def isInitialized: UIO[Boolean] = initializedRef.get
 
   def subscribe(uri: String): UIO[Unit] = subscriptionsRef.update(_ + uri)
+
+  /** Atomically admit a distinct URI within the cap. Re-subscribing an existing URI is free. */
+  def trySubscribe(uri: String, maxSubscriptions: Int): UIO[Boolean] =
+    subscriptionsRef.modify { subscriptions =>
+      if subscriptions.contains(uri) then (true, subscriptions)
+      else if subscriptions.size >= maxSubscriptions then (false, subscriptions)
+      else (true, subscriptions + uri)
+    }
+
   def unsubscribe(uri: String): UIO[Unit] = subscriptionsRef.update(_ - uri)
   def isSubscribed(uri: String): UIO[Boolean] = subscriptionsRef.get.map(_.contains(uri))
   def subscriptionCount: UIO[Int] = subscriptionsRef.get.map(_.size)
