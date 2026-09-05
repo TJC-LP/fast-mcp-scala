@@ -71,3 +71,39 @@ class BoundedLinesTest extends AnyFunSuite with Matchers:
         err.message should include("maxFrameChars")
       case other => fail(s"unexpected $other")
   }
+
+  test("padded oversized stdio frames are rejected and the following line still parses") {
+    val limits = LimitSettings(maxFrameChars = 128)
+    val ping = """{"jsonrpc":"2.0","id":1,"method":"ping"}"""
+    val invalidLines = List(
+      ping + " " * 200 + "invalid discarded tail",
+      " " * 200 + ping,
+      " " * 200,
+      " " * (limits.maxFrameChars + 1)
+    )
+    invalidLines.foreach { invalid =>
+      // Exercise both a single chunk and a line split across several input chunks.
+      val input = invalid + "\r\n" + ping + "\n"
+      List(List(input), input.grouped(17).toList).foreach { chunks =>
+        val frames = split(limits.maxFrameChars, chunks*)
+          .filter(MessageLoop.shouldDispatchStdioFrame(_, limits))
+        frames.length shouldBe 2
+        MessageLoop.parseFrame(frames.head, limits) match
+          case Left(jsonrpc.JsonRpcMessage.Failure(None, err)) =>
+            err.code shouldBe -32700
+            err.message should include("maxFrameChars")
+          case other => fail(s"oversized stdio frame was accepted: $other")
+        MessageLoop.parseFrame(frames(1), limits).isRight shouldBe true
+      }
+    }
+  }
+
+  test("within-limit stdio padding is preserved and blank lines are ignored") {
+    val limits = LimitSettings(maxFrameChars = 128)
+    val ping = """{"jsonrpc":"2.0","id":1,"method":"ping"}"""
+    val padded = " " + ping + " " * (limits.maxFrameChars - ping.length - 1)
+    val frames = split(limits.maxFrameChars, " \t\r\n" + padded + "\r\n")
+      .filter(MessageLoop.shouldDispatchStdioFrame(_, limits))
+    frames shouldBe Chunk(padded)
+    MessageLoop.parseFrame(frames.head, limits).isRight shouldBe true
+  }

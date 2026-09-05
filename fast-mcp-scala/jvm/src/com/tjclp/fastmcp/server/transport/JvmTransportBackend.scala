@@ -34,8 +34,7 @@ object JvmTransportBackend extends TransportBackend:
         .fromInputStream(java.lang.System.in)
         .via(ZPipeline.utf8Decode)
         .via(BoundedLines.pipeline(router.limits.maxFrameChars))
-        .map(_.trim)
-        .filter(_.nonEmpty)
+        .filter(MessageLoop.shouldDispatchStdioFrame(_, router.limits))
     )
 
   /** The JVM platform seam, in the impl object so it's exportable (givens can't be wildcard-
