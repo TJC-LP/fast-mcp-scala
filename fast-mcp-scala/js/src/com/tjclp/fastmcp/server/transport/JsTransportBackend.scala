@@ -8,7 +8,7 @@ import zio.json.*
 
 import com.tjclp.fastmcp.core.{ErrorCodes, Protocol}
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError, RequestId}
-import com.tjclp.fastmcp.facades.node.NodeProcess
+import com.tjclp.fastmcp.facades.node.{NodeProcess, NodeReadableStream}
 import com.tjclp.fastmcp.facades.runtime.{
   Bun,
   BunServeOptions,
@@ -58,17 +58,21 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         .forkDaemon
       // stdin EOF completes the async; take the drainer down with it.
       _ <- ZIO
-        .async[R, Throwable, Unit](cb => wireStdin(router, session, rt, cb))
+        .async[R, Throwable, Unit](cb =>
+          wireStdin(router, session, rt, cb, NodeProcess.stdin, writeLine)
+        )
         .ensuring(drainer.interrupt)
     yield ()
 
-  private def wireStdin[R](
+  /** Input/output seams let tests drive the real chunk callbacks without replacing process IO. */
+  private[fastmcp] def wireStdin[R](
       router: McpRouter[R],
       session: Session,
       rt: Runtime[R],
-      done: ZIO[R, Throwable, Unit] => Unit
+      done: ZIO[R, Throwable, Unit] => Unit,
+      stdin: NodeReadableStream,
+      emit: String => UIO[Unit]
   ): Unit =
-    val stdin = NodeProcess.stdin
     stdin.setEncoding("utf8")
     // Same contract as the JVM/Native `BoundedLines`: keep at most `maxFrameChars + 1` chars of
     // an over-long line (so `parseFrame` still answers -32700 FrameTooLong for it), discard the
@@ -78,12 +82,12 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     var buffer = "" // accumulates partial lines across `data` chunks (bounded at `cap`)
     var discarding = false // inside an over-long line: drop input until the next newline
     def dispatch(line: String): Unit =
-      if line.nonEmpty then
+      if MessageLoop.shouldDispatchStdioFrame(line, router.limits) then
         val _ = ZioJsPromise.zioToPromise(rt)(
           MessageLoop
             .handleFrame(router, session, line)
             .flatMap {
-              case Some(reply) => writeLine(reply)
+              case Some(reply) => emit(reply)
               case None => ZIO.unit
             }
             // Never surface a defect as an unhandled promise rejection — Bun terminates the whole
@@ -100,7 +104,12 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
           if !discarding then
             val room = cap - buffer.length // >= 0; avoid `from + room` overflow at Int.MaxValue
             buffer += text.substring(from, if nl - from <= room then nl else from + room)
-          dispatch(buffer.trim)
+            if nl - from > room then discarding = true
+          // Strip only a real CRLF terminator. A truncated prefix ending in CR must retain its
+          // overflow indication, just like BoundedLines on the JVM and Native.
+          val frame =
+            if !discarding && buffer.endsWith("\r") then buffer.dropRight(1) else buffer
+          dispatch(frame)
           buffer = ""
           discarding = false
           from = nl + 1

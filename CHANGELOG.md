@@ -32,15 +32,17 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   URIs longer than `limits.maxUriChars` are rejected with `-32602` on `resources/read`,
   `resources/subscribe` and `resources/unsubscribe` and dropped from `subscriptions/listen`; a
   legacy session may hold at most `limits.maxSubscriptionsPerSession` distinct subscriptions
-  (`-32602` beyond that; re-subscribing a held URI is free). Tool/prompt/resource argument decoding
+  (`-32602` beyond that; re-subscribing a held URI is free). Subscription admission is atomic,
+  so concurrent requests obey the same cap. Tool/prompt/resource argument decoding
   goes through zio-json's guarded `fromJsonAST` instead of an unguarded re-serialisation;
   `DefaultDecodeContext` (now constructed from `settings.limits`) bounds the depth and width of JSON
   embedded in string arguments with a linear pre-scan BEFORE the parser runs — so the bound also
   holds on Scala Native, where a parser stack overflow is not catchable — and converts a JVM
   `StackOverflowError` into `-32602`; a deeply nested `tools/call` can no longer terminate the JVM
   or Native process. All stdio backends bound the line buffer at `limits.maxFrameChars` (JVM/Native:
-  `BoundedLines`; Bun: the stdin accumulator): an over-long line is truncated, answered with
-  `-32700`, and the remainder discarded; `maxFrameChars = Int.MaxValue` is a valid "unbounded"
+  `BoundedLines`; Bun: the stdin accumulator): overflow is checked before whitespace filtering
+  (including all-whitespace lines), so discarded input can never turn into a valid request. An
+  over-long line is truncated, answered with `-32700`, and the remainder discarded; `maxFrameChars = Int.MaxValue` is a valid "unbounded"
   setting.
 - **HTTP transport hardening** (TJC-2296): `Origin` is now matched as a full origin
   (`scheme://host[:port]`, default port per scheme, fail-closed parsing) against the request's
