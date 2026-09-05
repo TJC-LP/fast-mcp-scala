@@ -17,6 +17,13 @@ import com.tjclp.fastmcp.server.router.{McpRouter, Methods, Session}
   */
 object MessageLoop:
 
+  /** Ignore blank stdio lines only when they fit the frame limit. An oversized prefix retained by
+    * the line splitter must reach `parseFrame` unchanged, even if it is entirely whitespace;
+    * trimming it could erase the overflow or turn a truncated invalid line into a valid request.
+    */
+  private[fastmcp] def shouldDispatchStdioFrame(frame: String, limits: LimitSettings): Boolean =
+    frame.length > limits.maxFrameChars || frame.trim.nonEmpty
+
   /** Process one inbound JSON-RPC frame (a single message — batching was dropped from the spec).
     *
     * Returns the serialized response frame, or `None` for notifications / cancelled requests /
