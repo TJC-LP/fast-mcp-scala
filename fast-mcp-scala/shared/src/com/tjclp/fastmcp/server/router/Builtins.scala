@@ -7,7 +7,7 @@ import zio.json.ast.Json
 import com.tjclp.fastmcp.core.{Protocol, SetLevelRequestParams}
 import com.tjclp.fastmcp.core.wire.*
 import com.tjclp.fastmcp.jsonrpc.McpError
-import com.tjclp.fastmcp.server.{CompletionHandler, McpContext}
+import com.tjclp.fastmcp.server.{CompletionHandler, LimitSettings, McpContext}
 import com.tjclp.fastmcp.server.manager.{
   PromptManager,
   ResourceManager,
@@ -37,8 +37,23 @@ final class Builtins[R](
     tasksEnabled: Boolean,
     exposeTemplates: Boolean,
     completionHandler: Option[CompletionHandler[R]] = None,
-    hooks: ServerHooks[R] = ServerHooks.noop[R]
+    hooks: ServerHooks[R] = ServerHooks.noop[R],
+    limits: LimitSettings = LimitSettings()
 ):
+
+  /** Bound a client-supplied resource URI BEFORE it reaches the template matcher, the resource
+    * lookup, or the session's subscription set. `-32602` in both eras: this is malformed input, not
+    * a miss (the legacy `-32002` re-coding stays for real misses).
+    */
+  private def checkUriLength(ctx: String, uri: String): IO[McpError, Unit] =
+    ZIO
+      .fail(
+        McpError.invalidParams(
+          s"$ctx: uri exceeds limits.maxUriChars (${limits.maxUriChars} characters)"
+        )
+      )
+      .when(uri.length > limits.maxUriChars)
+      .unit
 
   /** Helper: decode `params` into `A`, failing with InvalidParams. */
   private def decodeParams[A: JsonDecoder](params: Json, ctx: String): IO[McpError, A] =
@@ -104,6 +119,9 @@ final class Builtins[R](
   val toolsCall: RequestHandler[R] = (session, params) =>
     for
       req <- decodeParams[CallToolRequestParams](params, "tools/call")
+      // `ToolManager.callTool` and the macro-generated `Map[String, Any] => Any` handlers need a
+      // Map; the object is already bounded to `limits.maxObjectFields` members by the transport
+      // choke point (MessageLoop.parseFrame), so this build is O(maxObjectFields²) at worst.
       args <- req.arguments match
         case Some(Json.Obj(fields)) => ZIO.succeed(fields.toMap: Map[String, Any])
         case None => ZIO.succeed(Map.empty[String, Any])
@@ -157,6 +175,7 @@ final class Builtins[R](
   val resourcesRead: RequestHandler[R] = (session, params) =>
     for
       req <- decodeParams[ReadResourceRequestParams](params, "resources/read")
+      _ <- checkUriLength("resources/read", req.uri)
       ctx <- contextFor(session)
       modern <- session.currentRequestContext.map(_.isDefined)
       body <- resourceManager
@@ -179,6 +198,11 @@ final class Builtins[R](
   val resourcesSubscribe: RequestHandler[R] = (session, params) =>
     for
       req <- decodeParams[SubscribeRequestParams](params, "resources/subscribe")
+      _ <- checkUriLength("resources/subscribe", req.uri)
+      // TODO(TJC-2294 merge): once Session exposes `subscriptionCount: UIO[Int]` (Arc C), refuse
+      // new distinct URIs beyond `limits.maxSubscriptionsPerSession` with -32602
+      // ("resources/subscribe: subscription limit reached (limits.maxSubscriptionsPerSession = N)")
+      // before `session.subscribe`; re-subscribing an already-held URI must stay OK.
       _ <- session.subscribe(req.uri)
       json <- ok(EmptyResult())
     yield json
@@ -187,6 +211,7 @@ final class Builtins[R](
   val resourcesUnsubscribe: RequestHandler[R] = (session, params) =>
     for
       req <- decodeParams[UnsubscribeRequestParams](params, "resources/unsubscribe")
+      _ <- checkUriLength("resources/unsubscribe", req.uri)
       _ <- session.unsubscribe(req.uri)
       json <- ok(EmptyResult())
     yield json
@@ -217,9 +242,11 @@ final class Builtins[R](
         resourceSubscriptions = requested.resourceSubscriptions
           .filter(_ => supportsResourceSubscriptions)
           .map(
+            // Over-long URIs are silently not acknowledged — the matcher never sees them.
             _.filter(uri =>
-              resourceManager.getResourceDefinition(uri).isDefined ||
-                resourceManager.findMatchingTemplate(uri).isDefined
+              uri.length <= limits.maxUriChars &&
+                (resourceManager.getResourceDefinition(uri).isDefined ||
+                  resourceManager.findMatchingTemplate(uri).isDefined)
             )
           )
           .filter(_.nonEmpty)

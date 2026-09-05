@@ -59,9 +59,8 @@ object NativeTransportBackend extends TransportBackend:
         .fromReader(new java.io.InputStreamReader(java.lang.System.in, StandardCharsets.UTF_8))
         .chunks
         .map(chunk => new String(chunk.toArray))
-        .via(ZPipeline.splitLines)
-        .map(_.trim)
-        .filter(_.nonEmpty)
+        .via(BoundedLines.pipeline(router.limits.maxFrameChars))
+        .filter(MessageLoop.shouldDispatchStdioFrame(_, router.limits))
     )
 
   /** The Scala Native platform seam, in the impl object so it's exportable (givens can't be

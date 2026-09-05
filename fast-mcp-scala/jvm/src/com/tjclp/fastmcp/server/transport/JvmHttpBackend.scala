@@ -183,7 +183,7 @@ object JvmHttpBackend extends HttpTransportBackend:
         body <- request.body.asString.mapError(e =>
           Option(e.getMessage).getOrElse("body read error")
         )
-        resp <- MessageLoop.parseFrame(body) match
+        resp <- MessageLoop.parseFrame(body, router.limits) match
           case Left(parseFailure) =>
             ZIO.succeed(Response.json(parseFailure.toJson).status(Status.BadRequest))
           case Right(message) =>
@@ -264,7 +264,7 @@ object JvmHttpBackend extends HttpTransportBackend:
       case Right(body) =>
         // Parse BEFORE touching the session store: a malformed or non-initialize body must never
         // mint a durable session (it used to — an unauthenticated memory leak).
-        MessageLoop.parseFrame(body) match
+        MessageLoop.parseFrame(body, router.limits) match
           case Left(parseFailure) =>
             ZIO.succeed(Response.json(parseFailure.toJson).status(Status.BadRequest))
           case Right(message) =>

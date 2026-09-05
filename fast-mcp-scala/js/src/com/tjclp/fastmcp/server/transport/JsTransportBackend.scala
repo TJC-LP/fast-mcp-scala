@@ -188,7 +188,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     methodOf(req) match
       case "POST" =>
         readBody(req).flatMap { body =>
-          MessageLoop.parseFrame(body) match
+          MessageLoop.parseFrame(body, router.limits) match
             case Left(parseFailure) =>
               ZIO.succeed(jsonResponse(parseFailure.toJson, Map.empty, status = 400))
             case Right(message) =>
@@ -219,7 +219,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         readBody(req).flatMap { body =>
           // Parse BEFORE touching the session store: a malformed or non-initialize body must
           // never mint a durable session (JVM transport does the same).
-          MessageLoop.parseFrame(body) match
+          MessageLoop.parseFrame(body, router.limits) match
             case Left(parseFailure) =>
               ZIO.succeed(jsonResponse(parseFailure.toJson, Map.empty, status = 400))
             case Right(message) =>
