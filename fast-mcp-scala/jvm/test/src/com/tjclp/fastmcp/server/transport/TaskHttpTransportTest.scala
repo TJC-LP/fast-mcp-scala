@@ -15,27 +15,43 @@ import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
 /** The task lifecycle over streamable HTTP, end to end through the in-memory routes harness —
   * successor to the deleted `TaskAugmentedHttpTransportTest`. Covers capability advertisement,
-  * per-tool `execution.taskSupport` negotiation (both `-32601` rejections), create → poll →
-  * result, error/multi-content preservation through a task, cancellation, the per-session
-  * concurrency cap, unknown-task codes (`-32602` — 0.4.0 parity, regressed pre-C1), and
-  * cross-session isolation.
+  * per-tool `execution.taskSupport` negotiation (both `-32601` rejections), create → poll → result,
+  * error/multi-content preservation through a task, cancellation, the per-session concurrency cap,
+  * unknown-task codes (`-32602` — 0.4.0 parity, regressed pre-C1), and cross-session isolation.
   */
 class TaskHttpTransportTest extends AnyFunSuite with Matchers:
 
   object TaskServer:
-    @Tool(name = Some("slow"), description = Some("Completes after a beat"), taskSupport = Some("optional"))
+
+    @Tool(
+      name = Some("slow"),
+      description = Some("Completes after a beat"),
+      taskSupport = Some("optional")
+    )
     def slow(): ZIO[Any, Throwable, String] = ZIO.sleep(200.millis).as("slow done")
 
-    @Tool(name = Some("must-task"), description = Some("Requires task augmentation"), taskSupport = Some("required"))
+    @Tool(
+      name = Some("must-task"),
+      description = Some("Requires task augmentation"),
+      taskSupport = Some("required")
+    )
     def mustTask(): String = "must done"
 
     @Tool(name = Some("plain"), description = Some("No task support"))
     def plain(): String = "plain done"
 
-    @Tool(name = Some("rich-content"), description = Some("Multi-content result"), taskSupport = Some("optional"))
+    @Tool(
+      name = Some("rich-content"),
+      description = Some("Multi-content result"),
+      taskSupport = Some("optional")
+    )
     def richContent(): List[Content] = List(TextContent("a"), TextContent("b"))
 
-    @Tool(name = Some("broken-task"), description = Some("Always throws"), taskSupport = Some("optional"))
+    @Tool(
+      name = Some("broken-task"),
+      description = Some("Always throws"),
+      taskSupport = Some("optional")
+    )
     def brokenTask(): String = throw new RuntimeException("task boom")
 
     @Tool(name = Some("blocky"), description = Some("Long-running"), taskSupport = Some("optional"))
@@ -70,7 +86,10 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
 
   private def buildRoutes(
       maxConcurrent: Int = 64,
-      stateless: Boolean = false
+      stateless: Boolean = false,
+      maxConcurrentTotal: Int = 1024,
+      maxStoredPerOwner: Int = 256,
+      minResultRetentionMs: Long = 30_000L
   ): Routes[Any, Response] =
     val server = McpServer.typed[Any](
       "TaskT",
@@ -80,7 +99,10 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
         tasks = TaskSettings(
           enabled = true,
           pollIntervalMs = 50,
-          maxConcurrentPerSession = maxConcurrent
+          maxConcurrentPerSession = maxConcurrent,
+          maxConcurrentTotal = maxConcurrentTotal,
+          maxStoredPerOwner = maxStoredPerOwner,
+          minResultRetentionMs = minResultRetentionMs
         )
       )
     )
@@ -96,7 +118,10 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     runUnsafe(ZIO.scoped(routes.runZIO(req)))
 
   private def post(routes: Routes[Any, Response], body: String, sid: Option[String]): Response =
-    val base = Request.post(URL(Path.root / "mcp"), Body.fromString(body))
+    val base = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(body))
+      .addHeader(Header.Custom("content-type", "application/json"))
+      .addHeader(Header.Custom("accept", "application/json, text/event-stream"))
     val req = sid.fold(base)(s => base.addHeader(Header.Custom(SessionIdHeader, s)))
     run(routes, req)
 
@@ -337,4 +362,40 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     result should include(""""code":-32602""")
     val cancel = bodyOf(post(routes, tasksCancel(43, taskId), Some(sid)))
     cancel should include(""""code":-32602""")
+  }
+
+  test("a session that loops fast task calls never holds more than maxStoredPerOwner entries") {
+    val routes = buildRoutes(maxConcurrent = 8, maxStoredPerOwner = 8, minResultRetentionMs = 0L)
+    val sid = initSession(routes)
+    val ids = (1 to 20).map { i =>
+      val taskId =
+        extractTaskId(bodyOf(post(routes, augmentedCall(600 + i, "rich-content"), Some(sid))))
+      // Fence: tasks/result returns only once the entry is terminal, so the next create sees an
+      // evictable predecessor rather than racing the tool body.
+      bodyOf(post(routes, tasksResult(700 + i, taskId), Some(sid))) should include(""""text":"a"""")
+      taskId
+    }
+    val listed = bodyOf(post(routes, tasksList(800), Some(sid)))
+    val listedIds = TaskIdPattern.findAllMatchIn(listed).map(_.group(1)).toSet
+    listedIds.size should be <= 8
+    listedIds should contain allElementsOf ids.takeRight(8)
+    ids.take(12).foreach { old =>
+      val reply = bodyOf(post(routes, tasksGet(900, old), Some(sid)))
+      reply should include(""""code":-32602""")
+      reply should include("Unknown task")
+    }
+  }
+
+  test("pool capacity answers -32003 Task capacity exceeded across sessions") {
+    val routes = buildRoutes(maxConcurrent = 1, maxConcurrentTotal = 1)
+    val sid1 = initSession(routes)
+    extractTaskId(bodyOf(post(routes, augmentedCall(60, "blocky"), Some(sid1))))
+    val sid2 = initSession(routes)
+    val rejected = bodyOf(post(routes, augmentedCall(61, "blocky"), Some(sid2)))
+    rejected should include(""""code":-32003""")
+    rejected should include("Task capacity exceeded (running, limit 1)")
+    // The per-owner cap on the first session is still the caller's own fault: -32602.
+    val own = bodyOf(post(routes, augmentedCall(62, "blocky"), Some(sid1)))
+    own should include(""""code":-32602""")
+    own should include("concurrency limit")
   }

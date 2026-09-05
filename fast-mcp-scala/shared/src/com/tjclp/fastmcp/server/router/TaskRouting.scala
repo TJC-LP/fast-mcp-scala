@@ -8,6 +8,7 @@ import zio.json.ast.Json
 import com.tjclp.fastmcp.core.{
   ExtensionTaskHandle,
   Task,
+  TaskOwnerContext,
   TaskParams,
   TaskStatus,
   TaskStatusNotificationParams,
@@ -16,7 +17,7 @@ import com.tjclp.fastmcp.core.{
 }
 import com.tjclp.fastmcp.core.wire.EmptyResult
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError}
-import com.tjclp.fastmcp.server.manager.{TaskManager, TaskSnapshot, ToolManager}
+import com.tjclp.fastmcp.server.manager.{TaskManager, TaskScope, TaskSnapshot, ToolManager}
 
 private case class TaskIdParams(taskId: String)
 
@@ -36,6 +37,14 @@ private object TaskUpdateParams:
 /** Task routing supports both eras without mixing their wire shapes. Legacy requests explicitly
   * carry `params.task`; 2026 clients declare the Tasks extension and the server may return a task
   * handle without per-call augmentation.
+  *
+  * Accounting: legacy tasks are owned by their protocol session ([[TaskScope.session]]) and are
+  * released when the transport terminates that session ([[Session.terminate]]). Modern bearer tasks
+  * are owned by the client key derived from `TaskSettings.ownerKey` — by default the
+  * transport-supplied [[Session.clientKey]]; keyless requests share one anonymous bucket. Each
+  * owner has a running cap (`-32602`); each pool (legacy vs bearer) has running and stored ceilings
+  * (`-32003`), with completed results kept for at least `minResultRetentionMs` before a cap may
+  * evict them.
   */
 final class TaskMiddleware[R](
     taskManager: TaskManager[R],
@@ -47,8 +56,7 @@ final class TaskMiddleware[R](
     else
       (session, params) =>
         session.currentRequestContext.flatMap {
-          case Some(context) =>
-            modern(session, params, next, context.clientCapabilities.extensions)
+          case Some(context) => modern(session, params, next, context)
           case None => legacy(session, params, next)
         }
 
@@ -83,15 +91,29 @@ final class TaskMiddleware[R](
           case (true, TaskSupport.Optional | TaskSupport.Required) =>
             // runWithoutSink: the task fiber (forked inside create) outlives this POST, whose
             // sink queue is shut down when the SSE response ends — sends must go to outbound.
-            session
-              .runWithoutSink(
-                taskManager.create(
-                  sessionId = Some(session.sessionId),
-                  requestedTtlMs = ttl,
-                  run = next(session, params),
-                  onStatusChange = task => session.send(statusNotification(task))
+            val scope = TaskScope.session(session.sessionId)
+            // Session termination (DELETE / idle eviction) releases the session's tasks instead
+            // of pinning entries nobody can see until their TTL. Keyed (idempotent), registered
+            // BEFORE the create so an interrupt landing after registration can never leave a
+            // task without its release hook, and again AFTER it: on a session terminated in the
+            // meantime the late registration runs the release immediately.
+            val release = session.addFinalizer("tasks")(taskManager.releaseScope(scope))
+            (release *>
+              session
+                .runWithoutSink(
+                  taskManager.create(
+                    scope = scope,
+                    requestedTtlMs = ttl,
+                    run = next(session, params),
+                    onStatusChange = task => session.send(statusNotification(task))
+                  )
                 )
-              )
+                .tap(_ => release))
+              // Everything here is non-blocking Ref/Promise work: keeping the whole branch
+              // uninterruptible shrinks the window in which a registered task's handle is lost
+              // to the dispatcher's continuation. `create` still detects a pending interrupt and
+              // rolls back before the mask ends.
+              .uninterruptible
               .mapBoth(
                 McpError.fromThrowable,
                 created => created.toJsonAST.getOrElse(Json.Obj())
@@ -106,7 +128,7 @@ final class TaskMiddleware[R](
       session: Session,
       params: Json,
       next: RequestHandler[R],
-      extensions: Option[Map[String, Json]]
+      context: RequestContext
   ): ZIO[R, McpError, Json] =
     decodeName(params) match
       case Left(err) => ZIO.fail(err)
@@ -118,7 +140,8 @@ final class TaskMiddleware[R](
         val hasLegacyAugmentation = params match
           case Json.Obj(fields) => fields.toMap.contains("task")
           case _ => false
-        val clientSupportsTasks = extensions.exists(_.contains(Tasks.ExtensionId))
+        val clientSupportsTasks =
+          context.clientCapabilities.extensions.exists(_.contains(Tasks.ExtensionId))
 
         if hasLegacyAugmentation then
           ZIO.fail(McpError.invalidParams("tools/call: `params.task` was removed in 2026-07-28"))
@@ -133,26 +156,36 @@ final class TaskMiddleware[R](
               )
             case TaskSupport.Optional if !clientSupportsTasks => next(session, params)
             case TaskSupport.Optional | TaskSupport.Required =>
+              // Bucket per client: only the transport-supplied key is trusted by default;
+              // `clientInfo` / `_meta` reach a Custom hook but are attacker-controlled.
+              val ownerContext =
+                TaskOwnerContext(session.clientKey, context.clientInfo, context.meta)
               // runWithoutSink for the same reason as the legacy branch: the ephemeral modern
               // session's outbound is never drained, but an offer to a live unbounded queue is
               // harmless and GC'd with the task — unlike an offer to a shutdown sink queue.
-              session
-                .runWithoutSink(
-                  taskManager.create(
-                    sessionId = None,
-                    requestedTtlMs = None,
-                    run = next(session, params),
-                    onStatusChange = _ => ZIO.unit
-                  )
-                )
-                .mapBoth(
-                  McpError.fromThrowable,
-                  created =>
-                    ExtensionTaskHandle
-                      .fromLegacy(created.task)
-                      .toJsonAST
-                      .getOrElse(Json.Obj())
-                )
+              taskManager
+                .ownerKeyFor(ownerContext)
+                .mapError(McpError.fromThrowable)
+                .flatMap { key =>
+                  session
+                    .runWithoutSink(
+                      taskManager.create(
+                        scope = TaskScope.bearer(key),
+                        requestedTtlMs = None,
+                        run = next(session, params),
+                        onStatusChange = _ => ZIO.unit
+                      )
+                    )
+                    .uninterruptible // see the legacy branch
+                    .mapBoth(
+                      McpError.fromThrowable,
+                      created =>
+                        ExtensionTaskHandle
+                          .fromLegacy(created.task)
+                          .toJsonAST
+                          .getOrElse(Json.Obj())
+                    )
+                }
 
   private def decodeName(params: Json): Either[McpError, String] =
     params match

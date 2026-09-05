@@ -59,6 +59,12 @@ object ErrorCodes:
   val TransportError: Int = -32000
   val SessionNotFound: Int = -32001
 
+  /** Server-side capacity exhausted (task pool running ceiling, owner/pool stored-entry caps with
+    * nothing evictable). A server condition rather than a request fault, so clients may retry
+    * later; distinct from `InvalidParams`, which stays the caller's own per-owner cap.
+    */
+  val CapacityExceeded: Int = -32003
+
 /** Opaque pagination cursor. Wire shape is a string; treating it as opaque keeps cursor
   * production/consumption sites from leaking encoding choices.
   */
