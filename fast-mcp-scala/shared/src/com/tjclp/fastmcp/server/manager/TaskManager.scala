@@ -431,8 +431,24 @@ class TaskManager[R] private[manager] (
         }
     }
 
+  /** Fork the sweeper. Should the loop ever die with a defect (nothing in its body can fail today),
+    * the claim is released and logged so the next `create` starts a fresh sweeper instead of TTL
+    * expiry silently stopping for the life of the server. Interruption (shutdown) keeps the claim:
+    * `shutdown` drains the store right after.
+    */
   private def startSweeperFiber: UIO[Unit] =
-    sweepLoop.interruptible.forkDaemon.flatMap(f => sweeperRef.set(Some(f)))
+    sweepLoop
+      .catchAllCause { cause =>
+        ZIO
+          .unless(cause.isInterruptedOnly)(
+            ZIO.logErrorCause("Task sweeper died; releasing its claim", cause) *>
+              storeRef.update(_.copy(sweeperActive = false))
+          )
+          .unit
+      }
+      .interruptible
+      .forkDaemon
+      .flatMap(f => sweeperRef.set(Some(f)))
 
   // ------- queries -------
 

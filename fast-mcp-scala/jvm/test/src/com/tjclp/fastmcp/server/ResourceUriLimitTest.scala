@@ -8,7 +8,7 @@ import zio.*
 import zio.json.*
 import zio.json.ast.Json
 
-import com.tjclp.fastmcp.{given, *}
+import com.tjclp.fastmcp.{*, given}
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, RequestId}
 import com.tjclp.fastmcp.server.router.{McpRouter, Session}
 import com.tjclp.fastmcp.server.transport.MessageLoop
@@ -28,7 +28,9 @@ class ResourceUriLimitTest extends AnyFunSuite with Matchers:
     """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1.0"}}}"""
 
   /** A router with template `x://{a}` whose handler counts invocations. */
-  private def fixture(limits: LimitSettings = LimitSettings()): (McpRouter[Any], Session, AtomicInteger) =
+  private def fixture(
+      limits: LimitSettings = LimitSettings()
+  ): (McpRouter[Any], Session, AtomicInteger) =
     val counter = new AtomicInteger(0)
     val server = McpServer(
       "UriLimits",
@@ -53,8 +55,15 @@ class ResourceUriLimitTest extends AnyFunSuite with Matchers:
     )
     (router, session, counter)
 
-  private def call(router: McpRouter[Any], session: Session, id: Int, method: String, uri: String): String =
-    val frame = s"""{"jsonrpc":"2.0","id":$id,"method":"$method","params":{"uri":${Json.Str(uri).toJson}}}"""
+  private def call(
+      router: McpRouter[Any],
+      session: Session,
+      id: Int,
+      method: String,
+      uri: String
+  ): String =
+    val frame =
+      s"""{"jsonrpc":"2.0","id":$id,"method":"$method","params":{"uri":${Json.Str(uri).toJson}}}"""
     runUnsafe(MessageLoop.handleFrame(router, session, frame)).getOrElse(fail("no reply"))
 
   test("resources/read: a 9 000-char URI is -32602 (maxUriChars) and never reaches the handler") {
@@ -94,10 +103,13 @@ class ResourceUriLimitTest extends AnyFunSuite with Matchers:
     val session = runUnsafe(Session.make("modern-uri-limits"))
     val long = "x://" + "z" * 9_000
     val params =
-      s"""{"notifications":{"resourceSubscriptions":[${Json.Str(long).toJson},"x://ok"]},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}"""
+      s"""{"notifications":{"resourceSubscriptions":[${Json
+          .Str(long)
+          .toJson},"x://ok"]},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}"""
         .fromJson[Json]
         .fold(error => fail(error), identity)
-    val request = JsonRpcMessage.Request(RequestId.StrId("listen-1"), "subscriptions/listen", Some(params))
+    val request =
+      JsonRpcMessage.Request(RequestId.StrId("listen-1"), "subscriptions/listen", Some(params))
     val ack = runUnsafe(
       for
         fiber <- router.dispatch(session, request).fork
@@ -121,4 +133,54 @@ class ResourceUriLimitTest extends AnyFunSuite with Matchers:
     rejected should include("-32602")
     rejected should include("limits.maxUriChars (16 characters)")
     counter.get() shouldBe 1
+  }
+
+  test(
+    "resources/subscribe: maxSubscriptionsPerSession bounds DISTINCT URIs; re-subscribing is free"
+  ) {
+    val (router, session, _) = fixture(LimitSettings(maxSubscriptionsPerSession = 2))
+    call(router, session, 9, "resources/subscribe", "x://one") should include(""""result":{}""")
+    call(router, session, 10, "resources/subscribe", "x://two") should include(""""result":{}""")
+    runUnsafe(session.subscriptionCount) shouldBe 2
+
+    // Third distinct URI: refused, and the set is untouched.
+    val third = call(router, session, 11, "resources/subscribe", "x://three")
+    third should include("-32602")
+    third should include("limits.maxSubscriptionsPerSession = 2")
+    runUnsafe(session.isSubscribed("x://three")) shouldBe false
+    runUnsafe(session.subscriptionCount) shouldBe 2
+
+    // Re-subscribing a URI the session already holds is still OK at the cap.
+    call(router, session, 12, "resources/subscribe", "x://one") should include(""""result":{}""")
+    runUnsafe(session.subscriptionCount) shouldBe 2
+
+    // Unsubscribing frees a slot for a new distinct URI.
+    call(router, session, 13, "resources/unsubscribe", "x://two") should include(""""result":{}""")
+    call(router, session, 14, "resources/subscribe", "x://three") should include(""""result":{}""")
+    runUnsafe(session.isSubscribed("x://three")) shouldBe true
+  }
+
+  test("concurrent distinct subscriptions cannot exceed the session cap") {
+    val (router, _, _) = fixture(LimitSettings(maxSubscriptionsPerSession = 1))
+    runUnsafe(ZIO.foreachDiscard(1 to 16) { round =>
+      for
+        session <- Session.make(s"concurrent-subscriptions-$round")
+        _ <- MessageLoop.handleFrame(router, session, initFrame)
+        gate <- Promise.make[Nothing, Unit]
+        fibers <- ZIO.foreach(1 to 128) { id =>
+          val frame =
+            s"""{"jsonrpc":"2.0","id":$id,"method":"resources/subscribe","params":{"uri":"x://$id"}}"""
+          (gate.await *> MessageLoop.handleFrame(router, session, frame)).fork
+        }
+        _ <- gate.succeed(())
+        replies <- ZIO.foreach(fibers)(_.join)
+        count <- session.subscriptionCount
+        _ <- ZIO.succeed {
+          count shouldBe 1
+          replies.count(_.exists(_.contains("\"result\":{}"))) shouldBe 1
+          replies.count(_.exists(_.contains("-32602"))) shouldBe 127
+        }
+        _ <- session.terminate
+      yield ()
+    })
   }

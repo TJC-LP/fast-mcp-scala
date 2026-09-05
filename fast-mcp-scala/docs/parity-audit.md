@@ -24,6 +24,7 @@ the original audit snapshot; current disposition:
 - ✅ `Tool.outputSchema` carried on `ToolDefinition` and mapped to the wire
 - ✅ `completion/complete` handler + registration (honest `completions` capability — advertised only when a provider is wired)
 - ✅ HTTP `Accept` + `mcp-protocol-version` validation (JVM + JS; lenient when absent, rejects clearly-wrong)
+- ✅ HTTP `Content-Type` validation on POST — 415 unless `application/json` (JVM + JS, legacy and modern; TJC-2296 / F5)
 - ✅ **Server→client request/response correlation plumbing** — `Session` pending-promise registry +
   `McpRouter` routes inbound `Success`/`Failure` to the matching request. On top of it, three
   capability-gated `McpContext` methods (2025-11-25 wire shapes): `listRoots` (`roots/list`),
@@ -39,8 +40,8 @@ the original audit snapshot; current disposition:
 ## Status — Full MCP conformance (active suite), JVM + JS (2026-06-01)
 
 The native core **passes the official MCP conformance suite** (`@modelcontextprotocol/conformance`,
-`--suite active`, spec 2025-11-25) on **both JVM and JS — 42/42 checks, no baseline**. Reproduce with
-`scripts/conformance.sh [jvm|js]` (drives the harness via `bunx` against the cross-platform
+`--suite active`, spec 2025-11-25) on **both JVM and JS — 73/73 checks across both protocol eras, no baseline**. Reproduce with
+`scripts/conformance.sh [jvm|js]` (drives the pinned harness installed under `conformance/` from its frozen lockfile against the cross-platform
 `examples.conformance.ConformanceServer`); CI runs both in `.github/workflows/conformance.yml`.
 
 Gaps closed to get there (all shared logic, so both platforms benefit):
@@ -322,11 +323,11 @@ Gaps closed to get there (all shared logic, so both platforms benefit):
 | HTTP status: 404 Not Found | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Unknown session ID |
 | HTTP status: 405 Method Not Allowed | 2025-11-25 | ✓ | ⚠ PARTIAL | ⚠ PARTIAL | L | TS: includes Allow header; Scala: returns 405 without header |
 | HTTP status: 406 Not Acceptable | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Accept validated on POST (json + SSE on streamable) and GET. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
-| HTTP status: 415 Unsupported Media Type | 2025-11-25 | ✓ | ⚠ PARTIAL | ⚠ PARTIAL | L | Malformed bodies answer 400 with a -32700 JSON-RPC body; explicit 415 for wrong Content-Type remains open |
+| HTTP status: 415 Unsupported Media Type | 2025-11-25 | ✓ | ⚠ PARTIAL | ⚠ PARTIAL | L | Malformed bodies answer 400 with a -32700 JSON-RPC body; explicit 415 for wrong Content-Type remains open — CLOSED by TJC-2296 (F5): every POST needs `application/json`, else 415 |
 | mcp-protocol-version header validation | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Validated on all requests; absent header ⇒ 2025-03-26 assumed. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
 | SSE server→client stream | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Both drain outbound queue as message events |
 | Accept header validation (POST + GET) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Streamable POST requires json + text/event-stream; GET requires SSE. **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
-| Content-Type header validation (POST) | 2025-11-25 | ✓ | ✗ | ✗ MISSING | M | Spec-required for application/json |
+| Content-Type header validation (POST) | 2025-11-25 | ✓ | ✗ | ✗ MISSING | M | Spec-required for application/json — CLOSED by TJC-2296 (F5) |
 | Conflict detection (409 on duplicate SSE stream) | 2025-11-25 | ✓ | ✓ | ✓ PARITY | — | Second GET per session answers 409 (atomic acquire). **✅ CLOSED (PR #60 resolution, 2026-07-29).** |
 
 ### J. Server-Initiated Requests & Response Correlation (Stage D Blocker)

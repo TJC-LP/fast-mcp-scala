@@ -165,7 +165,8 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
       routes: Routes[Any, Response],
       body: String,
       method: String,
-      name: String
+      name: String,
+      peer: Option[String] = None
   ): Response =
     val req = Request
       .post(URL(Path.root / "mcp"), Body.fromString(body))
@@ -174,7 +175,8 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
       .addHeader(Header.Custom("mcp-protocol-version", "2026-07-28"))
       .addHeader(Header.Custom("mcp-method", method))
       .addHeader(Header.Custom("mcp-name", name))
-    run(routes, req)
+    // `peer` stands in for netty's TCP remote address (in-memory `routes.runZIO` requests have none).
+    run(routes, req.copy(remoteAddress = peer.map(java.net.InetAddress.getByName)))
 
   /** Poll tasks/get until the body reports the wanted status (bounded by a hard timeout). */
   private def pollUntil(
@@ -398,4 +400,26 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     val own = bodyOf(post(routes, augmentedCall(62, "blocky"), Some(sid1)))
     own should include(""""code":-32602""")
     own should include("concurrency limit")
+  }
+
+  test("bearer tasks are bucketed per peer address: two peers get independent caps (F9 wiring)") {
+    val routes = buildRoutes(maxConcurrent = 1)
+    val blockyCall = (id: Int) =>
+      s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"blocky","arguments":{},$taskMeta}}"""
+    // Peer A fills its single slot; its second create is refused by the per-owner cap.
+    extractTaskId(
+      bodyOf(modernPost(routes, blockyCall(60), "tools/call", "blocky", Some("10.0.0.1")))
+    )
+    val overflowA =
+      bodyOf(modernPost(routes, blockyCall(61), "tools/call", "blocky", Some("10.0.0.1")))
+    overflowA should include(""""code":-32602""")
+    overflowA should include("concurrency limit")
+    // Peer B is a different owner (`Session.clientKey` = its address) and is admitted.
+    extractTaskId(
+      bodyOf(modernPost(routes, blockyCall(62), "tools/call", "blocky", Some("10.0.0.2")))
+    )
+    // Keyless requests share one anonymous bucket, independent of both peers.
+    extractTaskId(bodyOf(modernPost(routes, blockyCall(63), "tools/call", "blocky", None)))
+    val overflowAnon = bodyOf(modernPost(routes, blockyCall(64), "tools/call", "blocky", None))
+    overflowAnon should include(""""code":-32602""")
   }

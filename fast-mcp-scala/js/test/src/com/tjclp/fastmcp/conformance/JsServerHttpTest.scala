@@ -1118,3 +1118,100 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       checked.andThen { case _ => bun.stop() }
     }
   }
+
+  "bearer tasks on Bun" should "be bucketed per peer address: two peers get independent caps (F9 wiring)" in {
+    // Dual-stack listener: an IPv4 client arrives as `::ffff:127.0.0.1`, an IPv6 one as `::1` — two
+    // distinct `server.requestIP` addresses on real sockets, hence two `Session.clientKey`s.
+    val peerPort = 38935
+    val settings = McpServerSettings(
+      host = "::",
+      port = peerPort,
+      httpEndpoint = "/mcp",
+      stateless = true,
+      tasks = TaskSettings(enabled = true, maxConcurrentPerSession = 1)
+    )
+    val server = com.tjclp.fastmcp.server.McpServer("JsHttpPeerBucketServer", "0.1.0", settings)
+    val blocky = McpTool
+      .withSchema[PingArgs, String](
+        name = "blocky",
+        inputSchema = pingSchema,
+        description = Some("Never completes; holds its owner's single running slot")
+      )
+      .contextual((_, _) => ZIO.never.as("done"))
+      .withTaskSupport(TaskSupport.Optional)
+    val taskMeta =
+      s""""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"extensions":{"${Tasks.ExtensionId}":{}}}}"""
+    def create(hostPart: String, id: Int): Future[String] =
+      fromJsPromise(
+        js.Dynamic.global
+          .fetch(
+            s"http://$hostPart:$peerPort/mcp",
+            js.Dynamic.literal(
+              method = "POST",
+              headers = js.Dictionary(
+                "content-type" -> "application/json",
+                "accept" -> "application/json, text/event-stream",
+                "mcp-protocol-version" -> "2026-07-28",
+                "mcp-method" -> "tools/call",
+                "mcp-name" -> "blocky"
+              ),
+              body =
+                s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"blocky","arguments":{"msg":"x"},$taskMeta}}"""
+            )
+          )
+          .asInstanceOf[js.Promise[js.Dynamic]]
+      ).flatMap(text)
+
+    runZio(server.tool(blocky) *> server.buildRouterWithTasks).flatMap { (router, taskManager) =>
+      val tm = taskManager.getOrElse(fail("tasks enabled but no TaskManager"))
+      val handle = JsTransportBackend.startBun(router, Runtime.default, settings, onStop = tm.shutdown)
+      val checked = for
+        a1 <- create("127.0.0.1", 1) // peer A fills its single slot
+        a2 <- create("127.0.0.1", 2) // peer A again: per-owner cap
+        b1 <- create("[::1]", 3) // peer B: its own bucket, admitted
+        stats <- runZio(tm.stats)
+      yield
+        a1 should include(""""taskId"""")
+        a2 should include(""""code":-32602""")
+        a2 should include("concurrency limit")
+        b1 should include(""""taskId"""")
+        // Both buckets are keyed on a transport client key — nothing landed in the anonymous one.
+        val owners = stats.perOwner.keySet
+        owners.size shouldBe 2
+        owners should not contain None
+        owners.flatten.filter(_.startsWith("client:")).size shouldBe 2
+      checked.andThen { case _ => handle.stop() }
+    }
+  }
+
+  "maxSessions on Bun" should "admit concurrent header-less initializes at the cap while idle sessions exist" in {
+    val racePort = 38936
+    val handle = statefulServer("JsHttpSessionCapRaceServer", racePort, _.copy(maxSessions = Some(2)))
+    def init(): Future[(Int, String)] =
+      fetchAt(
+        racePort,
+        js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyInitBody)
+      ).flatMap(resp => text(resp).map(_ => (status(resp), header(resp, "mcp-session-id").getOrElse(""))))
+    def listWith(sid: String): Future[Int] =
+      fetchAt(
+        racePort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("mcp-session-id" -> sid),
+          body = legacyListBody
+        )
+      ).map(status)
+    val checked = for
+      idle <- Future.sequence(List(init(), init()))
+      _ <- delay(10)
+      // 16 initializes race for the two slots: snapshot + decision + insert are one synchronous
+      // step, so nobody is refused (503) while an idle, GET-less session exists.
+      raced <- Future.sequence((1 to 16).toList.map(_ => init()))
+      alive <- Future.sequence((idle ++ raced).map(_._2).map(listWith))
+    yield
+      idle.map(_._1).distinct shouldBe List(200)
+      raced.map(_._1).distinct shouldBe List(200)
+      raced.map(_._2).distinct.size shouldBe 16
+      alive.count(_ == 200) shouldBe 2 // the cap held
+    checked.andThen { case _ => handle.stop() }
+  }

@@ -19,7 +19,8 @@ import com.tjclp.fastmcp.server.router.McpRouter
   * differ on this platform live here:
   *   - stdin: zio-streams Native has no `ZStream.fromInputStream`; chars are read via
   *     `ZStream.fromReader` (the `InputStreamReader` owns byte→UTF-8 decoding) and re-chunked into
-  *     Strings for the shared `ZPipeline.splitLines`.
+  *     Strings for the shared `BoundedLines.pipeline` (line buffer bounded at
+  *     `limits.maxFrameChars`).
   *   - `randomId()`: javalib's `UUID.randomUUID()` does not link on Scala Native 0.5 (it references
   *     `java.security.SecureRandom`, which has no published implementation); 16 bytes of
   *     `/dev/urandom` are formatted as an RFC-4122 v4 UUID instead. Unix-only.

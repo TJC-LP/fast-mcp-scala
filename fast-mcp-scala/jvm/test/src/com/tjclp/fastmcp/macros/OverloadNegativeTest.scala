@@ -44,7 +44,9 @@ object SiblingDefault:
   @Tool def opt(@Param("x", required = false) x: Int): Int = x
 
 case class ApplyOverloadReq(x: Int, @Param(description = "y", required = false) y: Boolean)
+
 object ApplyOverloadReq:
+
   def apply(x: Int, y: Boolean = true, z: String): ApplyOverloadReq =
     new ApplyOverloadReq(x, y)
 
@@ -154,7 +156,9 @@ class OverloadNegativeTest extends AnyFunSuite:
     )
   }
 
-  test("a non-literal @Tool name is a compile-time error, not a silent fallback to the method name") {
+  test(
+    "a non-literal @Tool name is a compile-time error, not a silent fallback to the method name"
+  ) {
     val errs: List[scala.compiletime.testing.Error] = typeCheckErrors("""
       val s = McpServer.typed[Any]("neg")
       s.scanAnnotations[NonLiteralToolName.type]

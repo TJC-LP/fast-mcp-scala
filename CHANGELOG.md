@@ -7,6 +7,147 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Umbrella for TJC-2295 (core input limits), TJC-2296 (HTTP transport), TJC-2297 (tasks), TJC-2298 (macro binding) and TJC-2299 (CI supply chain).
+
+- **Core input limits** (TJC-2295): inbound frames are bounded on every transport (JVM, Scala.js/Bun,
+  Scala Native; stdio and HTTP) by the new `McpServerSettings.limits: LimitSettings` —
+  `maxFrameChars` (4 MiB of UTF-16 chars per frame), `maxDepth` (64; hard ceiling
+  `LimitSettings.MaxSupportedDepth = 256`), `maxObjectFields` (1024 members per JSON object),
+  `maxUriChars` (8192) and `maxSubscriptionsPerSession` (1024). Frame violations answer JSON-RPC
+  `-32700` (HTTP 400) before any dispatch work and never mint a session; the check is a linear,
+  string-aware pre-scan of the raw text followed by an iterative AST re-check, so a 100 000-deep or
+  2^17-key frame costs one character scan. The JSON-RPC envelope decoder, request-context and
+  validation middleware and the header-validation / task-routing single-key lookups no longer
+  build a `HashMap` from client-chosen keys just to read one field (`JsonFields.get`); the maps
+  that remain (`_meta`, `inputResponses`, header-parameter paths) are built only from objects
+  already bounded by `limits.maxObjectFields`, which turns the unbounded hash-collision DoS on Bun
+  into a bounded per-object constant (see the `LimitSettings.maxObjectFields` scaladoc), and
+  parse-error bodies name the offending JSON type instead of echoing the value (fixes response
+  amplification). Numeric JSON-RPC ids must fit a 64-bit integer — an out-of-range or fractional id
+  is rejected with `-32600` instead of being silently wrapped and echoed back as a different id.
+  Resource URI templates are matched by a regex-free, linear-time matcher compiled once at
+  registration (`ResourceTemplatePattern`; fixes ReDoS on templates such as `{name}.{ext}`); client
+  URIs longer than `limits.maxUriChars` are rejected with `-32602` on `resources/read`,
+  `resources/subscribe` and `resources/unsubscribe` and dropped from `subscriptions/listen`; a
+  legacy session may hold at most `limits.maxSubscriptionsPerSession` distinct subscriptions
+  (`-32602` beyond that; re-subscribing a held URI is free). Subscription admission is atomic,
+  so concurrent requests obey the same cap. Tool/prompt/resource argument decoding
+  goes through zio-json's guarded `fromJsonAST` instead of an unguarded re-serialisation;
+  `DefaultDecodeContext` (now constructed from `settings.limits`) bounds the depth and width of JSON
+  embedded in string arguments with a linear pre-scan BEFORE the parser runs — so the bound also
+  holds on Scala Native, where a parser stack overflow is not catchable — and converts a JVM
+  `StackOverflowError` into `-32602`; a deeply nested `tools/call` can no longer terminate the JVM
+  or Native process. All stdio backends bound the line buffer at `limits.maxFrameChars` (JVM/Native:
+  `BoundedLines`; Bun: the stdin accumulator): overflow is checked before whitespace filtering
+  (including all-whitespace lines), so discarded input can never turn into a valid request. An
+  over-long line is truncated, answered with `-32700`, and the remainder discarded; `maxFrameChars = Int.MaxValue` is a valid "unbounded"
+  setting.
+- **HTTP transport hardening** (TJC-2296): `Origin` is now matched as a full origin
+  (`scheme://host[:port]`, default port per scheme, fail-closed parsing) against the request's
+  `Host` authority or the new `allowedOrigins` allow-list; port-stripped hostname matching of
+  `Origin` is gone, so a page on another loopback port (`http://localhost:3000`, `https://localhost`,
+  `http://127.0.0.1:1`, `null`) is refused with 403 when `allowedHosts` is set, and a `Host` header
+  with a malformed port (`h:99999`, `h:abc`) refuses every Origin instead of degrading to the
+  port-less rule. Unparseable `allowedOrigins` entries fail `runHttp()` at startup (F5). Every POST
+  — legacy and modern — must carry `Content-Type: application/json` (media-type parameters are
+  allowed, but a `charset` other than utf-8 is refused); anything else is refused 415 before the
+  body is read or a session is minted; gate order 403 → 415 → 413 → 406 (F5). New `maxRequestBodyBytes` (default 1 MiB; must not
+  exceed `limits.maxFrameChars`, checked at startup) bounds request bodies on every backend —
+  zio-http `disableRequestStreaming`, `Bun.serve` `maxRequestBodySize`, plus first-party
+  `Content-Length` and post-read checks → 413 (over TCP netty and Bun answer an empty 413;
+  first-party paths answer a JSON-RPC `-32000` body) (F1). `Bun.serve` now runs with
+  `development: false`, an `error` callback and a first-party `catchAllCause` boundary around the
+  fetch handler, so failures and defects answer a fixed JSON-RPC error (400/413/500) with no
+  exception text, trace or path regardless of `NODE_ENV`; the JVM answers the same JSON-RPC 500 for
+  non-interrupt defects, including a synchronous throw while the handler is built (tool-handler
+  defects are still answered in-band by the router as `-32603` with the handler's message) (F10).
+  A `Host` or `Origin` header sent more than once is evaluated as its `", "`-joined value on both
+  backends (the JVM used to check only the first), so the fail-closed origin parser refuses it with
+  403; a request whose URL cannot be parsed on Bun (e.g. `Host: 127.0.0.1:99999`) answers the host
+  gate's 403 (guard on) or a JSON-RPC 400 instead of a 500 defect. The Bun session mint takes its
+  idle/live snapshot in the same synchronous step as the eviction and insert, so concurrent
+  header-less initializes at `maxSessions` are never refused while an evictable session exists
+  (JVM parity, F12). The Bun stdio dispatch bridge gained the same `catchAllCause` boundary as the
+  HTTP handler, so a defect can no longer surface as an unhandled promise rejection (which
+  terminates the Bun process).
+  `HttpHeaderValidation`: sentinel-shaped header values shorter than `=?base64?` + `?=` yield
+  `-32020 Malformed Base64 header sentinel` instead of throwing (F10). New `maxSessions` (default
+  `Some(1000)`, `None` disables) caps the legacy streamable session store on both platforms: at the
+  cap the longest-idle session without a live GET is evicted (on the JVM the admission is one
+  serialised `Ref.Synchronized.modifyZIO`, so concurrent initializes never get a spurious 503), and
+  503 `Session limit reached; retry later` only when every stored session holds a live GET. Trade-off:
+  an unauthenticated flood of initializes at the cap evicts idle legitimate sessions — on Bun (no GET
+  channel) every stored session is evictable — so front non-loopback deployments with
+  `allowedHosts`/`allowedOrigins` and an authenticating proxy (F12). On Bun the idle-session sweeper
+  no longer dies after its first tick (`Schedule.spaced` needed tzdb on Scala.js), so
+  `sessionIdleTimeout` now actually evicts on Bun, including under `runHttp()`.
+- **Tasks hardening** (TJC-2297): the task store is bounded independently of client behaviour. New
+  `TaskSettings.maxStoredPerOwner` (256) and `maxStoredTotal` (4096, per pool) count terminal
+  entries too: at a cap the oldest completed entry older than `minResultRetentionMs` (30 s) is
+  evicted — the pool cap charges the creating owner's own stale results first, then the owner
+  holding the most stale results, never an owner whose results are all inside the grace — and when
+  nothing is evictable the create is rejected with the new error `-32003 Task capacity exceeded
+  (<kind>, limit N)` (`kind` in running | stored-per-owner | stored; `ErrorCodes.CapacityExceeded`).
+  `maxConcurrentTotal` (1024) is a running ceiling applied separately to the legacy-session pool and
+  the modern-bearer pool, so a flood of freely minted legacy sessions can never starve bearer
+  clients (and vice versa); `maxConcurrentPerSession` (64) is now the per-OWNER running cap and
+  still answers `-32602`. Modern bearer tasks are bucketed per client through
+  `TaskSettings.ownerKey`: `TaskOwnerKey.Transport` (default) uses the transport-supplied
+  `Session.clientKey` — the TCP peer address on both shipped HTTP backends (zio-http
+  `remoteAddress`, Bun `server.requestIP`) — and `TaskOwnerKey.Custom(f)` lets operators behind an
+  authenticating reverse proxy (where every peer collapses to one address) derive a key; keyless
+  requests share one anonymous bucket bounded by the per-owner cap; `_meta` / `clientInfo` are
+  attacker-controlled and must never be used as a key unless the proxy rewrites them (F9). The
+  pool ceilings are a documented residual: a client controlling >= `maxConcurrentTotal /
+  maxConcurrentPerSession` distinct peer addresses (16 at the defaults) can still fill a pool and
+  cause `-32003` for everyone else — pair the peer-address key with edge rate limiting, or use
+  `TaskOwnerKey.Custom` with an authenticated principal. Per-task
+  TTL eviction fibers were replaced by a single lazily started, self-terminating sweeper
+  (`sweepIntervalMs`, 1 s); expiry, the retention grace and eviction order are measured on the
+  monotonic clock, so an NTP step or VM resume neither cuts running tasks short nor extends
+  retention (F8). `TaskManager.create` is atomic under interruption: a client abort or
+  `notifications/cancelled` landing mid-create leaves no entry and no parked fiber behind, and the
+  legacy task branch registers its session release hook before the create (F11). `Session.terminate`
+  — now used by DELETE, idle eviction and session-cap eviction on both backends — is a latch that
+  interrupts the session's in-flight requests, runs the registered finalizers once (releasing,
+  i.e. interrupting, that session's tasks) and shuts the outbound queue; `McpServer.runStdio` /
+  `runHttp` stop the sweeper and running tasks on shutdown (the Bun `BunHttpHandle.stop()` too);
+  should the sweeper fiber ever die with a defect, it releases its claim and logs, so the next
+  create starts a fresh one instead of TTL expiry silently stopping. Additive API:
+  `Session.clientKey`,
+  `Session.addFinalizer`, `Session.terminate`, `Session.isTerminated`, `Session.subscriptionCount`,
+  `TaskScope`, `TaskManager.create(scope, ...)`, `TaskManager.releaseScope`, `TaskManager.shutdown`,
+  `TaskManager.ownerKeyFor`, `TaskOwnerContext`, `TaskOwnerKey`, `TaskCapacityExceeded`,
+  `ErrorCodes.CapacityExceeded`; `TaskManager`'s primary constructor is no longer public (use
+  `TaskManager.make`); `TaskSettings(...)` throws `IllegalArgumentException` when
+  `maxConcurrentPerSession`, `maxStoredPerOwner`, `maxStoredTotal` or `sweepIntervalMs` is < 1,
+  `minResultRetentionMs` is negative, or `maxConcurrentTotal` < `maxConcurrentPerSession`.
+- **Annotation macros bind to the exact annotated overload** (TJC-2298, F4 / CWE-706) — see
+  *Fixed* below; duplicate registrations and non-literal annotation arguments within a scanned
+  object are now compile-time errors — see *Changed*.
+- **Supply-chain hardening of the CI/release pipeline** (TJC-2299): the MCP conformance harness
+  (`@modelcontextprotocol/conformance@0.2.0-alpha.11`) is now resolved only from the committed,
+  integrity-hashed `conformance/bun.lock` (`conformance/package.json` pins the exact version) with
+  `bun install --frozen-lockfile --ignore-scripts` into a fresh per-run install cache, and
+  `scripts/conformance.sh` executes the installed `node_modules/.bin/conformance` directly (never
+  `bunx`, never a `bun run` PATH fallback) — a run whose resolution differs from the lock fails
+  before the suite starts; the script requires Bun ≥ 1.4 and prefers the Mill-managed 1.4.1
+  (`FAST_MCP_BUN` overrides; a non-executable override is an error). Every GitHub Action is pinned
+  to a full-length commit SHA (`# vX.Y.Z` comments) with Dependabot (weekly, 7-day cooldown;
+  workflows and the `setup-build` composite) keeping pins current. The release workflow is split
+  into `verify` → `publish` (`contents: read`, `persist-credentials: false`, no cache restore, the
+  Sonatype publish is the last step) → `github-release` (the only `contents: write` grant;
+  `gh release create --verify-tag --generate-notes`, no third-party action;
+  `softprops/action-gh-release` removed). The Mill launcher distribution is verified against pinned
+  SHA-256s (`.github/mill-dist.sha256`, `.github/scripts/install-mill.sh`) in every CI job before
+  the first `./mill` (Mill's own jars still come from coursier: SHA-1-checked on download,
+  cache-trusted only in non-release jobs); setup-bun's executable cache is disabled and
+  harness-running jobs restore the shared Mill/coursier cache read-only. `ci.yml` no longer exports
+  `GITHUB_TOKEN` workflow-wide: it is scoped to the Mill steps that need it (as `native.yml`
+  already did), so the third-party setup actions never see it.
+
 ### Added
 
 - **Scala Native target (experimental)** (TJC-2188, #82):
@@ -32,6 +173,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Behaviour changes from the security wave (pre-1.0)** (TJC-2294):
+  - Resource template literal text is matched verbatim — a `.` in `file://{name}.txt` is a dot, not
+    a regex wildcard. Placeholders in one path segment must be separated by literal text (`{a}{b}`
+    is rejected at registration, as are duplicate placeholder names, unbalanced or nested braces,
+    and `/` inside a placeholder name). Results are otherwise identical to the former greedy regex:
+    within a segment each separator binds to its last occurrence, so `{name}.{ext}` on
+    `archive.tar.gz` yields `name = archive.tar`, `ext = gz`. Registering a template with the same
+    placeholder shape as an existing one (`users://{id}` vs `users://{userId}`) logs a warning.
+  - `ResourceTemplatePattern` is now a `final class` (not a case class — no `unapply`/`copy`);
+    `matches` returns `Option[Map[String, String]]`; `extractParams(uri, Regex.Match)` was removed;
+    `ResourceManager.findMatchingTemplate` keeps its tuple shape.
+  - Frames larger than 4 MiB (any transport) are refused unless `limits.maxFrameChars` is raised —
+    sampling/createMessage results carrying large base64 images over stdio may need
+    `McpServerSettings(limits = LimitSettings(maxFrameChars = 16 * 1024 * 1024))`. `LimitSettings`
+    validates its values at construction (`IllegalArgumentException`). `DefaultDecodeContext` gained
+    constructor parameters `(maxDepth, maxObjectFields)`; `DefaultDecodeContext.default` is
+    unchanged for callers. JSON-RPC ids such as `1e30` or `1.5` are now `-32600` (`id: null`).
+  - Every HTTP POST needs `Content-Type: application/json` (415 otherwise). With `allowedHosts` set,
+    browser pages on another port/scheme than the listener need `allowedOrigins`. `maxSessions` is
+    an `Option[Int]` (`Some(1000)` default, `None` disables). Request bodies over
+    `maxRequestBodyBytes` (1 MiB) get 413.
+  - Bun: `startStatefulHttp()` / `startStatelessHttp()` return a `BunHttpHandle` (`port`,
+    `hostname`, `url`, `server`, `stop()`) instead of a `BunServer` and run the idle-session
+    sweeper for the listener's lifetime; `startBun` is internal; `BunServeOptions.apply` now takes
+    `fetch: js.Function2[js.Dynamic, js.Dynamic, js.Promise[js.Dynamic]]` (Bun calls
+    `fetch(request, server)`), `maxRequestBodySize: Int`, `development: Boolean` and
+    `error: js.Function1[js.Dynamic, js.Dynamic]` (source-breaking for the JS helpers and the
+    facade). `startStatefulHttp()` / `startStatelessHttp()` are aliases (the mode comes from
+    `settings.stateless`); their handle's `stop()` also shuts the `TaskManager` down.
+  - HTTP `DELETE` and idle/session-cap eviction now call `Session.terminate`: a request still in
+    flight on that session is interrupted (no reply) and its running legacy tasks are released
+    (interrupted); previously tasks survived eviction until their own TTL.
+  - `scanAnnotations` now fails at compile time when two annotated methods on the same object
+    register the same tool name, prompt name, static resource URI, or resource template pattern
+    (templates that differ only in placeholder names — `users://{id}` vs `users://{userId}` — count
+    as the same pattern; a static URI and a template are never compared with each other).
+    Previously this was last-writer-wins with a stderr warning, or nondeterministic template
+    selection. The error names every colliding method as `name(param: Type, ...)` with its
+    file:line (for objects compiled in the same run) and is also reported at the `scanAnnotations`
+    call site. Fix: give one of them an explicit `name = Some(...)` / a distinct `uri`, or remove
+    its annotation. `scanAnnotations[T]` also now fails at compile time when `T` is not an object's
+    singleton type. The check is per scanned object: duplicates across objects, or between
+    annotations and typed contracts mounted on the same server, remain a runtime overwrite
+    (ToolManager, ResourceManager and now PromptManager warn on stderr).
+  - Annotation `Option` arguments must be literals: `@Tool(name = Some(someVal))` (or any
+    non-literal `description` / `title` / `taskSupport` / `mimeType` / `schema` / hint) is now a
+    compile-time error — `@Tool(name) must be a literal Option[String] — Some(<literal>),
+    Option(<literal>) or None — but was ...` — instead of being silently dropped. `final val`
+    string/boolean constants are accepted.
+  - `@Tool(description = Some(...))` / `@Prompt(description = Some(...))` without `name` now
+    registers under the method name with that description (previously the description text became
+    the registered name).
 - **Scala 3.9.0 LTS** (TJC-2273): all three platforms now build with Scala 3.9.0
   (LTS, released 2026-09-03), up from 3.8.3. Companion bumps: WartRemover
   3.5.6 → 3.6.1 (first release for the 3.9.0 compiler) and the Scala.js
@@ -68,8 +261,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AST values directly on JVM and Scala.js. Typed contracts no longer require
   `sttp.tapir.generic.auto.*` at call sites.
 
+### Deprecated
+
+- `HostGuard.isAllowed(host, origin, allowed: Set[String])` (TJC-2296): use the new
+  `HostGuard.isAllowed(host, origin, settings: McpServerSettings)` overload, which matches `Origin`
+  as a full origin and honours `allowedOrigins`; the 3-arg form still works but never consults
+  `allowedOrigins`. Slated for removal in 1.0.0.
+
 ### Fixed
 
+- **Annotation macros bind to the annotated overload** (F4 / CWE-706, TJC-2298): `scanAnnotations`
+  used to re-resolve `@Tool` / `@Resource` / `@Prompt` targets by method name and could register,
+  schema-describe and invoke a different same-named overload (for example an un-annotated raw
+  helper declared before the annotated wrapper). The macro now emits a reference to the exact
+  annotated symbol, so the advertised `inputSchema`, the argument decoder and the invoked body
+  always come from the annotated declaration. Related name-based lookups were removed too:
+  `@Param(required = false)` default detection on method parameters and on typed-request
+  case-class fields now uses the parameter's own default flag instead of `name$default$N` /
+  `apply$default$N` lookups (a same-named sibling method or a companion `apply` overload with
+  defaults no longer satisfies it).
+- **Every literal spelling of an annotation `Option` argument is honoured** (TJC-2298):
+  `@Tool(name = scala.Some("x"))`, `Option("x")`, `Some.apply("x")`, `new Some("x")`,
+  `Some[String]("x")` and `final val` constants used to be silently ignored (the tool registered
+  under the method name); they now register under the given name. The same applies to
+  `description`, `title`, `taskSupport`, `mimeType`, `@Param(schema = ...)` and the boolean hints,
+  and to positional `@Resource(uri, name, description, mimeType)` arguments.
 - **Zero-boilerplate Scala 3 enum support** (TJC-2167, #78): enum fields —
   in typed contracts and annotation tools alike — derive string-enum JSON
   schemas (`{"type":"string","enum":[...]}`) and string-based zio-json

@@ -11,13 +11,14 @@ import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
-/** The input limits over the JVM HTTP transport (both the streamable and stateless adapters and
-  * the 2026-07-28 modern path), with LOWERED `LimitSettings` and bodies of a few KB — independent
-  * of the transport body cap. A rejected body is HTTP 400 / -32700 and never mints a session.
+/** The input limits over the JVM HTTP transport (both the streamable and stateless adapters and the
+  * 2026-07-28 modern path), with LOWERED `LimitSettings` and bodies of a few KB — independent of
+  * the transport body cap. A rejected body is HTTP 400 / -32700 and never mints a session.
   */
 class JvmHttpLimitsTest extends AnyFunSuite with Matchers:
 
   object TestServer:
+
     @Tool(name = Some("add"), description = Some("Add two numbers"))
     def add(@Param("a") a: Int, @Param("b") b: Int): Int = a + b
 
@@ -54,7 +55,11 @@ class JvmHttpLimitsTest extends AnyFunSuite with Matchers:
   private def bodyOf(resp: Response): String = runUnsafe(resp.body.asString)
 
   /** Legacy POST — always carries the JSON content type and the dual Accept header. */
-  private def post(routes: Routes[Any, Response], body: String, sid: Option[String] = None): Response =
+  private def post(
+      routes: Routes[Any, Response],
+      body: String,
+      sid: Option[String] = None
+  ): Response =
     val base = Request
       .post(URL(Path.root / "mcp"), Body.fromString(body))
       .addHeader(Header.Custom("content-type", "application/json"))
@@ -97,7 +102,9 @@ class JvmHttpLimitsTest extends AnyFunSuite with Matchers:
         collidingKeys(5)
       )}}}"""
 
-  test("streamable: a colliding-key initialize is 400/-32700 and mints no session; a clean one does") {
+  test(
+    "streamable: a colliding-key initialize is 400/-32700 and mints no session; a clean one does"
+  ) {
     val routes = buildRoutes(stateless = false)
     val _ = bodyOf(post(routes, pingFrame)) // warm the routes; timing bounds live in JsonLimitsTest
     val bad = post(routes, collidingInit)
@@ -139,7 +146,9 @@ class JvmHttpLimitsTest extends AnyFunSuite with Matchers:
     bodyOf(ping) should include(""""result":{}""")
   }
 
-  test("modern path: a 20-deep _meta is 400/-32700 — the frame check runs before ModernHttpValidation") {
+  test(
+    "modern path: a 20-deep _meta is 400/-32700 — the frame check runs before ModernHttpValidation"
+  ) {
     val routes = buildRoutes(stateless = false)
     val deep = "[" * 20 + "1" + "]" * 20
     val frame =

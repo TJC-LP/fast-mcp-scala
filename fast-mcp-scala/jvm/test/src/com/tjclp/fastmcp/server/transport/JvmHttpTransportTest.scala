@@ -476,6 +476,20 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     rawPost(routes, listFrame, ("host" -> "localhost:8000") :: JsonHeaders*).status shouldBe Status.Ok
   }
 
+  test("duplicated Host/Origin headers fail the guard closed (403) instead of checking only the first value") {
+    val routes =
+      buildRoutes(stateless = true, allowedHosts = Some(Set("localhost", "127.0.0.1")))
+    val base = ("host" -> "localhost:8000") :: ("origin" -> "http://localhost:8000") :: JsonHeaders
+    rawPost(routes, listFrame, base*).status shouldBe Status.Ok
+    // A second Origin (or Host) is seen as the `", "`-joined value, exactly like Bun's Headers.get,
+    // so the fail-closed origin parser refuses it on both backends.
+    val dupOrigin = rawPost(routes, listFrame, (("origin" -> "http://evil.example.com") :: base)*)
+    dupOrigin.status shouldBe Status.Forbidden
+    bodyOf(dupOrigin) should include("-32000")
+    val dupHost = rawPost(routes, listFrame, (("host" -> "evil.example.com") :: base)*)
+    dupHost.status shouldBe Status.Forbidden
+  }
+
   test("allowedOrigins admits an explicitly listed origin that is not the request's authority") {
     val routes = buildRoutes(
       stateless = true,

@@ -26,8 +26,9 @@ private[fastmcp] object HttpRequestGuards:
   val HostRefusedMessage: String = "Host/Origin not allowed (DNS-rebinding protection)"
 
   /** Startup validation, run by every `serveHttp` before binding: each `allowedOrigins` entry must
-    * parse as `scheme://host[:port]`, `maxRequestBodyBytes` must be positive and `maxSessions`,
-    * when set, must be positive (use `None` to disable the cap).
+    * parse as `scheme://host[:port]`, `maxRequestBodyBytes` must be positive and not exceed
+    * `limits.maxFrameChars`, and `maxSessions`, when set, must be positive (use `None` to disable
+    * the cap).
     */
   def validateSettings(settings: McpServerSettings): Either[String, Unit] =
     val bad = HostGuard.invalidOrigins(settings.allowedOrigins.getOrElse(Set.empty))
@@ -38,9 +39,10 @@ private[fastmcp] object HttpRequestGuards:
     else if settings.maxRequestBodyBytes <= 0 then Left("maxRequestBodyBytes must be positive")
     else if settings.maxSessions.exists(_ <= 0) then
       Left("maxSessions must be positive (use None to disable the cap)")
-    // TODO(TJC-2294 merge): add `maxRequestBodyBytes <= limits.maxFrameChars` once Arc A's
-    // `LimitSettings` lands: `else if settings.maxRequestBodyBytes > settings.limits.maxFrameChars
-    // then Left("maxRequestBodyBytes must not exceed limits.maxFrameChars")`.
+    // The body cap must sit inside the frame cap so an oversized body gets 413 before `parseFrame`
+    // ever sees it; `limits.maxFrameChars` is the transport-independent backstop.
+    else if settings.maxRequestBodyBytes > settings.limits.maxFrameChars then
+      Left("maxRequestBodyBytes must not exceed limits.maxFrameChars")
     else Right(())
 
   /** 403 when the Host/Origin guard refuses. Used for GET/DELETE and as step 1 of [[postGate]]. */

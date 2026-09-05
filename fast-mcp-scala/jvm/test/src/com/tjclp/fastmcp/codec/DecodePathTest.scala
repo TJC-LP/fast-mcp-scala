@@ -44,10 +44,16 @@ class DecodePathTest extends AnyFunSuite with Matchers:
   // ---- fromJsonAST path ----
 
   test("McpDecoder decodes a Map of wire Json nodes straight from the AST") {
-    McpDecoder[Add].decode("add", Map("a" -> Json.Num(2), "b" -> Json.Num(3)), ctx) shouldBe Add(2, 3)
+    McpDecoder[Add].decode("add", Map("a" -> Json.Num(2), "b" -> Json.Num(3)), ctx) shouldBe Add(
+      2,
+      3
+    )
     McpDecoder[User].decode(
       "user",
-      Map("id" -> Json.Str("u1"), "profile" -> Json.Obj("name" -> Json.Str("Ada"), "age" -> Json.Num(36))),
+      Map(
+        "id" -> Json.Str("u1"),
+        "profile" -> Json.Obj("name" -> Json.Str("Ada"), "age" -> Json.Num(36))
+      ),
       ctx
     ) shouldBe User("u1", Profile("Ada", 36))
     // Mirror-derived fallback (no explicit JsonDecoder) — the inline given.
@@ -70,7 +76,9 @@ class DecodePathTest extends AnyFunSuite with Matchers:
     ) shouldBe "1|x|3|7"
     // Absent Option → None; JSON null → None.
     fn(Map("a" -> Json.Num(1), "c" -> Json.Arr(), "d" -> Json.Obj())) shouldBe "1|-|0|0"
-    fn(Map("a" -> Json.Num(1), "b" -> Json.Null, "c" -> Json.Arr(), "d" -> Json.Obj())) shouldBe "1|-|0|0"
+    fn(
+      Map("a" -> Json.Num(1), "b" -> Json.Null, "c" -> Json.Arr(), "d" -> Json.Obj())
+    ) shouldBe "1|-|0|0"
   }
 
   test("bad input keeps the documented error prefix and a truncated value preview") {
@@ -89,8 +97,10 @@ class DecodePathTest extends AnyFunSuite with Matchers:
   test("a custom McpDecodeContext keeps the legacy writeValueAsString + decodeJson path") {
     var calls = 0
     val spy = new McpDecodeContext:
-      def convertValue[T: ClassTag](name: String, rawValue: Any): T = ctx.convertValue(name, rawValue)
-      def parseJsonArray(name: String, rawJson: String): List[Any] = ctx.parseJsonArray(name, rawJson)
+      def convertValue[T: ClassTag](name: String, rawValue: Any): T =
+        ctx.convertValue(name, rawValue)
+      def parseJsonArray(name: String, rawJson: String): List[Any] =
+        ctx.parseJsonArray(name, rawJson)
       def parseJsonObject(name: String, rawJson: String): Map[String, Any] =
         ctx.parseJsonObject(name, rawJson)
       def writeValueAsString(value: Any): String =
@@ -157,7 +167,9 @@ class DecodePathTest extends AnyFunSuite with Matchers:
     val server = McpServer("Deep", "0.1.0")
     runUnsafe(
       server.tool(McpTool[Args, String](name = "wrap", description = Some("wraps"))(_ => "ok")) *>
-        server.tool(McpTool[NoArgs, String](name = "noop", description = Some("no args"))(_ => "ok")) *>
+        server.tool(
+          McpTool[NoArgs, String](name = "noop", description = Some("no args"))(_ => "ok")
+        ) *>
         server.resource(
           McpTemplateResource[Args](
             uriPattern = "d://{x}",
@@ -169,14 +181,19 @@ class DecodePathTest extends AnyFunSuite with Matchers:
     val session = runUnsafe(Session.make("deep"))
     val init =
       """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1.0"}}}"""
-    runUnsafe(MessageLoop.handleFrame(router, session, init)).getOrElse("") should include("serverInfo")
+    runUnsafe(MessageLoop.handleFrame(router, session, init)).getOrElse("") should include(
+      "serverInfo"
+    )
 
     val deep = "[" * 60 + "1" + "]" * 60
     List("wrap", "noop").zipWithIndex.foreach { (tool, i) =>
       val frame =
         s"""{"jsonrpc":"2.0","id":${10 + i},"method":"tools/call","params":{"name":"$tool","arguments":{"x":$deep}}}"""
-      val reply = runUnsafe(MessageLoop.handleFrame(router, session, frame)).getOrElse(fail("no reply"))
+      val reply =
+        runUnsafe(MessageLoop.handleFrame(router, session, frame)).getOrElse(fail("no reply"))
       reply should include(s""""id":${10 + i}""")
-      (reply.contains("\"result\"") || reply.contains("-32602") || reply.contains("-32603")) shouldBe true
+      (reply.contains("\"result\"") || reply.contains("-32602") || reply.contains(
+        "-32603"
+      )) shouldBe true
     }
   }

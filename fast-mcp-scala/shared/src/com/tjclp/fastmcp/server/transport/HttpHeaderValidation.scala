@@ -7,7 +7,7 @@ import scala.util.Try
 
 import zio.json.ast.Json
 
-import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError}
+import com.tjclp.fastmcp.jsonrpc.{JsonFields, JsonRpcMessage, McpError}
 
 /** 2026-07-28 Streamable HTTP header/body consistency checks. Header lookup is supplied by the
   * platform backend so the security-sensitive comparison logic is identical on JVM and Bun.
@@ -48,8 +48,7 @@ private[fastmcp] object HttpHeaderValidation:
     if sourceField.isEmpty then Right(())
     else
       val expected = request.params
-        .collect { case Json.Obj(fields) => fields.toMap }
-        .flatMap(_.get(sourceField))
+        .flatMap(JsonFields.get(_, sourceField))
         .collect { case Json.Str(value) => value }
       expected match
         case None =>
@@ -63,10 +62,12 @@ private[fastmcp] object HttpHeaderValidation:
   ): Either[McpError, Unit] =
     if request.method != "tools/call" then Right(())
     else
-      val params =
-        request.params.collect { case Json.Obj(fields) => fields.toMap }.getOrElse(Map.empty)
-      val name = params.get("name").collect { case Json.Str(value) => value }
-      val args = params.get("arguments").collect { case Json.Obj(fields) => Json.Obj(fields*) }
+      val name = request.params
+        .flatMap(JsonFields.get(_, "name"))
+        .collect { case Json.Str(value) => value }
+      val args = request.params
+        .flatMap(JsonFields.get(_, "arguments"))
+        .collect { case Json.Obj(fields) => Json.Obj(fields*) }
       name.flatMap(schemas.get) match
         case None => Right(()) // unknown tool is classified by the router as Invalid Params
         case Some(schema) =>

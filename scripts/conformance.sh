@@ -14,11 +14,12 @@
 # baseline; "2026" runs `--requirements 2026-07-28` — exactly the scenarios that revision requires,
 # frozen at its release (extension/pending scenarios are reported but not scored by the harness).
 #
-# Requires: a JDK (jvm) and Bun >= 1.4 (every platform). The script prefers the Mill-managed Bun
-# (fast-mcp-scala.js.bunExecutable — the same SHA-256-verified 1.4.1 that generated conformance/bun.lock),
-# then $FAST_MCP_BUN, then PATH. The harness is resolved ONLY from conformance/package.json +
-# conformance/bun.lock: a run whose resolution differs from the committed lock fails before the suite
-# starts. To bump: edit the version in conformance/package.json, then
+# Requires: a JDK (jvm) and Bun >= 1.4 (every platform). Bun resolution order: $FAST_MCP_BUN when
+# set (must be executable — a bad pin is an error, never a silent fallback), else the Mill-managed
+# Bun (fast-mcp-scala.js.bunExecutable — the same SHA-256-verified 1.4.1 that generated
+# conformance/bun.lock), else PATH; anything older than 1.4 is refused. The harness is resolved
+# ONLY from conformance/package.json + conformance/bun.lock: a run whose resolution differs from the
+# committed lock fails before the suite starts. To bump: edit the version in conformance/package.json, then
 #   "$(./mill --no-server show fast-mcp-scala.js.bunExecutable | tr -d '"')" install --cwd conformance
 # and review the bun.lock diff (it, not package.json, is what --frozen-lockfile enforces).
 #

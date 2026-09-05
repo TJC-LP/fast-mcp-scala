@@ -124,7 +124,9 @@ object DefaultDecodeContext:
               s"Failed to decode parameter '$name' from JSON: $err. Value: ${preview(ast)}"
             )
       case other =>
-        val json = other.writeValueAsString(rawValue)
+        // A custom context's encoder is user code; a JVM StackOverflowError there still becomes
+        // an IllegalArgumentException (-32602) instead of a fatal Error.
+        val json = guardDepth(other.writeValueAsString(rawValue))
         decoder.decodeJson(json) match
           case Right(value) => value
           case Left(err) =>

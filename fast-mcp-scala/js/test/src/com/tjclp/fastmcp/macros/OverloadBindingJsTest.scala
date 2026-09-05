@@ -3,7 +3,7 @@ package com.tjclp.fastmcp.macros
 import org.scalatest.funsuite.AnyFunSuite
 import zio.*
 
-import com.tjclp.fastmcp.{given, *}
+import com.tjclp.fastmcp.{*, given}
 
 /** Scala.js mirror of the `@Tool` cases of the JVM `OverloadBindingTest` (F4 / TJC-2298): the same
   * macro expansion must link and dispatch through `RefResolver` under Bun, binding to the ANNOTATED
