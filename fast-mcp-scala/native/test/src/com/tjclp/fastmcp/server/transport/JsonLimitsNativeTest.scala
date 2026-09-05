@@ -3,6 +3,8 @@ package server.transport
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+import zio.*
+import zio.stream.*
 
 import com.tjclp.fastmcp.codec.DefaultDecodeContext
 import com.tjclp.fastmcp.jsonrpc.JsonRpcMessage
@@ -46,7 +48,9 @@ class JsonLimitsNativeTest extends AnyFunSuite with Matchers:
     keys.map(_.hashCode).distinct.size shouldBe 1
     val frame =
       s"""{"jsonrpc":"2.0","id":1,"method":"ping",${keys.map(k => s""""$k":0""").mkString(",")}}"""
-    message(MessageLoop.parseFrame(frame, LimitSettings(maxFrameChars = 8 * 1024 * 1024))) should include(
+    message(
+      MessageLoop.parseFrame(frame, LimitSettings(maxFrameChars = 8 * 1024 * 1024))
+    ) should include(
       "maxObjectFields"
     )
   }
@@ -83,4 +87,25 @@ class JsonLimitsNativeTest extends AnyFunSuite with Matchers:
     ResourceTemplatePattern("x://{name}.{ext}").matches("x://archive.tar.gz") shouldBe Some(
       Map("name" -> "archive.tar", "ext" -> "gz")
     )
+  }
+
+  test("Native stdio preserves padded overflow and recovers on the next line") {
+    val limits = LimitSettings(maxFrameChars = 128)
+    val ping = """{"jsonrpc":"2.0","id":1,"method":"ping"}"""
+    val input = ping + " " * 200 + "discarded junk\n" + " " * 200 + "\n" + ping + "\n"
+    val frames = Unsafe.unsafe { implicit unsafe =>
+      Runtime.default.unsafe
+        .run(
+          ZStream
+            .fromIterable(input.grouped(17).toList)
+            .via(BoundedLines.pipeline(limits.maxFrameChars))
+            .filter(MessageLoop.shouldDispatchStdioFrame(_, limits))
+            .runCollect
+        )
+        .getOrThrowFiberFailure()
+    }
+    frames.length shouldBe 3
+    message(MessageLoop.parseFrame(frames(0), limits)) should include("maxFrameChars")
+    message(MessageLoop.parseFrame(frames(1), limits)) should include("maxFrameChars")
+    MessageLoop.parseFrame(frames(2), limits).isRight shouldBe true
   }

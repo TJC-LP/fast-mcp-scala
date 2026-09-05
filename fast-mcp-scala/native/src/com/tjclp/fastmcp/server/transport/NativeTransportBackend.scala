@@ -60,8 +60,7 @@ object NativeTransportBackend extends TransportBackend:
         .chunks
         .map(chunk => new String(chunk.toArray))
         .via(BoundedLines.pipeline(router.limits.maxFrameChars))
-        .map(_.trim)
-        .filter(_.nonEmpty)
+        .filter(MessageLoop.shouldDispatchStdioFrame(_, router.limits))
     )
 
   /** The Scala Native platform seam, in the impl object so it's exportable (givens can't be
