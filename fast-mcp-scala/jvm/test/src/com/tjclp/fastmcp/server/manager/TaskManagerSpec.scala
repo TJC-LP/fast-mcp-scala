@@ -567,14 +567,18 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     val tm = newManager()
     val before = rootFibers
     val interrupted = runUnsafe(Ref.make(false))
+    val started = runUnsafe(Promise.make[Nothing, Unit])
     runUnsafe(
       tm.create(
         TaskScope.session("s"),
         None,
-        ZIO.never.onInterrupt(interrupted.set(true)),
+        (started.succeed(()) *> ZIO.never).onInterrupt(interrupted.set(true)),
         _ => ZIO.unit
       )
     )
+    // create returns before the task body starts. Await the signal inside onInterrupt so shutdown
+    // cannot cancel the parked task before this test's interruption callback has been installed.
+    runUnsafe(started.await.timeoutFail(new RuntimeException("task did not start"))(10.seconds))
     completed(tm, TaskScope.bearer(Some("k")))
     runUnsafe(tm.shutdown)
     val stats = runUnsafe(tm.stats)
