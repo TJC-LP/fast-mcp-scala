@@ -42,7 +42,7 @@ object ConformanceServer:
       stateless = false,
       loggingEnabled = true,
       resourcesSubscribe = true,
-      allowedHosts = Some(Set("127.0.0.1", "localhost", "[::1]", "0.0.0.0"))
+      allowedHosts = Some(Set("127.0.0.1", "localhost", "[::1]"))
     )
 
   // 1x1 red PNG (matches the reference server's image fixture); audio bytes are not validated.

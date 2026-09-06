@@ -12,6 +12,14 @@ import com.tjclp.fastmcp.server.manager.PromptHandler
 /** Cross-platform `@Prompt` annotation processor. Emits registration against [[McpServerCore]]. */
 private[macros] object PromptProcessor extends AnnotationProcessorBase:
 
+  /** The name this method registers under — identical to what [[processPromptAnnotation]] uses. */
+  def registeredName(using Quotes)(methodSym: quotes.reflect.Symbol): String =
+    import quotes.reflect.*
+    val annot = findAnnotation[Prompt](methodSym).getOrElse(
+      report.errorAndAbort(s"No @Prompt annotation found on method '${methodSym.name}'")
+    )
+    nameAndDescription(annot, methodSym)._1
+
   def processPromptAnnotation[R: Type](using Quotes)(
       server: Expr[McpServerCore[R]],
       ownerSym: quotes.reflect.Symbol,

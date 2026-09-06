@@ -20,8 +20,16 @@ import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 class LifecycleSoakTest extends AnyFunSuite with Matchers:
 
   object SoakServer:
+
     @Tool(name = Some("blocky"), description = Some("Long-running"), taskSupport = Some("optional"))
     def blocky(): ZIO[Any, Throwable, String] = ZIO.sleep(30.seconds).as("blocky")
+
+    @Tool(
+      name = Some("quick"),
+      description = Some("Completes at once"),
+      taskSupport = Some("optional")
+    )
+    def quick(): String = "quick"
 
   private val SessionIdHeader = "mcp-session-id"
 
@@ -45,7 +53,10 @@ class LifecycleSoakTest extends AnyFunSuite with Matchers:
     )
 
   private def post(routes: Routes[Any, Response], body: String, sid: Option[String]): Response =
-    val base = Request.post(URL(Path.root / "mcp"), Body.fromString(body))
+    val base = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(body))
+      .addHeader(Header.Custom("content-type", "application/json"))
+      .addHeader(Header.Custom("accept", "application/json, text/event-stream"))
     val req = sid.fold(base)(s => base.addHeader(Header.Custom(SessionIdHeader, s)))
     runUnsafe(ZIO.scoped(routes.runZIO(req)))
 
@@ -57,6 +68,14 @@ class LifecycleSoakTest extends AnyFunSuite with Matchers:
     resp.rawHeader(SessionIdHeader).getOrElse(fail("initialize did not return a session id"))
 
   private def rootFibers: Int = runUnsafe(Fiber.roots.map(_.size))
+
+  /** Poll rather than sleep-then-assert: interruption finalizers settle at their own pace. */
+  private def awaitRootsSettle(before: Int, tolerance: Int = 5): Int =
+    runUnsafe(
+      (ZIO.sleep(25.millis) *> Fiber.roots.map(_.size))
+        .repeatUntil(_ - before <= tolerance)
+        .timeoutFail(new RuntimeException("root fibers did not settle"))(10.seconds)
+    )
 
   test("dropped subscriptions/listen streams leave no fibers behind") {
     val routes = buildRoutes()
@@ -118,6 +137,37 @@ class LifecycleSoakTest extends AnyFunSuite with Matchers:
       reply should include("Unknown task")
     }
     val after = rootFibers
+    withClue(s"root fibers before=$before after=$after: ") {
+      (after - before) should be <= 5
+    }
+  }
+
+  test("N terminal tasks leave no sleeping eviction fibers behind") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    def augmented(id: Int): String =
+      s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"quick","arguments":{},"task":{"ttl":60000}}}"""
+    val TaskIdPattern = """"taskId":"([^"]+)"""".r
+
+    val before = rootFibers
+    val taskIds = (1 to 30).toList.map { i =>
+      val body = bodyOf(post(routes, augmented(300 + i), Some(sid)))
+      TaskIdPattern.findFirstMatchIn(body).map(_.group(1)).getOrElse(fail(s"no taskId in: $body"))
+    }
+    // Fence on every result: all 30 entries are terminal and retained (60 s TTL).
+    taskIds.foreach { taskId =>
+      val reply = bodyOf(
+        post(
+          routes,
+          s"""{"jsonrpc":"2.0","id":400,"method":"tasks/result","params":{"taskId":"$taskId"}}""",
+          Some(sid)
+        )
+      )
+      reply should include("quick")
+    }
+    // Pre-fix each retained task pinned one sleeping eviction fiber for its whole TTL; now a single
+    // sweeper covers the store.
+    val after = awaitRootsSettle(before)
     withClue(s"root fibers before=$before after=$after: ") {
       (after - before) should be <= 5
     }

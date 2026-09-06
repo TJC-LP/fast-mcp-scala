@@ -35,24 +35,29 @@ object JvmHttpBackend extends HttpTransportBackend:
     // Capture the environment ZIO-natively and thread it into each handler via provideEnvironment,
     // so Routes stay `Routes[Any]` — Server.serve then needs only `Server`, avoiding the generic-R
     // HasNoScope constraint. No Unsafe, no runtime capture.
-    ZIO.environment[R].flatMap { env =>
-      val ep = settings.httpEndpoint.stripPrefix("/")
-      if settings.stateless then serve(statelessRoutes(router, env, settings), settings)
-      else
-        // The idle-session sweeper is forked here (scoped to the server's lifetime), NOT in
-        // httpRoutes — tests drive httpRoutes directly and must not leak a sweeper fiber each.
-        Ref.make(Map.empty[String, Session]).flatMap { store =>
-          val routes = streamableRoutes(router, ep, env, store, settings)
-          ZIO.scoped {
-            evictIdleSessions(store, settings).forkScoped *> serve(routes, settings)
+    ZIO
+      .fromEither(HttpRequestGuards.validateSettings(settings))
+      .mapError(msg => new IllegalArgumentException(s"Invalid HTTP settings: $msg")) *>
+      ZIO.environment[R].flatMap { env =>
+        val ep = settings.httpEndpoint.stripPrefix("/")
+        if settings.stateless then serve(statelessRoutes(router, env, settings), settings)
+        else
+          // The idle-session sweeper is forked here (scoped to the server's lifetime), NOT in
+          // httpRoutes — tests drive httpRoutes directly and must not leak a sweeper fiber each.
+          Ref.Synchronized.make(Map.empty[String, Session]).flatMap { store =>
+            val routes = streamableRoutes(router, ep, env, store, settings)
+            ZIO.scoped {
+              evictIdleSessions(store, settings).forkScoped *> serve(routes, settings)
+            }
           }
-        }
-    }
+      }
 
   /** Periodically drop streamable sessions idle past `settings.sessionIdleTimeout` — abandoned
     * clients would otherwise grow the store forever. Sessions with a live GET stream are exempt
-    * (push-only consumers may never POST). Eviction shuts the outbound queue down; the session's
-    * tasks stay in the TaskManager until their own TTL.
+    * (push-only consumers may never POST). Eviction calls `session.terminate`, which interrupts the
+    * session's in-flight requests, releases (interrupts) its tasks and shuts the outbound queue
+    * down. The store is additionally bounded by `settings.maxSessions` at mint time (see
+    * [[streamablePostDispatch]]).
     */
   private[fastmcp] def evictIdleSessions(
       store: Ref[Map[String, Session]],
@@ -70,7 +75,7 @@ object JvmHttpBackend extends HttpTransportBackend:
               (s.lastSeen zip s.hasActiveGet).map((seen, live) => !live && now - seen > timeoutMs)
             }
             _ <- store.update(_ -- expired.map(_.sessionId))
-            _ <- ZIO.foreachDiscard(expired)(_.outbound.shutdown)
+            _ <- ZIO.foreachDiscard(expired)(_.terminate)
           yield ()
         val interval = Duration.fromMillis(math.max(timeoutMs / 4, 1000L))
         sweep.repeat(Schedule.spaced(interval)).unit
@@ -87,7 +92,7 @@ object JvmHttpBackend extends HttpTransportBackend:
     val ep = settings.httpEndpoint.stripPrefix("/")
     if settings.stateless then ZIO.succeed(statelessRoutes(router, env, settings))
     else
-      Ref
+      Ref.Synchronized
         .make(Map.empty[String, Session])
         .map(store => streamableRoutes(router, ep, env, store, settings))
 
@@ -132,7 +137,13 @@ object JvmHttpBackend extends HttpTransportBackend:
     // Server.customized with NettyConfig.default is behavior-identical to Server.defaultWith
     // (Server.live supplies NettyConfig.default internally); going through it is what lets the
     // channel type be pinned.
-    val config = Server.Config.default.binding(settings.host, settings.port)
+    // `disableRequestStreaming(n)` installs netty's HttpObjectAggregator with `n` as its cap: bodies
+    // above `maxRequestBodyBytes` (declared or chunked) are answered 413 on the wire before the
+    // handler runs. The first-party checks in `postGate` / `bodyTooLarge` give the same verdict on
+    // paths with no aggregator in front (in-memory route tests).
+    val config = Server.Config.default
+      .binding(settings.host, settings.port)
+      .disableRequestStreaming(settings.maxRequestBodyBytes)
     val netty = nettyConfigFor(resolveChannelType())
     Server
       .serve(routes)
@@ -151,7 +162,7 @@ object JvmHttpBackend extends HttpTransportBackend:
     val ep = settings.httpEndpoint.stripPrefix("/")
     Routes(
       Method.POST / ep -> handler { (request: Request) =>
-        handleStatelessPost(router, request, settings).provideEnvironment(env)
+        guarded(handleStatelessPost(router, request, settings)).provideEnvironment(env)
       },
       Method.GET / ep -> handler((_: Request) =>
         ZIO.succeed(Response.status(Status.MethodNotAllowed))
@@ -161,6 +172,23 @@ object JvmHttpBackend extends HttpTransportBackend:
       )
     )
 
+  /** First-party error boundary: any non-interrupt Cause (a defect, or a failure no handler mapped)
+    * becomes a JSON-RPC 500 with a fixed message; the full cause is logged server-side only.
+    * Interrupts (client disconnect) keep zio-http's own 408 path. `effect` is by-name and suspended
+    * so a synchronous throw while the handler effect is BUILT (the eager header gates) is caught
+    * too — parity with the Bun boundary.
+    */
+  private[fastmcp] def guarded[R](effect: => URIO[R, Response]): URIO[R, Response] =
+    ZIO.suspendSucceed(effect).catchSomeCause {
+      case cause if !cause.isInterruptedOnly =>
+        ZIO
+          .logWarningCause("HTTP handler failed", cause)
+          .as(errorResponse(Status.InternalServerError, HttpRequestGuards.InternalErrorMessage))
+    }
+
+  private def reject(r: HttpRequestGuards.Rejection): Response =
+    errorResponse(Status.fromInt(r.status), r.message)
+
   /** One stateless POST: fresh ephemeral session, dispatch a single frame, return the reply (or
     * `202 Accepted` for a notification, which produces no body).
     */
@@ -169,7 +197,7 @@ object JvmHttpBackend extends HttpTransportBackend:
       request: Request,
       settings: McpServerSettings
   ): ZIO[R, Nothing, Response] =
-    postHeaderError(request, settings.allowedHosts.getOrElse(Set.empty), requireSse = false) match
+    postHeaderError(request, settings, requireSse = false) match
       case Some(err) => ZIO.succeed(err)
       case None => statelessDispatch(router, request, settings)
 
@@ -183,22 +211,27 @@ object JvmHttpBackend extends HttpTransportBackend:
         body <- request.body.asString.mapError(e =>
           Option(e.getMessage).getOrElse("body read error")
         )
-        resp <- MessageLoop.parseFrame(body) match
-          case Left(parseFailure) =>
-            ZIO.succeed(Response.json(parseFailure.toJson).status(Status.BadRequest))
-          case Right(message) =>
-            if isModernRequest(request, message) then modernPost(router, request, message, settings)
-            else
-              for
-                session <- Session.make("stateless", supportsTasks = false)
-                // Legacy stateless compatibility mode starts ready without a handshake.
-                _ <- session.markInitialized
-                reply <- router.dispatch(session, message)
-              yield (message, reply) match
-                case (_: JsonRpcMessage.Invalid, Some(r)) =>
-                  Response.json(r.toJson).status(Status.BadRequest)
-                case (_, Some(r)) => Response.json(r.toJson)
-                case (_, None) => Response.status(Status.Accepted)
+        resp <-
+          if HttpRequestGuards.bodyTooLarge(body, settings) then
+            ZIO.succeed(reject(HttpRequestGuards.bodyTooLargeRejection(settings)))
+          else
+            MessageLoop.parseFrame(body, router.limits) match
+              case Left(parseFailure) =>
+                ZIO.succeed(Response.json(parseFailure.toJson).status(Status.BadRequest))
+              case Right(message) =>
+                if isModernRequest(request, message) then
+                  modernPost(router, request, message, settings)
+                else
+                  for
+                    session <- Session.make("stateless", supportsTasks = false)
+                    // Legacy stateless compatibility mode starts ready without a handshake.
+                    _ <- session.markInitialized
+                    reply <- router.dispatch(session, message)
+                  yield (message, reply) match
+                    case (_: JsonRpcMessage.Invalid, Some(r)) =>
+                      Response.json(r.toJson).status(Status.BadRequest)
+                    case (_, Some(r)) => Response.json(r.toJson)
+                    case (_, None) => Response.status(Status.Accepted)
       yield resp
     effect.catchAll(msg => ZIO.succeed(errorResponse(Status.BadRequest, msg)))
 
@@ -210,23 +243,18 @@ object JvmHttpBackend extends HttpTransportBackend:
       router: McpRouter[R],
       ep: String,
       env: ZEnvironment[R],
-      store: Ref[Map[String, Session]],
+      store: Ref.Synchronized[Map[String, Session]],
       settings: McpServerSettings
   ): Routes[Any, Response] =
     Routes(
       Method.POST / ep -> handler { (request: Request) =>
-        handleStreamablePost(router, store, request, settings).provideEnvironment(env)
+        guarded(handleStreamablePost(router, store, request, settings)).provideEnvironment(env)
       },
       Method.GET / ep -> handler { (request: Request) =>
-        handleStreamableGet(store, request, settings)
+        guarded(handleStreamableGet(store, request, settings))
       },
       Method.DELETE / ep -> handler { (request: Request) =>
-        handleStreamableDelete(
-          store,
-          request,
-          settings.disallowDelete,
-          settings.allowedHosts.getOrElse(Set.empty)
-        )
+        guarded(handleStreamableDelete(store, request, settings))
       }
     )
 
@@ -242,17 +270,17 @@ object JvmHttpBackend extends HttpTransportBackend:
     */
   private def handleStreamablePost[R](
       router: McpRouter[R],
-      store: Ref[Map[String, Session]],
+      store: Ref.Synchronized[Map[String, Session]],
       request: Request,
       settings: McpServerSettings
   ): ZIO[R, Nothing, Response] =
-    postHeaderError(request, settings.allowedHosts.getOrElse(Set.empty), requireSse = true) match
+    postHeaderError(request, settings, requireSse = true) match
       case Some(err) => ZIO.succeed(err)
       case None => streamablePostDispatch(router, store, request, settings)
 
   private def streamablePostDispatch[R](
       router: McpRouter[R],
-      store: Ref[Map[String, Session]],
+      store: Ref.Synchronized[Map[String, Session]],
       request: Request,
       settings: McpServerSettings
   ): ZIO[R, Nothing, Response] =
@@ -261,10 +289,12 @@ object JvmHttpBackend extends HttpTransportBackend:
         ZIO.succeed(
           errorResponse(Status.BadRequest, Option(err.getMessage).getOrElse("body read error"))
         )
+      case Right(body) if HttpRequestGuards.bodyTooLarge(body, settings) =>
+        ZIO.succeed(reject(HttpRequestGuards.bodyTooLargeRejection(settings)))
       case Right(body) =>
         // Parse BEFORE touching the session store: a malformed or non-initialize body must never
         // mint a durable session (it used to — an unauthenticated memory leak).
-        MessageLoop.parseFrame(body) match
+        MessageLoop.parseFrame(body, router.limits) match
           case Left(parseFailure) =>
             ZIO.succeed(Response.json(parseFailure.toJson).status(Status.BadRequest))
           case Right(message) =>
@@ -280,12 +310,7 @@ object JvmHttpBackend extends HttpTransportBackend:
                         respondStreamable(router, session, message, isNew = false, settings)
                   }
                 case None if MessageLoop.isInitialize(message) =>
-                  for
-                    id <- JvmTransportBackend.randomId()
-                    session <- Session.make(id)
-                    _ <- store.update(_ + (session.sessionId -> session))
-                    resp <- respondStreamable(router, session, message, isNew = true, settings)
-                  yield resp
+                  mintSession(router, store, message, settings)
                 case None =>
                   ZIO.succeed(
                     errorResponse(
@@ -294,6 +319,50 @@ object JvmHttpBackend extends HttpTransportBackend:
                     )
                   )
     }
+
+  /** Mint a durable session for a header-less legacy `initialize`, bounded by
+    * `settings.maxSessions`. The cap check, the idle/live snapshot, the victim choice and the
+    * insert all run inside ONE `store.modifyZIO` on the `Ref.Synchronized` store, so concurrent
+    * initializes are serialised at the cap: the store never exceeds it, and a newcomer is never
+    * refused while an evictable session exists. When the store is full the longest-idle session
+    * WITHOUT a live GET is evicted — terminated, so its in-flight requests and tasks are released
+    * along with its queue — and the newcomer admitted; only when every stored session holds a live
+    * GET is the request refused with 503.
+    */
+  private def mintSession[R](
+      router: McpRouter[R],
+      store: Ref.Synchronized[Map[String, Session]],
+      message: JsonRpcMessage,
+      settings: McpServerSettings
+  ): URIO[R, Response] =
+    for
+      id <- JvmTransportBackend.randomId()
+      session <- Session.make(id)
+      outcome <- store.modifyZIO { m =>
+        if !HttpRequestGuards.capReached(m.size, settings) then
+          ZIO.succeed((Right(None), m + (id -> session)))
+        else
+          ZIO
+            .foreach(m.values.toList) { s =>
+              (s.lastSeen zip s.hasActiveGet).map((seen, live) => (s.sessionId, seen, live))
+            }
+            .map { snapshot =>
+              HttpRequestGuards.pickEvictable(snapshot) match
+                case Some(victim) => (Right(Some(m(victim))), (m - victim) + (id -> session))
+                case None => (Left(()), m)
+            }
+      }
+      resp <- outcome match
+        case Right(None) => respondStreamable(router, session, message, isNew = true, settings)
+        case Right(Some(victim)) =>
+          ZIO.logWarning(
+            s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted idle session ${victim.sessionId}"
+          ) *> victim.terminate *>
+            respondStreamable(router, session, message, isNew = true, settings)
+        case Left(()) =>
+          session.terminate
+            .as(errorResponse(Status.ServiceUnavailable, HttpRequestGuards.SessionLimitMessage))
+    yield resp
 
   /** Dispatch one streamable POST frame. A *request* gets an SSE response that streams the
     * notifications and sub-requests it emits (progress, sampling, elicitation) followed by its
@@ -423,9 +492,13 @@ object JvmHttpBackend extends HttpTransportBackend:
                 .status(status)
             )
           case Right(_) =>
-            Session.make(s"request-${req.id.toString}").flatMap { session =>
-              streamRequest(router, session, req, isNew = false, settings, modern = true)
-            }
+            // Peer address of the request — the default owner key for bearer-task buckets
+            // (`TaskOwnerKey.Transport`); behind a reverse proxy use `TaskOwnerKey.Custom`.
+            Session
+              .make(s"request-${req.id.toString}", clientKey = clientKeyOf(request))
+              .flatMap { session =>
+                streamRequest(router, session, req, isNew = false, settings, modern = true)
+              }
       case _: JsonRpcMessage.Invalid =>
         val failure: JsonRpcMessage = JsonRpcMessage.Failure(
           None,
@@ -478,6 +551,10 @@ object JvmHttpBackend extends HttpTransportBackend:
   private def isModernRequest(request: Request, message: JsonRpcMessage): Boolean =
     ModernHttpValidation.isModern(name => request.rawHeader(name), message)
 
+  /** The TCP peer address as seen by netty (`None` for in-memory `routes.runZIO` requests). */
+  private def clientKeyOf(request: Request): Option[String] =
+    request.remoteAddress.map(_.getHostAddress)
+
   /** Merge a heartbeat into an SSE stream so proxies / idle timeouts don't kill long-quiet
     * connections. The `ping` event type is ignored by conforming clients (the TS SDK only parses
     * `message` events); zio-http 3.4.0 has no comment-frame support. Halts with the data stream.
@@ -513,13 +590,12 @@ object JvmHttpBackend extends HttpTransportBackend:
       request: Request,
       settings: McpServerSettings
   ): ZIO[Any, Nothing, Response] =
-    val allowedHosts = settings.allowedHosts.getOrElse(Set.empty)
-    hostError(request, allowedHosts) match
+    hostError(request, settings) match
       case Some(err) => ZIO.succeed(err)
       case None if request.rawHeader("mcp-protocol-version").exists(Protocol.isStatelessVersion) =>
         ZIO.succeed(Response.status(Status.MethodNotAllowed))
       case None =>
-        getHeaderError(request, allowedHosts) match
+        getHeaderError(request, settings) match
           case Some(err) => ZIO.succeed(err)
           case None => streamableGetDispatch(store, request, settings)
 
@@ -552,39 +628,33 @@ object JvmHttpBackend extends HttpTransportBackend:
             }
         }
 
-  /** DELETE terminates a session: drop it from the store and shut down its outbound queue (which
-    * ends any open `GET` SSE stream). `405` when delete is disallowed by settings.
+  /** DELETE terminates a session: drop it from the store and `Session.terminate` it (in-flight
+    * requests interrupted, its tasks released, outbound queue shut down — which ends any open `GET`
+    * SSE stream). `405` when delete is disallowed by settings.
     */
   private def handleStreamableDelete(
       store: Ref[Map[String, Session]],
       request: Request,
-      disallowDelete: Boolean,
-      allowedHosts: Set[String]
+      settings: McpServerSettings
   ): ZIO[Any, Nothing, Response] =
-    hostError(request, allowedHosts) match
+    hostError(request, settings) match
       case Some(err) => ZIO.succeed(err)
       case None if request.rawHeader("mcp-protocol-version").exists(Protocol.isStatelessVersion) =>
         ZIO.succeed(Response.status(Status.MethodNotAllowed))
-      case None if disallowDelete => ZIO.succeed(Response.status(Status.MethodNotAllowed))
+      case None if settings.disallowDelete => ZIO.succeed(Response.status(Status.MethodNotAllowed))
       case None =>
         request.rawHeader(SessionIdHeader) match
           case None =>
             ZIO.succeed(Response.status(Status.MethodNotAllowed))
           case Some(id) =>
             store.modify(sessions => (sessions.get(id), sessions - id)).flatMap {
-              case Some(session) => session.outbound.shutdown.as(Response.status(Status.Ok))
+              case Some(session) => session.terminate.as(Response.status(Status.Ok))
               case None => ZIO.succeed(errorResponse(Status.NotFound, s"Session not found: $id"))
             }
 
-  // --- Header validation (validate `Accept` + `mcp-protocol-version`; lenient when absent, so
-  // header-less clients still work while clearly-wrong headers are rejected per spec). ---
-
-  private def acceptsAny(req: Request, types: List[String]): Boolean =
-    req.rawHeader("accept") match
-      case None => true // absent Accept is treated as "accepts anything"
-      case Some(a) =>
-        val lower = a.toLowerCase
-        lower.contains("*/*") || types.exists(lower.contains)
+  // --- Header validation. The decisions live in the shared [[HttpRequestGuards]] (one truth for
+  // JVM and Bun); this backend only renders the verdicts. `mcp-protocol-version` stays lenient when
+  // absent so header-less clients still work while clearly-wrong headers are rejected per spec. ---
 
   /** `mcp-protocol-version` header validation. Absent ⇒ assume
     * [[Protocol.DefaultNegotiatedProtocolVersion]] per the spec's backwards-compatibility rule
@@ -596,15 +666,27 @@ object JvmHttpBackend extends HttpTransportBackend:
       .getOrElse(Protocol.DefaultNegotiatedProtocolVersion)
     Protocol.SupportedProtocolVersions.contains(declared)
 
-  /** Reject (403) when DNS-rebinding protection is on and the request's Host/Origin isn't allowed.
+  /** Reject (403) when DNS-rebinding protection is on and the request's Host/Origin isn't allowed
+    * (full-origin match, see [[HostGuard]]).
     */
-  private def hostError(req: Request, allowedHosts: Set[String]): Option[Response] =
-    if HostGuard.isAllowed(req.rawHeader("host"), req.rawHeader("origin"), allowedHosts) then None
-    else Some(errorResponse(Status.Forbidden, "Host/Origin not allowed (DNS-rebinding protection)"))
+  private def hostError(req: Request, settings: McpServerSettings): Option[Response] =
+    HttpRequestGuards.hostGate(gateHeader(req), settings).map(reject)
 
-  /** POST guard: `Accept` (if present) must allow `application/json` — and on the streamable
-    * transport (`requireSse`) `text/event-stream` too, since request replies stream as SSE (spec
-    * requires clients to accept both).
+  /** Header lookup for the gates: a header sent more than once is seen as its `", "`-joined value
+    * (what Bun's `Headers.get` returns), so a duplicated `Host`/`Origin` fails the origin parser
+    * closed (403) on both backends instead of only the first value being checked.
+    */
+  private def gateHeader(req: Request)(name: String): Option[String] =
+    val values = req.headers.iterator
+      .filter(_.headerName.equalsIgnoreCase(name))
+      .map(_.renderedValue)
+      .toList
+    if values.isEmpty then None else Some(values.mkString(", "))
+
+  /** POST guard, evaluated on headers only and BEFORE the body is read or any session is minted:
+    * 403 Host/Origin → 415 unless `Content-Type` is `application/json` → 413 when the declared
+    * `Content-Length` exceeds `maxRequestBodyBytes` → 406 unless `Accept` allows `application/json`
+    * (and `text/event-stream` too on the streamable transport, `requireSse`).
     *
     * Note this guard does NOT check `mcp-protocol-version`: on POST the version travels in the
     * initialize payload (legacy) or is validated by [[ModernHttpValidation]] (modern, `-32022`).
@@ -612,24 +694,21 @@ object JvmHttpBackend extends HttpTransportBackend:
     */
   private def postHeaderError(
       req: Request,
-      allowedHosts: Set[String],
+      settings: McpServerSettings,
       requireSse: Boolean
   ): Option[Response] =
-    hostError(req, allowedHosts).orElse {
-      if !acceptsAny(req, List("application/json", "application/*")) then
-        Some(errorResponse(Status.NotAcceptable, "Accept must allow application/json"))
-      else if requireSse && !acceptsAny(req, List("text/event-stream", "text/*")) then
-        Some(errorResponse(Status.NotAcceptable, "Accept must allow text/event-stream"))
-      else None
-    }
+    HttpRequestGuards.postGate(gateHeader(req), settings, requireSse).map(reject)
 
   /** GET guard (SSE channel): `Accept` (if present) must allow `text/event-stream`. */
-  private def getHeaderError(req: Request, allowedHosts: Set[String]): Option[Response] =
-    hostError(req, allowedHosts).orElse {
+  private def getHeaderError(req: Request, settings: McpServerSettings): Option[Response] =
+    hostError(req, settings).orElse {
       if !protocolVersionOk(req) then
         Some(errorResponse(Status.BadRequest, "Unsupported mcp-protocol-version header"))
-      else if !acceptsAny(req, List("text/event-stream", "text/*")) then
-        Some(errorResponse(Status.NotAcceptable, "Accept must allow text/event-stream"))
+      else if !HttpRequestGuards.acceptsAny(
+          req.rawHeader("accept"),
+          List("text/event-stream", "text/*")
+        )
+      then Some(errorResponse(Status.NotAcceptable, "Accept must allow text/event-stream"))
       else None
     }
 

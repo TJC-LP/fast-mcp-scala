@@ -5,8 +5,8 @@ on:
   push:
     branches: [main]
 
-env:
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up build
         uses: ./.github/actions/setup-build
@@ -27,22 +27,30 @@ jobs:
 
       - name: Check Formatting
         run: ./mill fast-mcp-scala.checkFormat
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
 
       - name: Compile
         run: ./mill fast-mcp-scala.compile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
 
       - name: Test (JVM)
         run: ./mill -i fast-mcp-scala.jvm.test
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
 
       - name: Test (Scala.js on Bun)
         run: ./mill -i fast-mcp-scala.js.test
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
 
   scala-native:
     name: Scala Native (linux-x64)
     runs-on: ubuntu-latest # clang + jq preinstalled; SN 0.5 recommends LLVM >= 17
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Separate cache prefix from the JDK-matrix builds so the Scala Native toolchain artifacts
       # (nativelib/javalib/clib NIR jars) don't churn the main cache.
@@ -53,12 +61,16 @@ jobs:
 
       - name: Test (Scala Native)
         run: ./mill -i fast-mcp-scala.scalaNative.test
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
 
       - name: Link demo binary (AnnotatedServer)
         run: |
           BIN="$(./mill --no-server show fast-mcp-scala.scalaNative.nativeLink 2>/dev/null |
             python3 -c "import sys,json,re; print(re.sub(r'^q?ref:v\d+:[0-9a-f]+:','',json.load(sys.stdin)))")"
           echo "BIN=$BIN" >> "$GITHUB_ENV"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
 
       - name: Stdio smoke over the Scala Native binary
         run: scripts/native-smoke.sh "$BIN"

@@ -24,6 +24,11 @@ final class Session private (
       * client each and keep the legacy task surface.
       */
     val supportsTasks: Boolean,
+    /** Transport-supplied client identity (peer address on the shipped HTTP backends), used to
+      * bucket modern bearer tasks per client. `None` when the transport cannot tell clients apart;
+      * never derived from request content.
+      */
+    val clientKey: Option[String],
     private val protocolVersionRef: Ref[String],
     private val logLevelRef: Ref[Option[LoggingLevel]],
     private val initializedRef: Ref[Boolean],
@@ -38,26 +43,35 @@ final class Session private (
     private val requestContextRef: FiberRef[Option[RequestContext]],
     private val requestIdRef: FiberRef[Option[RequestId]],
     private val inputKeyOccurrencesRef: FiberRef[Option[Ref[Map[String, Int]]]],
-    private val lastSeenRef: Ref[Long],
-    private val activeGetRef: Ref[Boolean]
+    private val lastSeenRef: java.util.concurrent.atomic.AtomicLong,
+    private val activeGetRef: java.util.concurrent.atomic.AtomicBoolean,
+    /** `Some(finalizers)` while live; `None` once [[terminate]] has run (the terminated latch). */
+    private val finalizersRef: Ref[Option[Map[String, UIO[Unit]]]]
 ):
 
   /** Millis timestamp of the last client activity (transports touch on every request). Drives idle
     * eviction of abandoned streamable sessions.
     */
-  def lastSeen: UIO[Long] = lastSeenRef.get
+  def lastSeen: UIO[Long] = ZIO.succeed(lastSeenRef.get())
+
+  /** `(lastSeen, hasActiveGet)` read synchronously — for a single-threaded runtime (Bun) that must
+    * snapshot every stored session and decide an eviction in ONE step, with no fiber yield between
+    * the snapshot and the decision.
+    */
+  private[fastmcp] def idleStateUnsafe(implicit unsafe: Unsafe): (Long, Boolean) =
+    (lastSeenRef.get(), activeGetRef.get())
 
   def touch: UIO[Unit] =
-    ZIO.succeed(java.lang.System.currentTimeMillis()).flatMap(lastSeenRef.set)
+    ZIO.succeed(lastSeenRef.set(java.lang.System.currentTimeMillis()))
 
   /** At most one standalone GET SSE stream may drain `outbound` — two would round-robin-steal
     * messages. `tryAcquireGet` is an atomic test-and-set (false = a stream is already live, answer
     * 409); the stream's finalizer must call [[releaseGet]]. Sessions with a live GET are exempt
     * from idle eviction (push-only consumers may never POST).
     */
-  def tryAcquireGet: UIO[Boolean] = activeGetRef.modify(active => (!active, true))
-  def releaseGet: UIO[Unit] = activeGetRef.set(false)
-  def hasActiveGet: UIO[Boolean] = activeGetRef.get
+  def tryAcquireGet: UIO[Boolean] = ZIO.succeed(activeGetRef.compareAndSet(false, true))
+  def releaseGet: UIO[Unit] = ZIO.succeed(activeGetRef.set(false))
+  def hasActiveGet: UIO[Boolean] = ZIO.succeed(activeGetRef.get())
 
   def protocolVersion: UIO[String] = protocolVersionRef.get
   def setProtocolVersion(v: String): UIO[Unit] = protocolVersionRef.set(v)
@@ -76,8 +90,55 @@ final class Session private (
   def isInitialized: UIO[Boolean] = initializedRef.get
 
   def subscribe(uri: String): UIO[Unit] = subscriptionsRef.update(_ + uri)
+
+  /** Atomically admit a distinct URI within the cap. Re-subscribing an existing URI is free. */
+  def trySubscribe(uri: String, maxSubscriptions: Int): UIO[Boolean] =
+    subscriptionsRef.modify { subscriptions =>
+      if subscriptions.contains(uri) then (true, subscriptions)
+      else if subscriptions.size >= maxSubscriptions then (false, subscriptions)
+      else (true, subscriptions + uri)
+    }
+
   def unsubscribe(uri: String): UIO[Unit] = subscriptionsRef.update(_ - uri)
   def isSubscribed(uri: String): UIO[Boolean] = subscriptionsRef.get.map(_.contains(uri))
+  def subscriptionCount: UIO[Int] = subscriptionsRef.get.map(_.size)
+
+  // --- termination ---
+
+  /** Register (or replace) a keyed finalizer run by [[terminate]]. Keyed so a component that
+    * re-registers on every request stays idempotent (e.g. the task manager releasing the session's
+    * tasks). A finalizer registered AFTER the session was terminated runs immediately instead of
+    * being parked on a dead session — so a request whose registration completes after a racing
+    * `DELETE` / idle eviction still gets its state released.
+    */
+  def addFinalizer(key: String)(f: UIO[Unit]): UIO[Unit] =
+    finalizersRef
+      .modify {
+        case Some(fs) => (false, Some(fs.updated(key, f)))
+        case None => (true, None)
+      }
+      .flatMap(late => ZIO.when(late)(f.ignore).unit)
+
+  /** True once [[terminate]] has run. */
+  def isTerminated: UIO[Boolean] = finalizersRef.get.map(_.isEmpty)
+
+  /** Terminate the session: latch the terminated flag, interrupt the session's in-flight request
+    * fibers (a request cannot outlive its session; `interruptFork` so a fiber parked in an
+    * uninterruptible region never blocks the caller), run every registered finalizer once (failures
+    * ignored), then shut the outbound channel down. Idempotent. A strict superset of
+    * `outbound.shutdown`; transports call it on `DELETE` and idle eviction so session-bound state
+    * (tasks) does not outlive the session.
+    */
+  def terminate: UIO[Unit] =
+    finalizersRef.getAndSet(None).flatMap {
+      case None => ZIO.unit
+      case Some(fs) =>
+        inflight
+          .getAndSet(Map.empty)
+          .flatMap(fibers => ZIO.foreachDiscard(fibers.values)(_._2.interruptFork)) *>
+          ZIO.foreachDiscard(fs.values)(_.ignore) *>
+          outbound.shutdown
+    }
 
   /** Allocate the next id for a server-initiated request. Prefixed so server ids never collide with
     * client-issued ids on the same connection.
@@ -155,6 +216,11 @@ final class Session private (
 
   def clearInflight(id: RequestId): UIO[Unit] = inflight.update(_ - id)
 
+  /** Ids currently tracked in the in-flight registry (test seam: lets a cancellation test wait
+    * until `trackInflight` has run, since the dispatcher forks before tracking).
+    */
+  private[fastmcp] def inflightIds: UIO[Set[RequestId]] = inflight.get.map(_.keySet)
+
   /** Interrupt the in-flight fiber for `id`, if any (drives `notifications/cancelled`). The
     * `initialize` request is exempt — the spec forbids cancelling it.
     */
@@ -198,7 +264,11 @@ final class Session private (
 
 object Session:
 
-  def make(sessionId: String, supportsTasks: Boolean = true): UIO[Session] =
+  def make(
+      sessionId: String,
+      supportsTasks: Boolean = true,
+      clientKey: Option[String] = None
+  ): UIO[Session] =
     for
       pv <- Ref.make("")
       ll <- Ref.make(Option.empty[LoggingLevel])
@@ -218,11 +288,13 @@ object Session:
       inputOccurrences = Unsafe.unsafe(implicit u =>
         FiberRef.unsafe.make(Option.empty[Ref[Map[String, Int]]])
       )
-      seen <- Ref.make(java.lang.System.currentTimeMillis())
-      activeGet <- Ref.make(false)
+      seen = new java.util.concurrent.atomic.AtomicLong(java.lang.System.currentTimeMillis())
+      activeGet = new java.util.concurrent.atomic.AtomicBoolean(false)
+      finalizers <- Ref.make(Option(Map.empty[String, UIO[Unit]]))
     yield new Session(
       sessionId,
       supportsTasks,
+      clientKey,
       pv,
       ll,
       init,
@@ -238,5 +310,6 @@ object Session:
       requestId,
       inputOccurrences,
       seen,
-      activeGet
+      activeGet,
+      finalizers
     )

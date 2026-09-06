@@ -14,6 +14,10 @@ import com.tjclp.fastmcp.server.transport.*
   * The Bun streamable transport streams server→client messages (sampling / elicitation / progress /
   * logging) on each request's own POST SSE response, so the full active conformance suite passes on
   * JS, matching the JVM transport.
+  *
+  * `startStatefulHttp()` returns a [[BunHttpHandle]]: like `runHttp()`, it runs the idle-session
+  * sweeper (`sessionIdleTimeout`), bounds the legacy store (`maxSessions`) and applies every HTTP
+  * hardening gate for the listener's lifetime.
   */
 object ConformanceServerJs:
 

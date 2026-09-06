@@ -7,7 +7,7 @@ import scala.util.Try
 
 import zio.json.ast.Json
 
-import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError}
+import com.tjclp.fastmcp.jsonrpc.{JsonFields, JsonRpcMessage, McpError}
 
 /** 2026-07-28 Streamable HTTP header/body consistency checks. Header lookup is supplied by the
   * platform backend so the security-sensitive comparison logic is identical on JVM and Bun.
@@ -48,8 +48,7 @@ private[fastmcp] object HttpHeaderValidation:
     if sourceField.isEmpty then Right(())
     else
       val expected = request.params
-        .collect { case Json.Obj(fields) => fields.toMap }
-        .flatMap(_.get(sourceField))
+        .flatMap(JsonFields.get(_, sourceField))
         .collect { case Json.Str(value) => value }
       expected match
         case None =>
@@ -63,10 +62,12 @@ private[fastmcp] object HttpHeaderValidation:
   ): Either[McpError, Unit] =
     if request.method != "tools/call" then Right(())
     else
-      val params =
-        request.params.collect { case Json.Obj(fields) => fields.toMap }.getOrElse(Map.empty)
-      val name = params.get("name").collect { case Json.Str(value) => value }
-      val args = params.get("arguments").collect { case Json.Obj(fields) => Json.Obj(fields*) }
+      val name = request.params
+        .flatMap(JsonFields.get(_, "name"))
+        .collect { case Json.Str(value) => value }
+      val args = request.params
+        .flatMap(JsonFields.get(_, "arguments"))
+        .collect { case Json.Obj(fields) => Json.Obj(fields*) }
       name.flatMap(schemas.get) match
         case None => Right(()) // unknown tool is classified by the router as Invalid Params
         case Some(schema) =>
@@ -191,15 +192,21 @@ private[fastmcp] object HttpHeaderValidation:
 
   private def decodeHeaderValue(value: String): Either[McpError, String] =
     if value.startsWith(EncodedPrefix) && value.endsWith(EncodedSuffix) then
-      val payload = value.substring(EncodedPrefix.length, value.length - EncodedSuffix.length)
-      Try(Base64.getDecoder.decode(payload)).toEither.left
-        .map(_ => McpError.headerMismatch("Malformed Base64 header sentinel"))
-        .flatMap { bytes =>
-          val decoded = new String(bytes, StandardCharsets.UTF_8)
-          if java.util.Arrays.equals(bytes, decoded.getBytes(StandardCharsets.UTF_8)) then
-            Right(decoded)
-          else Left(McpError.headerMismatch("Base64 header value is not valid UTF-8"))
-        }
+      // `=?base64?=` (10 chars, prefix and suffix overlap on the `?`) and the empty-payload
+      // `=?base64??=` (11 chars) are malformed sentinels, not plain values; the substring below
+      // would throw StringIndexOutOfBounds for the first, so refuse before slicing.
+      if value.length <= EncodedPrefix.length + EncodedSuffix.length then
+        Left(McpError.headerMismatch("Malformed Base64 header sentinel"))
+      else
+        val payload = value.substring(EncodedPrefix.length, value.length - EncodedSuffix.length)
+        Try(Base64.getDecoder.decode(payload)).toEither.left
+          .map(_ => McpError.headerMismatch("Malformed Base64 header sentinel"))
+          .flatMap { bytes =>
+            val decoded = new String(bytes, StandardCharsets.UTF_8)
+            if java.util.Arrays.equals(bytes, decoded.getBytes(StandardCharsets.UTF_8)) then
+              Right(decoded)
+            else Left(McpError.headerMismatch("Base64 header value is not valid UTF-8"))
+          }
     else validatePlainValue(value)
 
   private def validatePlainValue(value: String): Either[McpError, String] =
