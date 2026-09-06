@@ -38,8 +38,9 @@ that fast-mcp-scala does not implement yet:
 ## Protocol tracking
 
 New MCP specification revisions are implemented within the Tier 2 six-month window, and the
-conformance oracle pinned in `scripts/conformance.sh` is bumped deliberately, with the reasoning
-recorded in [docs/2026-07-28-upgrade.md](docs/2026-07-28-upgrade.md).
+conformance harness pinned in `conformance/package.json` (frozen by `conformance/bun.lock`) is
+bumped deliberately, with the reasoning recorded in
+[docs/2026-07-28-upgrade.md](docs/2026-07-28-upgrade.md).
 
 ## SDK tiering
 
