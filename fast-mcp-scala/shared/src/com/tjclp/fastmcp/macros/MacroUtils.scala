@@ -47,18 +47,31 @@ private[macros] object MacroUtils:
     val annotTpe = TypeRepr.of[A]
     sym.annotations.filter(_.tpe <:< annotTpe)
 
-  // Gets a reference to the method within its owner object
+  /** Wording shared by the two "not an object" diagnostics so tests can assert one substring. */
+  private[macros] val NotAnObjectHint: String =
+    "requires the singleton type of an object (e.g. scanAnnotations[MyServer.type])"
+
+  /** Emit `owner.<method>` eta-expanded to a `FunctionN`, denoting EXACTLY `methodSym`.
+    *
+    * `Select(qualifier, symbol)` builds a symbol-designated `TermRef` whose denotation is the
+    * symbol's own (not a by-name member lookup), so overloads declared on the same object can never
+    * be confused: schema derivation, argument decoding and invocation all see the annotated
+    * declaration. The eta-expansion yields `Block(DefDef($anonfun(<original param names>)),
+    * Closure(Ident($anonfun)))`, the shape read by `MapToFunctionMacro.tryGetRealParamNames` and
+    * `FunctionAnalyzer.maybeRealParamNames`.
+    */
   def getMethodRefExpr(using
       quotes: Quotes
   )(ownerSym: quotes.reflect.Symbol, methodSym: quotes.reflect.Symbol): Expr[Any] =
     import quotes.reflect.*
-    val companionSym = ownerSym.companionModule
-    val methodSymOpt = companionSym.declaredMethod(methodSym.name).headOption.getOrElse {
+    // Defensive backstop only: RegistrationMacro reports this first with the full T-aware message.
+    if !ownerSym.flags.is(Flags.Module) then
       report.errorAndAbort(
-        s"Could not find method symbol for '${methodSym.name}' in ${companionSym.fullName}"
+        s"Cannot bind annotated method '${methodSym.name}' on ${ownerSym.fullName}: annotation " +
+          s"scanning $NotAnObjectHint."
       )
-    }
-    Select(Ref(companionSym), methodSymOpt).etaExpand(Symbol.spliceOwner).asExprOf[Any]
+    val moduleSym = ownerSym.companionModule // module class -> its module value (the Ref target)
+    Select(Ref(moduleSym), methodSym).etaExpand(Symbol.spliceOwner).asExprOf[Any]
 
   private def stripTerm(using quotes: Quotes)(term: quotes.reflect.Term): quotes.reflect.Term =
     import quotes.reflect.*
@@ -108,8 +121,10 @@ private[macros] object MacroUtils:
     term match {
       case Apply(Select(New(_), _), argTerms) =>
         argTerms.foreach {
-          case NamedArg("name", valueTerm) => toolName = parseOptionStringLiteral(valueTerm)
-          case NamedArg("description", valueTerm) => toolDesc = parseOptionStringLiteral(valueTerm)
+          case NamedArg("name", valueTerm) =>
+            toolName = parseOptionStringLiteral(valueTerm, "@Tool(name)")
+          case NamedArg("description", valueTerm) =>
+            toolDesc = parseOptionStringLiteral(valueTerm, "@Tool(description)")
           case NamedArg("tags", valueTerm) => toolTags = parseListString(valueTerm)
           case _ => () // Ignore other args
         }
@@ -129,9 +144,10 @@ private[macros] object MacroUtils:
     term match {
       case Apply(Select(New(_), _), argTerms) =>
         argTerms.foreach {
-          case NamedArg("name", valueTerm) => promptName = parseOptionStringLiteral(valueTerm)
+          case NamedArg("name", valueTerm) =>
+            promptName = parseOptionStringLiteral(valueTerm, "@Prompt(name)")
           case NamedArg("description", valueTerm) =>
-            promptDesc = parseOptionStringLiteral(valueTerm)
+            promptDesc = parseOptionStringLiteral(valueTerm, "@Prompt(description)")
           case _ => ()
         }
       case _ => ()
@@ -233,7 +249,7 @@ private[macros] object MacroUtils:
                 }
               // Named schema
               case NamedArg("schema", valueTerm) =>
-                paramSchema = parseOptionStringLiteral(valueTerm)
+                paramSchema = parseOptionStringLiteral(valueTerm, "@Param(schema)")
                 schemaSetByName = true
               // Positional args: description, examples, required, schema
               case term =>
@@ -253,7 +269,7 @@ private[macros] object MacroUtils:
                       case _ => ()
                     }
                   case 3 if !schemaSetByName =>
-                    paramSchema = parseOptionStringLiteral(term)
+                    paramSchema = parseOptionStringLiteral(term, "@Param(schema)")
                   case _ => ()
                 }
                 positionalIndex += 1
@@ -274,15 +290,6 @@ private[macros] object MacroUtils:
     import quotes.reflect.*
 
     val tpe = rawTpe.dealias.simplified
-
-    def hasDefaultValue(owner: Symbol, fieldIndex: Int): Boolean =
-      if owner == Symbol.noSymbol then false
-      else
-        val candidateNames = List(
-          s"$$lessinit$$greater$$default$$${fieldIndex + 1}",
-          s"apply$$default$$${fieldIndex + 1}"
-        )
-        candidateNames.exists(name => owner.methodMember(name).nonEmpty)
 
     def fieldAnnotation(fieldSym: Symbol, ctorParams: List[Symbol]): Option[Term] =
       extractAnnotation[com.tjclp.fastmcp.core.Param](fieldSym).orElse {
@@ -313,16 +320,19 @@ private[macros] object MacroUtils:
         if !isProduct then None
         else
           val ctorParams = tpeSym.primaryConstructor.paramSymss.flatten
-          val companion = tpeSym.companionModule
 
-          val entries = tpeSym.caseFields.zipWithIndex.flatMap { case (fieldSym, idx) =>
+          val entries = tpeSym.caseFields.flatMap { fieldSym =>
             val fieldTpe = tpe.memberType(fieldSym)
             val nested = schemaMetadataForTypeRepr(fieldTpe)
             val parsedMeta = fieldAnnotation(fieldSym, ctorParams).map { annot =>
               val (desc, examples, required, schema) = parseToolParam(Some(annot))
               if !required then
                 val isOption = fieldTpe <:< TypeRepr.of[Option[?]]
-                val hasDefault = hasDefaultValue(companion, idx)
+                // `HasDefault` lives on the primary-constructor parameter itself (pickled), so a
+                // hand-written companion `apply` overload with defaults can no longer satisfy the
+                // gate on behalf of a field that has none.
+                val hasDefault =
+                  ctorParams.find(_.name == fieldSym.name).exists(_.flags.is(Flags.HasDefault))
                 if !isOption && !hasDefault then
                   report.errorAndAbort(
                     s"Field '${fieldSym.name}' in typed request ${tpeSym.name} is marked as required=false " +
@@ -389,16 +399,26 @@ private[macros] object MacroUtils:
     var resourceDesc: Option[String] = None
     var mimeType: Option[String] = None
 
+    // Typed annotation trees are argument-complete and in constructor order (`uri`, `name`,
+    // `description`, `mimeType`); named arguments stay `NamedArg`, omitted ones are default getters.
     term match {
       case Apply(Select(New(_), _), argTerms) =>
-        argTerms.foreach {
-          // Handle positional URI argument first
-          case Literal(StringConstant(s)) if uri.isEmpty => uri = s
-          case NamedArg("uri", Literal(StringConstant(s))) => uri = s
-          case NamedArg("name", valueTerm) => resourceName = parseOptionStringLiteral(valueTerm)
-          case NamedArg("description", valueTerm) =>
-            resourceDesc = parseOptionStringLiteral(valueTerm)
-          case NamedArg("mimeType", valueTerm) => mimeType = parseOptionStringLiteral(valueTerm)
+        argTerms.zipWithIndex.foreach {
+          case (NamedArg("uri", Literal(StringConstant(s))), _) => uri = s
+          case (NamedArg("name", valueTerm), _) =>
+            resourceName = parseOptionStringLiteral(valueTerm, "@Resource(name)")
+          case (NamedArg("description", valueTerm), _) =>
+            resourceDesc = parseOptionStringLiteral(valueTerm, "@Resource(description)")
+          case (NamedArg("mimeType", valueTerm), _) =>
+            mimeType = parseOptionStringLiteral(valueTerm, "@Resource(mimeType)")
+          case (NamedArg(_, _), _) => ()
+          case (Literal(StringConstant(s)), 0) => uri = s
+          case (valueTerm, 1) =>
+            resourceName = parseOptionStringLiteral(valueTerm, "@Resource(name)")
+          case (valueTerm, 2) =>
+            resourceDesc = parseOptionStringLiteral(valueTerm, "@Resource(description)")
+          case (valueTerm, 3) =>
+            mimeType = parseOptionStringLiteral(valueTerm, "@Resource(mimeType)")
           case _ => ()
         }
       case _ => ()
@@ -406,50 +426,93 @@ private[macros] object MacroUtils:
     if uri.isEmpty then report.errorAndAbort("@Resource annotation must have a 'uri' parameter.")
     (uri, resourceName, resourceDesc, mimeType)
 
-  // Helper to parse Option[String] literals from annotation arguments
-  private def parseOptionStringLiteral(using quotes: Quotes)(
+  /** Name of the annotation constructor's default getters (`<init>$default$N`), which appear
+    * positionally in a typed annotation tree wherever an argument was omitted.
+    */
+  private val AnnotationDefaultGetterPrefix = "$lessinit$greater$default$"
+
+  /** Classify an `Option[?]`-typed annotation argument. `Some(None)` is the `None` literal or an
+    * omitted argument (every `Option` parameter of `@Tool` / `@Prompt` / `@Resource` / `@Param`
+    * defaults to `None`); `Some(Some(inner))` is `Some(inner)` / `Option(inner)` / `new
+    * Some(inner)` in any qualified or type-applied spelling; `None` is an unrecognised shape.
+    */
+  private def optionArgShape(using quotes: Quotes)(
       argTerm: quotes.reflect.Term
+  ): Option[Option[quotes.reflect.Term]] =
+    import quotes.reflect.*
+    val optionModule = Symbol.requiredModule("scala.Option")
+    val someClass = Symbol.requiredClass("scala.Some")
+
+    def isOptionFactory(fn: Term): Boolean =
+      val callee = fn match
+        case TypeApply(f, _) => f
+        case f => f
+      callee match
+        case Select(qual, "apply") =>
+          val q = qual.tpe.termSymbol
+          q == defn.SomeModule || q == optionModule
+        case Select(New(tpt), "<init>") => tpt.tpe.typeSymbol == someClass
+        case _ => false
+
+    stripTerm(argTerm) match
+      case Apply(fn, List(inner)) if isOptionFactory(fn) => Some(Some(inner))
+      case t if t.symbol == defn.NoneModule || t.tpe.termSymbol == defn.NoneModule => Some(None)
+      case t if t.symbol.exists && t.symbol.name.startsWith(AnnotationDefaultGetterPrefix) =>
+        Some(None)
+      case _ => None
+
+  /** A compile-time constant carried by `term`: a literal, or a `final val` whose type is the
+    * constant itself (`ConstantType`). Anything else is not statically known.
+    */
+  private def constantOf[C](using quotes: Quotes)(term: quotes.reflect.Term)(
+      pf: PartialFunction[quotes.reflect.Constant, C]
+  ): Option[C] =
+    import quotes.reflect.*
+    stripTerm(term) match
+      case Literal(c) => pf.lift(c)
+      case t =>
+        t.tpe.widenTermRefByName.dealias match
+          case ConstantType(c) => pf.lift(c)
+          case _ => None
+
+  /** Parse a literal `Option[C]` annotation argument or ABORT compilation. Annotation arguments are
+    * read at expansion time, so a non-literal payload (`Some(someVal)`) cannot be honoured; failing
+    * loudly keeps the registered name / hint provenance explicit instead of silently falling back
+    * to a default (F4 / TJC-2298). `what` names the argument in the diagnostic, e.g. `@Tool(name)`.
+    */
+  private def parseOptionLiteral[C](using quotes: Quotes)(
+      argTerm: quotes.reflect.Term,
+      what: String,
+      payloadType: String
+  )(pf: PartialFunction[quotes.reflect.Constant, C]): Option[C] =
+    import quotes.reflect.*
+    def fail(t: Term): Nothing =
+      report.errorAndAbort(
+        s"$what must be a literal Option[$payloadType] — Some(<literal>), Option(<literal>) or None " +
+          s"— but was `${t.show}`. Annotation arguments are read at compile time, so only literals " +
+          "(or `final val` constants) can be used here.",
+        argTerm.pos
+      )
+    optionArgShape(argTerm) match
+      case Some(None) => None
+      case Some(Some(inner)) => Some(constantOf(inner)(pf).getOrElse(fail(inner)))
+      case None => fail(argTerm)
+
+  /** Literal `Option[String]` annotation argument (see [[parseOptionLiteral]]). */
+  private[macros] def parseOptionStringLiteral(using quotes: Quotes)(
+      argTerm: quotes.reflect.Term,
+      what: String
   ): Option[String] =
     import quotes.reflect.*
+    parseOptionLiteral(argTerm, what, "String") { case StringConstant(s) => s }
 
-    def parseLiteral(term: Term): Option[String] = stripTerm(term) match {
-      case Literal(StringConstant(s)) => Some(s)
-      case _ => None
-    }
-
-    stripTerm(argTerm) match {
-      // Matches Some("literal") created via Some.apply[String]("literal")
-      case Apply(TypeApply(Select(Ident("Some"), "apply"), _), List(arg)) =>
-        parseLiteral(arg)
-      // Matches Some("literal") created via Some("literal")
-      case Apply(Select(Ident("Some"), "apply"), List(arg)) =>
-        parseLiteral(arg)
-      // Matches None
-      case Select(Ident("None"), _) | Ident("None") => None
-      case _ =>
-        // report.warning(s"Could not parse Option[String] from term: ${argTerm.show}") // Optional warning
-        None
-    }
-
-  // Helper to parse Option[Boolean] literals from annotation arguments
+  /** Literal `Option[Boolean]` annotation argument (see [[parseOptionLiteral]]). */
   private def parseOptionBooleanLiteral(using quotes: Quotes)(
-      argTerm: quotes.reflect.Term
+      argTerm: quotes.reflect.Term,
+      what: String
   ): Option[Boolean] =
     import quotes.reflect.*
-
-    def parseLiteral(term: Term): Option[Boolean] = stripTerm(term) match {
-      case Literal(BooleanConstant(b)) => Some(b)
-      case _ => None
-    }
-
-    stripTerm(argTerm) match {
-      case Apply(TypeApply(Select(Ident("Some"), "apply"), _), List(arg)) =>
-        parseLiteral(arg)
-      case Apply(Select(Ident("Some"), "apply"), List(arg)) =>
-        parseLiteral(arg)
-      case Select(Ident("None"), _) | Ident("None") => None
-      case _ => None
-    }
+    parseOptionLiteral(argTerm, what, "Boolean") { case BooleanConstant(b) => b }
 
   /** Extract MCP ToolAnnotation hints from a @Tool annotation term.
     *
@@ -481,19 +544,19 @@ private[macros] object MacroUtils:
       case Apply(Select(New(_), _), argTerms) =>
         argTerms.foreach {
           case NamedArg("title", valueTerm) =>
-            title = parseOptionStringLiteral(valueTerm)
+            title = parseOptionStringLiteral(valueTerm, "@Tool(title)")
           case NamedArg("readOnlyHint", valueTerm) =>
-            readOnlyHint = parseOptionBooleanLiteral(valueTerm)
+            readOnlyHint = parseOptionBooleanLiteral(valueTerm, "@Tool(readOnlyHint)")
           case NamedArg("destructiveHint", valueTerm) =>
-            destructiveHint = parseOptionBooleanLiteral(valueTerm)
+            destructiveHint = parseOptionBooleanLiteral(valueTerm, "@Tool(destructiveHint)")
           case NamedArg("idempotentHint", valueTerm) =>
-            idempotentHint = parseOptionBooleanLiteral(valueTerm)
+            idempotentHint = parseOptionBooleanLiteral(valueTerm, "@Tool(idempotentHint)")
           case NamedArg("openWorldHint", valueTerm) =>
-            openWorldHint = parseOptionBooleanLiteral(valueTerm)
+            openWorldHint = parseOptionBooleanLiteral(valueTerm, "@Tool(openWorldHint)")
           case NamedArg("returnDirect", valueTerm) =>
-            returnDirect = parseOptionBooleanLiteral(valueTerm)
+            returnDirect = parseOptionBooleanLiteral(valueTerm, "@Tool(returnDirect)")
           case NamedArg("taskSupport", valueTerm) =>
-            taskSupport = parseOptionStringLiteral(valueTerm)
+            taskSupport = parseOptionStringLiteral(valueTerm, "@Tool(taskSupport)")
           case _ => ()
         }
       case _ => ()

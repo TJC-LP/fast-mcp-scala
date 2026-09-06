@@ -10,8 +10,9 @@ reference kept in sync with this file.
 - **JDK 17 or newer.** CI tests the LTS releases 17, 21, and 25.
 - **Mill** comes with the repo: the `./mill` wrapper reads `.mill-version` (1.1.8). Nothing to install.
 - **Bun.** The build provisions its own pinned Bun (1.4.1) through the mill-bun plugin, so the
-  Scala.js tests need nothing extra. A system `bun` is required only for
-  `scripts/conformance.sh`, which fetches the conformance harness with `bunx`.
+  Scala.js tests need nothing extra. `scripts/conformance.sh` prefers that same Mill-managed Bun
+  (`FAST_MCP_BUN` overrides; a system `bun` ≥ 1.4 also works) and installs the conformance
+  harness from the frozen `conformance/bun.lock`.
 - **clang/LLVM ≥ 17** for the Scala Native module (`brew install llvm` on macOS; preinstalled on
   the Ubuntu CI runners).
 - **jq** for `scripts/native-smoke.sh`.
@@ -84,7 +85,12 @@ Every pull request must pass:
 - **Official MCP conformance** (`conformance.yml`) against the JVM and Bun servers, and the same
   server as a GraalVM native image (`native.yml`). Run locally with
   `scripts/conformance.sh {jvm|js|native} [port] [active|2026]`. The expected-failure baselines in
-  `conformance/` are **empty and stay empty**: fix the regression, never grow a baseline.
+  `conformance/` are **empty and stay empty**: fix the regression, never grow a baseline. The
+  harness itself is pinned in `conformance/package.json` and frozen by `conformance/bun.lock`; to
+  bump it, edit the version in `package.json`, run
+  `"$(./mill --no-server show fast-mcp-scala.js.bunExecutable | tr -d '"')" install --cwd conformance`,
+  remove `conformance/node_modules`, and review the `bun.lock` diff (the lock, not `package.json`,
+  is what `--frozen-lockfile` enforces).
 - **Native stdio smoke** (`native.yml`) — `scripts/native-smoke.sh [binary]` drives a stdio binary
   through the full MCP handshake.
 
@@ -149,8 +155,14 @@ through [SECURITY.md](SECURITY.md), never a public issue.
   the README and docs.
 - An annotated tag `vX.Y.Z` on the merge commit triggers `.github/workflows/release.yml`, which
   runs the full test suite and publishes all three artifacts to Maven Central. A `-` qualifier in
-  the tag (`v1.0.0-RC1`) marks the GitHub release as a prerelease.
+  the tag (`v1.0.0-RC1`) marks the GitHub release as a prerelease. The workflow is three jobs —
+  `verify` → `publish` → `github-release` — with no cache restore, and every action it uses is
+  pinned to a full commit SHA (Dependabot keeps the pins current).
 - A follow-up PR bumps the default back to the next `-SNAPSHOT`.
+- Bumping `.mill-version` requires adding the new Mill distributions' SHA-256 lines to
+  `.github/mill-dist.sha256` in the same PR: every CI job verifies the launcher download against
+  that file before the first `./mill`, and on a mismatch CI prints the exact line to add together
+  with the Maven Central `.sha1` cross-check recipe.
 
 ## Code of conduct
 

@@ -1,0 +1,28 @@
+# Keeps the full-SHA action pins (and the pinned conformance harness) current through reviewed PRs.
+# Every `uses:` is pinned to a 40-hex commit with a same-line `# vX.Y.Z` comment; Dependabot
+# rewrites both. The cooldown delays adoption of a freshly moved/hijacked upstream release.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories:
+      - "/"                            # .github/workflows/*.yml
+      - "/.github/actions/setup-build" # the composite ("/" alone covers only a root action.yml);
+                                       # listed explicitly — no reliance on glob support for this
+                                       # ecosystem. Add a line per new composite action.
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7          # let upstream detect a hijacked release before we adopt it
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+  - package-ecosystem: bun
+    directory: "/conformance"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "ci"

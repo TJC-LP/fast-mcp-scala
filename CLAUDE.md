@@ -59,6 +59,7 @@ fast-mcp-scala/
 │   │       │   └── wire/                # 2026-07-28 wire shapes + compatibility-adapter shapes
 │   │       ├── jsonrpc/                 # JSON-RPC 2.0 envelope + McpError
 │   │       ├── codec/                   # DefaultDecodeContext + McpDecoders (zio-json)
+│   │       │   └── JsonLimits.scala     # linear frame pre-scan (maxFrameChars/maxDepth/maxObjectFields)
 │   │       ├── macros/                  # scanAnnotations, @Tool/@Resource/@Prompt processors,
 │   │       │                            #   JsonSchemaMacro + MacroUtils (schema derivation)
 │   │       ├── runtime/                 # RefResolver
@@ -70,8 +71,10 @@ fast-mcp-scala/
 │   │           ├── McpContext.scala     # request context incl. server→client requests
 │   │           ├── McpServerSettings.scala
 │   │           ├── manager/             # Tool/Prompt/Resource/Task managers
+│   │           │   └── ResourceTemplatePattern.scala  # regex-free, linear-time URI template matcher
 │   │           ├── router/              # McpRouter, Builtins, Session, middleware
-│   │           └── transport/           # TransportBackend seam, StdioLoop, MessageLoop, HostGuard
+│   │           └── transport/           # TransportBackend seam, StdioLoop, MessageLoop, HostGuard,
+│   │                                    #   BoundedLines (bounded stdio lines), HttpRequestGuards (HTTP gates)
 │   ├── jvm/
 │   │   ├── src/               # JVM-specific code
 │   │   │   └── com/tjclp/fastmcp/
@@ -180,7 +183,7 @@ server.tool(addTool)
 ### Transports
 
 - **Stdio** (`runStdio()`) — stdin/stdout, used by MCP clients
-- **HTTP** (`runHttp()`) — MCP 2026-07-28 is stateless: one JSON-RPC message per `POST /mcp`, answered with JSON or a request-scoped SSE stream; no sessions, GET stream, or DELETE on the modern path. Older protocol versions are routed to the legacy initialize/session/GET/DELETE adapter, which is on by default; `stateless = true` disables only that adapter's session store. Binds `127.0.0.1` by default (set `host = "0.0.0.0"` for containers); idle legacy sessions evict after `sessionIdleTimeout`; `allowedHosts` enables the DNS-rebinding guard; `keepAliveInterval` enables SSE heartbeats. Full reference: `docs/transports.md`
+- **HTTP** (`runHttp()`) — MCP 2026-07-28 is stateless: one JSON-RPC message per `POST /mcp`, answered with JSON or a request-scoped SSE stream; no sessions, GET stream, or DELETE on the modern path. Older protocol versions are routed to the legacy initialize/session/GET/DELETE adapter, which is on by default; `stateless = true` disables only that adapter's session store. Binds `127.0.0.1` by default (set `host = "0.0.0.0"` for containers); idle legacy sessions evict after `sessionIdleTimeout`; `allowedHosts` enables the DNS-rebinding guard (`Origin` is matched as a full origin against the request `Host`; `allowedOrigins` extends the allow-list); all POSTs require `Content-Type: application/json` (415 otherwise); `maxRequestBodyBytes` (1 MiB) and `maxSessions` (`Some(1000)`) bound request size and the legacy session store; `limits: LimitSettings` bounds every inbound frame on every transport (frame size 4 MiB / depth 64 / object width 1024 → `-32700`; URI length 8192 / subscriptions 1024 → `-32602`); on Bun `startStatefulHttp()`/`startStatelessHttp()` return `BunHttpHandle`; `keepAliveInterval` enables SSE heartbeats. Full reference: `docs/transports.md`
 
 ### Tasks (experimental, off by default)
 
@@ -222,7 +225,16 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   **stateless legacy adapter** all clients share one session identity, so legacy task requests
   there are rejected with `-32601`.
 - Task ids come from the platform CSPRNG (`/dev/urandom` on Scala Native); a task that outlives
-  its TTL is interrupted (not orphaned); terminal results stay pollable until the TTL sweeps them.
+  its TTL is interrupted (not orphaned); terminal results stay pollable until the TTL sweeps them
+  or, after a 30 s grace, the owner/pool stored-entry cap evicts the oldest completed task.
+- Store bounds: per-owner running/stored caps (`maxConcurrentPerSession` 64 / `maxStoredPerOwner`
+  256), per-pool (legacy vs bearer) running/stored ceilings (`maxConcurrentTotal` 1024 /
+  `maxStoredTotal` 4096) with grace-aware, self-first oldest-stale eviction (`-32003` when nothing
+  is evictable); one lazily started sweeper fiber per server on the monotonic clock; `create` is
+  interruption-atomic; `Session.terminate` (DELETE, idle and session-cap eviction) interrupts
+  in-flight requests and releases the session's tasks. Bearer tasks are bucketed per client by
+  `TaskSettings.ownerKey` (`TaskOwnerKey.Transport` = peer address on both HTTP backends; keyless
+  requests share one anonymous bucket; `TaskOwnerKey.Custom` behind an authenticating proxy).
 - Not yet implemented: `input_required` suspension and task-status notifications.
 
 ### Cross-Platform Architecture
@@ -242,7 +254,7 @@ As of 0.5.0 there is **no wrapped SDK** — the MCP protocol layer is pure Scala
 - `core/wire/` + `core/Types.scala` — the 2026-07-28 wire types (plus compatibility-adapter shapes) with ZIO JSON codecs
 - `server/router/` — `McpRouter`, `Builtins`, `Middleware`, `RouterBuilder`, `WireMapping`, Tasks
 - `codec/` — `DefaultDecodeContext` + `McpDecoders` (one ZIO JSON decode path for both platforms)
-- `server/transport/` — `TransportBackend` (the platform seam) + `MessageLoop` (parse → dispatch → encode)
+- `server/transport/` — `TransportBackend` (the platform seam) + `MessageLoop` (limit checks → parse → dispatch → encode)
 
 Each platform provides exactly one `given TransportBackend` (`JvmTransportBackend` / `JsTransportBackend` / `NativeTransportBackend`) and, where HTTP exists, an `HttpTransportBackend` (`JvmHttpBackend`; the JS backend provides both givens; Scala Native provides none, so `runHttp()` does not compile there); everything else is shared. The TypeScript `@modelcontextprotocol/sdk` is used only as a test-time conformance client.
 
@@ -275,12 +287,20 @@ Key test classes:
 - `ConformanceGapsTest` / `ParityFixesTest` - regression nets for closed spec gaps
 - `ConformanceTest` (JS) - 17 cross-platform conformance tests against AnnotatedServer (real TS SDK client over stdio)
 - `JsServerHttpTest` (JS) - Bun HTTP routing, session lifecycle, HostGuard coverage
+- `JsonLimitsTest` / `JvmHttpLimitsTest` / `LimitsWiringTest` / `BoundedLinesTest` - input limits (frame/depth/width, HTTP 400 path, every `parseFrame` call site passes `router.limits`, bounded stdio lines)
+- `UriTemplateMatcherTest` / `ResourceUriLimitTest` / `DecodePathTest` - linear-time template matcher, `maxUriChars` + `maxSubscriptionsPerSession`, guarded argument decoding
+- `HostGuardTest` / `HttpRequestGuardsTest` / `HttpHeaderValidationTest` - full-origin guard truth table, POST gate order + settings invariants, header sentinel handling
+- `TaskManagerSpec` / `TaskTransportGuardTest` / `LifecycleSoakTest` - task store bounds, sweeper hygiene, `Session.terminate`, interruption atomicity, per-client buckets
+- `OverloadBindingTest` / `OverloadNegativeTest` (JVM) and `OverloadBindingJsTest` (JS) - exact-overload binding, duplicate-registration and non-literal diagnostics
+- `JsServerLimitsTest` / `FromJsonAstDecodeTest` (JS), `JsonLimitsNativeTest` (Native) - limits and decode path on the other platforms
 
 ## CI/CD
 
 - **CI** (`.github/workflows/ci.yml`): Runs on PRs and main pushes, tests on the LTS JDKs 17, 21, 25
-- **Conformance** (`.github/workflows/conformance.yml`): official `@modelcontextprotocol/conformance` suite (oracle pinned in `scripts/conformance.sh`, currently `0.2.0-alpha.11`) against the JVM and Bun servers, with expected-failure baselines at `conformance/baseline-{jvm,js}.yml` kept EMPTY (any regression fails the gate). `native.yml` runs the same suite against the GraalVM HTTP image. Run locally via `scripts/conformance.sh {jvm|js|native} [port] [active|2026]`.
-- **Release** (`.github/workflows/release.yml`): Triggered by `v*` tags, publishes to Maven Central
+- **Conformance** (`.github/workflows/conformance.yml`): official `@modelcontextprotocol/conformance` suite (harness pinned in `conformance/package.json` + `conformance/bun.lock`, currently `0.2.0-alpha.11`; frozen install, needs Bun ≥ 1.4) against the JVM and Bun servers — 73/73 checks, with expected-failure baselines at `conformance/baseline-{jvm,js}.yml` kept EMPTY (any regression fails the gate). `native.yml` runs the same suite against the GraalVM HTTP image. Run locally via `scripts/conformance.sh {jvm|js|native} [port] [active|2026]`.
+- The harness is executed from `conformance/node_modules/.bin`. To bump: edit the version in `conformance/package.json`, run `"$(./mill --no-server show fast-mcp-scala.js.bunExecutable | tr -d '"')" install --cwd conformance`, remove `conformance/node_modules`, and review the `bun.lock` diff (it, not package.json, is what `--frozen-lockfile` enforces).
+- **Release** (`.github/workflows/release.yml`): Triggered by `v*` tags, publishes to Maven Central. Three jobs (verify → publish → github-release); no cache restore; every action is SHA-pinned; the Mill launcher distribution is verified against `.github/mill-dist.sha256` in every CI job — bumping `.mill-version` requires adding the new dists' SHA-256 lines there in the same PR (CI prints the exact line and the Maven Central `.sha1` cross-check recipe).
+- `.github/dependabot.yml` keeps action SHA pins (workflows + `.github/actions/setup-build`) and the harness lock current (weekly, 7-day cooldown); a new composite action needs its own `directories` entry.
 
 ## Common Tasks
 

@@ -30,7 +30,13 @@ val server = McpServer(
 | `defaultTtlMs` | 1 hour | TTL applied when the requestor does not supply one. |
 | `maxTtlMs` | 24 hours | Upper bound; requestor-supplied TTLs above this are clamped. |
 | `pollIntervalMs` | `Tasks.DefaultPollIntervalMs` | `pollInterval` advertised back to clients in `tasks/get` responses. |
-| `maxConcurrentPerSession` | `64` | Additional creations beyond this are rejected with `-32602`. Legacy tasks count per protocol session; modern bearer tasks share one global bucket. |
+| `maxConcurrentPerSession` | `64` | Running (non-terminal) tasks per **owner**: the legacy protocol session id, or the modern client key derived by `ownerKey` (keyless modern requests share one anonymous bucket). Creations beyond it are rejected with `-32602`. |
+| `maxConcurrentTotal` | `1024` | Running-task ceiling per **pool** (legacy-session tasks and modern bearer tasks are counted separately, so neither can starve the other). `-32003` when exceeded; must be ≥ `maxConcurrentPerSession`. |
+| `maxStoredPerOwner` | `256` | Stored entries per owner, terminal results included. At the cap the owner's oldest terminal entry older than `minResultRetentionMs` is evicted to admit the new task; if none qualifies the create is refused with `-32003`. |
+| `maxStoredTotal` | `4096` | Stored entries per pool, terminal results included. At the cap the creating owner's own oldest eligible entry is evicted first, then the oldest eligible entry of the owner holding the most stale results; an owner whose results are all inside the grace is never a victim; otherwise `-32003`. |
+| `minResultRetentionMs` | `30 000` | A terminal result younger than this is never evicted by a cap (only by its own TTL), so a client always gets at least 30 s to collect it. |
+| `sweepIntervalMs` | `1 000` | Upper bound on the single TTL sweeper's sleep; TTLs are honoured within this slack, measured on the monotonic clock. |
+| `ownerKey` | `TaskOwnerKey.Transport` | How modern bearer tasks are bucketed per client: `Transport` uses the transport-supplied peer address; `TaskOwnerKey.Custom(f)` derives a key (an authenticated principal) behind a reverse proxy. |
 
 ## Opting in per tool
 
@@ -66,11 +72,29 @@ session.
 
 Tasks dispatch is native router middleware; there is no transport-layer special-casing.
 
+Modern bearer tasks are bucketed per client for the running and stored caps above. By default
+(`TaskOwnerKey.Transport`) the bucket key is the peer address supplied by the HTTP transport
+(zio-http `remoteAddress`, Bun `server.requestIP`); requests that arrive without a key share one
+anonymous bucket bounded by the per-owner cap. Behind a reverse proxy every peer collapses to one
+address, so use `TaskOwnerKey.Custom` to derive the key from an authenticated principal instead;
+`_meta` and `clientInfo` are client-controlled and must never be used as a key unless the proxy
+rewrites them. The pool ceilings are a documented residual: a client controlling
+`maxConcurrentTotal / maxConcurrentPerSession` distinct peer addresses (16 at the defaults) can
+still fill a pool, so pair the peer-address key with edge rate limiting.
+
 ## Lifecycle and current limitations
 
 - Task IDs come from the platform CSPRNG (`/dev/urandom` on Scala Native).
 - A task that outlives its TTL is interrupted, not orphaned; terminal results stay pollable until
-  the TTL sweeps the entry.
+  the TTL sweeps the entry or, after the 30 s `minResultRetentionMs` grace, the owner/pool
+  stored-entry cap (`maxStoredPerOwner` 256 / `maxStoredTotal` 4096) evicts the oldest completed
+  task. A create with nothing evictable is refused with `-32003`.
+- One lazily started sweeper fiber per server enforces TTLs and the retention grace on the
+  monotonic clock; `TaskManager.create` is atomic under interruption (a client abort mid-create
+  leaves no entry and no parked fiber behind).
+- `Session.terminate` — used by HTTP DELETE, idle eviction, and session-cap eviction — interrupts
+  the session's in-flight requests and releases (interrupts) that session's running legacy tasks;
+  `runStdio()` / `runHttp()` stop the sweeper and running tasks on shutdown.
 - The server creates working / completed / failed / cancelled tool tasks. It implements
   `tasks/update` validation but does **not yet** suspend a task in `input_required`, and
   task-status notifications are not emitted. These boundaries are listed in the

@@ -107,6 +107,8 @@ def search(
 - `required = false`, combined with `Option[...]` or a default value, marks the field optional
 - `schema` is a raw JSON Schema fragment that overrides the derived schema entirely
 
+Overloading is fine: only the annotated overload is registered, and its schema and handler come from that exact declaration; two annotated overloads must register distinct `name`s — duplicate names or resource URI patterns within one object are a compile-time error. Annotation arguments such as `name`, `description` and the hints must be literals (`Some("...")`, `Option("...")`, `None`, or a `final val` constant); anything else is a compile-time error.
+
 Enums, nested case classes, `Option`, collections, and `java.time` values derive with no user-supplied givens; custom wire shapes go through `McpInputCodec`. See [docs/custom-types.md](docs/custom-types.md).
 
 ## Tool hints
@@ -143,6 +145,8 @@ Templated resources use `{placeholders}` in the URI, matched against method para
 )
 def userProfile(@Param("The user id") userId: String): String = ...
 ```
+
+A placeholder matches a non-empty run of characters within one path segment (never `/`); literal text is matched verbatim (not as a regex); placeholders in the same segment must be separated by literal text. Client URIs longer than `limits.maxUriChars` (8192) are rejected with `-32602`.
 
 ## Prompts
 

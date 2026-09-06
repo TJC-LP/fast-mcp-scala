@@ -40,7 +40,10 @@ What the Scala.js target gives you:
 
 - The same native MCP **server runtime** on Bun: stdio (`runStdio`, Node stdin) and modern
   stateless Streamable HTTP (`runHttp`, `Bun.serve`), plus the version-selected legacy session
-  adapter.
+  adapter. The Bun listener runs with `development: false`, an `error` callback and a first-party
+  `catchAllCause` boundary (`NODE_ENV` is not security-relevant); `startStatefulHttp()` /
+  `startStatelessHttp()` return a `BunHttpHandle` (call `.stop()`), and idle-session eviction plus
+  the `maxSessions` cap run on every entry.
 - Pluggable tool-argument validation through the shared `Validation.scala` seam (permissive by
   default on every platform).
 - The shared `McpContext`: client info and capabilities, request and trace metadata, progress and
@@ -126,9 +129,7 @@ Caveats (experimental):
 - stdio only (see the matrix footnote);
 - session and task ids come from `/dev/urandom` (Unix only);
 - ZIO's signal handlers and shutdown hooks are no-ops on Scala Native, so shutdown is EOF-driven
-  (the client closing stdin ends the loop) and SIGINT falls back to the OS default;
-- `java.util.regex` is RE2-backed (no lookaheads), which matters only if your resource URI
-  templates embed exotic regex.
+  (the client closing stdin ends the loop) and SIGINT falls back to the OS default.
 
 ## GraalVM native image (JVM)
 
@@ -140,6 +141,7 @@ CI-gated. Recipes, flags, and the metadata audit loop are in [native-image.md](.
 
 `ci.yml` builds and tests the JVM and Scala.js modules on JDK 17, 21, and 25 and runs the Scala
 Native test suite, links the demo binary, and smokes it over stdio. `conformance.yml` runs the
-official MCP conformance suite against the JVM and Bun HTTP servers; `native.yml` runs the same
+official MCP conformance suite against the JVM and Bun HTTP servers at **73/73** checks with zero
+expected failures (harness pinned and lock-frozen under `conformance/`); `native.yml` runs the same
 suite against the GraalVM HTTP image and smokes the GraalVM stdio image. Details in
 [spec-coverage.md](./spec-coverage.md).

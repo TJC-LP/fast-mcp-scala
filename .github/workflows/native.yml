@@ -13,8 +13,8 @@ on:
   push:
     branches: [main]
 
-env:
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+permissions:
+  contents: read
 
 jobs:
   native-smoke:
@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up build
         uses: ./.github/actions/setup-build
@@ -31,6 +31,8 @@ jobs:
 
       - name: Build native stdio smoke binary
         run: ./mill fast-mcp-scala.nativeSmoke.stdio.nativeImage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index / GraalVM provisioning by Mill; kept off the harness steps
 
       - name: Exercise binary over stdio JSON-RPC
         run: ./scripts/native-smoke.sh
@@ -40,16 +42,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up build
         uses: ./.github/actions/setup-build
         with:
           bun: "true"          # conformance harness
           cache-prefix: native
+          cache-write: "false" # this job executes the npm harness: restore the shared cache read-only
 
       - name: Build native HTTP conformance binary
         run: ./mill fast-mcp-scala.nativeSmoke.http.nativeImage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index / GraalVM provisioning by Mill; kept off the harness steps
 
       # The official MCP conformance suite against the native binary, held to the SAME
       # (empty) baseline as the JVM: any divergence is a native-image bug, never a new baseline.

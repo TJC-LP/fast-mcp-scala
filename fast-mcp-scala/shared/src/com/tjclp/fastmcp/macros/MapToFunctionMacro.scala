@@ -81,15 +81,10 @@ object MapToFunctionMacro:
     def jsonDecoderToMcpDecoder[T: Type](jsonDecoderExpr: Expr[JsonDecoder[T]])(using
         Quotes
     ): Expr[McpDecoder[T]] =
+      // AST path (no re-serialisation of client input): see DefaultDecodeContext.decodeRaw.
       '{
         McpDecoder.instance[T] { (name, rawValue, context) =>
-          val json = context.writeValueAsString(rawValue)
-          $jsonDecoderExpr.decodeJson(json) match
-            case Right(value) => value
-            case Left(err) =>
-              throw new RuntimeException(
-                s"Failed to decode parameter '$name' from JSON: $err. Value: $json"
-              )
+          DefaultDecodeContext.decodeRaw[T](name, rawValue, context, $jsonDecoderExpr)
         }
       }
 

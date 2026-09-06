@@ -4,8 +4,8 @@
 
 Transport is a phantom type parameter on `McpServerApp[T, Self]`: `Stdio` or `Http`. The matching
 `TransportRunner[T]` given resolves at compile time, so there is no run-time transport plumbing in
-user code. Every transport is a thin adapter over the shared `MessageLoop` (parse → dispatch →
-reply framing) and the shared router; each platform contributes only a `TransportBackend` (stdio)
+user code. Every transport is a thin adapter over the shared `MessageLoop` (limit checks → parse →
+dispatch → reply framing) and the shared router; each platform contributes only a `TransportBackend` (stdio)
 and, where HTTP is available, an `HttpTransportBackend`.
 
 ## stdio
@@ -44,9 +44,10 @@ Modern Streamable HTTP is identical on the JVM (ZIO HTTP) and Bun (`Bun.serve`).
 
 ### Request requirements and error mapping
 
-Modern POST requests must include:
+Every POST — legacy and modern — must carry `Content-Type: application/json`; anything else is
+refused with 415 before the body is read or a session is minted. Modern POST requests must
+additionally include:
 
-- `Content-Type: application/json`
 - an `Accept` header listing both `application/json` and `text/event-stream`
 - `MCP-Protocol-Version: 2026-07-28`
 - `Mcp-Method`, and for tool calls, resource reads, and prompt gets also `Mcp-Name`
@@ -56,10 +57,22 @@ Schema-driven `Mcp-Param-*` values may be supplied through `x-mcp-header`.
 
 | Condition | HTTP | JSON-RPC code |
 |---|---|---|
+| `Host`/`Origin` refused by `allowedHosts` / `allowedOrigins` | 403 | `-32000` |
+| Missing or wrong `Content-Type` (any POST) | 415 | `-32000` |
+| Body larger than `maxRequestBodyBytes` | 413 | `-32000` on first-party paths; netty and Bun answer an empty 413 when they refuse the body first |
+| Frame over `limits` (`maxFrameChars` / `maxDepth` / `maxObjectFields`) | 400 | `-32700` |
 | Header/body mismatch | 400 | `-32020` |
 | Missing required client capability | 400 | `-32021` |
 | Unsupported protocol version (answer carries `data.supported`) | 400 | `-32022` |
 | Unknown request method | 404 | `-32601` |
+
+The admission gates run in a fixed order on every backend, on headers first and before any session
+state is touched: unknown path 404 → `allowedHosts`/`allowedOrigins` 403 → `Content-Type` 415 →
+declared `Content-Length` over `maxRequestBodyBytes` 413 → `Accept` 406 → body read (platform byte
+cap, then a first-party post-read check → 413) → frame limits (`-32700`, HTTP 400) → dispatch. The
+legacy session cap (`maxSessions`) is applied when an `initialize` is dispatched. Any defect on the
+way is answered by a fixed JSON-RPC 500 boundary (`Internal server error`) on both backends: no
+exception text, stack trace, or path ever reaches the client.
 
 The complete wire-behavior and review matrix is in the
 [2026-07-28 upgrade guide](./2026-07-28-upgrade.md#wire-behavior).
@@ -69,8 +82,13 @@ The complete wire-behavior and review matrix is in the
 Requests that speak an older protocol version (`Protocol.LegacyProtocolVersions`) are routed to an
 initialization-based adapter: `initialize` mints an `Mcp-Session-Id`, the standalone GET stream
 pushes server→client messages (JVM; Bun answers 405 because per-request SSE already covers
-server→client traffic), and DELETE terminates the session. Only `initialize` mints a session; idle
-sessions are evicted after `sessionIdleTimeout`.
+server→client traffic), and DELETE terminates the session. Legacy POSTs are subject to the same
+`Content-Type: application/json` gate (415) as modern ones. Only `initialize` mints a session; idle
+sessions are evicted after `sessionIdleTimeout`, and the store is capped by `maxSessions`
+(`Some(1000)` by default): at the cap the longest-idle session without a live GET stream is evicted
+to make room, and the `initialize` is refused with 503 only when every stored session holds a live
+GET. DELETE, idle eviction, and cap eviction all go through `Session.terminate`: a request still in
+flight on that session is interrupted (no reply) and its running legacy tasks are released.
 
 `stateless` controls **only** this adapter. Modern requests are stateless regardless of the flag.
 Leaving it `false` (the default) lets older clients fall back to the initialize/session/GET/DELETE
@@ -88,12 +106,52 @@ clients share one session identity, which is why legacy task requests there are 
 | `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless. |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity (live legacy GET streams are exempt); `None` disables. |
 | `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. |
-| `allowedHosts` | `None` | DNS-rebinding guard: reject requests whose `Host`/`Origin` is not in the set (403). |
+| `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` hostname must be listed (port ignored); a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, and malformed `Host`/`Origin` ports are refused (403). |
+| `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted alongside the request's own authority; malformed entries fail `runHttp()` at startup. |
+| `maxRequestBodyBytes` | `1 MiB` | Request body cap on every backend; larger bodies get 413 before decoding (empty 413 on the wire from netty/Bun, JSON-RPC `-32000` on first-party paths); must not exceed `limits.maxFrameChars`. |
+| `maxSessions` | `Some(1000)` | Cap on stored legacy sessions; at the cap the longest-idle session without a live GET is evicted (unauthenticated initializes can evict idle sessions — front non-loopback deployments with auth), 503 only if none is evictable; `None` disables. |
 | `loggingEnabled` | `false` | Advertise logging; modern clients use per-request `_meta` levels, legacy clients `logging/setLevel`. |
 | `resourcesSubscribe` | `false` | Enable legacy `resources/subscribe`; modern clients use `subscriptions/listen`. |
 | `tasks` | `TaskSettings()` | The Tasks extension, off by default (see [tasks.md](./tasks.md)). |
+| `limits` | `LimitSettings()` | Input bounds on every transport: `maxFrameChars` 4 MiB, `maxDepth` 64, `maxObjectFields` 1024 (`-32700` / HTTP 400 before dispatch), `maxUriChars` 8192 and `maxSubscriptionsPerSession` 1024 (`-32602`). See [Input limits](#input-limits). |
 
-HTTP-specific fields are ignored under stdio.
+HTTP-specific fields are ignored under stdio; `limits` and `tasks` apply on every transport.
+
+### Input limits
+
+`McpServerSettings.limits: LimitSettings` bounds every inbound JSON-RPC frame on every transport
+(stdio and HTTP; JVM, Scala.js/Bun, Scala Native) before any dispatch work happens. The limits
+cannot be disabled, only moved; the constructor rejects out-of-range values at construction.
+
+| Field | Default | Bounds |
+|---|---|---|
+| `maxFrameChars` | `4 * 1024 * 1024` | One decoded frame (one stdio line / one HTTP body), in UTF-16 chars. |
+| `maxDepth` | `64` | JSON nesting depth (the envelope object is depth 1; every nested `{` / `[` adds one). Hard ceiling `LimitSettings.MaxSupportedDepth`. |
+| `maxObjectFields` | `1024` | Members of any single JSON object anywhere in the frame. |
+| `maxUriChars` | `8192` | A client-supplied resource URI (`resources/read`, `resources/subscribe`, `resources/unsubscribe`, `subscriptions/listen` entries). |
+| `maxSubscriptionsPerSession` | `1024` | Distinct URIs one legacy session may hold via `resources/subscribe`. |
+
+A frame that violates `maxFrameChars`, `maxDepth`, or `maxObjectFields` is answered with JSON-RPC
+`-32700` (HTTP 400) by a linear pre-scan of the raw text, and never mints a session; `maxUriChars`
+and `maxSubscriptionsPerSession` violations answer `-32602`. On HTTP an oversized body meets
+`maxRequestBodyBytes` first (413), so keep that cap at or below `maxFrameChars` — `runHttp()`
+refuses to start otherwise; `maxFrameChars` is the transport-independent backstop. On stdio the
+line splitter itself is bounded at `maxFrameChars`: an over-long line is truncated, answered with
+`-32700`, and the rest of it discarded.
+
+`maxObjectFields` bounds the residual cost of building a `Map` from attacker-chosen, hash-colliding
+keys after the frame check: each object costs up to `maxObjectFields² / 2` string comparisons, so
+the per-frame constant grows quadratically with this knob (at the defaults about 0.4 s per 4 MiB
+frame on the JVM, several times that on single-threaded Bun). Operators exposing a Bun server to
+untrusted networks should lower it (for example to 256); the wire shapes never need more than a few
+dozen members per object.
+
+Frames carrying large payloads must fit: a `sampling/createMessage` result with base64 images over
+stdio may need a larger frame, e.g.
+
+```scala 3 raw
+McpServerSettings(limits = LimitSettings(maxFrameChars = 8 * 1024 * 1024))
+```
 
 ### Lower-level construction
 

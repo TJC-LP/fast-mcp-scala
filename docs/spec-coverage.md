@@ -33,7 +33,8 @@ of them, newest first.
 | Deprecated Roots, Sampling, Logging legacy surfaces | ✅ (compatibility only) |
 | Cancellation (`notifications/cancelled`) | ✅ |
 | Tasks extension | ✅ (opt-in; no task `input_required` production yet) |
-| DNS-rebinding protection (`allowedHosts`) | ✅ (opt-in) |
+| DNS-rebinding / browser-origin protection (`allowedHosts`, `allowedOrigins`) | ✅ (opt-in) |
+| Input limits (`limits: LimitSettings`) + HTTP body / session caps (`maxRequestBodyBytes`, `maxSessions`) | ✅ (on by default) |
 | Legacy session idle eviction + SSE keepalives | ✅ |
 
 The deliberately unimplemented pieces (no dynamic subscription publishers, no `input_required`
@@ -49,11 +50,13 @@ upgrade guide's [Deliberate boundaries](./2026-07-28-upgrade.md#deliberate-bound
   revision requires. Expected-failure baselines live in
   [`conformance/`](../conformance/) and are kept **empty** on every platform, so any regression
   fails the gate. [`conformance.yml`](../.github/workflows/conformance.yml) runs this on every PR
-  for the JVM and Bun; [`native.yml`](../.github/workflows/native.yml) runs the same server as a
-  GraalVM native image against the unchanged JVM baseline.
-- **Oracle pin.** The suite version is pinned in `scripts/conformance.sh` (`CONF_VERSION`,
-  currently `0.2.0-alpha.11`, the first release carrying the 2026-07-28 scenario set). Bumps are
-  deliberate and recorded in the upgrade guide's gate ledger.
+  for the JVM and Bun at **73/73** checks; [`native.yml`](../.github/workflows/native.yml) runs the
+  same server as a GraalVM native image against the unchanged JVM baseline.
+- **Harness pin.** The suite version is pinned in [`conformance/package.json`](../conformance/package.json)
+  (currently `0.2.0-alpha.11`, the first release carrying the 2026-07-28 scenario set) and frozen
+  by the integrity-hashed [`conformance/bun.lock`](../conformance/bun.lock); the script installs it
+  with `bun install --frozen-lockfile` (Bun ≥ 1.4) and runs the installed binary, never `bunx`.
+  Bumps are deliberate and recorded in the upgrade guide's gate ledger.
 - **Real client over stdio.**
   [`ConformanceTest.scala`](../fast-mcp-scala/js/test/src/com/tjclp/fastmcp/conformance/ConformanceTest.scala)
   drives the official TypeScript SDK client against `AnnotatedServer` over stdio.

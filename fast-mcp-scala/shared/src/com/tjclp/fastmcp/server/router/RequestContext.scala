@@ -5,7 +5,7 @@ import zio.json.ast.Json
 
 import com.tjclp.fastmcp.core.LoggingLevel
 import com.tjclp.fastmcp.core.wire.{ClientCapabilities, Implementation}
-import com.tjclp.fastmcp.jsonrpc.McpError
+import com.tjclp.fastmcp.jsonrpc.{JsonFields, McpError}
 
 /** The 2026-07-28 metadata and retry payload bound to one request fiber. It is deliberately
   * fiber-local: the protocol is stateless and concurrent calls from one stdio connection must never
@@ -27,21 +27,25 @@ object RequestContext:
   val ClientInfoKey = "io.modelcontextprotocol/clientInfo"
   val LogLevelKey = "io.modelcontextprotocol/logLevel"
 
+  /** Linear lookups ([[JsonFields]]) — this runs on every request before dispatch, so it must never
+    * build a map from client-chosen keys.
+    */
   def declaredProtocolVersion(params: Json): Option[String] =
-    params match
-      case Json.Obj(fields) =>
-        fields.toMap.get("_meta") match
-          case Some(Json.Obj(meta)) =>
-            meta.toMap.get(ProtocolVersionKey).collect { case Json.Str(value) => value }
-          case _ => None
-      case _ => None
+    JsonFields
+      .get(params, "_meta")
+      .flatMap(JsonFields.get(_, ProtocolVersionKey))
+      .collect { case Json.Str(value) => value }
 
+  /** Top-level lookups are linear; the `meta` / `inputResponses` maps (public fields) are built
+    * with `toMap` over objects already bounded by `limits.maxObjectFields` at the transport choke
+    * point (`MessageLoop.parseFrame`).
+    */
   def decode(params: Json): Either[McpError, RequestContext] =
     for
       fields <- params match
-        case Json.Obj(value) => Right(value.toMap)
+        case Json.Obj(value) => Right(value)
         case _ => Left(McpError.invalidParams("request params must be an object"))
-      meta <- fields.get("_meta") match
+      meta <- JsonFields.get(fields, "_meta") match
         case Some(Json.Obj(value)) => Right(value.toMap)
         case _ => Left(McpError.invalidParams("request params must include an object `_meta`"))
       version <- meta.get(ProtocolVersionKey) match
@@ -51,11 +55,11 @@ object RequestContext:
       capabilities <- decodeRequired[ClientCapabilities](meta, ClientCapabilitiesKey)
       clientInfo <- decodeOptional[Implementation](meta, ClientInfoKey)
       logLevel <- decodeOptional[LoggingLevel](meta, LogLevelKey)
-      inputResponses <- fields.get("inputResponses") match
+      inputResponses <- JsonFields.get(fields, "inputResponses") match
         case None => Right(Map.empty[String, Json])
         case Some(Json.Obj(values)) => Right(values.toMap)
         case Some(_) => Left(McpError.invalidParams("`inputResponses` must be an object"))
-      requestState <- fields.get("requestState") match
+      requestState <- JsonFields.get(fields, "requestState") match
         case None => Right(None)
         case Some(Json.Str(value)) => Right(Some(value))
         case Some(_) => Left(McpError.invalidParams("`requestState` must be a string"))

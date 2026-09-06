@@ -1,11 +1,15 @@
 name: Conformance
 
-# Runs the official MCP conformance "active" server suite (via `bunx @modelcontextprotocol/conformance`)
-# against the fast-mcp-scala ConformanceServer over streamable HTTP, on both platforms.
+# Runs the official MCP conformance "active" server suite (via the pinned harness in
+# conformance/package.json + bun.lock, installed with bun install --frozen-lockfile) against the
+# fast-mcp-scala ConformanceServer over streamable HTTP, on both platforms.
 on:
   pull_request:
   push:
     branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   conformance:
@@ -17,12 +21,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up build
         uses: ./.github/actions/setup-build
         with:
           bun: "true"
+          cache-write: "false" # this job executes the npm harness: restore the shared cache read-only
 
       # Boots the server, drives it with the pinned conformance harness, and checks the result against
       # conformance/baseline-${platform}.yml (both baselines are empty — full active-suite green).

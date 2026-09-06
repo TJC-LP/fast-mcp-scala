@@ -11,6 +11,18 @@ in the js module's `bunDevDeps` and frozen by the committed
 [`fast-mcp-scala/js/bun.lock`](fast-mcp-scala/js/bun.lock); it never appears in the published
 artifacts.
 
+The CI-only inputs are pinned the same way. The MCP conformance harness is pinned in
+[`conformance/package.json`](conformance/package.json) and frozen by the integrity-hashed
+[`conformance/bun.lock`](conformance/bun.lock); `scripts/conformance.sh` installs it with
+`bun install --frozen-lockfile` and runs the installed binary, so a resolution that differs from
+the lock fails before the suite starts (to bump, edit `package.json`, reinstall with the
+Mill-managed Bun, and review the lock diff). Every GitHub Action in the workflows and the
+`setup-build` composite is pinned to a full commit SHA, and
+[`.github/dependabot.yml`](.github/dependabot.yml) refreshes those pins and the harness lock weekly
+with a 7-day cooldown. The Mill launcher distribution named by `.mill-version` is verified against
+[`.github/mill-dist.sha256`](.github/mill-dist.sha256) in every CI job, so a Mill bump must add the
+new distributions' SHA-256 lines in the same PR.
+
 ## When dependencies change
 
 A production dependency is updated when one of these applies:
