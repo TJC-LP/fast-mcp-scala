@@ -364,6 +364,14 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Fixed
 
+- **`Vector[T]` parameters of derived element types no longer crash the macro** (TJC-2331, C2.1):
+  an annotated `Vector[T]` parameter whose `T` needs derivation (an enum, a case class, an `Option`
+  or `Either` of one) aborted expansion with an `ExprCastException` and a compiler stack trace — the
+  `Seq[a]` decoder arm matched `Vector` by conformance, built a `JsonDecoder[Seq[T]]` and cast it to
+  the invariant `JsonDecoder[Vector[T]]`. A dedicated `Vector` arm now derives the element decoder
+  and summons zio-json's `Vector` instance (the shape the schema already advertised), and a derived
+  decoder that does not fit its parameter's type (e.g. `IndexedSeq[T]`) is a compile error naming
+  the parameter and the `given JsonDecoder[T]` / `McpInputCodec[T]` remedy instead of a crash.
 - **`allowedHosts` parses the `Host` header fail-closed** (TJC-2354): the `Host` value must be one
   `host[:port]` authority. A value containing a comma — the `", "`-joined form of a `Host` sent
   more than once, or any second authority — is refused with 403 in either order instead of being

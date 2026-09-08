@@ -115,6 +115,14 @@ class CollectionDecoderParityNegativeTest extends AnyFunSuite:
     assert(errs.isEmpty, s"Vector[Option[Color]] parameter does not compile:\n${messages(errs)}")
   }
 
+  test("Vector[Color] decodes on the wire") {
+    val h = MacroDxHarness("vector-parity") { server =>
+      val _ = server.scanAnnotations[DxVectorOfEnum.type]
+    }
+    val vector = h.call("vector_color", """{"p":["RED","BLUE","RED"]}""")
+    assert(!vector.isError && vector.text == "3", s"vector_color reply: $vector")
+  }
+
   test("a Seq subtype the decoder cannot build is a diagnostic, not an ExprCastException") {
     val errs: List[Error] = typeCheckErrors(scan("DxIndexedSeqOfEnum"))
     assert(errs.nonEmpty, "IndexedSeq[Color] compiled (unexpected: no decoder arm covers it)")

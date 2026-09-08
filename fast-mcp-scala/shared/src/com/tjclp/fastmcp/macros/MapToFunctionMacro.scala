@@ -165,6 +165,15 @@ object MapToFunctionMacro:
                 given JsonDecoder[a] = $inner
                 summon[JsonDecoder[List[a]]]
               }
+        // Vector before Seq: quoted type patterns match by conformance, and Vector[a] <: Seq[a]
+        // would otherwise yield a JsonDecoder[Seq[a]] that is not a JsonDecoder[Vector[a]].
+        case '[Vector[a]] =>
+          summonOrDeriveJsonDecoder(TypeRepr.of[a]) match
+            case '{ $inner: JsonDecoder[a] } =>
+              '{
+                given JsonDecoder[a] = $inner
+                summon[JsonDecoder[Vector[a]]]
+              }
         case '[Seq[a]] =>
           summonOrDeriveJsonDecoder(TypeRepr.of[a]) match
             case '{ $inner: JsonDecoder[a] } =>
@@ -218,16 +227,30 @@ object MapToFunctionMacro:
               )
             )
 
-    def summonDecoder(tpe: TypeRepr)(using Quotes): Expr[McpDecoder[?]] =
+    /** The `McpDecoder` for one parameter: a user instance wins; otherwise the zio-json decoder is
+      * summoned or derived and wrapped. The derived decoder is CHECKED against `JsonDecoder[t]`
+      * (invariant) rather than cast — a container arm matched by conformance (a `Seq` or `Map`
+      * SUBTYPE such as `IndexedSeq[T]`) yields a decoder for the supertype, and casting it used to
+      * crash the macro with an `ExprCastException` and a compiler stack trace.
+      */
+    def summonDecoder(tpe: TypeRepr, paramName: String)(using Quotes): Expr[McpDecoder[?]] =
       tpe.dealias.simplified.asType match
         case '[t] =>
-          Expr
-            .summon[McpDecoder[t]]
-            .getOrElse(
-              jsonDecoderToMcpDecoder[t](
-                summonOrDeriveJsonDecoder(tpe).asExprOf[JsonDecoder[t]]
+          Expr.summon[McpDecoder[t]].getOrElse {
+            // `isExprOf`, not a quoted `'{ $d: JsonDecoder[t] }` pattern: a lowercase type name in a
+            // quoted pattern binds a FRESH type variable, so that pattern matches any decoder.
+            val derived = summonOrDeriveJsonDecoder(tpe)
+            if derived.isExprOf[JsonDecoder[t]] then
+              jsonDecoderToMcpDecoder[t](derived.asExprOf[JsonDecoder[t]])
+            else
+              report.errorAndAbort(
+                s"Cannot decode parameter '$paramName' of type ${tpe.show}: derivation produced a " +
+                  s"${derived.asTerm.tpe.widen.show}, which is not a JsonDecoder[${tpe.show}] " +
+                  "(JsonDecoder is invariant, so a decoder for a supertype does not fit). Provide a " +
+                  s"given JsonDecoder[${tpe.show}] or McpInputCodec[${tpe.show}], or declare the " +
+                  "parameter as List, Vector, Set, Seq, Array or Map[String, V]."
               )
-            )
+          }
 
     /** One decoded argument per parameter. An argument present in the map is decoded; an absent one
       * takes the parameter's Scala default when it has one (exactly what a direct Scala call would
@@ -242,7 +265,7 @@ object MapToFunctionMacro:
     )(using Quotes): Expr[List[Any]] =
       Expr.ofList(params.map { p =>
         val nameExpr = Expr(p.name)
-        val decoderExpr = summonDecoder(p.tpe)
+        val decoderExpr = summonDecoder(p.tpe, p.name)
         val isOptionType = p.tpe.dealias.simplified match
           case AppliedType(base, _) if base.typeSymbol.fullName == "scala.Option" => true
           case _ => false
