@@ -175,8 +175,19 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   and `TaskOwnerKey`, and the `resources/read` payload ADT `ResourceContents` /
   `TextResourceContents` / `BlobResourceContents`, so every documented fence compiles with the root
   import alone (`RootImportExportsTest` type-checks the `docs/tasks.md` and `docs/transports.md`
-  fences in a root-import-only scope). Additive: an export alias and its `server.*` / `core.*` /
-  `core.wire.*` target resolve as one reference, so files that already import both are unaffected.
+  fences in a root-import-only scope). It also exports every shape a handler must name to call
+  the public `McpContext` / `McpServer` surface: the server→client request params and results
+  (`CreateMessageRequestParams` / `CreateMessageResult` with `SamplingMessage`,
+  `ModelPreferences`, `ModelHint`, `ToolChoice`; `ElicitRequestParams` /
+  `ElicitRequestUrlParams` / `ElicitResult`; `ListRootsResult` / `Root`), the client identity
+  snapshots `Implementation` / `ClientCapabilities`, the notification arguments `LoggingLevel` /
+  `ProgressToken`, and the `completion/complete` provider types (`CompleteRequestParams`,
+  `CompletionReference` with `PromptReference` / `ResourceTemplateReference`,
+  `CompletionArgument`, `CompletionContext`, `Completion`). `core.wire.Tool` (the sampling
+  `tools` element) is deliberately not exported — it would collide with the `@Tool` annotation —
+  so a sampling request that passes tools still needs `import com.tjclp.fastmcp.core.wire.Tool`.
+  Additive: an export alias and its `server.*` / `core.*` / `core.wire.*` target resolve as one
+  reference, so files that already import both are unaffected.
 
 ### Changed
 
