@@ -123,9 +123,19 @@ server→client traffic), and DELETE terminates the session. Legacy POSTs are su
 `Content-Type: application/json` gate (415) as modern ones. Only `initialize` mints a session; idle
 sessions are evicted after `sessionIdleTimeout`, and the store is capped by `maxSessions`
 (`Some(1000)` by default): at the cap the longest-idle session without a live GET stream is evicted
-to make room, and the `initialize` is refused with 503 only when every stored session holds a live
-GET. DELETE, idle eviction, and cap eviction all go through `Session.terminate`: a request still in
-flight on that session is interrupted (no reply) and its running legacy tasks are released.
+to make room; when every stored session holds a live GET, the longest-idle of them is evicted
+instead — its GET stream is closed — provided it has been idle longer than `sessionIdleTimeout`
+(clients reopen their GET stream as usual); the `initialize` is refused with 503 only when no
+session qualifies under either rule. The periodic idle sweeper never evicts a session with a live
+GET stream while capacity is free. DELETE, idle eviction, and cap eviction all go through
+`Session.terminate`: a request still in flight on that session is interrupted (no reply) and its
+running legacy tasks are released.
+
+A GET peer that disappears without closing its connection (NAT expiry, a suspended machine) leaves
+the stream "live" from the server's point of view: the OS only notices such a peer once the server
+writes to the socket — that is, with `keepAliveInterval` set — and only after its own TCP
+retransmission budget (zio-http 3.4.0 exposes no accepted-socket option, so the server does not
+set TCP keepalive itself). The cap-time rule above bounds the session store regardless.
 
 `stateless` controls **only** this adapter. Modern requests are stateless regardless of the flag.
 Leaving it `false` (the default) lets older clients fall back to the initialize/session/GET/DELETE
@@ -141,12 +151,12 @@ clients share one session identity, which is why legacy task requests there are 
 | `port` | `8000` | Listen port. |
 | `httpEndpoint` | `/mcp` | JSON-RPC endpoint path. |
 | `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless. |
-| `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity (live legacy GET streams are exempt); `None` disables. |
-| `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. Neither listener closes a quiet stream on its own: the JVM has no idle timeout and Bun runs with `idleTimeout: 0` (its 10 s default used to cut a slow tool's reply). |
+| `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity. Live legacy GET streams are exempt from the periodic sweep but become evictable at the `maxSessions` cap once idle this long; `None` disables both. |
+| `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. Neither listener closes a quiet stream on its own: the JVM has no idle timeout and Bun runs with `idleTimeout: 0` (its 10 s default used to cut a slow tool's reply). Heartbeats are also what lets the OS detect a GET peer that vanished without closing its connection (the socket is only probed when the server writes to it, and the OS gives up after its retransmission budget); without them such a stream stays live until the cap-time eviction described under `maxSessions`. |
 | `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` value must parse as one `host[:port]` authority and its hostname (or the verbatim `host:port`) must be listed — the port itself is not compared; a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, a `Host` or `Origin` sent more than once (seen as its `", "`-joined value), and malformed `Host`/`Origin` ports are refused (403), with or without the other header. IPv6 entries are written bracketed, exactly as they appear in the `Host` header: `Set("[::1]")`, not `Set("::1")`. |
 | `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted alongside the request's own authority; malformed entries fail `runHttp()` at startup. |
 | `maxRequestBodyBytes` | `1 MiB` | Request body cap on every backend; larger bodies get 413 before decoding (empty 413 on the wire from netty/Bun, JSON-RPC `-32000` on first-party paths); must not exceed `limits.maxFrameChars`. |
-| `maxSessions` | `Some(1000)` | Cap on stored legacy sessions; at the cap the longest-idle session without a live GET is evicted (unauthenticated initializes can evict idle sessions — front non-loopback deployments with auth), 503 only if none is evictable; `None` disables. |
+| `maxSessions` | `Some(1000)` | Cap on stored legacy sessions; at the cap the longest-idle session without a live GET is evicted, else the longest-idle GET-holding session that has been idle longer than `sessionIdleTimeout` (its GET stream is closed). Unauthenticated initializes can evict idle sessions — front non-loopback deployments with auth. 503 only if neither rule finds a victim; `None` disables. |
 | `loggingEnabled` | `false` | Advertise logging; modern clients use per-request `_meta` levels, legacy clients `logging/setLevel`. |
 | `resourcesSubscribe` | `false` | Enable legacy `resources/subscribe`; modern clients use `subscriptions/listen`. |
 | `tasks` | `TaskSettings()` | The Tasks extension, off by default (see [tasks.md](./tasks.md)). |

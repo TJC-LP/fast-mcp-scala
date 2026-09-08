@@ -110,9 +110,15 @@ case class McpServerSettings(
     // request-scoped SSE response regardless of this flag. For older versions, true disables the
     // protocol session store; false preserves the initialize/session/GET/DELETE adapter.
     stateless: Boolean = false,
+    // SSE heartbeat period. Also the only thing that makes the OS probe a GET peer that vanished
+    // without closing its connection (a socket is probed only when written to; the OS then gives
+    // up after its own retransmission budget) — zio-http 3.4.0 exposes no accepted-socket option,
+    // so the server sets no TCP keepalive itself.
     keepAliveInterval: Option[java.time.Duration] = None,
-    // Streamable HTTP only: evict sessions idle longer than this (no POST/GET/DELETE activity and
-    // no live GET stream). Guards the session store against abandoned clients; `None` disables.
+    // Streamable HTTP only: evict sessions idle longer than this (no POST/GET/DELETE activity).
+    // Sessions with a live GET stream are exempt from the periodic sweep, but at the `maxSessions`
+    // cap the longest-idle GET holder idle past this timeout is evicted when no GET-less session is
+    // available. Guards the session store against abandoned clients; `None` disables both.
     sessionIdleTimeout: Option[java.time.Duration] = Some(java.time.Duration.ofMinutes(30)),
     disallowDelete: Boolean = false,
     // Advertise logging. Modern requests opt in per call through `_meta`; the legacy adapter also
@@ -143,9 +149,11 @@ case class McpServerSettings(
     // Legacy streamable adapter only: cap on concurrently stored sessions. When a header-less
     // `initialize` arrives at the cap, the longest-idle session without a live GET stream is evicted
     // — terminated (`Session.terminate`: in-flight requests interrupted, its tasks released, queue
-    // shut down) — to make room; only when every stored session has a live GET is the request
-    // refused with 503. Bounds memory without letting a flood lock new clients out.
-    // `None` disables. Modern 2026-07-28 requests never store sessions.
+    // shut down) — to make room. When every stored session holds a live GET, the longest-idle of
+    // them is evicted instead (its GET stream is closed) provided it has been idle longer than
+    // `sessionIdleTimeout`; the request is refused with 503 only when no session qualifies under
+    // either rule. Bounds memory without letting a flood — or a set of vanished GET peers — lock new
+    // clients out. `None` disables. Modern 2026-07-28 requests never store sessions.
     maxSessions: Option[Int] = Some(1000),
     // Optional io.modelcontextprotocol/tasks extension. Off by default.
     tasks: TaskSettings = TaskSettings(),

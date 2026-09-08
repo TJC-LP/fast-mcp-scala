@@ -124,3 +124,25 @@ private[fastmcp] object HttpRequestGuards:
     */
   def pickEvictable(snapshot: Iterable[(String, Long, Boolean)]): Option[String] =
     snapshot.filterNot(_._3).minByOption(_._2).map(_._1)
+
+  /** Cap-eviction victim with the idle fallback. A GET-less session is always preferred
+    * ([[pickEvictable]]); only when every stored session holds a live GET does the longest-idle of
+    * them qualify, and only once `now - lastSeen` exceeds `idleTimeoutMs`: a client silent that
+    * long on a live stream has either abandoned it or vanished without closing the connection, and
+    * terminating the session closes the stream (a server may end a GET stream at any time; clients
+    * reopen it). `idleTimeoutMs = None` (`sessionIdleTimeout` off) keeps GET holders exempt, so the
+    * verdict is then exactly [[pickEvictable]]'s.
+    */
+  def pickEvictable(
+      snapshot: Iterable[(String, Long, Boolean)],
+      now: Long,
+      idleTimeoutMs: Option[Long]
+  ): Option[String] =
+    pickEvictable(snapshot).orElse {
+      idleTimeoutMs.flatMap { timeout =>
+        snapshot
+          .filter((_, seen, live) => live && now - seen > timeout)
+          .minByOption(_._2)
+          .map(_._1)
+      }
+    }
