@@ -29,6 +29,15 @@ object Bun extends js.Object:
   *   - `development = false` — Bun otherwise defaults to `NODE_ENV !== "production"` and renders a
   *     ~100 KB HTML debug page (stack traces, on-disk paths) for a rejected `fetch` promise.
   *   - `error` — last-resort callback for anything Bun still sees; returns a plain JSON 500.
+  *   - `idleTimeout` — seconds a connection may sit with no bytes in either direction before Bun
+  *     closes it. Bun's own default is 10 s (its timer is coarse: Bun 1.4.1 fires between ~9 and
+  *     ~12 s) and it applies to a per-request SSE response awaiting a slow tool, so with
+  *     `keepAliveInterval = None` any tool slower than that lost its reply — the socket was cut
+  *     mid-stream and the client saw only its own request timeout (dogfood finding D6 8.15). The
+  *     transport passes `0`, which disables the runtime's idle close: parity with the JVM listener
+  *     (zio-http's `Server.Config.default.idleTimeout` is `None`). A non-zero value is capped by
+  *     Bun at 255 s. Legacy session lifetime stays governed by `sessionIdleTimeout`, and
+  *     `keepAliveInterval` remains the knob for intermediaries with idle timers of their own.
   */
 trait BunServeOptions extends js.Object:
   val port: js.UndefOr[Int]
@@ -37,6 +46,7 @@ trait BunServeOptions extends js.Object:
   val maxRequestBodySize: js.UndefOr[Int]
   val development: js.UndefOr[Boolean]
   val error: js.UndefOr[js.Function1[js.Dynamic, js.Dynamic]]
+  val idleTimeout: js.UndefOr[Int]
 
 object BunServeOptions:
 
@@ -46,7 +56,8 @@ object BunServeOptions:
       fetch: js.Function2[js.Dynamic, js.Dynamic, js.Promise[js.Dynamic]],
       maxRequestBodySize: Int,
       development: Boolean,
-      error: js.Function1[js.Dynamic, js.Dynamic]
+      error: js.Function1[js.Dynamic, js.Dynamic],
+      idleTimeout: Int
   ): BunServeOptions =
     js.Dynamic
       .literal(
@@ -55,7 +66,8 @@ object BunServeOptions:
         fetch = fetch,
         maxRequestBodySize = maxRequestBodySize,
         development = development,
-        error = error
+        error = error,
+        idleTimeout = idleTimeout
       )
       .asInstanceOf[BunServeOptions]
 

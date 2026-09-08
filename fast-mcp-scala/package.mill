@@ -61,8 +61,41 @@ object `package` extends Module {
       mvn"dev.zio::zio:${Versions.zio}",
       mvn"dev.zio::zio-json:${Versions.zioJson}",
       // ZIO HTTP for HTTP transports (stateless + streamable)
-      mvn"dev.zio::zio-http:${Versions.zioHttp}"
+      mvn"dev.zio::zio-http:${Versions.zioHttp}",
+      // Netty override (TJC-2327). zio-http 3.4.0 declares netty 4.2.3.Final, which carries 27 OSV
+      // advisories, 7 of them reachable on the default HTTP path (request smuggling in
+      // HttpRequestDecoder/HttpObjectAggregator, epoll RST DoS). Every io.netty module zio-http
+      // resolves is pinned directly — ALL of them, not just codec-http: a partial pin leaves the
+      // rest (incl. transport-classes-epoll, the HIGH epoll CVE) at 4.2.3 and mixes netty versions
+      // in one JVM. Direct pins are resolver-agnostic (coursier, Maven, Gradle all pick 4.2.17), at
+      // the cost that netty is now a direct <dependency> of the published POM: a stdio-only
+      // consumer that sheds the HTTP stack must exclude BOTH `dev.zio:zio-http_3` and
+      // `io.netty:*` (docs/native-image.md). Keep this list in sync with
+      // `cs resolve dev.zio:zio-http_3:${Versions.zioHttp} | grep io.netty`.
+      mvn"io.netty:netty-buffer:${Versions.netty}",
+      mvn"io.netty:netty-codec-base:${Versions.netty}",
+      mvn"io.netty:netty-codec-compression:${Versions.netty}",
+      mvn"io.netty:netty-codec-http:${Versions.netty}",
+      mvn"io.netty:netty-codec-socks:${Versions.netty}",
+      mvn"io.netty:netty-common:${Versions.netty}",
+      mvn"io.netty:netty-handler:${Versions.netty}",
+      mvn"io.netty:netty-handler-proxy:${Versions.netty}",
+      mvn"io.netty:netty-pkitesting:${Versions.netty}",
+      mvn"io.netty:netty-resolver:${Versions.netty}",
+      mvn"io.netty:netty-transport:${Versions.netty}",
+      mvn"io.netty:netty-transport-classes-epoll:${Versions.netty}",
+      mvn"io.netty:netty-transport-classes-kqueue:${Versions.netty}",
+      mvn"io.netty:netty-transport-native-epoll:${Versions.netty}",
+      mvn"io.netty:netty-transport-native-kqueue:${Versions.netty}",
+      mvn"io.netty:netty-transport-native-unix-common:${Versions.netty}"
     )
+
+    // Belt and braces for the pins above: the netty BOM lands in the published POM as a
+    // `<dependencyManagement>` import, so a consumer whose resolver honours it (coursier: Mill,
+    // sbt, scala-cli) stays on `Versions.netty` even for the classified native artifacts
+    // (`linux-x86_64`, `osx-aarch_64`, ...) that zio-http requests and that a plain
+    // `groupId:artifactId` pin cannot address under Maven's per-classifier mediation.
+    override def bomMvnDeps = Seq(mvn"io.netty:netty-bom:${Versions.netty}")
 
     object test extends ScalaTests with FastMCPTestModule {
       override def mvnDeps = Seq(
@@ -255,9 +288,10 @@ object `package` extends Module {
 
       // Netty-scoped counter to the stale GraalVM-metadata-repo entries: the repo marks netty
       // `override: true` but its newest netty configs are 4.1.x-era (predating netty 4.2's
-      // module renames). With the latest-config fallback off, the untested 4.2.3 gets no repo
-      // config and no `--exclude-config` stripping of its own (correct) in-jar metadata — while
-      // every other dependency keeps Mill's default repo-metadata behavior.
+      // module renames). With the latest-config fallback off, the 4.2.x version in use
+      // (`Versions.netty`, untested by the repo) gets no repo config and no `--exclude-config`
+      // stripping of its own (correct) in-jar metadata — while every other dependency keeps
+      // Mill's default repo-metadata behavior.
       override def nativeUseLatestConfigWhenVersionIsUntested = Task { false }
 
       override def nativeImageOptions = Task {
