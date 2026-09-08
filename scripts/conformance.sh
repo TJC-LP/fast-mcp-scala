@@ -215,13 +215,15 @@ set -e
 # Terminate BEFORE inspecting the log, so teardown-time failures are gated too.
 stop_server
 echo "→ server log: $LOG" >&2
+# Every platform must exit within 15s of SIGTERM — not only the native image. A JVM or Bun server
+# that ignores SIGTERM (stdin still open, a live SSE stream pinning graceful shutdown, a dead event
+# loop) is the same class of bug, and until now the gate only saw it on "native". Baselines: JVM
+# 2.3 s idle / 12.3 s with a live legacy GET (zio-http gracefulShutdownTimeout 10 s), Bun < 1 s.
+if [ "$SRV_STOPPED" = "hang" ]; then
+  echo "$PLATFORM FAIL: server did not exit within 15s of SIGTERM (suite verdict: $RC)" >&2
+  exit 1
+fi
 if [ "$PLATFORM" = "native" ]; then
-  # --install-exit-handlers must actually work: a binary that survives 15s of SIGTERM is a bug
-  # (dead event loops deadlocking shutdown was exactly the failure SharedArenaSupport fixed).
-  if [ "$SRV_STOPPED" = "hang" ]; then
-    echo "native FAIL: server did not exit within 15s of SIGTERM (suite verdict: $RC)" >&2
-    exit 1
-  fi
   # Native binaries can shed threads on GraalVM UnsupportedFeatureError while the suite still
   # passes on the surviving event loops — treat any such error as a failure.
   if grep -q "UnsupportedFeatureError" "$LOG"; then
