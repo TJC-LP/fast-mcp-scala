@@ -205,7 +205,7 @@ MCP Tasks are the official **`io.modelcontextprotocol/tasks` extension** (MCP 20
 
 ```scala
 import com.tjclp.fastmcp.{*, given}
-import com.tjclp.fastmcp.server.TaskSettings   // not re-exported by the package object
+import com.tjclp.fastmcp.server.TaskSettings   // optional since 1.0.0 (root-exported); the release candidates need it
 
 val server = McpServer(
   name = "my-server",
@@ -223,7 +223,7 @@ def expensiveOp(@Param("input") x: String): String = ???
 **Opt in per tool** (typed contract):
 
 ```scala
-import com.tjclp.fastmcp.core.TaskSupport      // not re-exported by the package object
+import com.tjclp.fastmcp.core.TaskSupport   // optional since 1.0.0 (root-exported); the release candidates need it
 
 val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   .withTaskSupport(TaskSupport.Optional)
