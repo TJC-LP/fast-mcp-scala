@@ -69,8 +69,17 @@ jobs:
 
       # Scenario-level parity on the 2026 requirements run: the native binary must produce the
       # SAME normalized scenario results as the JVM server, not merely a passing exit code.
+      # pipefail makes each conformance.sh verdict fail this step as well — without it the grep
+      # filter's status masked a scored 2026-07-28 regression shared by both binaries (a clean
+      # diff). Only the grep stage is exempt: an empty selection is not a failure of its own, and
+      # the non-empty checks below turn a harness whose output shape changed into an error instead
+      # of a vacuous diff of two empty files.
       - name: Conformance parity (2026 requirements, JVM vs native)
         run: |
-          ./scripts/conformance.sh jvm 8078 2026 | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(✓|✗|Total:)' > jvm-2026.txt
-          ./scripts/conformance.sh native 8079 2026 | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(✓|✗|Total:)' > native-2026.txt
+          set -o pipefail
+          ./scripts/conformance.sh jvm 8078 2026 | sed 's/\x1b\[[0-9;]*m//g' | { grep -E '^(✓|✗|Total:)' || true; } > jvm-2026.txt
+          ./scripts/conformance.sh native 8079 2026 | sed 's/\x1b\[[0-9;]*m//g' | { grep -E '^(✓|✗|Total:)' || true; } > native-2026.txt
+          for f in jvm-2026.txt native-2026.txt; do
+            [ -s "$f" ] || { echo "::error::$f is empty — the harness printed no scenario lines, so the parity diff would be vacuous"; exit 1; }
+          done
           diff -u jvm-2026.txt native-2026.txt
