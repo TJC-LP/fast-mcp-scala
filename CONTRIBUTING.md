@@ -42,7 +42,7 @@ cd fast-mcp-scala
 ./mill fast-mcp-scala.jvm.test
 ./mill fast-mcp-scala.js.test                       # Scala.js conformance tests on Bun
 ./mill fast-mcp-scala.scalaNative.test              # links a native test binary
-./mill fast-mcp-scala.jvm.test com.tjclp.fastmcp.macros.ToolProcessorTest
+./mill fast-mcp-scala.jvm.test.testOnly com.tjclp.fastmcp.macros.ToolProcessorTest   # class selectors go through testOnly
 
 # Scala.js / Bun housekeeping
 ./mill fast-mcp-scala.js.bunLock                    # regenerate js/bun.lock after changing bunDevDeps
@@ -121,11 +121,15 @@ def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:<version>")
 //> using dep com.tjclp::fast-mcp-scala:<version>
 ```
 
-Or point `scala-cli` at a built JAR directly:
+Or point `scala-cli` at a built JAR directly. The jar carries no transitive dependencies, so
+declare the ZIO libraries the build pins (`Versions` in `build.mill`) alongside it:
 
 ```scala 3 ignore
 //> using scala 3.9.0
 //> using jar "/absolute/path/to/out/fast-mcp-scala/jvm/jar.dest/out.jar"
+//> using dep dev.zio::zio:2.1.20
+//> using dep dev.zio::zio-json:0.7.44
+//> using dep dev.zio::zio-http:3.4.0
 //> using options "-experimental"
 ```
 
@@ -137,8 +141,12 @@ Or point `scala-cli` at a built JAR directly:
 4. User-visible changes get an entry under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md)
    (Keep a Changelog format).
 5. Run `./mill fast-mcp-scala.reformat` and `./mill fast-mcp-scala.test`.
-6. Open a pull request. PRs are **squash-merged**, so keep each PR self-contained rather than
-   stacking one on another. Prefer follow-up commits over force-pushes during review.
+6. Open a pull request. A single PR merges with a **merge commit**. Multi-part work goes in a
+   linear **stack** of PRs with chained bases (each PR based on the one below it), reviewed
+   independently and merged **bottom-up with merge commits** — never squash a stack bottom, or
+   every PR above it conflicts. Prefer follow-up commits over force-pushes during review.
+   Commits attributed to an agent (a `Co-Authored-By` trailer naming one) need one approving
+   review from a human before they can merge (organisation ruleset, no bypass).
 
 ## Reporting issues
 
@@ -151,14 +159,43 @@ through [SECURITY.md](SECURITY.md), never a public issue.
 ## Releasing (maintainers)
 
 - `build.mill` holds a `-SNAPSHOT` default during development.
-- A release-prep PR strips the suffix, dates the CHANGELOG section, and updates version pins in
-  the README and docs.
+- A release-prep PR strips the suffix, dates the CHANGELOG section (`## [X.Y.Z] - <tag day>`;
+  everything under `[Unreleased]` moves below it), and updates every version pin in the README,
+  `docs/` and `scripts/*.sc`. Before it merges, sweep for stale pins — the coordinate grep
+  `git grep -nE 'fast-mcp-scala[A-Za-z0-9_.]*::?[0-9]+\.[0-9]+\.[0-9]+-(RC|SNAPSHOT)' -- . ':(exclude)CHANGELOG.md' ':(exclude)docs/2026-07-28-upgrade.md'`
+  must print nothing — and confirm `./mill --no-server show fast-mcp-scala.jvm.publishVersion`
+  (with `PUBLISH_VERSION` unset) prints the release version: the tagged commit's `build.mill`
+  default is what `publishLocal` users get.
 - An annotated tag `vX.Y.Z` on the merge commit triggers `.github/workflows/release.yml`, which
   runs the full test suite and publishes all three artifacts to Maven Central. A `-` qualifier in
   the tag (`v1.0.0-RC1`) marks the GitHub release as a prerelease. The workflow is three jobs —
   `verify` → `publish` → `github-release` — with no cache restore, and every action it uses is
   pinned to a full commit SHA (Dependabot keeps the pins current).
+- After the workflow finishes, verify the publish from Central rather than from a local cache:
+  coursier resolves `~/.ivy2/local` ahead of Central, so delete any `publishLocal` copy of the
+  same version under `~/.ivy2/local/com.tjclp/` first, then
+  `cs resolve -r central --no-default com.tjclp:fast-mcp-scala_3:X.Y.Z` (and `_sjs1_3`,
+  `_native0.5_3`) must resolve.
+- Curate the release notes: `--generate-notes` produces a PR list, not release notes. For a
+  notable release extract the `## [X.Y.Z]` section of `CHANGELOG.md` (up to the next `## [`
+  header) into a file and run `gh release edit vX.Y.Z --notes-file <file>`.
 - A follow-up PR bumps the default back to the next `-SNAPSHOT`.
+
+### If a release fails
+
+- Never delete or move a pushed `v*` tag once anything for that version is on Maven Central,
+  and never re-publish a version to Central. A defective X.Y.Z is superseded by X.Y.(Z+1)
+  through the same prep-PR → merge-commit → annotated-tag flow.
+- `verify` or `publish` failed and nothing reached Central (the Sonatype upload is the last step
+  of `publish`, and `publishAll` bundles all three artifacts, so a failure leaves nothing
+  behind; confirm with the `cs resolve -r central --no-default` check above, which must fail):
+  fix forward on `main`, then delete and re-push the tag. This is the only state in which
+  re-tagging is acceptable.
+- `publish` succeeded but `github-release` failed: `gh run rerun <run-id> --failed` once — never
+  re-run all jobs, which would re-run `publish`. The job is idempotent (`gh release view` first).
+- Central already holds any X.Y.Z artifact: do not retag. Ship the complete triple as X.Y.(Z+1);
+  while it is in flight, `gh release edit vX.Y.Z --notes-file <file>` with a "Known issue —
+  upgrade to X.Y.(Z+1)" banner, and add `--prerelease` for a severe defect.
 - Bumping `.mill-version` requires adding the new Mill distributions' SHA-256 lines to
   `.github/mill-dist.sha256` in the same PR: every CI job verifies the launcher download against
   that file before the first `./mill`, and on a mismatch CI prints the exact line to add together
