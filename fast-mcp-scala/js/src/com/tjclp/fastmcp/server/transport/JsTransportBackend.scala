@@ -187,7 +187,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     (_: js.Dynamic) => jsonRpcErrorResponse(500, HttpRequestGuards.InternalErrorMessage)
 
   /** The options handed to `Bun.serve` — a seam so tests can assert `development == false`, the
-    * `error` callback and `maxRequestBodySize` without depending on `NODE_ENV`.
+    * `error` callback, `maxRequestBodySize` and `idleTimeout == 0` without depending on `NODE_ENV`.
     */
   private[fastmcp] def serveOptions[R](
       router: McpRouter[R],
@@ -205,7 +205,10 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       ),
       maxRequestBodySize = settings.maxRequestBodyBytes,
       development = false,
-      error = bunErrorHandler
+      error = bunErrorHandler,
+      // Bun's 10 s default would cut a quiet SSE response before a slow tool replies (D6 8.15);
+      // 0 disables the runtime idle close, as on the JVM listener. See `BunServeOptions`.
+      idleTimeout = 0
     )
 
   /** First-party error boundary, independent of `NODE_ENV`. The by-name `effect` is evaluated
@@ -481,7 +484,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
             .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
             .forkDaemon
-        yield sseResponse(reqQueue, req.id, session, isNew, fiber, settings, modern = false)
+          response <- sseResponse(reqQueue, req.id, session, isNew, fiber, settings, modern = false)
+        yield response
       case other =>
         val extra =
           if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String]
@@ -491,8 +495,25 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
           case None => webResponse(202, "")
         }
 
+  /** Heartbeat marker the keepalive fiber offers into a request's `reqQueue`; the pull turns it
+    * into an SSE comment frame (`: ping`). Like [[MessageLoop.CloseSentinel]] it never reaches the
+    * wire as a JSON-RPC message.
+    */
+  private val KeepAliveSentinel: JsonRpcMessage =
+    JsonRpcMessage.Notification("$fastmcp/internal/keepalive", None)
+
   /** Build a Bun SSE `Response` whose `ReadableStream` is pull-fed from `reqQueue`: each take emits
     * one `event: message` frame, and the stream closes right after the request's final reply.
+    *
+    * Keepalive (`settings.keepAliveInterval`) is a daemon heartbeat fiber that OFFERS
+    * [[KeepAliveSentinel]] into `reqQueue` on a `sleep *> offer` loop — the Bun twin of the JVM's
+    * `sse.mergeHaltLeft(pings)`. The pull stays a plain `take`, so a heartbeat can never discard a
+    * reply (TJC-2337: `take.timeout(interval)` interrupted a take whose promise already held the
+    * reply; the next pull took the close sentinel and the stream ended pings-only, HTTP 200, with
+    * nothing logged). A sleep loop rather than `Schedule.spaced` for the reason given on
+    * [[evictIdleSessions]]. The heartbeat is interrupted when the stream closes (final reply or
+    * close sentinel), when the client cancels, and when a pull fails; an offer into an already
+    * shut-down queue interrupts it on its own.
     */
   private def sseResponse(
       reqQueue: Queue[JsonRpcMessage],
@@ -503,63 +524,73 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       settings: McpServerSettings,
       modern: Boolean,
       initial: Option[JsonRpcMessage] = None
-  ): js.Dynamic =
-    val encoder = js.Dynamic.newInstance(js.Dynamic.global.TextEncoder)()
-    var initialMessage = initial
-    // Keepalive: when configured, a quiet `take` emits an SSE comment frame instead of blocking
-    // forever, so proxies / idle timeouts don't kill long-running calls.
-    val takeNext: UIO[Option[JsonRpcMessage]] = ZIO.suspendSucceed {
-      initialMessage match
-        case Some(message) =>
-          initialMessage = None
-          ZIO.some(message)
-        case None =>
-          settings.keepAliveInterval match
-            case None => reqQueue.take.map(Some(_))
-            case Some(interval) => reqQueue.take.timeout(Duration.fromJava(interval))
-    }
-    val source = js.Dynamic.literal(
-      pull = js.Any.fromFunction1((controller: js.Dynamic) =>
-        ZioJsPromise.zioToPromise(
-          takeNext
-            .map {
-              case None =>
-                val _ = controller.enqueue(encoder.encode(": ping\n\n"))
-              case Some(msg) if MessageLoop.isCloseSentinel(msg) =>
-                // Dispatch ended replyless (cancelled): end the stream without emitting a frame.
-                val _ = controller.close()
-              case Some(msg) =>
-                val frame = s"event: message\ndata: ${MessageLoop.encodeOutbound(msg)}\n\n"
-                val _ = controller.enqueue(encoder.encode(frame))
-                if isFinalReply(msg, reqId) then
-                  val _ = controller.close()
-            }
-            // A defect mid-stream ends the stream instead of rejecting the pull promise — Bun
-            // would otherwise surface the raw error itself. A pull racing the client's cancel
-            // (interrupted `take`, or the controller already closed) is benign and not logged.
-            .catchAllCause { cause =>
-              val benign = cause.isInterruptedOnly || cause.dieOption.exists {
-                case _: js.JavaScriptException => true
-                case _ => false
+  ): UIO[js.Dynamic] =
+    val heartbeat: UIO[Option[Fiber.Runtime[Nothing, Nothing]]] =
+      settings.keepAliveInterval match
+        case None => ZIO.none
+        case Some(interval) =>
+          val tick = Duration.fromJava(interval)
+          (ZIO.sleep(tick) *> reqQueue.offer(KeepAliveSentinel)).forever.forkDaemon.map(Some(_))
+    heartbeat.map { hb =>
+      val stopHeartbeat: UIO[Unit] = hb.fold(ZIO.unit)(_.interrupt.unit)
+      val encoder = js.Dynamic.newInstance(js.Dynamic.global.TextEncoder)()
+      var initialMessage = initial
+      val takeNext: UIO[JsonRpcMessage] = ZIO.suspendSucceed {
+        initialMessage match
+          case Some(message) =>
+            initialMessage = None
+            ZIO.succeed(message)
+          case None => reqQueue.take
+      }
+      val source = js.Dynamic.literal(
+        pull = js.Any.fromFunction1((controller: js.Dynamic) =>
+          ZioJsPromise.zioToPromise(
+            takeNext
+              .flatMap {
+                case msg if msg == KeepAliveSentinel =>
+                  ZIO.succeed { val _ = controller.enqueue(encoder.encode(": ping\n\n")) }
+                case msg if MessageLoop.isCloseSentinel(msg) =>
+                  // Dispatch ended replyless (cancelled): end the stream without emitting a frame.
+                  stopHeartbeat *> ZIO.succeed { val _ = controller.close() }
+                case msg =>
+                  val frame = s"event: message\ndata: ${MessageLoop.encodeOutbound(msg)}\n\n"
+                  ZIO.succeed {
+                    val _ = controller.enqueue(encoder.encode(frame))
+                  } *>
+                    (if isFinalReply(msg, reqId) then
+                       stopHeartbeat *> ZIO.succeed { val _ = controller.close() }
+                     else ZIO.unit)
               }
-              (if benign then ZIO.unit else ZIO.logWarningCause("SSE pull failed", cause)) *>
-                ZIO.succeed { val _ = scala.util.Try(controller.error(js.Error("stream failed"))) }
-            }
+              // A defect mid-stream ends the stream instead of rejecting the pull promise — Bun
+              // would otherwise surface the raw error itself. A pull racing the client's cancel
+              // (interrupted `take`, or the controller already closed) is benign and not logged.
+              .catchAllCause { cause =>
+                val benign = cause.isInterruptedOnly || cause.dieOption.exists {
+                  case _: js.JavaScriptException => true
+                  case _ => false
+                }
+                (if benign then ZIO.unit else ZIO.logWarningCause("SSE pull failed", cause)) *>
+                  stopHeartbeat *>
+                  ZIO.succeed {
+                    val _ = scala.util.Try(controller.error(js.Error("stream failed")))
+                  }
+              }
+          )
+        ),
+        // Client disconnected mid-request: stop the heartbeat, interrupt the dispatch and drop the
+        // queue, otherwise the pending `take` leaks a fiber per aborted request.
+        cancel = js.Any.fromFunction1((_: js.Any) =>
+          ZioJsPromise.zioToPromise(stopHeartbeat *> dispatchFiber.interrupt *> reqQueue.shutdown)
         )
-      ),
-      // Client disconnected mid-request: interrupt the dispatch and drop the queue, otherwise the
-      // pending `take` leaks a fiber per aborted request.
-      cancel = js.Any.fromFunction1((_: js.Any) =>
-        ZioJsPromise.zioToPromise(dispatchFiber.interrupt *> reqQueue.shutdown)
       )
-    )
-    val stream = js.Dynamic.newInstance(js.Dynamic.global.ReadableStream)(source)
-    val headers =
-      Map("content-type" -> "text/event-stream", "cache-control" -> "no-cache") ++
-        (if modern then Map("x-accel-buffering" -> "no") else Map.empty[String, String]) ++
-        (if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String])
-    val init = js.Dynamic.literal(status = 200, headers = js.Dictionary[String](headers.toSeq*))
-    js.Dynamic.newInstance(js.Dynamic.global.Response)(stream, init)
+      val stream = js.Dynamic.newInstance(js.Dynamic.global.ReadableStream)(source)
+      val headers =
+        Map("content-type" -> "text/event-stream", "cache-control" -> "no-cache") ++
+          (if modern then Map("x-accel-buffering" -> "no") else Map.empty[String, String]) ++
+          (if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String])
+      val init = js.Dynamic.literal(status = 200, headers = js.Dictionary[String](headers.toSeq*))
+      js.Dynamic.newInstance(js.Dynamic.global.Response)(stream, init)
+    }
 
   private def isFinalReply(message: JsonRpcMessage, reqId: RequestId): Boolean =
     message match
@@ -602,17 +633,15 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                     jsonResponse(first.toJson, Map.empty, status)
                   )
                 case None =>
-                  ZIO.succeed(
-                    sseResponse(
-                      reqQueue,
-                      rpc.id,
-                      session,
-                      isNew = false,
-                      fiber,
-                      settings,
-                      modern = true,
-                      initial = Some(first)
-                    )
+                  sseResponse(
+                    reqQueue,
+                    rpc.id,
+                    session,
+                    isNew = false,
+                    fiber,
+                    settings,
+                    modern = true,
+                    initial = Some(first)
                   )
             yield response
       case _: JsonRpcMessage.Invalid =>

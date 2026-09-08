@@ -372,6 +372,23 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   search finds nothing), never exported givens that could shadow
   companions. Parameterized-case enums intentionally keep wrapper-object
   codecs; provide an `McpInputCodec` for a custom shape.
+- **Bun SSE keepalive no longer drops a reply that lands on a heartbeat tick** (TJC-2337): with
+  `keepAliveInterval` set, the Scala.js/Bun HTTP backend implemented the heartbeat as a timed `take`
+  on the per-request stream queue; a tool reply arriving in the same tick as the timeout was
+  discarded by the interrupted take and the stream then ended as `: ping` frames only — HTTP 200,
+  nothing logged (deterministic when the handler ran for exactly one interval, intermittent at
+  multiples; legacy per-request streams from the first frame, modern 2026-07-28 streams from the
+  second). The heartbeat is now a fiber that offers a ping marker into the queue — the Bun twin of
+  the JVM's stream merge — so the pull is a plain `take` and every reply frame is delivered.
+- **Bun's `idleTimeout` no longer cuts a slow tool's reply** (TJC-2337): the Scala.js/Bun HTTP
+  backend passed no `idleTimeout` to `Bun.serve`, whose 10 s default closes any connection with no
+  bytes in either direction — a per-request SSE response awaiting a slow tool included. With the
+  documented default `keepAliveInterval = None` a `tools/call` slower than that lost its reply: the
+  socket was cut mid-stream (measured 9–12 s) and the client saw only its own request timeout
+  (`-32001`). The listener now runs with `idleTimeout: 0`, disabling Bun's runtime idle close —
+  parity with the JVM listener, which has none; legacy session lifetime is still governed by
+  `sessionIdleTimeout` — so a quiet stream stays open until the reply. `keepAliveInterval` remains
+  the knob for intermediaries with idle timers of their own.
 
 ### Removed
 
