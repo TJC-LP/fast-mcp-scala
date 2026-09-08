@@ -1,15 +1,16 @@
 # fast-mcp-scala public API baseline — for the 1.1.0 MiMa gate (ROADMAP.md 1.1.0 "MiMa gate")
-# Generated 2026-09-08 by R3 step 1 (role publisher) from the release tree tjc-2277-release-prep @ 6fce1f9 (PR #99; contains main 7da60a4):
+# Generated 2026-09-08 by R3 stage 3 (role r3s3-gate) from the final release tree tjc-2277-release-prep @ 56d113f (PR #99; contains main e834c64):
 #   jar   : the R3 rehearsal `./mill --no-server __.publishLocal` of this tree (JVM artifact fast-mcp-scala_3.jar, ivy2Local, Scala 3.9.0,
 #           built WITHOUT -experimental — PR #98 dropped the flag, so no @experimental taint reaches TASTy)
 #   source: this tree (shared/src + jvm/src) for the public/private split of top-level decls
 #   method: identical to the v0 INPUT (C1 step 4, commit cad9b60): sorted source-public top-level types, jar top-level class files,
 #           `javap -public` of the root-import export surface
-# Supersedes the v0 INPUT generated from main 8b2fede. Deltas now IN the jar (fix PRs #96-#107 merged to main; PR B's own removals on this tree):
+# Supersedes the v0 INPUT generated from main 8b2fede. Deltas now IN the jar (fix PRs #96-#111 merged to main; PR B's own removals on this tree):
 #   - PR B (prep) deletes the RC1/RC4-deprecated ErrorCodes.ResourceNotFound, ElicitRequestUrlParams.requiredError, HostGuard.isAllowed/3-arg
 #   - PR #102 (+ follow-up) widens the root-import export list; adds vs v0: BlobResourceContents, ClientCapabilities, CompleteRequestParams, Completion, CompletionArgument, CompletionContext, CompletionReference, CreateMessageRequestParams, CreateMessageResult, ElicitRequestParams, ElicitRequestUrlParams, ElicitResult, Implementation, LimitSettings, ListRootsResult, LoggingLevel, ModelHint, ModelPreferences, ProgressToken, PromptReference, ResourceContents, ResourceTemplateReference, Root, SamplingMessage, TaskOwnerKey, TaskSettings, TaskSupport, TextResourceContents, ToolChoice
 #   - PR #102 removes McpServerSettings ctor params debug, logLevel, warnOnDuplicate{Resources,Tools,Prompts}, dependencies and McpServer.dependencies
 #   - PR #103 macro defaults / @Param Option semantics; PR #98 no @experimental (bytecode-invisible to javap; TASTy-visible to MiMa's Scala 3 checks)
+#   - PR #109 macro DX guards (compile-time rejections inside inline givens / macro internals); PR #111 ZIO 2.1.26 / zio-json 0.10.0 / zio-http 3.11.4 (dependency-only)
 # Sections:
 #   TYPE       <fqcn> <kind> <src>            top-level, source-public (non-private) decl; jar=yes|no (type aliases have no class file)
 #   INTERNAL   <fqcn>                          class file in the jar whose top-level decl is private[...] or nested on this tree
@@ -22,7 +23,7 @@
 TYPE	com.tjclp.fastmcp.codec.DefaultDecodeContext	final class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/codec/DefaultDecodeContext.scala:31
 TYPE	com.tjclp.fastmcp.codec.McpDecoders	object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/codec/McpDecoders.scala:47
 TYPE	com.tjclp.fastmcp.codec.McpDecodersLowPriority	trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/codec/McpDecoders.scala:26
-TYPE	com.tjclp.fastmcp.core.AsResourceBody	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:259
+TYPE	com.tjclp.fastmcp.core.AsResourceBody	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:265
 TYPE	com.tjclp.fastmcp.core.AudioContent	case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Types.scala:192
 TYPE	com.tjclp.fastmcp.core.Content	object/sealed trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Types.scala:165
 TYPE	com.tjclp.fastmcp.core.CreateTaskResult	case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Tasks.scala:154
@@ -34,17 +35,17 @@ TYPE	com.tjclp.fastmcp.core.ImageContent	case class/object	jar=yes	fast-mcp-scal
 TYPE	com.tjclp.fastmcp.core.ListTasksResult	case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Tasks.scala:188
 TYPE	com.tjclp.fastmcp.core.LoggingLevel	enum/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Logging.scala:12
 TYPE	com.tjclp.fastmcp.core.LoggingMessageNotificationParams	case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Logging.scala:55
-TYPE	com.tjclp.fastmcp.core.McpCodec	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:179
+TYPE	com.tjclp.fastmcp.core.McpCodec	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:185
 TYPE	com.tjclp.fastmcp.core.McpDecodeContext	trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:19
 TYPE	com.tjclp.fastmcp.core.McpDecoder	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:35
 TYPE	com.tjclp.fastmcp.core.McpEncoder	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:121
 TYPE	com.tjclp.fastmcp.core.McpEncoderLowPriority	trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:91
-TYPE	com.tjclp.fastmcp.core.McpInputCodec	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:217
-TYPE	com.tjclp.fastmcp.core.McpPrompt	final case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:586
-TYPE	com.tjclp.fastmcp.core.McpSchema	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:201
-TYPE	com.tjclp.fastmcp.core.McpStaticResource	final case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:699
-TYPE	com.tjclp.fastmcp.core.McpTemplateResource	final case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:786
-TYPE	com.tjclp.fastmcp.core.McpTool	final case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:331
+TYPE	com.tjclp.fastmcp.core.McpInputCodec	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:223
+TYPE	com.tjclp.fastmcp.core.McpPrompt	final case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:592
+TYPE	com.tjclp.fastmcp.core.McpSchema	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:207
+TYPE	com.tjclp.fastmcp.core.McpStaticResource	final case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:705
+TYPE	com.tjclp.fastmcp.core.McpTemplateResource	final case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:792
+TYPE	com.tjclp.fastmcp.core.McpTool	final case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:337
 TYPE	com.tjclp.fastmcp.core.Message	case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Types.scala:234
 TYPE	com.tjclp.fastmcp.core.Param	class	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Annotations.scala:104
 TYPE	com.tjclp.fastmcp.core.ProgressToken	enum/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Protocol.scala:81
@@ -53,8 +54,8 @@ TYPE	com.tjclp.fastmcp.core.PromptArgument	case class/object	jar=yes	fast-mcp-sc
 TYPE	com.tjclp.fastmcp.core.PromptDefinition	case class	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Types.scala:124
 TYPE	com.tjclp.fastmcp.core.Protocol	object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Protocol.scala:6
 TYPE	com.tjclp.fastmcp.core.Resource	class	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Annotations.scala:130
-TYPE	com.tjclp.fastmcp.core.ResourceArgument	case class	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:299
-TYPE	com.tjclp.fastmcp.core.ResourceDefinition	case class	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:306
+TYPE	com.tjclp.fastmcp.core.ResourceArgument	case class	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:305
+TYPE	com.tjclp.fastmcp.core.ResourceDefinition	case class	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:312
 TYPE	com.tjclp.fastmcp.core.ResourceLink	case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Types.scala:207
 TYPE	com.tjclp.fastmcp.core.Role	enum/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Types.scala:132
 TYPE	com.tjclp.fastmcp.core.SetLevelRequestParams	case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Logging.scala:47
@@ -69,15 +70,15 @@ TYPE	com.tjclp.fastmcp.core.TaskSupport	enum/object	jar=yes	fast-mcp-scala/share
 TYPE	com.tjclp.fastmcp.core.TaskTimestamp	object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Tasks.scala:218
 TYPE	com.tjclp.fastmcp.core.Tasks	object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Tasks.scala:15
 TYPE	com.tjclp.fastmcp.core.TextContent	case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Types.scala:171
-TYPE	com.tjclp.fastmcp.core.ToHandlerEffect	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:284
+TYPE	com.tjclp.fastmcp.core.ToHandlerEffect	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:290
 TYPE	com.tjclp.fastmcp.core.Tool	class	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Annotations.scala:58
 TYPE	com.tjclp.fastmcp.core.ToolAnnotations	case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Types.scala:10
 TYPE	com.tjclp.fastmcp.core.ToolDefinition	case class	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Types.scala:83
 TYPE	com.tjclp.fastmcp.core.ToolExample	case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Types.scala:28
 TYPE	com.tjclp.fastmcp.core.ToolExecution	case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Tasks.scala:208
 TYPE	com.tjclp.fastmcp.core.ToolInputSchema	object/opaque type	jar=no	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Types.scala:38
-TYPE	com.tjclp.fastmcp.core.ToolOutputSchemaProvider	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:244
-TYPE	com.tjclp.fastmcp.core.ToolSchemaProvider	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:190
+TYPE	com.tjclp.fastmcp.core.ToolOutputSchemaProvider	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:250
+TYPE	com.tjclp.fastmcp.core.ToolSchemaProvider	object/trait	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/Contracts.scala:196
 TYPE	com.tjclp.fastmcp.core.ToolSchemaProviders	object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/ToolSchemaProviders.scala:13
 TYPE	com.tjclp.fastmcp.core.wire.Annotations	case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/wire/Resources.scala:18
 TYPE	com.tjclp.fastmcp.core.wire.BlobResourceContents	case class/object	jar=yes	fast-mcp-scala/shared/src/com/tjclp/fastmcp/core/wire/Resources.scala:83
