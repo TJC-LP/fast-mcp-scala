@@ -17,7 +17,7 @@ on modern requests.
 
 ```scala 3 raw
 import com.tjclp.fastmcp.{*, given}
-import com.tjclp.fastmcp.server.TaskSettings   // not re-exported by the package object
+import com.tjclp.fastmcp.server.TaskSettings   // optional since 1.0.0 (root-exported); the release candidates need it
 
 val server = McpServer(
   name = "my-server",
@@ -54,7 +54,7 @@ Typed-contract path:
 
 ```scala 3 raw
 import com.tjclp.fastmcp.{*, given}
-import com.tjclp.fastmcp.core.TaskSupport      // not re-exported by the package object
+import com.tjclp.fastmcp.core.TaskSupport   // optional since 1.0.0 (root-exported); the release candidates need it
 
 val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   .withTaskSupport(TaskSupport.Optional)
@@ -75,15 +75,15 @@ see and use it.
 ## Transport and security policy
 
 Modern task IDs are **bearer handles**, so task creation and polling work over stdio and both HTTP
-settings on JVM and Bun. Possession of an ID grants access to that task: keep them secret and
+settings on JVM and Bun, and over stdio on Scala Native. Possession of an ID grants access to that task: keep them secret and
 enforce authorization around the MCP endpoint. Legacy task IDs remain scoped to their initialized
 session.
 
 Tasks dispatch is native router middleware; there is no transport-layer special-casing.
 
 Modern bearer tasks are bucketed per client for the running and stored caps above. By default
-(`TaskOwnerKey.Transport`; `TaskOwnerKey` lives in `com.tjclp.fastmcp.core` and is imported by
-name) the bucket key is the peer address supplied by the HTTP transport
+(`TaskOwnerKey.Transport`; `TaskOwnerKey` lives in `com.tjclp.fastmcp.core` and is root-exported
+since 1.0.0) the bucket key is the peer address supplied by the HTTP transport
 (zio-http `remoteAddress`, Bun `server.requestIP`); requests that arrive without a key share one
 anonymous bucket bounded by the per-owner cap. Behind a reverse proxy every peer collapses to one
 address, so use `TaskOwnerKey.Custom` to derive the key from an authenticated principal instead;
