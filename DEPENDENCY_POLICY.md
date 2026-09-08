@@ -34,8 +34,12 @@ A production dependency is updated when one of these applies:
   `.github/workflows/osv.yml`, before every release, and recorded per release in the gate ledger):
   GitHub's dependency graph does not see Mill-resolved Maven dependencies, so its security alerts,
   when enabled, cover only the Actions and bun ecosystems declared in `.github/dependabot.yml`. A
-  transitive dependency with a security surface of its own (netty, via zio-http) is pinned
-  explicitly in `Versions` so it can move independently of the library that brings it;
+  transitive dependency with a security surface of its own (netty, which reaches the JVM artifact
+  only through zio-http) is not declared directly: its version is governed by the
+  `io.netty:netty-bom` import the JVM module publishes in its POM (`Versions.netty`, kept equal to
+  the version zio-http declares — 4.2.17.Final with zio-http 3.11.4), so it can still move ahead of
+  the library that brings it when an advisory lands first, without becoming a direct dependency
+  that a stdio-only consumer would have to exclude on its own;
 - a bug in the dependency affects fast-mcp-scala's behavior;
 - a new dependency feature is needed;
 - the dependency drops support for a Scala, Scala.js, Scala Native, or JDK version this library

@@ -272,7 +272,7 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   harness-running jobs restore the shared Mill/coursier cache read-only. `ci.yml` no longer exports
   `GITHUB_TOKEN` workflow-wide: it is scoped to the Mill steps that need it (as `native.yml`
   already did), so the third-party setup actions never see it.
-- **Netty pinned to 4.2.17.Final** (TJC-2327): zio-http 3.4.0 declares netty 4.2.3.Final, whose
+- **Netty 4.2.17.Final** (TJC-2327, TJC-2357): zio-http 3.4.0 declared netty 4.2.3.Final, whose
   16 modules carried 27 OSV advisories (12 HIGH / 13 MODERATE / 2 LOW), 7 of them reachable from
   the default JVM HTTP path — CVE-2026-33870 (HIGH, request smuggling), CVE-2026-42577 (HIGH,
   epoll DoS on every Linux JVM), CVE-2026-42585, CVE-2026-42580, CVE-2026-42581, CVE-2026-50020
@@ -281,16 +281,16 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   CVE-2026-42578, CVE-2026-42583, CVE-2026-42584, CVE-2026-42587, CVE-2026-44249,
   CVE-2026-45416, CVE-2026-45536, CVE-2026-50010, CVE-2026-55831, CVE-2026-55833,
   CVE-2026-56745, CVE-2026-56746, CVE-2026-59898, CVE-2026-59899, CVE-2026-59901,
-  CVE-2026-59903, CVE-2026-59921. `build.mill` now pins `Versions.netty`, and the JVM module
-  declares all 16 `io.netty` modules zio-http brings as direct dependencies and imports
-  `io.netty:netty-bom` into the published POM's `<dependencyManagement>`, so the resolved
-  classpath and every consumer's resolution (coursier, Maven, Gradle) see a single netty version;
-  the OSV audit of the resolved 1.0.0 classpath reports 0 advisories. zio-http itself stays at
-  3.4.0 (netty 4.2.x is binary-compatible within the line; the pairing is gated by the JVM test
-  suite, the official conformance suite and the GraalVM HTTP smoke). **Consequence for
-  stdio-only GraalVM builds**: netty is now a direct `<dependency>` of `fast-mcp-scala_3`, so
-  the netty-free recipe must exclude both `dev.zio:zio-http_3` and `io.netty:*` — excluding
-  zio-http alone no longer sheds netty (see [docs/native-image.md](docs/native-image.md)).
+  CVE-2026-59903, CVE-2026-59921. The 1.0.0 classpath resolves netty 4.2.17.Final, which clears
+  all 27; the version now comes from zio-http 3.11.4 itself (the ZIO stack bump under *Changed*),
+  and the JVM module imports `io.netty:netty-bom` at the same version (`Versions.netty`) into the
+  published POM, so a consumer's resolution sees a single netty version
+  — the classified native artifacts included — and a future netty advisory can be answered by
+  moving that one constant ahead of zio-http. The interim direct pins of all 16 `io.netty` modules
+  (in place while zio-http stayed at 3.4.0) are gone with the bump, so netty is a transitive
+  dependency again and a stdio-only GraalVM build sheds it by excluding `dev.zio:zio-http_3` alone
+  (see [docs/native-image.md](docs/native-image.md)). The OSV audit of the resolved 1.0.0
+  classpath reports 0 advisories.
 
 ### Added
 
@@ -351,6 +351,63 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Changed
 
+- **ZIO stack bump** (TJC-2357): ZIO 2.1.20 → 2.1.26, zio-json 0.7.44 → 0.10.0 (JVM, Scala.js and
+  Scala Native artifacts alike) and zio-http 3.4.0 → 3.11.4 (JVM). zio-http 3.11.4 declares netty
+  4.2.17.Final itself, so the 16 direct `io.netty` pins the TJC-2327 override added to the JVM
+  module are removed again: netty is a transitive dependency of zio-http, the published
+  `fast-mcp-scala_3` POM lists only `zio`, `zio-json`, `zio-http` and the Scala 3 library as
+  dependencies plus the `import`-scoped `io.netty:netty-bom` entry (kept at `Versions.netty`,
+  equal to what zio-http declares, as the single switch for a future advisory),
+  and a stdio-only consumer sheds the HTTP stack by excluding `dev.zio:zio-http_3` alone (the
+  two-exclusion form stays valid). Two zio-http behaviour deltas reach the wire, neither on a
+  first-party path: a request netty's decoder rejects is now answered with zio-http's own status
+  mapping — 431 for an over-long header block, 414 for an over-long request line, 413 for a body
+  over the aggregator cap, 400 for any other decoder failure — where 3.4.0 routed every decoder
+  failure through its generic 500 error-response path (this library's 413 / `-32000` body-cap
+  replies and the aggregator's empty 413 are unchanged); and the channel's auto-read is paused
+  while a streamed SSE body is being written, so a pipelined follow-up request is no longer read
+  interleaved with it. Resolved-tree side effects: zio-schema 1.7.4 → 1.8.6, zio-prelude RC41 →
+  RC48, magnolia 1.3.18 → 1.3.23, izumi-reflect 3.0.5 → 3.0.9, scala-collection-compat 2.13.0 →
+  2.14.0, scala-java-time 2.6.0 → 2.7.0 (Scala.js / Scala Native). No source change was needed;
+  the three platforms' test suites, the official conformance suite (both revisions, JVM, Bun and
+  the GraalVM HTTP image) and the OSV audit (0 advisories) gate the pairing.
+- **Misplaced annotations are a compile error** (TJC-2331, C2.8): the scan still registers only
+  members declared directly on the scanned object (inherited members would break default-argument
+  getter lookup and exact-overload binding), but an annotated member it skips — inherited from a
+  trait or class, on a `val`, or in a nested object — is now reported by name with the rule and the
+  remedy instead of silently producing an empty `tools/list` (`McpServerApp`'s quiet scan included).
+  A nested annotated object next to declared members is a warning, since it may be scanned
+  separately; `private` / `protected` declared members are registered as before.
+- **Annotated method shapes are checked at expansion** (TJC-2331, C2.7; rejects shapes that were
+  silently broken or crashed): a `@Tool` / `@Prompt` / `@Resource` method with no parameter list
+  (`def m: String`), more than one parameter list (curried, or a `using` / implicit clause), type
+  parameters, or more than 22 parameters is now a compile error positioned at the method, naming it
+  and the fix. Before: a curried method registered its first list only and put a
+  `Function1.toString` on the wire; a generic method crashed the macro ("partially applied Term"); a
+  `using` clause failed with a raw `?=>` type mismatch at the object header; a no-parens method failed
+  naming only its return type; a 23-parameter method registered and every call died at the
+  `RefResolver` arity guard.
+- **`.withOutputSchema` requires an object `Out`** (TJC-2331, C2.5; rejects a shape that was silently
+  broken): `Out = String`, `Option[_]`, a collection or an enum advertised a non-object
+  `outputSchema` and emitted no `structuredContent` (the spec says a tool with `outputSchema` MUST
+  return a conforming one). The derived `ToolOutputSchemaProvider` now aborts at compile time naming
+  the type and the remedy (wrap the result in a case class, or drop `.withOutputSchema`). Case
+  classes, `Map[String, V]` and `Unit` are unaffected.
+- **`McpTool` `In` must derive an object schema** (TJC-2331, C2.4; rejects a shape that was silently
+  broken): `McpTool[String, _]`, `McpTool[Int, _]`, a collection, `Option`, `Either`, an enum or a
+  sealed trait as `In` used to compile and advertise a non-object `inputSchema` that no MCP
+  `arguments` object could ever satisfy — the tool could not be called. The derived
+  `ToolSchemaProvider` now aborts at compile time: `McpTool In must be a case class (use `case class
+  NoArgs()` for no arguments)`. Case classes, `Map[String, V]`, `Unit` and types with a user
+  `McpSchema` / `McpInputCodec` are unaffected.
+- **CI gates the 2026-07-28 requirements run on every PR** (TJC-2356): `conformance.yml` now runs
+  both `scripts/conformance.sh` modes per platform — the active suite (31 scenarios / 73 checks,
+  every one at the 2025-11-25 wire, empty baselines) and `--requirements 2026-07-28` (37 scored
+  scenarios) — on the JVM and Bun. Until now only the active suite was gated, so no workflow sent a
+  2026-07-28 request as a pass/fail check; `native.yml`'s JVM-vs-native 2026 parity step ran the
+  mode, but as a diff whose `grep` filter masked the harness verdict. That step now runs under
+  `pipefail` (a harness failure fails the job) and rejects an empty normalized result instead of
+  diffing two empty files.
 - **Legacy HTTP session cap: idle GET holders become evictable** (TJC-2355): at `maxSessions` the
   JVM adapter still evicts the longest-idle session without a live GET stream first; when every
   stored session holds a live GET, it now evicts the longest-idle of them once it has been idle
@@ -358,7 +415,7 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   it as usual) instead of refusing the `initialize` with 503. The 503 remains only when no session
   qualifies under either rule, and `sessionIdleTimeout = None` keeps GET holders exempt. The
   periodic idle sweeper is unchanged (live GET streams stay exempt while capacity is free). Bun is
-  unaffected (no standalone GET channel). zio-http 3.4.0 exposes no accepted-socket option, so TCP
+  unaffected (no standalone GET channel). zio-http 3.11.4 exposes no accepted-socket option, so TCP
   keepalive is not set by the server; `docs/transports.md` describes how a vanished GET peer is
   detected.
 - **stdio servers log to stderr by default** (TJC-2338): on the stdio transport stdout is the wire,
@@ -494,6 +551,31 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Fixed
 
+- **`Out = Unit` with `.withOutputSchema` emits `structuredContent: {}`** (TJC-2331, C2.5): the
+  tool advertised the empty-object `outputSchema` but emitted no `structuredContent` at all (the
+  spec requires a conforming one whenever `outputSchema` is declared);
+  `McpEncoder[Unit].encodeStructured` is now `Some(Json.Obj())`.
+- **`Either[A, B]` parameters decode the shape their schema advertises** (TJC-2331, C2.3): when a
+  side needed derivation (`Either[Color, String]`), the Mirror sum fallback produced a decoder
+  wanting `{"Left":{"value":"Red"}}` while the schema advertises zio-json's `{"Left":"Red"}` — every
+  schema-conforming call was rejected, bare or inside `Option` / `List` / `Map[String, _]`. An
+  `Either` arm now derives both sides and summons zio-json's `Either` instance, so the annotation
+  path matches the typed path and the docs' "collections derive with no givens" promise holds for
+  `List`, `Vector`, `Set`, `Seq`, `Array`, `Map[String, V]` and `Either`.
+- **`Set[T]` parameters derive a decoder like `List[T]`** (TJC-2331, C2.2): `Set[T]` of a derived
+  element type advertised a `uniqueItems` array schema but decoder synthesis aborted with `No
+  McpDecoder or derivable JsonDecoder found for type: Set[...]` (no `Set` arm; `Set` is not a
+  `Seq`), while the typed path decoded it. Every decoder abort on the annotation path now names the
+  parameter and states the remedy (`given JsonDecoder[T]` or `McpInputCodec[T]`) and lists what
+  derives automatically.
+- **`Vector[T]` parameters of derived element types no longer crash the macro** (TJC-2331, C2.1):
+  an annotated `Vector[T]` parameter whose `T` needs derivation (an enum, a case class, an `Option`
+  or `Either` of one) aborted expansion with an `ExprCastException` and a compiler stack trace — the
+  `Seq[a]` decoder arm matched `Vector` by conformance, built a `JsonDecoder[Seq[T]]` and cast it to
+  the invariant `JsonDecoder[Vector[T]]`. A dedicated `Vector` arm now derives the element decoder
+  and summons zio-json's `Vector` instance (the shape the schema already advertised), and a derived
+  decoder that does not fit its parameter's type (e.g. `IndexedSeq[T]`) is a compile error naming
+  the parameter and the `given JsonDecoder[T]` / `McpInputCodec[T]` remedy instead of a crash.
 - **`allowedHosts` parses the `Host` header fail-closed** (TJC-2354): the `Host` value must be one
   `host[:port]` authority. A value containing a comma — the `", "`-joined form of a `Host` sent
   more than once, or any second authority — is refused with 403 in either order instead of being

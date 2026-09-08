@@ -29,10 +29,10 @@ object server extends ScalaModule with mill.javalib.NativeImageModule {
   def mainClass = Some("com.example.MyServer")
 
   def mvnDeps = Seq(
-    // stdio-only: exclude the HTTP stack. BOTH exclusions are needed — netty is a direct,
-    // version-pinned dependency of the JVM artifact — see "The stdio/HTTP split" below
+    // stdio-only: exclude the HTTP stack. netty arrives only through zio-http, so this single
+    // exclusion sheds both — see "The stdio/HTTP split" below
     mvn"com.tjclp::fast-mcp-scala:1.0.0"
-      .exclude("dev.zio" -> "zio-http_3", "io.netty" -> "*")
+      .exclude("dev.zio" -> "zio-http_3")
   )
 
   // GraalVM provisioned by Mill via the coursier JVM index — no GRAALVM_HOME, no setup-graalvm.
@@ -59,29 +59,34 @@ stack: `serveHttp` lives on the separate `HttpTransportBackend` trait, `runHttp(
 `using` parameter, and the `TransportRunner[Http]` given is conditional. Closed-world analysis
 therefore drops zio-http and netty from stdio-only binaries entirely.
 
-**Stdio-only builds must also exclude the HTTP stack from the dependency — both
-`dev.zio:zio-http_3` and `io.netty:*`** (as in the recipe above; sbt:
-`("com.tjclp" %% "fast-mcp-scala" % "1.0.0").exclude("dev.zio", "zio-http_3").exclude("io.netty", "*")`).
-Since 1.0.0 the JVM artifact
-pins every netty module zio-http brings as a direct dependency (the CVE override, see
-[DEPENDENCY_POLICY.md](../DEPENDENCY_POLICY.md)), so excluding zio-http alone no longer removes
-netty from the classpath. This is not just size hygiene: netty's own in-jar reflect-config
-unconditionally registers methods whose signatures mention netty buffer types, forcing them
-reachable, and netty's `--initialize-at-build-time=io.netty` directive then allocates a native
-`MemorySegment` in `EmptyByteBuf.<clinit>` on JDK 25 — failing the build with "Detected a native
-MemorySegment in the image heap". With both exclusions in place, none of that metadata is on the
-image classpath — and Mill's GraalVM-reachability-metadata-repo integration can stay at its
-defaults, so any OTHER dependency you add keeps its repo metadata. (HTTP builds keep netty and
-counter the stale-repo problem with a scoped override — see the HTTP section below.)
+**Stdio-only builds must also exclude the HTTP stack from the dependency: `dev.zio:zio-http_3`**
+(as in the recipe above; sbt:
+`("com.tjclp" %% "fast-mcp-scala" % "1.0.0").exclude("dev.zio", "zio-http_3")`). netty reaches
+`fast-mcp-scala_3` only through zio-http — 3.11.4 declares netty 4.2.17.Final, and the JVM
+artifact declares no `io.netty` dependency of its own, only an `import`-scoped
+`io.netty:netty-bom` entry, which adds no dependency — so excluding zio-http removes every netty
+jar with it. The two-exclusion form `.exclude("dev.zio" -> "zio-http_3", "io.netty" -> "*")` is
+also valid: the second exclusion matches nothing in the published tree today, so it is harmless,
+and it keeps the recipe correct should a future release ever have to declare netty directly again
+(as the tree did briefly before 1.0.0 to override zio-http 3.4.0's netty 4.2.3.Final; see
+[DEPENDENCY_POLICY.md](../DEPENDENCY_POLICY.md)). Shedding netty is not just size hygiene:
+netty's own in-jar reflect-config unconditionally registers methods whose signatures mention
+netty buffer types, forcing them reachable, and netty's `--initialize-at-build-time=io.netty`
+directive then allocates a native `MemorySegment` in `EmptyByteBuf.<clinit>` on JDK 25 — failing
+the build with "Detected a native MemorySegment in the image heap". With the exclusion in place,
+none of that metadata is on the image classpath — and Mill's GraalVM-reachability-metadata-repo
+integration can stay at its defaults, so any OTHER dependency you add keeps its repo metadata.
+(HTTP builds keep netty and counter the stale-repo problem with a scoped override — see the HTTP
+section below.)
 
 The in-repo proof: `fast-mcp-scala.nativeSmoke.stdio` builds `examples.AnnotatedServer` with
 the same classpath shape — it filters the `netty-*` and `zio-http*` jars from
-`nativeImageClasspath`, the moduleDeps stand-in for the two dependency exclusions (a module
+`nativeImageClasspath`, the moduleDeps stand-in for the dependency exclusion (a module
 dependency cannot carry an exclusion) — and `scripts/native-smoke.sh` asserts both the full MCP
 handshake and that the binary contains no `io.netty` / `zio.http` strings. That filter proves the
 transport seam, not the published recipe; the recipe is checked against the published POM instead:
-`cs resolve com.tjclp:fast-mcp-scala_3:<version> --exclude dev.zio:zio-http_3 --exclude 'io.netty:*' | grep -c io.netty`
-must print `0`.
+`cs resolve com.tjclp:fast-mcp-scala_3:<version> --exclude dev.zio:zio-http_3 | grep -c io.netty`
+must print `0` (it does for 1.0.0: nothing but zio-http brings netty in).
 
 ## Notes and troubleshooting
 

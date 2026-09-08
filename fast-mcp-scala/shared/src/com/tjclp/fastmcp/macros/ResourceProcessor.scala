@@ -53,6 +53,8 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
       report.errorAndAbort(s"No @Resource annotation found on method '$methodName'")
     }
 
+    requireRegistrableShape("@Resource", methodSym)
+
     val (uri, nameOpt, descOpt, mimeTypeOpt) = MacroUtils.parseResourceParams(resourceAnnot)
     val finalName = nameOpt.orElse(Some(methodName))
     val finalDesc = descOpt.orElse(methodSym.docstring)

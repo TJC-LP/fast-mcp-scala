@@ -158,7 +158,9 @@ CI-gated. Recipes, flags, and the metadata audit loop are in [native-image.md](.
 
 `ci.yml` builds and tests the JVM and Scala.js modules on JDK 17, 21, and 25 and runs the Scala
 Native test suite, links the demo binary, and smokes it over stdio. `conformance.yml` runs the
-official MCP conformance suite against the JVM and Bun HTTP servers at **73/73** checks with zero
-expected failures (harness pinned and lock-frozen under `conformance/`); `native.yml` runs the same
-suite against the GraalVM HTTP image and smokes the GraalVM stdio image. Details in
+official MCP conformance harness against the JVM and Bun HTTP servers in both modes on every PR:
+the active suite at **73/73** checks (31 scenarios, 2025-11-25 wire, zero expected failures) and
+the 2026-07-28 requirements run at **37/37** scored scenarios (harness pinned and lock-frozen under
+`conformance/`); `native.yml` runs both against the GraalVM HTTP image — the 2026-07-28 run as a
+parity diff against the JVM — and smokes the GraalVM stdio image. Details in
 [spec-coverage.md](./spec-coverage.md).

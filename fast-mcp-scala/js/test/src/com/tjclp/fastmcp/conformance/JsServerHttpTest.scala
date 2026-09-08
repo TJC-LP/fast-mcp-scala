@@ -1284,8 +1284,12 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     * default 10 s `idleTimeout` (measured ~12 s on Bun 1.4.1), so a quiet per-request SSE response
     * is exposed to the runtime's own idle close. One call, once — the whole suite pays these
     * seconds exactly one time.
+    *
+    * The port must be unique across every Bun test suite in this module (they share one process):
+    * 38932 is `JsServerLimitsTest`'s stateful port, and sharing it made this test fail with
+    * "Failed to start server. Is port 38932 in use?" whenever the suites interleaved that way.
     */
-  private val idleTimeoutPort = 38932
+  private val idleTimeoutPort = 38938
   private val slowReplyMs = 14000
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))

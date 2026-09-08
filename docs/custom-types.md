@@ -14,6 +14,10 @@ typed contracts.
 - An enum field derives a string-enum JSON Schema (`{"type":"string","enum":[...]}`) and a
   string-based codec, at any nesting depth, including through `Option`, collections, and nested
   case classes.
+- "Collections" means `List`, `Vector`, `Set`, `Seq`, `Array`, `Map[String, V]` and `Either` (as
+  zio-json's `{"Left": ...}` / `{"Right": ...}` objects), each with derived element types; a
+  parameter type the annotation path cannot derive is a compile error naming the parameter and the
+  `given JsonDecoder[T]` / `McpInputCodec[T]` remedy.
 - A hand-written `given JsonDecoder` / `JsonEncoder` for a type always wins over the derived one,
   custom naming and all. Derivation is macro-side and summon-first; the library never exports
   givens that could shadow yours.
@@ -29,11 +33,16 @@ typed contracts.
   `java.time.DayOfWeek`) are not derived either: provide a `given McpInputCodec[T]` for them.
   Prefer case classes to tuples — a tuple field advertises an object schema (`_1`, `_2`) while the
   decoder reads a JSON array.
-- Typed results: an enum *field* of `Out` derives, but a bare enum `Out` (`McpTool[In, Color]`)
-  needs a `given JsonEncoder[Color]`; for collection results use `Seq[T]` / `Set[T]` or a case
-  class rather than `List[T]` / `Vector[T]` (the encoder summon is ambiguous for those); write
-  `Option.empty[T]` rather than `None` where the builder overloads would otherwise be ambiguous.
-  A typed tool with no arguments takes `case class NoArgs()` (there is no `McpDecoder[Unit]`).
+- A typed tool's `In` must be a case class (`case class NoArgs()` for no arguments; `Map[String, V]`
+  and types with a user `McpSchema` also qualify) and `.withOutputSchema` needs a case-class (or
+  `Unit`) `Out`: MCP `arguments` and `structuredContent` are always JSON objects, so a scalar,
+  `Option`, collection, `Either` or enum root is a compile-time error naming the type and the fix.
+  (`McpTool[Unit, _]` has a schema but no `McpDecoder[Unit]` in 1.0.0, hence `NoArgs`.)
+- Typed results without `.withOutputSchema`: an enum *field* of `Out` derives, but a bare enum
+  `Out` (`McpTool[In, Color]`) needs a `given JsonEncoder[Color]`; for collection results use
+  `Seq[T]` / `Set[T]` or a case class rather than `List[T]` / `Vector[T]` (the encoder summon is
+  ambiguous for those); write `Option.empty[T]` rather than `None` where the builder overloads
+  would otherwise be ambiguous.
 - Derived schemas use the `format` keywords `date-time`, `date`, `time`, `duration`, `uuid` and
   `uri` for the matching `java.time` / `UUID` / `URI` types; validators running in strict mode
   (`ajv --strict`) need their formats plugin (`ajv-formats`) to accept them.

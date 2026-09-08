@@ -19,13 +19,22 @@ object ToolSchemaProviders:
         """{"type":"object","properties":{},"additionalProperties":false}"""
       )
 
+  /** Derived for any `A` whose schema root is a JSON object (case classes, `Map[String, V]`, types
+    * with a user `McpSchema`); a scalar / collection / `Option` / `Either` / enum `In` is a
+    * compile-time error, because MCP `arguments` is always an object and such a tool could never be
+    * called.
+    */
   inline given [A]: ToolSchemaProvider[A] =
     ToolSchemaProvider.instance(
-      ToolInputSchema.unsafeFromJsonString(JsonSchemaMacro.schemaForType[A].toJson)
+      ToolInputSchema.unsafeFromJsonString(JsonSchemaMacro.schemaForToolInput[A].toJson)
     )
 
-  /** Output-schema derivation for `McpTool#withOutputSchema` — same native macro as input. */
+  /** Output-schema derivation for `McpTool#withOutputSchema` — same native macro as input, same
+    * object-root guard: `structuredContent` is always a JSON object, so `Out = String` / `Option` /
+    * a collection / an enum is a compile-time error (wrap it in a case class); `Unit` derives the
+    * empty object and `McpEncoder[Unit]` emits the conforming `{}`.
+    */
   inline given [A]: ToolOutputSchemaProvider[A] =
     ToolOutputSchemaProvider.instance(
-      wire.ToolOutputSchema.unsafeFromJsonString(JsonSchemaMacro.schemaForType[A].toJson)
+      wire.ToolOutputSchema.unsafeFromJsonString(JsonSchemaMacro.schemaForToolOutput[A].toJson)
     )

@@ -46,13 +46,18 @@ guide's [Deliberate boundaries](./2026-07-28-upgrade.md#deliberate-boundaries).
 
 - **Official MCP conformance suite.** [`scripts/conformance.sh`](../scripts/conformance.sh) boots
   the cross-platform `ConformanceServer` over streamable HTTP and drives it with
-  `@modelcontextprotocol/conformance`. The `active` mode runs the active suite across both
-  protocol eras; the `2026` mode runs `--requirements 2026-07-28`, exactly the scenarios that
-  revision requires. Expected-failure baselines live in
+  `@modelcontextprotocol/conformance`. The `active` mode runs the harness's active suite — 31
+  scenarios, 73 checks, every one at the 2025-11-25 wire — against the per-platform
+  expected-failure baseline; the `2026` mode runs `--requirements 2026-07-28`, exactly the
+  scenarios that revision requires (37 scored, 118 checks; the harness reports but never scores
+  extension and pending scenarios, so the `tasks-*` extension scenarios move no gate in either
+  mode), and is the only run that sends 2026-07-28 requests. Baselines live in
   [`conformance/`](../conformance/) and are kept **empty** on every platform, so any regression
-  fails the gate. [`conformance.yml`](../.github/workflows/conformance.yml) runs this on every PR
-  for the JVM and Bun at **73/73** checks; [`native.yml`](../.github/workflows/native.yml) runs the
-  same server as a GraalVM native image against the unchanged JVM baseline.
+  fails the gate. [`conformance.yml`](../.github/workflows/conformance.yml) runs both modes on
+  every PR for the JVM and Bun — **73/73** active checks and **37/37** scored 2026-07-28 scenarios
+  on each; [`native.yml`](../.github/workflows/native.yml) runs the same server as a GraalVM native
+  image: the active suite against the unchanged JVM baseline, and the 2026-07-28 run as a
+  scenario-by-scenario parity diff against the JVM.
 - **Harness pin.** The suite version is pinned in [`conformance/package.json`](../conformance/package.json)
   (currently `0.2.0-alpha.11`, the first release carrying the 2026-07-28 scenario set) and frozen
   by the integrity-hashed [`conformance/bun.lock`](../conformance/bun.lock); the script installs it

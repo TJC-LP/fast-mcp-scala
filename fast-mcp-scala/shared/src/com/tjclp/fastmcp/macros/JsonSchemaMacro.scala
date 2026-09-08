@@ -31,6 +31,20 @@ object JsonSchemaMacro:
   inline def schemaForType[T]: Json =
     ${ schemaForTypeImpl[T] }
 
+  /** [[schemaForType]] for a typed tool's `In`, guarded: MCP `arguments` is always a JSON object,
+    * so a type whose schema root is not an object (`String`, `Int`, a collection, `Option`,
+    * `Either`, an enum, a sealed trait) would advertise a tool no client can ever call — a
+    * compile-time error.
+    */
+  inline def schemaForToolInput[T]: Json =
+    ${ objectRootSchemaImpl[T](input = true) }
+
+  /** [[schemaForType]] for a typed tool's `Out` under `.withOutputSchema`, guarded the same way:
+    * `structuredContent` is always a JSON object, so a non-object root could never conform.
+    */
+  inline def schemaForToolOutput[T]: Json =
+    ${ objectRootSchemaImpl[T](input = false) }
+
   private def schemaForFunctionArgsImpl[F: Type](fn: Expr[F], exclude: Expr[List[String]])(using
       Quotes
   ): Expr[Json] =
@@ -60,6 +74,54 @@ object JsonSchemaMacro:
     val rawSchema = schemaFor(quotes.reflect.TypeRepr.of[T], Nil)
     val metadata = MacroUtils.schemaMetadataForType[T]
     '{ MacroUtils.injectSchemaMetadata($rawSchema, $metadata) }
+
+  private def objectRootSchemaImpl[T: Type](input: Boolean)(using Quotes): Expr[Json] =
+    import quotes.reflect.*
+    val tpe = TypeRepr.of[T].dealias.simplified
+    nonObjectRoot(tpe).foreach { root =>
+      val shown = tpe.show(using Printer.TypeReprShortCode)
+      if input then
+        report.errorAndAbort(
+          "McpTool In must be a case class (use `case class NoArgs()` for no arguments): " +
+            s"$shown derives an inputSchema whose root is $root, and MCP tool `arguments` is always " +
+            "a JSON object, so such a tool could never be called. Case classes, Map[String, V] and " +
+            "types with a given McpSchema / McpInputCodec are accepted."
+        )
+      else
+        report.errorAndAbort(
+          s".withOutputSchema requires Out to be a case class (or Unit): $shown derives an " +
+            s"outputSchema whose root is $root, but MCP structuredContent is always a JSON object, " +
+            "so no result could conform. Wrap the result in a case class (e.g. `case class " +
+            s"Result(value: $shown)`) or drop .withOutputSchema."
+        )
+    }
+    schemaForTypeImpl[T]
+
+  /** `None` when [[schemaFor]] renders `tpe` as a JSON object; otherwise a description of the root
+    * it renders. Mirrors the dispatch order of [[schemaFor]] / [[schemaForNonContainer]]. A
+    * user-supplied `McpSchema` is trusted as written.
+    */
+  private def nonObjectRoot(using Quotes)(tpe: quotes.reflect.TypeRepr): Option[String] =
+    import quotes.reflect.*
+    val customSchema = tpe.asType match
+      case '[t] => Expr.summon[McpSchema[t]].isDefined
+    if customSchema then None
+    else
+      tpe.asType match
+        case '[Option[?]] => Some("a nullable anyOf (Option)")
+        case '[Map[?, ?]] => None // string-keyed: an object; other keys abort in schemaFor
+        case '[Either[?, ?]] => Some("a Left/Right oneOf (Either)")
+        case '[Array[?]] => Some("an array")
+        case '[Iterable[?]] => Some("an array")
+        case _ =>
+          val symbol = tpe.typeSymbol
+          if tpe =:= TypeRepr.of[Unit] || tpe =:= TypeRepr.of[Any] then None
+          else if symbol.fullName == "zio.json.ast.Json" then None
+          else if symbol.flags.is(Flags.Enum) then Some("a string enum")
+          else if symbol.flags.is(Flags.Case) then None
+          else if symbol.flags.is(Flags.Sealed) && symbol.children.nonEmpty then
+            Some("a oneOf over the sealed hierarchy")
+          else Some("a scalar")
 
   private def schemaFor(using Quotes)(
       rawTpe: quotes.reflect.TypeRepr,

@@ -315,7 +315,7 @@ Key test classes:
 ## CI/CD
 
 - **CI** (`.github/workflows/ci.yml`): Runs on PRs and main pushes, tests on the LTS JDKs 17, 21, 25
-- **Conformance** (`.github/workflows/conformance.yml`): official `@modelcontextprotocol/conformance` suite (harness pinned in `conformance/package.json` + `conformance/bun.lock`, currently `0.2.0-alpha.11`; frozen install, needs Bun ≥ 1.4) against the JVM and Bun servers — 73/73 checks, with expected-failure baselines at `conformance/baseline-{jvm,js}.yml` kept EMPTY (any regression fails the gate). `native.yml` runs the same suite against the GraalVM HTTP image. Run locally via `scripts/conformance.sh {jvm|js|native} [port] [active|2026]`.
+- **Conformance** (`.github/workflows/conformance.yml`): official `@modelcontextprotocol/conformance` harness (pinned in `conformance/package.json` + `conformance/bun.lock`, currently `0.2.0-alpha.11`; frozen install, needs Bun ≥ 1.4) against the JVM and Bun servers in both `scripts/conformance.sh` modes on every PR — the active suite (73/73 checks, 31 scenarios, all at the 2025-11-25 wire) with expected-failure baselines at `conformance/baseline-{jvm,js}.yml` kept EMPTY (any regression fails the gate), and the 2026-07-28 requirements run (37/37 scored scenarios; the only lane that sends 2026-07-28 requests; extension/pending scenarios are reported but never scored). `native.yml` runs both against the GraalVM HTTP image (the 2026 run as a JVM-vs-native parity diff). Run locally via `scripts/conformance.sh {jvm|js|native} [port] [active|2026]`.
 - The harness is executed from `conformance/node_modules/.bin`. To bump: edit the version in `conformance/package.json`, run `"$(./mill --no-server show fast-mcp-scala.js.bunExecutable | tr -d '"')" install --cwd conformance`, remove `conformance/node_modules`, and review the `bun.lock` diff (it, not package.json, is what `--frozen-lockfile` enforces).
 - **Release** (`.github/workflows/release.yml`): Triggered by `v*` tags, publishes to Maven Central; `workflow_dispatch` with a `version` input is a maintainer-run dry run (tests + `publishLocal` of the three artifacts on the runner; the Sonatype step and the GitHub release run only on a tag push). Three jobs (verify → publish → github-release); no cache restore; every action is SHA-pinned; the Mill launcher distribution is verified against `.github/mill-dist.sha256` in every CI job — bumping `.mill-version` requires adding the new dists' SHA-256 lines there in the same PR (CI prints the exact line and the Maven Central `.sha1` cross-check recipe).
 - **OSV** (`.github/workflows/osv.yml`): weekly + on PRs touching `build.mill`/`fast-mcp-scala/package.mill`, `scripts/osv-scan.sh` queries OSV.dev for the production classpath of the three published modules (`fast-mcp-scala.{jvm,js,scalaNative}.resolvedMvnDeps`) and fails on any advisory >= MODERATE or of unknown severity; accepted advisories go in `.github/osv-ignore`.
@@ -354,9 +354,9 @@ Then use the version printed by `./mill show fast-mcp-scala.jvm.publishVersion` 
 
 Key dependencies (versions in `build.mill`):
 - Scala 3.9.0 LTS
-- ZIO 2.1.20 - Effect system
-- ZIO JSON 0.7.44 - JSON codecs (shared)
-- ZIO HTTP 3.4.0 - HTTP transport
+- ZIO 2.1.26 - Effect system
+- ZIO JSON 0.10.0 - JSON codecs (shared)
+- ZIO HTTP 3.11.4 - HTTP transport (brings netty 4.2.17.Final transitively; the JVM module imports `io.netty:netty-bom` at `Versions.netty` but declares no `io.netty` dependency)
 - Native Scala 3 macros - Compile-time JSON Schema derivation
 - mill-bun-plugin 0.3.1 - Scala.js + Bun build integration (Scala.js 1.22.0 pinned via `Versions.scalaJs`)
 - `@modelcontextprotocol/sdk` 1.29.0 - TS MCP SDK, pinned in the js module's `bunDevDeps` and frozen by the committed `fast-mcp-scala/js/bun.lock`; consumed only by the `js.test` conformance client (zero production `@JSImport`s, absent from the published bun manifest)
