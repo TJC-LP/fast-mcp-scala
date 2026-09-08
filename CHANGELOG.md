@@ -295,6 +295,26 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Fixed
 
+- **Scala default arguments are applied on the annotation path** (TJC-2334): a `tools/call` or
+  `prompts/get` that omits a parameter declared with a default (`operation: String = "add"`,
+  `title: String = ""`) now invokes the method with that default — exactly what a direct Scala
+  call does — instead of failing with `Key not found in map: <param>` (`isError: true` on tools,
+  `-32603` on prompts). The generated handler resolves the compiler's `<method>$default$N` getter
+  for every parameter flagged `HasDefault` on the annotated method itself, so the flagship
+  `AnnotatedServer.calculator` / `greeting_prompt` and the README `search` / `greeting` examples
+  work as documented on JVM, Scala.js/Bun and Scala Native. An omitted `Option` parameter with a
+  non-`None` default now also takes that default (previously `None`). An omitted parameter without
+  a default fails with `Missing required argument '<param>'`, naming the argument, in the same
+  place as before (an `isError` tool result; `-32602` on prompts and resources).
+- **`@Param` no longer re-requires `Option` parameters** (TJC-2334): a description-only
+  `@Param("Maximum results") limit: Option[Int]` used to land in the advertised `required` array
+  (the bare parameter was optional, the annotated one was not). `required` now defaults to
+  `!isOption` for `@Tool` parameters, typed-request case-class fields and `@Prompt` arguments
+  (whose `Option` parameters were advertised `required: true` even without `@Param`); only an
+  explicit `@Param(required = true)` re-requires an `Option`. Existing `required = false` spellings
+  keep working.
+- **Prompt failures carry their cause** (TJC-2334): the `-32603` for a failing `@Prompt` handler
+  reads `Error rendering prompt '<name>': <cause message>` instead of swallowing the cause.
 - **Annotation macros bind to the annotated overload** (F4 / CWE-706, TJC-2298): `scanAnnotations`
   used to re-resolve `@Tool` / `@Resource` / `@Prompt` targets by method name and could register,
   schema-describe and invoke a different same-named overload (for example an un-annotated raw

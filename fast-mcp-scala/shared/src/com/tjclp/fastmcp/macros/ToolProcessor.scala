@@ -117,10 +117,11 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
         MacroUtils
           .extractParamAnnotation(pSym)
           .map { annotTerm =>
-            val (desc, examples, required, schema) = MacroUtils.parseToolParam(Some(annotTerm))
+            val isOptionType = pSym.termRef.widenTermRefByName <:< TypeRepr.of[Option[?]]
+            val (desc, examples, required, schema) =
+              MacroUtils.parseToolParam(Some(annotTerm), isOptionType)
 
             if !required then
-              val isOptionType = pSym.termRef.widenTermRefByName <:< TypeRepr.of[Option[?]]
               val hasDefault = paramsWithDefaults.contains(pSym.name)
 
               if !isOptionType && !hasDefault then
