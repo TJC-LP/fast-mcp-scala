@@ -31,7 +31,7 @@ libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "1.0.0"
 //> using dep com.tjclp::fast-mcp-scala::1.0.0   // scala-cli, Scala.js or Native (with `//> using platform ...`)
 ```
 
-Built against Scala 3.9.0 LTS: **consuming 1.0.0 requires Scala 3.9.0 or newer** (it emits TASTy 28.9, which 3.8 and older compilers cannot read; the RC3 prerelease, built with Scala 3.8.3, is the last release a Scala 3.8 project can use). 1.0.0 is not compiled with `-experimental`, so consumers no longer need the flag (the release candidates required it on every registration path; TJC-2335). JVM: JDK 17+ (CI tests the LTS releases 17, 21, and 25). Scala.js: `sjs1_3`, runs on Bun (first-class; Node is untested); Scala 3.9 output needs a Scala.js 1.22+ linker (Mill: mill-bun 0.3.x with an explicit `scalaJSVersion`; scala-cli: `--js-version 1.22.0`). Scala Native: `native0.5_3`, stdio only, experimental. Platform details and quickstarts: [docs/platforms.md](docs/platforms.md).
+Built against Scala 3.9.0 LTS: **consuming 1.0.0 requires Scala 3.9.0 or newer** (it emits TASTy 28.9, which 3.8 and older compilers cannot read; the RC3 prerelease, built with Scala 3.8.3, is the last release a Scala 3.8 project can use). 1.0.0 is not compiled with `-experimental`, so consumers no longer need the flag (the release candidates required it on every registration path; TJC-2335). JVM: JDK 17+ (CI tests the LTS releases 17, 21, and 25). Scala.js: `sjs1_3`, runs on Bun (first-class) and, for stdio, on Node 18+ (verified with Node 18 and 26 in the 1.0.0 dogfood, not yet in CI; the HTTP listener is `Bun.serve`-only, and bearer task ids come from `globalThis.crypto`, which Node 18 exposes only behind `--experimental-global-webcrypto`); Scala 3.9 output needs a Scala.js 1.22+ linker (Mill: mill-bun 0.3.x with an explicit `scalaJSVersion`; scala-cli: `--js-version 1.22.0`). Scala Native: `native0.5_3`, stdio only, experimental. Platform details and quickstarts: [docs/platforms.md](docs/platforms.md).
 
 ## Quickstart
 
@@ -195,6 +195,20 @@ def echo(
 ): String =
   val clientName = ctx.getClientInfo.map(_.name).getOrElse("Unknown Client")
   s"Hello from $clientName${note.fold("")(n => s": $n")}"
+```
+
+Client-visible logging goes through the context too: `ctx.sendLogMessage(level, data)` returns a
+`ZIO` (so the handler returns one), and `LoggingLevel` lives in `com.tjclp.fastmcp.core`, imported
+by name:
+
+```scala 3 raw
+import zio.*
+import zio.json.ast.Json
+import com.tjclp.fastmcp.core.LoggingLevel   // not re-exported by the package object
+
+@Tool(name = Some("echo_logged"), description = Some("Echo the note and log it"))
+def echoLogged(@Param("Note to echo") note: String, ctx: McpContext): ZIO[Any, Throwable, String] =
+  ctx.sendLogMessage(LoggingLevel.Info, Json.Str(s"echo: $note")).as(note)
 ```
 
 Typed contracts use the builder's `.contextual` — `McpTool[In, Out](name = "echo").contextual { (in, ctx) => ... }` — whose handler receives `(In, Option[McpContext])`. Runnable demo: [`ContextEchoServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContextEchoServer.scala).
