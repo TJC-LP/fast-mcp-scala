@@ -230,6 +230,18 @@ object MapToFunctionMacro:
                   s"Map[String, V], or provide a given JsonDecoder[${tpe.show}] or " +
                   s"McpInputCodec[${tpe.show}]."
               )
+        // Either: derive both sides, then summon zio-json's instance — the {"Left": a} / {"Right": b}
+        // wrapper shape the schema advertises. Left to the '[t] fallback, a side needing derivation
+        // made the Mirror sum decoder win, which wants {"Left": {"value": a}} and rejects every
+        // schema-conforming call.
+        case '[Either[a, b]] =>
+          (derive(TypeRepr.of[a]), derive(TypeRepr.of[b])) match
+            case ('{ $left: JsonDecoder[a] }, '{ $right: JsonDecoder[b] }) =>
+              '{
+                given JsonDecoder[a] = $left
+                given JsonDecoder[b] = $right
+                summon[JsonDecoder[Either[a, b]]]
+              }
         case '[t] =>
           Expr
             .summon[JsonDecoder[t]]
@@ -246,8 +258,8 @@ object MapToFunctionMacro:
                 s"Cannot decode parameter '$paramName': no McpDecoder, JsonDecoder or " +
                   s"Mirror-derivable JsonDecoder found for ${tpe.show}. Provide a given " +
                   s"JsonDecoder[${tpe.show}] or McpInputCodec[${tpe.show}] (decoder + schema in one " +
-                  "value). Primitives, java.time values, Scala 3 enums, case classes, Option, List, " +
-                  "Vector, Set, Seq, Array and Map[String, V] derive automatically."
+                  "value). Primitives, java.time values, Scala 3 enums, case classes, Option, Either, " +
+                  "List, Vector, Set, Seq, Array and Map[String, V] derive automatically."
               )
             )
 

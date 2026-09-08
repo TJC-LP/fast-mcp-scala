@@ -14,6 +14,10 @@ typed contracts.
 - An enum field derives a string-enum JSON Schema (`{"type":"string","enum":[...]}`) and a
   string-based codec, at any nesting depth, including through `Option`, collections, and nested
   case classes.
+- "Collections" means `List`, `Vector`, `Set`, `Seq`, `Array`, `Map[String, V]` and `Either` (as
+  zio-json's `{"Left": ...}` / `{"Right": ...}` objects), each with derived element types; a
+  parameter type the annotation path cannot derive is a compile error naming the parameter and the
+  `given JsonDecoder[T]` / `McpInputCodec[T]` remedy.
 - A hand-written `given JsonDecoder` / `JsonEncoder` for a type always wins over the derived one,
   custom naming and all. Derivation is macro-side and summon-first; the library never exports
   givens that could shadow yours.

@@ -364,6 +364,13 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Fixed
 
+- **`Either[A, B]` parameters decode the shape their schema advertises** (TJC-2331, C2.3): when a
+  side needed derivation (`Either[Color, String]`), the Mirror sum fallback produced a decoder
+  wanting `{"Left":{"value":"Red"}}` while the schema advertises zio-json's `{"Left":"Red"}` — every
+  schema-conforming call was rejected, bare or inside `Option` / `List` / `Map[String, _]`. An
+  `Either` arm now derives both sides and summons zio-json's `Either` instance, so the annotation
+  path matches the typed path and the docs' "collections derive with no givens" promise holds for
+  `List`, `Vector`, `Set`, `Seq`, `Array`, `Map[String, V]` and `Either`.
 - **`Set[T]` parameters derive a decoder like `List[T]`** (TJC-2331, C2.2): `Set[T]` of a derived
   element type advertised a `uniqueItems` array schema but decoder synthesis aborted with `No
   McpDecoder or derivable JsonDecoder found for type: Set[...]` (no `Set` arm; `Set` is not a
