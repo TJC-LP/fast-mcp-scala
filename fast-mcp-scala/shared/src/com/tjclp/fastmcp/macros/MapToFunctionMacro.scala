@@ -149,17 +149,27 @@ object MapToFunctionMacro:
         }
       }
 
-    def summonOrDeriveJsonDecoder(tpe: TypeRepr)(using Quotes): Expr[JsonDecoder[?]] =
+    /** The zio-json decoder for `tpe`, derived structurally: container arms recurse into the
+      * element type and plant its decoder as a local `given` before summoning zio-json's container
+      * instance (the same wire shape the schema advertises); anything else is a summoned
+      * `JsonDecoder`, or a Mirror-derived one for products and singleton enums. `paramName` is the
+      * annotated parameter this decoder is for — every abort names it and the remedy.
+      */
+    def summonOrDeriveJsonDecoder(tpe: TypeRepr, paramName: String)(using
+        Quotes
+    ): Expr[JsonDecoder[?]] =
+      def derive(inner: TypeRepr): Expr[JsonDecoder[?]] =
+        summonOrDeriveJsonDecoder(inner, paramName)
       tpe.dealias.simplified.asType match
         case '[Option[a]] =>
-          summonOrDeriveJsonDecoder(TypeRepr.of[a]) match
+          derive(TypeRepr.of[a]) match
             case '{ $inner: JsonDecoder[a] } =>
               '{
                 given JsonDecoder[a] = $inner
                 summon[JsonDecoder[Option[a]]]
               }
         case '[List[a]] =>
-          summonOrDeriveJsonDecoder(TypeRepr.of[a]) match
+          derive(TypeRepr.of[a]) match
             case '{ $inner: JsonDecoder[a] } =>
               '{
                 given JsonDecoder[a] = $inner
@@ -168,35 +178,42 @@ object MapToFunctionMacro:
         // Vector before Seq: quoted type patterns match by conformance, and Vector[a] <: Seq[a]
         // would otherwise yield a JsonDecoder[Seq[a]] that is not a JsonDecoder[Vector[a]].
         case '[Vector[a]] =>
-          summonOrDeriveJsonDecoder(TypeRepr.of[a]) match
+          derive(TypeRepr.of[a]) match
             case '{ $inner: JsonDecoder[a] } =>
               '{
                 given JsonDecoder[a] = $inner
                 summon[JsonDecoder[Vector[a]]]
               }
         case '[Seq[a]] =>
-          summonOrDeriveJsonDecoder(TypeRepr.of[a]) match
+          derive(TypeRepr.of[a]) match
             case '{ $inner: JsonDecoder[a] } =>
               '{
                 given JsonDecoder[a] = $inner
                 summon[JsonDecoder[Seq[a]]]
               }
+        case '[Set[a]] =>
+          derive(TypeRepr.of[a]) match
+            case '{ $inner: JsonDecoder[a] } =>
+              '{
+                given JsonDecoder[a] = $inner
+                summon[JsonDecoder[Set[a]]]
+              }
         case '[Array[a]] =>
-          summonOrDeriveJsonDecoder(TypeRepr.of[a]) match
+          derive(TypeRepr.of[a]) match
             case '{ $inner: JsonDecoder[a] } =>
               '{
                 given JsonDecoder[a] = $inner
                 summon[JsonDecoder[Array[a]]]
               }
         case '[Map[String, v]] =>
-          summonOrDeriveJsonDecoder(TypeRepr.of[v]) match
+          derive(TypeRepr.of[v]) match
             case '{ $inner: JsonDecoder[v] } =>
               '{
                 given JsonDecoder[v] = $inner
                 summon[JsonDecoder[Map[String, v]]]
               }
         case '[Map[k, v]] =>
-          (Expr.summon[JsonFieldDecoder[k]], summonOrDeriveJsonDecoder(TypeRepr.of[v])) match
+          (Expr.summon[JsonFieldDecoder[k]], derive(TypeRepr.of[v])) match
             case (
                   Some('{ $keyDecoder: JsonFieldDecoder[k] }),
                   '{ $valueDecoder: JsonDecoder[v] }
@@ -208,7 +225,10 @@ object MapToFunctionMacro:
               }
             case _ =>
               report.errorAndAbort(
-                s"No JsonFieldDecoder / JsonDecoder combination found for type: ${tpe.show}"
+                s"Cannot decode parameter '$paramName': no JsonFieldDecoder for the keys and " +
+                  s"JsonDecoder for the values of ${tpe.show}. JSON object keys are strings — use " +
+                  s"Map[String, V], or provide a given JsonDecoder[${tpe.show}] or " +
+                  s"McpInputCodec[${tpe.show}]."
               )
         case '[t] =>
           Expr
@@ -223,7 +243,11 @@ object MapToFunctionMacro:
             )
             .getOrElse(
               report.errorAndAbort(
-                s"No McpDecoder or derivable JsonDecoder found for type: ${tpe.show}"
+                s"Cannot decode parameter '$paramName': no McpDecoder, JsonDecoder or " +
+                  s"Mirror-derivable JsonDecoder found for ${tpe.show}. Provide a given " +
+                  s"JsonDecoder[${tpe.show}] or McpInputCodec[${tpe.show}] (decoder + schema in one " +
+                  "value). Primitives, java.time values, Scala 3 enums, case classes, Option, List, " +
+                  "Vector, Set, Seq, Array and Map[String, V] derive automatically."
               )
             )
 
@@ -239,7 +263,7 @@ object MapToFunctionMacro:
           Expr.summon[McpDecoder[t]].getOrElse {
             // `isExprOf`, not a quoted `'{ $d: JsonDecoder[t] }` pattern: a lowercase type name in a
             // quoted pattern binds a FRESH type variable, so that pattern matches any decoder.
-            val derived = summonOrDeriveJsonDecoder(tpe)
+            val derived = summonOrDeriveJsonDecoder(tpe, paramName)
             if derived.isExprOf[JsonDecoder[t]] then
               jsonDecoderToMcpDecoder[t](derived.asExprOf[JsonDecoder[t]])
             else

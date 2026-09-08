@@ -364,6 +364,12 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Fixed
 
+- **`Set[T]` parameters derive a decoder like `List[T]`** (TJC-2331, C2.2): `Set[T]` of a derived
+  element type advertised a `uniqueItems` array schema but decoder synthesis aborted with `No
+  McpDecoder or derivable JsonDecoder found for type: Set[...]` (no `Set` arm; `Set` is not a
+  `Seq`), while the typed path decoded it. Every decoder abort on the annotation path now names the
+  parameter and states the remedy (`given JsonDecoder[T]` or `McpInputCodec[T]`) and lists what
+  derives automatically.
 - **`Vector[T]` parameters of derived element types no longer crash the macro** (TJC-2331, C2.1):
   an annotated `Vector[T]` parameter whose `T` needs derivation (an enum, a case class, an `Option`
   or `Either` of one) aborted expansion with an `ExprCastException` and a compiler stack trace — the
