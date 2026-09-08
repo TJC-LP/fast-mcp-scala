@@ -91,7 +91,9 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
               case None => ZIO.unit
             }
             // Never surface a defect as an unhandled promise rejection — Bun terminates the whole
-            // process on those. The cause goes to stderr (the log); the client gets no frame.
+            // process on those. The cause goes to the ZIO logger — with ZIO's default Scala.js
+            // logger a warning is printed via `console.log`, i.e. to stdout, unless the app installs
+            // a stderr logger in `bootstrap` — and the client gets no frame.
             .catchAllCause(cause => ZIO.logWarningCause("stdio dispatch failed", cause))
         )
     stdin.on(
