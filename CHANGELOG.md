@@ -283,13 +283,6 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   AST values directly on JVM and Scala.js. Typed contracts no longer require
   `sttp.tapir.generic.auto.*` at call sites.
 
-### Deprecated
-
-- `HostGuard.isAllowed(host, origin, allowed: Set[String])` (TJC-2296): use the new
-  `HostGuard.isAllowed(host, origin, settings: McpServerSettings)` overload, which matches `Origin`
-  as a full origin and honours `allowedOrigins`; the 3-arg form still works but never consults
-  `allowedOrigins`. Slated for removal in 1.0.0.
-
 ### Fixed
 
 - **Annotation macros bind to the annotated overload** (F4 / CWE-706, TJC-2298): `scanAnnotations`
@@ -329,6 +322,11 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   `InvalidParams`, `-32602`; legacy sessions keep `LegacyResourceNotFound`,
   `-32002`) and `ElicitRequestUrlParams.requiredError` (the legacy `-32042`
   helper; modern handlers use `McpContext.elicitUrl` and MRTR).
+- `HostGuard.isAllowed(host, origin, allowed: Set[String])` (TJC-2296, TJC-2277): deprecated
+  during the RC4 development cycle, never shipped in a stable release. Use
+  `HostGuard.isAllowed(host, origin, settings: McpServerSettings)`, which matches `Origin` as a
+  full origin and honours `allowedOrigins`. RC3 callers passed a `Set[String]` to the only
+  overload that existed then and must migrate to the settings overload.
 
 ## [1.0.0-RC3] - 2026-08-31
 

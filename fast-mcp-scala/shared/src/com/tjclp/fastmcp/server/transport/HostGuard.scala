@@ -71,13 +71,6 @@ object HostGuard:
       settings.allowedOrigins.getOrElse(Set.empty)
     )
 
-  @deprecated(
-    "Origin is now matched as a full origin; pass the McpServerSettings so allowedOrigins is honoured",
-    "1.0.0-RC4"
-  )
-  def isAllowed(host: Option[String], origin: Option[String], allowed: Set[String]): Boolean =
-    isAllowed(host, origin, allowed, Set.empty)
-
   /** Raw-set core (tests). `allowedOrigins` entries are full origins; unparseable entries are
     * ignored here — `HttpRequestGuards.validateSettings` rejects them at startup.
     */
