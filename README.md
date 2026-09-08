@@ -198,13 +198,13 @@ def echo(
 ```
 
 Client-visible logging goes through the context too: `ctx.sendLogMessage(level, data)` returns a
-`ZIO` (so the handler returns one), and `LoggingLevel` lives in `com.tjclp.fastmcp.core`, imported
-by name:
+`ZIO` (so the handler returns one), and `LoggingLevel` (in `com.tjclp.fastmcp.core`) is root-exported
+since 1.0.0 — the release candidates needed it imported by name, which still works:
 
 ```scala 3 raw
 import zio.*
 import zio.json.ast.Json
-import com.tjclp.fastmcp.core.LoggingLevel   // not re-exported by the package object
+import com.tjclp.fastmcp.core.LoggingLevel   // optional since 1.0.0 (root-exported); the release candidates need it
 
 @Tool(name = Some("echo_logged"), description = Some("Echo the note and log it"))
 def echoLogged(@Param("Note to echo") note: String, ctx: McpContext): ZIO[Any, Throwable, String] =
@@ -274,7 +274,8 @@ The official MCP conformance suite runs in CI against the JVM and Bun servers an
 - [docs/spec-coverage.md](docs/spec-coverage.md) — MCP 2026-07-28 coverage matrix and how it is verified
 - [docs/examples.md](docs/examples.md) — the example servers and how to run them
 - [docs/architecture.md](docs/architecture.md) — how the library is put together
-- [docs/2026-07-28-upgrade.md](docs/2026-07-28-upgrade.md) — wire behavior, review matrix, release gate ledgers
+- [docs/upgrading.md](docs/upgrading.md) — moving a 0.x or release-candidate project to 1.0.0, organised by compiler error
+- [MCP 2026-07-28 protocol upgrade](docs/2026-07-28-upgrade.md) — wire behavior, review matrix, release gate ledgers
 - [docs/native-core-design.md](docs/native-core-design.md) — design record for the native core
 - [CHANGELOG.md](CHANGELOG.md) · [ROADMAP.md](ROADMAP.md) · [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) · [DEPENDENCY_POLICY.md](DEPENDENCY_POLICY.md)
 
