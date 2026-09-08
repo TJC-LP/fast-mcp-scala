@@ -91,24 +91,18 @@ case class TaskSettings(
   require(minResultRetentionMs >= 0L, "TaskSettings.minResultRetentionMs must be >= 0")
   require(sweepIntervalMs >= 1L, "TaskSettings.sweepIntervalMs must be >= 1")
 
-/** Settings for an MCP server. HTTP-specific fields (`stateless`, `keepAliveInterval`,
-  * `sessionIdleTimeout`, `disallowDelete`, `httpEndpoint`, `allowedHosts`, `allowedOrigins`,
+/** Settings for an MCP server. HTTP-specific fields (`host`, `port`, `httpEndpoint`, `stateless`,
+  * `keepAliveInterval`, `sessionIdleTimeout`, `disallowDelete`, `allowedHosts`, `allowedOrigins`,
   * `maxRequestBodyBytes`, `maxSessions`) are ignored under stdio transports. `limits` and `tasks`
   * apply on every transport.
   */
 case class McpServerSettings(
-    debug: Boolean = false,
-    logLevel: String = "INFO",
     // Spec: HTTP servers SHOULD bind to localhost by default (DNS-rebinding surface). Deployments
     // that need external exposure (e.g. containers) must set this explicitly — 0.5.0 BREAKING
     // change from the old "0.0.0.0" default.
     host: String = "127.0.0.1",
     port: Int = 8000,
     httpEndpoint: String = "/mcp",
-    warnOnDuplicateResources: Boolean = true,
-    warnOnDuplicateTools: Boolean = true,
-    warnOnDuplicatePrompts: Boolean = true,
-    dependencies: List[String] = List.empty,
     // If true, advertise templates via the resources/templates/list endpoint.
     // If false, rely on clients that derive templates from resource URIs containing `{}`.
     exposeTemplatesEndpoint: Boolean = false,

@@ -90,7 +90,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
     val methodRefExpr = methodRef(ownerSym, methodSym)
 
     val ctxParamPresent = methodSym.paramSymss.headOption.exists(_.exists { p =>
-      p.name == "ctx" && p.info <:< TypeRepr.of[McpContext]
+      p.name == "ctx" && p.termRef.widenTermRefByName <:< TypeRepr.of[McpContext]
     })
 
     val ctxParamPresentExpr = Expr(ctxParamPresent)
@@ -117,17 +117,18 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
         MacroUtils
           .extractParamAnnotation(pSym)
           .map { annotTerm =>
-            val (desc, examples, required, schema) = MacroUtils.parseToolParam(Some(annotTerm))
+            val isOptionType = pSym.termRef.widenTermRefByName <:< TypeRepr.of[Option[?]]
+            val (desc, examples, required, schema) =
+              MacroUtils.parseToolParam(Some(annotTerm), isOptionType)
 
             if !required then
-              val isOptionType = pSym.info <:< TypeRepr.of[Option[?]]
               val hasDefault = paramsWithDefaults.contains(pSym.name)
 
               if !isOptionType && !hasDefault then
                 report.errorAndAbort(
                   s"Parameter '${pSym.name}' in method '$methodName' is marked as required=false " +
                     s"but is not an Option type and has no default value. " +
-                    s"Use Option[${pSym.info.show}] or provide a default value."
+                    s"Use Option[${pSym.termRef.widenTermRefByName.show}] or provide a default value."
                 )
 
             pSym.name -> ParamMetadata(desc, examples, required, schema)

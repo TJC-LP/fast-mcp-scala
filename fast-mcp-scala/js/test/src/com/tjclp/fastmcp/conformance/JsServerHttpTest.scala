@@ -86,11 +86,27 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
 
   override def afterAll(): Unit =
     if bunServer != null then bunServer.stop()
+    keepAliveHandle.foreach(_.stop())
+    idleTimeoutHandle.foreach(_.stop())
     super.afterAll()
 
   private def delay(ms: Int): Future[Unit] =
     val promise = Promise[Unit]()
     val _ = js.timers.setTimeout(ms.toDouble)(promise.success(()))
+    promise.future
+
+  /** Fail `f` with a clear message instead of hanging the suite when a stream never closes. */
+  private def withTimeout[A](f: Future[A], ms: Int, what: String): Future[A] =
+    val promise = Promise[A]()
+    val timer = js.timers.setTimeout(ms.toDouble) {
+      val _ = promise.tryFailure(
+        new java.util.concurrent.TimeoutException(s"$what did not complete within ${ms}ms")
+      )
+    }
+    f.onComplete { result =>
+      js.timers.clearTimeout(timer)
+      val _ = promise.tryComplete(result)
+    }
     promise.future
 
   private def text(resp: js.Dynamic): Future[String] =
@@ -400,7 +416,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     }
   }
 
-  "Bun.serve options" should "run with development=false, an error callback and the body cap (NODE_ENV-independent)" in {
+  "Bun.serve options" should "run with development=false, an error callback, the body cap and idleTimeout 0 (NODE_ENV-independent)" in {
     val settings = McpServerSettings(
       host = "127.0.0.1",
       port = 1, // never bound: serveOptions does not call Bun.serve
@@ -415,6 +431,8 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       opts.maxRequestBodySize.getOrElse(0) shouldBe 4096
       opts.port.getOrElse(0) shouldBe 1
       opts.error.isDefined shouldBe true
+      // 0 disables Bun's runtime idle close (its 10 s default cut quiet SSE streams, D6 8.15).
+      opts.idleTimeout.getOrElse(-1) shouldBe 0
       // Bun calls fetch(request, server): the closure must take both.
       opts.fetch.asInstanceOf[js.Dynamic].length.asInstanceOf[Int] shouldBe 2
 
@@ -1002,31 +1020,75 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     done.andThen { case _ => taskBunServer.stop() }
   }
 
-  "runHttp (stateless keepalive)" should "emit pings on a quiet modern POST SSE stream" in {
-    val kaPort = 38923
-    val server = com.tjclp.fastmcp.server.McpServer(
-      "JsHttpKeepaliveServer",
-      "0.1.0",
-      McpServerSettings(
-        host = "127.0.0.1",
-        port = kaPort,
-        httpEndpoint = "/mcp",
-        stateless = true,
-        keepAliveInterval = Some(java.time.Duration.ofMillis(50))
-      )
-    )
-    val slowProgressTool = McpTool
-      .withSchema[PingArgs, String](
-        name = "slow-progress",
-        inputSchema = pingSchema,
-        description = Some("Reports progress, then sleeps")
-      )
-      .contextual { (_, ctx) =>
-        // The early notification opens the SSE stream; the sleep leaves it quiet for pings.
-        ZIO.foreachDiscard(ctx.get.progressToken)(t => ctx.get.sendProgress(t, 0.5)) *>
-          ZIO.sleep(30.seconds).as("done")
-      }
+  // --- keepalive: one stateful server (legacy sessions AND modern POSTs) shared by the tests below ---
 
+  case class SleepArgs(millis: Int)
+  given JsonDecoder[SleepArgs] = DeriveJsonDecoder.gen[SleepArgs]
+
+  private val sleepSchema = ToolInputSchema.unsafeFromJsonString(
+    """{"type":"object","properties":{"millis":{"type":"integer"}},"required":["millis"]}"""
+  )
+
+  /** Sleeps exactly `millis`, then replies. Shared by the keepalive server (called with a multiple
+    * of `keepAliveMs`, so the reply is offered in the same tick as a heartbeat) and the
+    * keepalive-less idle-timeout server below. Given a progress token it first emits a
+    * notification, which makes the reply the stream's SECOND frame — the only shape in which a
+    * modern POST (whose first frame is taken before the SSE response exists) is exposed to the
+    * keepalive path.
+    */
+  private val sleepTool = McpTool
+    .withSchema[SleepArgs, String](
+      name = "sleep",
+      inputSchema = sleepSchema,
+      description = Some("Sleeps for millis, then replies")
+    )
+    .contextual { (args, ctx) =>
+      ZIO.foreachDiscard(ctx.get.progressToken)(t => ctx.get.sendProgress(t, 0.0)) *>
+        ZIO.sleep(args.millis.millis).as(s"slept ${args.millis}")
+    }
+
+  /** Heartbeat period of the shared keepalive server. The `sleep` tool below is called with N and
+    * 3N so its reply lands ON a heartbeat tick.
+    */
+  private val keepAliveMs = 150
+  private val keepAlivePort = 38923
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private var keepAliveHandle: Option[BunHttpHandle] = None
+
+  private def keepAliveServer(): Future[BunHttpHandle] =
+    keepAliveHandle match
+      case Some(handle) => Future.successful(handle)
+      case None =>
+        val server = com.tjclp.fastmcp.server.McpServer(
+          "JsHttpKeepaliveServer",
+          "0.1.0",
+          McpServerSettings(
+            host = "127.0.0.1",
+            port = keepAlivePort,
+            httpEndpoint = "/mcp",
+            stateless = false,
+            keepAliveInterval = Some(java.time.Duration.ofMillis(keepAliveMs.toLong))
+          )
+        )
+        val slowProgressTool = McpTool
+          .withSchema[PingArgs, String](
+            name = "slow-progress",
+            inputSchema = pingSchema,
+            description = Some("Reports progress, then sleeps")
+          )
+          .contextual { (_, ctx) =>
+            // The early notification opens the SSE stream; the sleep leaves it quiet for pings.
+            ZIO.foreachDiscard(ctx.get.progressToken)(t => ctx.get.sendProgress(t, 0.5)) *>
+              ZIO.sleep(30.seconds).as("done")
+          }
+        runZio(server.tool(slowProgressTool) *> server.tool(sleepTool).unit).map { _ =>
+          val handle = server.startStatefulHttp()
+          keepAliveHandle = Some(handle)
+          handle
+        }
+
+  "runHttp (keepalive)" should "emit pings on a quiet modern POST SSE stream" in {
     def readUntilPing(reader: js.Dynamic, acc: String, remaining: Int): Future[String] =
       if acc.contains("ping") || remaining <= 0 then Future.successful(acc)
       else
@@ -1040,35 +1102,198 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
             readUntilPing(reader, acc + piece, remaining - 1)
         }
 
-    runZio(server.tool(slowProgressTool).unit).flatMap { _ =>
-      val bun = server.startStatelessHttp()
-      val checked = for
-        resp <- fromJsPromise(
-          js.Dynamic.global
-            .fetch(
-              s"http://127.0.0.1:$kaPort/mcp",
-              js.Dynamic.literal(
-                method = "POST",
-                headers = js.Dictionary(
-                  "content-type" -> "application/json",
-                  "accept" -> "application/json, text/event-stream",
-                  "mcp-protocol-version" -> "2026-07-28",
-                  "mcp-method" -> "tools/call",
-                  "mcp-name" -> "slow-progress"
-                ),
-                body =
-                  """{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow-progress","arguments":{"msg":"hi"},"_meta":{"progressToken":"kp","io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
-              )
-            )
-            .asInstanceOf[js.Promise[js.Dynamic]]
+    keepAliveServer().flatMap { _ =>
+      for
+        resp <- fetchAt(
+          keepAlivePort,
+          js.Dynamic.literal(
+            method = "POST",
+            headers = jsonHeaders(
+              "mcp-protocol-version" -> "2026-07-28",
+              "mcp-method" -> "tools/call",
+              "mcp-name" -> "slow-progress"
+            ),
+            body =
+              """{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow-progress","arguments":{"msg":"hi"},"_meta":{"progressToken":"kp","io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+          )
         )
         reader = resp.body.getReader()
         seen <- readUntilPing(reader, "", remaining = 40)
       yield
         val _ = reader.cancel()
         seen should include("ping")
-      checked.andThen { case _ => bun.stop() }
     }
+  }
+
+  // TJC-2337: a `take.timeout(interval)` keepalive interrupted a take whose promise already held the
+  // reply; the next pull then took the close sentinel and the stream ended as pings-only, HTTP 200.
+  it should "deliver the reply when the tool completes on a heartbeat tick (legacy + modern, N and 3N)" in {
+    val callTimeoutMs = 10 * keepAliveMs + 5000
+
+    // Legacy: plain per-request SSE, the reply is frame 1 (the D4 dogfood repro shape).
+    def legacyCall(sid: String, id: Int, millis: Int): Future[String] =
+      fetchAt(
+        keepAlivePort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("mcp-session-id" -> sid),
+          body =
+            s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"sleep","arguments":{"millis":$millis}}}"""
+        )
+      ).flatMap(text)
+
+    // Modern: the progress token makes the reply frame 2, i.e. taken under the keepalive path.
+    def modernCall(id: Int, millis: Int): Future[String] =
+      fetchAt(
+        keepAlivePort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders(
+            "mcp-protocol-version" -> "2026-07-28",
+            "mcp-method" -> "tools/call",
+            "mcp-name" -> "sleep"
+          ),
+          body =
+            s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"sleep","arguments":{"millis":$millis},"_meta":{"progressToken":"tick-$id","io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+        )
+      ).flatMap(text)
+
+    // One stream at a time per lane, like a client awaiting a slow tool; legacy and modern lanes
+    // run side by side.
+    def lane(label: String, n: Int)(call: Int => Future[String]): Future[List[String]] =
+      (1 to n).foldLeft(Future.successful(List.empty[String])) { (acc, i) =>
+        acc.flatMap(bodies =>
+          withTimeout(call(i), callTimeoutMs, s"$label call $i").map(bodies :+ _)
+        )
+      }
+
+    def delivered(label: String, bodies: List[String]): String =
+      val ok = bodies.count(b => b.contains("event: message") && b.contains("\"slept "))
+      s"$label: $ok/${bodies.size} replies delivered"
+
+    val labels = List(
+      s"legacy sleep ${keepAliveMs}ms",
+      s"modern sleep ${keepAliveMs}ms",
+      s"legacy sleep ${3 * keepAliveMs}ms",
+      s"modern sleep ${3 * keepAliveMs}ms"
+    )
+
+    val checked = for
+      _ <- keepAliveServer()
+      initResp <- fetchAt(
+        keepAlivePort,
+        js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyInitBody)
+      )
+      sid = header(initResp, "mcp-session-id").getOrElse("")
+      _ <- text(initResp)
+      initialized <- fetchAt(
+        keepAlivePort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("mcp-session-id" -> sid),
+          body = """{"jsonrpc":"2.0","method":"notifications/initialized"}"""
+        )
+      )
+      onTick <- lane(labels(0), 20)(i => legacyCall(sid, 100 + i, keepAliveMs))
+        .zip(lane(labels(1), 20)(i => modernCall(200 + i, keepAliveMs)))
+      thirdTick <- lane(labels(2), 20)(i => legacyCall(sid, 300 + i, 3 * keepAliveMs))
+        .zip(lane(labels(3), 20)(i => modernCall(400 + i, 3 * keepAliveMs)))
+    yield
+      status(initResp) shouldBe 200
+      status(initialized) shouldBe 202
+      val streams = List(onTick._1, onTick._2, thirdTick._1, thirdTick._2)
+      val summary = labels.zip(streams).map(delivered)
+      val firstLost = streams.flatten.find(b => !b.contains("event: message"))
+      withClue(s"first reply-less stream: ${firstLost.map(_.replace("\n", "\\n"))}\n") {
+        summary shouldBe labels.map(l => s"$l: 20/20 replies delivered")
+      }
+    checked
+  }
+
+  // --- Bun idleTimeout: a slow reply must survive with the documented default keepAliveInterval = None ---
+
+  /** Port of the keepalive-less server, and how long its one `sleep` call takes: past `Bun.serve`'s
+    * default 10 s `idleTimeout` (measured ~12 s on Bun 1.4.1), so a quiet per-request SSE response
+    * is exposed to the runtime's own idle close. One call, once — the whole suite pays these
+    * seconds exactly one time.
+    */
+  private val idleTimeoutPort = 38932
+  private val slowReplyMs = 14000
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private var idleTimeoutHandle: Option[BunHttpHandle] = None
+
+  private def idleTimeoutServer(): Future[BunHttpHandle] =
+    idleTimeoutHandle match
+      case Some(handle) => Future.successful(handle)
+      case None =>
+        // `keepAliveInterval` deliberately left at its default (None): nothing but the reply is
+        // ever written to the stream, exactly the shape a slow tool has out of the box.
+        val server = com.tjclp.fastmcp.server.McpServer(
+          "JsHttpIdleTimeoutServer",
+          "0.1.0",
+          McpServerSettings(
+            host = "127.0.0.1",
+            port = idleTimeoutPort,
+            httpEndpoint = "/mcp",
+            stateless = false
+          )
+        )
+        runZio(server.tool(sleepTool).unit).map { _ =>
+          val handle = server.startStatefulHttp()
+          idleTimeoutHandle = Some(handle)
+          handle
+        }
+
+  // D6 8.15 (TJC-2337 follow-up): `Bun.serve` closes any connection with no bytes in either
+  // direction after its default 10 s `idleTimeout` — a per-request SSE response waiting on a slow
+  // tool included. With `keepAliveInterval = None` a tools/call longer than that lost its reply:
+  // the stream ended replyless, HTTP 200, and the client saw only its own request timeout.
+  "Bun idleTimeout" should "not cut a quiet legacy POST SSE stream before a 14 s tool reply (keepAliveInterval None)" in {
+    val checked = for
+      _ <- idleTimeoutServer()
+      initResp <- fetchAt(
+        idleTimeoutPort,
+        js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyInitBody)
+      )
+      sid = header(initResp, "mcp-session-id").getOrElse("")
+      _ <- text(initResp)
+      initialized <- fetchAt(
+        idleTimeoutPort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("mcp-session-id" -> sid),
+          body = """{"jsonrpc":"2.0","method":"notifications/initialized"}"""
+        )
+      )
+      started = java.lang.System.currentTimeMillis()
+      body <- withTimeout(
+        fetchAt(
+          idleTimeoutPort,
+          js.Dynamic.literal(
+            method = "POST",
+            headers = jsonHeaders("mcp-session-id" -> sid),
+            body =
+              s"""{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"sleep","arguments":{"millis":$slowReplyMs}}}"""
+          )
+        ).flatMap(text)
+          // Bun's idle close cuts the socket mid-chunked-body, so the client's `text()` rejects
+          // rather than ending cleanly: fold that into the body so the clue below reports WHEN.
+          .recover { case e => s"<stream failed: ${e.getMessage}>" },
+        slowReplyMs + 10000,
+        s"legacy sleep ${slowReplyMs}ms"
+      )
+      elapsedMs = java.lang.System.currentTimeMillis() - started
+    yield
+      status(initResp) shouldBe 200
+      status(initialized) shouldBe 202
+      withClue(
+        s"stream ended after ${elapsedMs}ms with body: ${body.replace("\n", "\\n")}\n"
+      ) {
+        body should include("event: message")
+        body should include(s"\"slept $slowReplyMs\"")
+      }
+    checked
   }
 
   "runHttp (stateless tasks)" should "refuse legacy task augmentation on the shared stateless session" in {

@@ -16,14 +16,17 @@ import com.tjclp.fastmcp.core.wire.{
 import com.tjclp.fastmcp.jsonrpc.McpError
 
 /** Cross-platform MCP "everything" server mirroring the conformance harness's reference
-  * `everything-server.ts` legacy ACTIVE surface (spec 2025-11-25). One source of truth registered
-  * identically on JVM and JS; the thin platform mains (`ConformanceServerJvm` /
-  * `ConformanceServerJs`) just build an [[McpServer]] and `runHttp()`.
+  * `everything-server.ts` ACTIVE surface across both protocol eras (2026-07-28 stateless requests
+  * and the 2025-11-25-and-earlier session adapter). One source of truth registered identically on
+  * JVM and JS; the thin platform mains (`ConformanceServerJvm` / `ConformanceServerJs`) just build
+  * an [[McpServer]] and `runHttp()`.
   *
-  * Drives the official suite via `bunx @modelcontextprotocol/conformance server --url … --suite
-  * active` (see `scripts/conformance.sh`). Both JVM and JS stream every server→client message
-  * (sampling / elicitation / progress / logging) on each request's own POST SSE response, so the
-  * full active suite passes on both transports — no baseline.
+  * `scripts/conformance.sh {jvm|js|native}` drives the official suite: it installs the harness
+  * pinned by `conformance/package.json` + `conformance/bun.lock` (`bun install --frozen-lockfile`)
+  * and execs that installed binary — never `bunx`, which would auto-install a same-named package
+  * from the registry. Both JVM and JS stream every server→client message (sampling / elicitation /
+  * progress / logging) on each request's own POST SSE response, so the full active suite passes on
+  * both transports with EMPTY expected-failure baselines (`conformance/baseline-{jvm,js}.yml`).
   */
 object ConformanceServer:
 
