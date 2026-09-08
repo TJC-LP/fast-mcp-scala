@@ -147,6 +147,25 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   harness-running jobs restore the shared Mill/coursier cache read-only. `ci.yml` no longer exports
   `GITHUB_TOKEN` workflow-wide: it is scoped to the Mill steps that need it (as `native.yml`
   already did), so the third-party setup actions never see it.
+- **Netty pinned to 4.2.17.Final** (TJC-2327): zio-http 3.4.0 declares netty 4.2.3.Final, whose
+  16 modules carried 27 OSV advisories (12 HIGH / 13 MODERATE / 2 LOW), 7 of them reachable from
+  the default JVM HTTP path — CVE-2026-33870 (HIGH, request smuggling), CVE-2026-42577 (HIGH,
+  epoll DoS on every Linux JVM), CVE-2026-42585, CVE-2026-42580, CVE-2026-42581, CVE-2026-50020
+  and CVE-2025-58056 — plus 20 in code paths this library never installs (TLS, compression,
+  WebSocket, proxy, IP filtering): CVE-2025-58057, CVE-2025-67735, CVE-2026-41417,
+  CVE-2026-42578, CVE-2026-42583, CVE-2026-42584, CVE-2026-42587, CVE-2026-44249,
+  CVE-2026-45416, CVE-2026-45536, CVE-2026-50010, CVE-2026-55831, CVE-2026-55833,
+  CVE-2026-56745, CVE-2026-56746, CVE-2026-59898, CVE-2026-59899, CVE-2026-59901,
+  CVE-2026-59903, CVE-2026-59921. `build.mill` now pins `Versions.netty`, and the JVM module
+  declares all 16 `io.netty` modules zio-http brings as direct dependencies and imports
+  `io.netty:netty-bom` into the published POM's `<dependencyManagement>`, so the resolved
+  classpath and every consumer's resolution (coursier, Maven, Gradle) see a single netty version;
+  the OSV audit of the resolved 1.0.0 classpath reports 0 advisories. zio-http itself stays at
+  3.4.0 (netty 4.2.x is binary-compatible within the line; the pairing is gated by the JVM test
+  suite, the official conformance suite and the GraalVM HTTP smoke). **Consequence for
+  stdio-only GraalVM builds**: netty is now a direct `<dependency>` of `fast-mcp-scala_3`, so
+  the netty-free recipe must exclude both `dev.zio:zio-http_3` and `io.netty:*` — excluding
+  zio-http alone no longer sheds netty (see [docs/native-image.md](docs/native-image.md)).
 
 ### Added
 

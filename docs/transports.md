@@ -20,7 +20,9 @@ use. One durable session per process; shutdown is EOF-driven (the client closing
 loop). The stdio lifecycle (`StdioLoop`: session, single-writer stdout, outbound drainer, EOF
 teardown) is shared by the JVM and Scala Native backends; the Scala.js backend drives Node's
 callback IO directly. Because `runStdio()` has no reachable call path into the HTTP stack,
-stdio-only programs never link zio-http or netty. That is what makes small GraalVM images possible
+stdio-only programs never link zio-http or netty; exclude both `dev.zio:zio-http_3` and `io.netty:*`
+from the dependency (netty is a direct, version-pinned dependency of the JVM artifact) to keep them
+off the classpath too. That is what makes small GraalVM images possible
 (see [native-image.md](./native-image.md)).
 
 ## HTTP
