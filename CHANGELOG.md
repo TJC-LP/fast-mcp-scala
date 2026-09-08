@@ -270,6 +270,16 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Fixed
 
+- **Legacy `tasks/result` always answers** (TJC-2353): a `tasks/result` for a task that was
+  cancelled — by `tasks/cancel`, by the TTL sweep, or with its session's release, whether the task
+  was already terminal or the waiter was parked when it happened — now fails with JSON-RPC
+  `-32602` (`Task <id> was cancelled`, the same family as `Unknown task`; new
+  `TaskCancelledError` carrier in `server.manager`). The awaiting handler used to re-raise the
+  task fiber's interrupt-only cause, which the router treated as a client-cancelled request and
+  answered with nothing: the streamable-HTTP SSE stream closed after at most a keepalive ping (JVM
+  and Bun), stdio wrote no frame, and the TypeScript SDK's `getTaskResult` hung until its 60 s
+  timeout. Real task failures keep their full cause; `tasks/get` snapshots of a cancelled task are
+  unchanged (no `result` / `error` block).
 - **Annotation macros bind to the annotated overload** (F4 / CWE-706, TJC-2298): `scanAnnotations`
   used to re-resolve `@Tool` / `@Resource` / `@Prompt` targets by method name and could register,
   schema-describe and invoke a different same-named overload (for example an un-annotated raw

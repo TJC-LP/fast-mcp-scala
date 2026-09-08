@@ -495,3 +495,39 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     gone should include(""""code":-32602""")
     gone should include("Unknown task")
   }
+
+  test("a cancelled bearer task's tasks/get snapshot renders no result or error block (guard)") {
+    // The promise now completes with a TaskCancelledError value; `renderSnapshot` must keep
+    // treating a Cancelled task as detail-less (details are for Completed / Failed only).
+    val routes = buildRoutes()
+    val created = bodyOf(
+      modernPost(
+        routes,
+        s"""{"jsonrpc":"2.0","id":80,"method":"tools/call","params":{"name":"blocky","arguments":{},$taskMeta}}""",
+        "tools/call",
+        "blocky"
+      )
+    )
+    val taskId = extractTaskId(created)
+    val cancelled = bodyOf(
+      modernPost(
+        routes,
+        s"""{"jsonrpc":"2.0","id":81,"method":"tasks/cancel","params":{"taskId":"$taskId",$taskMeta}}""",
+        "tasks/cancel",
+        taskId
+      )
+    )
+    cancelled should include(""""resultType":"complete"""")
+    val snapshot = bodyOf(
+      modernPost(
+        routes,
+        s"""{"jsonrpc":"2.0","id":82,"method":"tasks/get","params":{"taskId":"$taskId",$taskMeta}}""",
+        "tasks/get",
+        taskId
+      )
+    )
+    snapshot should include(""""status":"cancelled"""")
+    snapshot should not include """"error":"""
+    // Exactly one "result": the JSON-RPC envelope's — no nested task result payload.
+    snapshot.sliding(9).count(_ == "\"result\":") shouldBe 1
+  }
