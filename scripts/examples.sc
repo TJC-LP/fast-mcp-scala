@@ -23,4 +23,6 @@
 // scala-cli examples.sc --main-class com.tjclp.fastmcp.examples.HttpServer
 //     HTTP transport: modern stateless POST + request-scoped SSE, with the legacy session adapter on by default.
 //
-// stdout is redirected to stderr inside each server so the stdio transport stays clean.
+// Servers write only JSON-RPC frames to stdout. ZIO's default logger prints to stdout, so a tool
+// that logs must route the logger to stderr (docs/transports.md, "stdout is the wire") until
+// TJC-2338 makes that the stdio runner's default.
