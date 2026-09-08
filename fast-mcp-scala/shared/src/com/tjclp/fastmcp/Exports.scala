@@ -28,6 +28,8 @@ export core.{
   ResourceDefinition,
   ResourceLink,
   Role,
+  TaskOwnerKey,
+  TaskSupport,
   TextContent,
   ToHandlerEffect,
   Tool,
@@ -37,6 +39,8 @@ export core.{
   ToolInputSchema,
   ToolSchemaProvider
 }
+// `resources/read` payloads and `EmbeddedResource.resource`: the text-or-blob ADT.
+export core.wire.{BlobResourceContents, ResourceContents, TextResourceContents}
 export core.McpEncoder.given
 export core.ToHandlerEffect.given
 // Native-core shared codec + schema derivation (one copy for both platforms).
@@ -45,6 +49,7 @@ export codec.McpDecoders.given
 export macros.RegistrationMacro.*
 export server.{
   Http,
+  LimitSettings,
   McpContext,
   McpServer,
   McpServerApp,
@@ -52,6 +57,7 @@ export server.{
   McpServerCoreFactory,
   McpServerSettings,
   Stdio,
+  TaskSettings,
   Transport,
   TransportRunner
 }

@@ -26,7 +26,9 @@ class RootImportExportsTest extends AnyFunSuite:
   private def messages(errors: List[scala.compiletime.testing.Error]): List[String] =
     errors.map(_.message)
 
-  private def assertCompiles(errors: List[scala.compiletime.testing.Error]): org.scalatest.Assertion =
+  private def assertCompiles(
+      errors: List[scala.compiletime.testing.Error]
+  ): org.scalatest.Assertion =
     assert(errors == Nil, s"unexpected errors: ${messages(errors).mkString("\n---\n")}")
 
   test("docs/tasks.md: enabling tasks needs only the root import (TaskSettings)") {

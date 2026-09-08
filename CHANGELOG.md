@@ -170,6 +170,13 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   single customization point that supplies both the zio-json decoder used
   inside typed request case classes and the JSON Schema advertised for a
   custom wire type.
+- **Root-import surface** (TJC-2336): `import com.tjclp.fastmcp.{*, given}` now also exports the
+  settings sub-records `TaskSettings` and `LimitSettings`, the per-tool task policy `TaskSupport`
+  and `TaskOwnerKey`, and the `resources/read` payload ADT `ResourceContents` /
+  `TextResourceContents` / `BlobResourceContents`, so every documented fence compiles with the root
+  import alone (`RootImportExportsTest` type-checks the `docs/tasks.md` and `docs/transports.md`
+  fences in a root-import-only scope). Additive: an export alias and its `server.*` / `core.*` /
+  `core.wire.*` target resolve as one reference, so files that already import both are unaffected.
 
 ### Changed
 
@@ -260,6 +267,13 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 - JSON Schema derivation is now a native Scala 3 macro that emits `zio-json`
   AST values directly on JVM and Scala.js. Typed contracts no longer require
   `sttp.tapir.generic.auto.*` at call sites.
+- **Never-read `McpServerSettings` fields removed** (TJC-2336): `debug`, `logLevel`,
+  `warnOnDuplicateResources`, `warnOnDuplicateTools`, `warnOnDuplicatePrompts` and `dependencies`
+  were accepted and silently ignored (nothing read them; duplicate registrations always warn on
+  stderr), as was the `McpServer.dependencies` copy. Construct settings by name — every shipped
+  example and test already does; a positional construction that passed these fields no longer
+  compiles. Removed rather than deprecated while still pre-1.0: a knob that does nothing must not
+  be frozen into the 1.x line.
 
 ### Deprecated
 
@@ -267,6 +281,12 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   `HostGuard.isAllowed(host, origin, settings: McpServerSettings)` overload, which matches `Origin`
   as a full origin and honours `allowedOrigins`; the 3-arg form still works but never consults
   `allowedOrigins`. Slated for removal in 1.0.0.
+- The six inert `@Tool` parameters `examples`, `version`, `deprecated`, `deprecationMessage`,
+  `tags` and `timeoutMillis`, the matching `ToolDefinition` fields and `ToolExample` (TJC-2336):
+  `@deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")`.
+  `scanAnnotations` never read them and no wire shape carries them; they stay accepted through 1.x
+  and are removed in 2.0.0. `@Param(examples = ...)` is unaffected (it populates the schema's
+  `examples` array). The dead `MacroUtils.parseToolParams` helper is gone.
 
 ### Fixed
 

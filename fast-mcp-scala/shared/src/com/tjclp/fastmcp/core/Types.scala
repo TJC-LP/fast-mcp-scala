@@ -21,11 +21,16 @@ object ToolAnnotations:
 
 // --- Tool Related Types ---
 
+/** Metadata only: never read by the server and absent from every wire shape. Deprecated since 1.0.0
+  * together with the six inert `@Tool` / [[ToolDefinition]] fields; removed in 2.0.0.
+  */
+@deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")
 case class ToolExample(
     name: Option[String],
     description: Option[String]
 )
 
+@deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")
 object ToolExample:
   given JsonEncoder[ToolExample] = DeriveJsonEncoder.gen[ToolExample]
   given JsonDecoder[ToolExample] = DeriveJsonDecoder.gen[ToolExample]
@@ -79,11 +84,20 @@ case class ToolDefinition(
     name: String,
     description: Option[String],
     inputSchema: ToolInputSchema = ToolInputSchema.default,
+    // The six fields below are metadata only — never read, never on the wire. Deprecated since
+    // 1.0.0 alongside the matching `@Tool` parameters; removed in 2.0.0.
+    @deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")
     version: Option[String] = None,
+    @deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")
+    @annotation.nowarn("cat=deprecation") // its own type names the deprecated ToolExample
     examples: List[ToolExample] = List.empty,
+    @deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")
     deprecated: Boolean = false,
+    @deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")
     deprecationMessage: Option[String] = None,
+    @deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")
     tags: List[String] = List.empty,
+    @deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")
     timeoutMillis: Option[Long] = None,
     annotations: Option[ToolAnnotations] = None,
     taskSupport: Option[TaskSupport] = None,

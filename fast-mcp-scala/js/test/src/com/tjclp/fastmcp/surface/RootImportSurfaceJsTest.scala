@@ -82,3 +82,19 @@ class RootImportSurfaceJsTest extends AnyFunSuite:
     )
     assert(result == StructuredToolResult(List(TextContent("mood:happy")), None))
   }
+
+  test("root import exposes the settings sub-records and the resource-contents ADT (TJC-2336)") {
+    val settings = McpServerSettings(
+      tasks = TaskSettings(enabled = true, ownerKey = TaskOwnerKey.Transport),
+      limits = LimitSettings(maxFrameChars = 8 * 1024 * 1024)
+    )
+    assert(settings.tasks.enabled && settings.limits.maxFrameChars == 8 * 1024 * 1024)
+    val policy: TaskSupport = TaskSupport.Optional
+    assert(policy == TaskSupport.Optional)
+    val contents: List[ResourceContents] = List(
+      TextResourceContents("file:///a.txt", "a"),
+      BlobResourceContents("file:///a.bin", "AAAA")
+    )
+    assert(contents.map(_.uri) == List("file:///a.txt", "file:///a.bin"))
+    assert(EmbeddedResource(contents.head).resource.uri == "file:///a.txt")
+  }
