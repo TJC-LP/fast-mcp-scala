@@ -569,7 +569,10 @@ object JvmHttpBackend extends HttpTransportBackend:
 
   /** Merge a heartbeat into an SSE stream so proxies / idle timeouts don't kill long-quiet
     * connections. The `ping` event type is ignored by conforming clients (the TS SDK only parses
-    * `message` events); zio-http 3.4.0 has no comment-frame support. Halts with the data stream.
+    * `message` events). zio-http 3.11.4 can write an SSE comment frame (a `data` string starting
+    * with `:` is emitted verbatim, no `data:` prefix), but the heartbeat keeps the `ping` event
+    * shape it has had since zio-http 3.4.0 (which had no comment support) so the wire is unchanged
+    * across the bump. Halts with the data stream.
     */
   private def withKeepAlive(
       sse: ZStream[Any, Nothing, ServerSentEvent[String]],

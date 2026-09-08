@@ -147,7 +147,7 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   harness-running jobs restore the shared Mill/coursier cache read-only. `ci.yml` no longer exports
   `GITHUB_TOKEN` workflow-wide: it is scoped to the Mill steps that need it (as `native.yml`
   already did), so the third-party setup actions never see it.
-- **Netty pinned to 4.2.17.Final** (TJC-2327): zio-http 3.4.0 declares netty 4.2.3.Final, whose
+- **Netty 4.2.17.Final** (TJC-2327, TJC-2357): zio-http 3.4.0 declared netty 4.2.3.Final, whose
   16 modules carried 27 OSV advisories (12 HIGH / 13 MODERATE / 2 LOW), 7 of them reachable from
   the default JVM HTTP path — CVE-2026-33870 (HIGH, request smuggling), CVE-2026-42577 (HIGH,
   epoll DoS on every Linux JVM), CVE-2026-42585, CVE-2026-42580, CVE-2026-42581, CVE-2026-50020
@@ -156,16 +156,16 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   CVE-2026-42578, CVE-2026-42583, CVE-2026-42584, CVE-2026-42587, CVE-2026-44249,
   CVE-2026-45416, CVE-2026-45536, CVE-2026-50010, CVE-2026-55831, CVE-2026-55833,
   CVE-2026-56745, CVE-2026-56746, CVE-2026-59898, CVE-2026-59899, CVE-2026-59901,
-  CVE-2026-59903, CVE-2026-59921. `build.mill` now pins `Versions.netty`, and the JVM module
-  declares all 16 `io.netty` modules zio-http brings as direct dependencies and imports
-  `io.netty:netty-bom` into the published POM's `<dependencyManagement>`, so the resolved
-  classpath and every consumer's resolution (coursier, Maven, Gradle) see a single netty version;
-  the OSV audit of the resolved 1.0.0 classpath reports 0 advisories. zio-http itself stays at
-  3.4.0 (netty 4.2.x is binary-compatible within the line; the pairing is gated by the JVM test
-  suite, the official conformance suite and the GraalVM HTTP smoke). **Consequence for
-  stdio-only GraalVM builds**: netty is now a direct `<dependency>` of `fast-mcp-scala_3`, so
-  the netty-free recipe must exclude both `dev.zio:zio-http_3` and `io.netty:*` — excluding
-  zio-http alone no longer sheds netty (see [docs/native-image.md](docs/native-image.md)).
+  CVE-2026-59903, CVE-2026-59921. The 1.0.0 classpath resolves netty 4.2.17.Final, which clears
+  all 27; the version now comes from zio-http 3.11.4 itself (the ZIO stack bump under *Changed*),
+  and the JVM module imports `io.netty:netty-bom` at the same version (`Versions.netty`) into the
+  published POM, so a consumer's resolution sees a single netty version
+  — the classified native artifacts included — and a future netty advisory can be answered by
+  moving that one constant ahead of zio-http. The interim direct pins of all 16 `io.netty` modules
+  (in place while zio-http stayed at 3.4.0) are gone with the bump, so netty is a transitive
+  dependency again and a stdio-only GraalVM build sheds it by excluding `dev.zio:zio-http_3` alone
+  (see [docs/native-image.md](docs/native-image.md)). The OSV audit of the resolved 1.0.0
+  classpath reports 0 advisories.
 
 ### Added
 
@@ -219,6 +219,26 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Changed
 
+- **ZIO stack bump** (TJC-2357): ZIO 2.1.20 → 2.1.26, zio-json 0.7.44 → 0.10.0 (JVM, Scala.js and
+  Scala Native artifacts alike) and zio-http 3.4.0 → 3.11.4 (JVM). zio-http 3.11.4 declares netty
+  4.2.17.Final itself, so the 16 direct `io.netty` pins the TJC-2327 override added to the JVM
+  module are removed again: netty is a transitive dependency of zio-http, the published
+  `fast-mcp-scala_3` POM lists only `zio`, `zio-json`, `zio-http` and the Scala 3 library as
+  dependencies plus the `import`-scoped `io.netty:netty-bom` entry (kept at `Versions.netty`,
+  equal to what zio-http declares, as the single switch for a future advisory),
+  and a stdio-only consumer sheds the HTTP stack by excluding `dev.zio:zio-http_3` alone (the
+  two-exclusion form stays valid). Two zio-http behaviour deltas reach the wire, neither on a
+  first-party path: a request netty's decoder rejects is now answered with zio-http's own status
+  mapping — 431 for an over-long header block, 414 for an over-long request line, 413 for a body
+  over the aggregator cap, 400 for any other decoder failure — where 3.4.0 routed every decoder
+  failure through its generic 500 error-response path (this library's 413 / `-32000` body-cap
+  replies and the aggregator's empty 413 are unchanged); and the channel's auto-read is paused
+  while a streamed SSE body is being written, so a pipelined follow-up request is no longer read
+  interleaved with it. Resolved-tree side effects: zio-schema 1.7.4 → 1.8.6, zio-prelude RC41 →
+  RC48, magnolia 1.3.18 → 1.3.23, izumi-reflect 3.0.5 → 3.0.9, scala-collection-compat 2.13.0 →
+  2.14.0, scala-java-time 2.6.0 → 2.7.0 (Scala.js / Scala Native). No source change was needed;
+  the three platforms' test suites, the official conformance suite (both revisions, JVM, Bun and
+  the GraalVM HTTP image) and the OSV audit (0 advisories) gate the pairing.
 - **Misplaced annotations are a compile error** (TJC-2331, C2.8): the scan still registers only
   members declared directly on the scanned object (inherited members would break default-argument
   getter lookup and exact-overload binding), but an annotated member it skips — inherited from a
@@ -263,7 +283,7 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   it as usual) instead of refusing the `initialize` with 503. The 503 remains only when no session
   qualifies under either rule, and `sessionIdleTimeout = None` keeps GET holders exempt. The
   periodic idle sweeper is unchanged (live GET streams stay exempt while capacity is free). Bun is
-  unaffected (no standalone GET channel). zio-http 3.4.0 exposes no accepted-socket option, so TCP
+  unaffected (no standalone GET channel). zio-http 3.11.4 exposes no accepted-socket option, so TCP
   keepalive is not set by the server; `docs/transports.md` describes how a vanished GET peer is
   detected.
 - **stdio servers log to stderr by default** (TJC-2338): on the stdio transport stdout is the wire,

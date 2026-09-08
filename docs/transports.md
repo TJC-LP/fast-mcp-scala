@@ -20,9 +20,9 @@ use. One durable session per process; shutdown is EOF-driven (the client closing
 loop). The stdio lifecycle (`StdioLoop`: session, single-writer stdout, outbound drainer, EOF
 teardown) is shared by the JVM and Scala Native backends; the Scala.js backend drives Node's
 callback IO directly. Because `runStdio()` has no reachable call path into the HTTP stack,
-stdio-only programs never link zio-http or netty; exclude both `dev.zio:zio-http_3` and `io.netty:*`
-from the dependency (netty is a direct, version-pinned dependency of the JVM artifact) to keep them
-off the classpath too. That is what makes small GraalVM images possible
+stdio-only programs never link zio-http or netty; exclude `dev.zio:zio-http_3` from the dependency
+(netty reaches the JVM artifact only through zio-http, so that one exclusion sheds both) to keep
+them off the classpath too. That is what makes small GraalVM images possible
 (see [native-image.md](./native-image.md)).
 
 ### stdout is the wire — log to stderr
@@ -134,7 +134,7 @@ running legacy tasks are released.
 A GET peer that disappears without closing its connection (NAT expiry, a suspended machine) leaves
 the stream "live" from the server's point of view: the OS only notices such a peer once the server
 writes to the socket — that is, with `keepAliveInterval` set — and only after its own TCP
-retransmission budget (zio-http 3.4.0 exposes no accepted-socket option, so the server does not
+retransmission budget (zio-http 3.11.4 exposes no accepted-socket option, so the server does not
 set TCP keepalive itself). The cap-time rule above bounds the session store regardless.
 
 `stateless` controls **only** this adapter. Modern requests are stateless regardless of the flag.
