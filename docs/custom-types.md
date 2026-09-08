@@ -71,8 +71,9 @@ case class LookupArgs(id: UserId)
 ## Per-field override: `@Param(schema = ...)`
 
 For a one-off field, `@Param(schema = Some("..."))` replaces that field's generated schema with a
-raw JSON Schema fragment. This is the right tool for enum constraints, patterns, or numeric bounds
-that Scala types cannot express:
+raw JSON Schema fragment — the whole property, `description` and `examples` included, so repeat
+the description inside the fragment. This is the right tool for enum constraints, patterns, or
+numeric bounds that Scala types cannot express:
 
 ```scala 3 raw
 @Param(
