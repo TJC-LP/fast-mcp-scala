@@ -128,7 +128,11 @@ class PromptManager[R] extends Manager[PromptDefinition]:
               // McpErrors pass through untouched — the MRTR input_required sentinel in
               // particular must reach the router intact to become an InputRequiredResult.
               case m: McpError => m
-              case e => new PromptExecutionError(s"Error rendering prompt '$name'", Some(e))
+              // Keep the cause's message: a `-32603` that only says "Error rendering prompt"
+              // leaves the client (and the operator) with nothing to act on (D1.29).
+              case e =>
+                val cause = Option(e.getMessage).getOrElse(e.getClass.getSimpleName)
+                new PromptExecutionError(s"Error rendering prompt '$name': $cause", Some(e))
             }
 
       case None =>
