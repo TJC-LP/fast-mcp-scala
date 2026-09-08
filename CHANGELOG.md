@@ -38,24 +38,47 @@ sections below for the cumulative RC changes rolled into this release.
 
 ### Upgrading
 
+The error-by-error migration guide for 0.x and release-candidate projects is
+[docs/upgrading.md](docs/upgrading.md); the protocol-side changes are in
+[docs/2026-07-28-upgrade.md](docs/2026-07-28-upgrade.md).
+
 - **Consumer compiler floor: Scala 3.9.0 or newer.** 1.0.0 is compiled with Scala 3.9.0 LTS and
   emits TASTy 28.9, which 3.8 and older compilers cannot read; `1.0.0-RC3` (Scala 3.8.3, TASTy
-  28.8) is the last release a Scala 3.8 project can consume. Scala.js consumers also need a
-  Scala.js 1.22+ linker — Mill: mill-bun 0.3.1 with an explicit `scalaJSVersion` (Mill 1.1.x's
-  bundled linker stops at IR 1.20); scala-cli: `//> using jsVersion 1.22.0` plus
-  `--js-version 1.22.0` on `package --js`. Scala Native consumers use 0.5.12.
+  28.8) is the last release a Scala 3.8 project can consume. A 3.8 compiler fails first on the
+  Scala 3.9.0 standard library the POM pulls in transitively (`TASTy file scala/language.tasty
+  could not be read ... version 28.9`), then on the library's own `Exports$package.tasty`; every
+  `Not found: type ...` after that is a cascade. A 3.9.0 module may depend on your remaining 3.8
+  modules, never the reverse. WartRemover users: the `org.wartremover:::wartremover` coordinate
+  has no 3.9.0 build below 3.6.1. Scala.js consumers also need a Scala.js 1.22+ linker, and that
+  failure is link-time only — `compile` passes because the compiler never reads dependency IR,
+  then `fastLinkJS` / `bundle` / `package --js` fails with `IRVersionNotSupportedException ...
+  compiled with Scala.js 1.22 (supported up to: 1.21)`. Mill: mill-bun 0.3.1 with an explicit
+  `scalaJSVersion` (Mill 1.1.x's bundled linker stops at IR 1.20); the plugin bump makes
+  `scalaJSVersion` abstract on every `BunScalaJSModule`, freezes installs (`Missing
+  <module>/bun.lock` until `./mill <module>.bunLock` is run and the lockfile committed; a module
+  whose only Bun-side dependency is fast-mcp-scala needs none) and writes the bundle to
+  `out/<module>/bundle.dest/` instead of `bunBundle.dest/`. scala-cli: `//> using jsVersion
+  1.22.0` plus `--js-version 1.22.0` on `package --js`. Scala Native consumers use 0.5.12.
 - **`-experimental` is no longer required.** The release candidates were compiled with
   `-experimental`, which stamped every public definition `@experimental` and forced the flag onto
   every consumer on both registration paths and all three platforms; 1.0.0 is not (TJC-2335), so
   remove `-experimental` from your build. The annotation macros use only stable reflect API
   (details under *Changed*).
+<!-- PENDING MERGE (delete in R3): the root-export sentence in the bullet below assumes PR #102
+     (TJC-2336) is merged before the tag; if it slips, revert it to "are imported by name". -->
 - **`import com.tjclp.fastmcp.{*, given}` — the `given` selector is mandatory.** The platform
   `TransportBackend` and the `McpServerCoreFactory` are `given` instances re-exported from the
-  package object; a plain `import com.tjclp.fastmcp.*` no longer compiles for `McpServerApp`
-  users ("No given instance of type McpServerCoreFactory"). Settings types that are not
-  re-exported (`TaskSettings`, `LimitSettings`, `TaskSupport`, `TaskOwnerKey`, the
-  `core.wire.*ResourceContents` payloads) are imported by name; every documented snippet shows
-  the import it needs.
+  package object; a plain `import com.tjclp.fastmcp.*` (the 0.3.x idiom, even with the old
+  `McpServer.given` / `TransportRunner.given` lines next to it) no longer compiles for
+  `McpServerApp` users: `[E172] No given instance of type McpServerCoreFactory ... Note: given
+  instance instance in package com.tjclp.fastmcp was not considered because it was not imported
+  with import given`. The root import also exports, since 1.0.0, `TaskSettings`,
+  `LimitSettings`, `TaskSupport`, `TaskOwnerKey`, `LoggingLevel`, `ProgressToken` and the
+  `ResourceContents` / `TextResourceContents` / `BlobResourceContents` payloads (TJC-2336), so
+  every documented fence compiles with the root import alone; the release candidates needed them
+  imported by name (`com.tjclp.fastmcp.server.{TaskSettings, LimitSettings}`,
+  `core.{TaskSupport, TaskOwnerKey}`, `core.wire.{TextResourceContents, BlobResourceContents}`)
+  and those imports stay valid.
 - **First Scala Native publish.** `com.tjclp:fast-mcp-scala_native0.5_3` (stdio only,
   experimental) is on Maven Central for the first time; `%%%` / `::` coordinates resolve it.
 - **Client-facing codes changed by the security wave.** Every POST without
@@ -75,7 +98,12 @@ sections below for the cumulative RC changes rolled into this release.
   arguments are compile-time errors too.
 - **Bun HTTP API.** `startStatefulHttp()` / `startStatelessHttp()` return a `BunHttpHandle`
   (`port`, `hostname`, `url`, `server`, `stop()`) instead of a `BunServer`, and
-  `BunServeOptions.apply` changed shape (details under *Changed*).
+  `BunServeOptions.apply` changed shape (details under *Changed*). There is no public
+  per-request handler to wrap: 0.x Bun servers that built their own `Bun.serve(fetch = ...)`
+  around the SDK transport to add CORS headers, an `OPTIONS` preflight or a `/health` route
+  cannot reproduce that shape — `runHttp()` owns the listener and non-endpoint paths answer 404.
+  Put those concerns on a reverse proxy in front of the server; a composable fetch handler /
+  route hook is tracked for 1.1.0.
 - **Removed members.** The RC1 deprecations (`ErrorCodes.ResourceNotFound`,
   `ElicitRequestUrlParams.requiredError`) and the RC4-cycle
   `HostGuard.isAllowed(host, origin, Set[String])` overload are gone (see *Removed*). Coming
@@ -83,6 +111,15 @@ sections below for the cumulative RC changes rolled into this release.
   `JacksonConverter`, `EmbeddedResourceContent`) and below apply too. Coming from 0.2.x or
   earlier: `@ToolParam` / `@ResourceParam` / `@PromptParam` were removed in 0.3.0 in favour of
   `@Param` (see `[0.3.0] ### Removed`).
+- **`Content` and `ResourceContents` ADTs (coming from 0.4.0).** `EmbeddedResourceContent`
+  became the sealed `ResourceContents` with `TextResourceContents(uri, text, mimeType, _meta)` /
+  `BlobResourceContents(uri, blob, mimeType, _meta)` in `core.wire` (root-exported since 1.0.0);
+  `mimeType` is `Option[String]` and `text` / `blob` are plain `String`.
+  `EmbeddedResource.resource` exposes only `uri`, `mimeType` and `_meta`, so `resource.text` /
+  `resource.blob` no longer compile — match on the two cases instead. `Content` gained
+  `AudioContent` and `ResourceLink` in 0.5.0: an exhaustive match written against the 0.4.0 shape
+  (`TextContent` / `ImageContent` / `EmbeddedResource`) now warns `match may not be exhaustive`
+  and fails under `-Werror`; add the two cases (both root-exported) or a wildcard.
 - **Compatibility scope.** The 1.x compatibility promise
   ([DEPENDENCY_POLICY.md](DEPENDENCY_POLICY.md)) covers the public API of `fast-mcp-scala_3`
   except `com.tjclp.fastmcp.examples.*` and `com.tjclp.fastmcp.macros.*`, which ship for the
@@ -694,7 +731,13 @@ conformance suite: **42/42 on both platforms**, zero expected failures.
 - **Content ADT reshape** (spec alignment): `audience`/`priority` moved off the
   content constructors into `annotations` (`ContentAnnotations`), and
   `EmbeddedResourceContent` is replaced by `ResourceContents`
-  (`TextResourceContents` / `BlobResourceContents`).
+  (`TextResourceContents` / `BlobResourceContents` in `com.tjclp.fastmcp.core.wire`, with
+  `mimeType: Option[String]` and plain-`String` `text` / `blob`). `Content` also gained the
+  `AudioContent` and `ResourceLink` cases, so exhaustive matches over the 0.4.0 shape need two
+  more cases (see `[1.0.0] ### Upgrading`).
+- The Scala.js TS-SDK facade package `com.tjclp.fastmcp.facades.server` and
+  `McpServer#connect(transport)` went with the vendored SDK — the library now owns the listener
+  (migration under `[1.0.0] ### Removed`).
 - Stale GraalVM native-image reachability metadata (it described the removed
   Java SDK + Jackson reflection). Regenerate with the `native-image-agent`
   against a native-core server if you build native images.
