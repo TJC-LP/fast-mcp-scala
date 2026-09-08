@@ -28,7 +28,10 @@ new distributions' SHA-256 lines in the same PR.
 
 A production dependency is updated when one of these applies:
 
-- a **security vulnerability** is disclosed in it (GitHub security alerts are enabled on the repo);
+- a **security vulnerability** is disclosed in it. Detection is an explicit OSV audit of the
+  resolved Maven tree (recorded per release in the gate ledger): GitHub's dependency graph does not
+  see Mill-resolved Maven dependencies, and its security alerts, when enabled, cover only the Actions
+  and bun ecosystems declared in `.github/dependabot.yml`;
 - a bug in the dependency affects fast-mcp-scala's behavior;
 - a new dependency feature is needed;
 - the dependency drops support for a Scala, Scala.js, Scala Native, or JDK version this library
