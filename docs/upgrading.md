@@ -17,10 +17,6 @@ the toolchain floor first, then the import, then symbols — a project on the wr
 produces nothing but noise, and a file with one failed import produces misleading secondary
 errors (see [Troubleshooting](#troubleshooting)).
 
-<!-- PENDING MERGE (delete in R3): this page assumes PR #98 (no `-experimental`, TJC-2335) and
-     PR #102 (root exports, TJC-2336) are merged before the v1.0.0 tag. If either slips, revise
-     §1.4 and §2.2 here and the CHANGELOG `### Upgrading` import bullet before merging PR B. -->
-
 ## Checklist
 
 1. Compiler **Scala 3.9.0 or newer** (§1.1).
