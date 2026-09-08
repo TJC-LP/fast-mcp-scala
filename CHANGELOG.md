@@ -148,8 +148,10 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   An `Origin` header sent more than once is evaluated as its `", "`-joined value on both backends
   (the JVM used to check only the first), so the fail-closed origin parser refuses it with 403; a
   duplicated `Host` is joined the same way but the host guard compares only its first hostname, so
-  it is refused only when that first value is not listed; a request whose URL cannot be parsed on Bun (e.g. `Host: 127.0.0.1:99999`) answers the host
-  gate's 403 (guard on) or a JSON-RPC 400 instead of a 500 defect. The Bun session mint takes its
+  it is refused only when that first value is not listed; a request whose URL cannot be parsed on Bun
+  (e.g. `Host: 127.0.0.1:99999`) answers 403 when the guard is on and the hostname is not listed,
+  otherwise a JSON-RPC 400 (`Malformed request URL`), instead of a 500 defect — the JVM's netty
+  ignores the malformed port and serves the request. The Bun session mint takes its
   idle/live snapshot in the same synchronous step as the eviction and insert, so concurrent
   header-less initializes at `maxSessions` are never refused while an evictable session exists
   (JVM parity, F12). The Bun stdio dispatch bridge gained the same `catchAllCause` boundary as the
