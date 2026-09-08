@@ -126,7 +126,7 @@ Or point `scala-cli` at a built JAR directly:
 ```scala 3 ignore
 //> using scala 3.9.0
 //> using jar "/absolute/path/to/out/fast-mcp-scala/jvm/jar.dest/out.jar"
-//> using options "-Xcheck-macros" "-experimental"
+//> using options "-experimental"
 ```
 
 ## Making changes

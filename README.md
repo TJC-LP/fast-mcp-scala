@@ -22,13 +22,13 @@ Two registration paths, `@Tool`-style annotations and typed `McpTool` contracts,
 
 ```scala 3 ignore
 // sbt — JVM
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "1.0.0-RC3"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "1.0.0"
 
 // sbt — Scala.js (Bun-first) or Scala Native (stdio only, experimental); %%% picks the platform artifact
-libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "1.0.0-RC3"
+libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "1.0.0"
 
-//> using dep com.tjclp::fast-mcp-scala:1.0.0-RC3    // scala-cli, JVM
-//> using dep com.tjclp::fast-mcp-scala::1.0.0-RC3   // scala-cli, Scala.js or Native (with `//> using platform ...`)
+//> using dep com.tjclp::fast-mcp-scala:1.0.0    // scala-cli, JVM
+//> using dep com.tjclp::fast-mcp-scala::1.0.0   // scala-cli, Scala.js or Native (with `//> using platform ...`)
 ```
 
 Built against Scala 3.9.0 LTS; consumers compile with `-experimental` (the annotation macros require it). JVM: JDK 17+ (CI tests the LTS releases 17, 21, and 25). Scala.js: `sjs1_3`, runs on Bun (first-class) and Node 18+; Scala 3.9 output needs a 1.22+ linker. Scala Native: `native0.5_3`, stdio only, experimental. Platform details and quickstarts: [docs/platforms.md](docs/platforms.md).
@@ -39,8 +39,8 @@ A single-file server with one tool; the same code lives in [`HelloWorld.scala`](
 
 ```scala 3 raw
 //> using scala 3.9.0
-//> using dep com.tjclp::fast-mcp-scala:1.0.0-RC3
-//> using options "-Xcheck-macros" "-experimental"
+//> using dep com.tjclp::fast-mcp-scala:1.0.0
+//> using options "-experimental"
 
 import com.tjclp.fastmcp.{*, given}
 
@@ -255,7 +255,9 @@ Add to `claude_desktop_config.json`:
       "command": "scala-cli",
       "args": [
         "-e",
-        "//> using dep com.tjclp::fast-mcp-scala:1.0.0-RC3",
+        "//> using scala 3.9.0",
+        "-e",
+        "//> using dep com.tjclp::fast-mcp-scala:1.0.0",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]

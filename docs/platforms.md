@@ -57,7 +57,7 @@ What the Scala.js target gives you:
 //> using platform scala-js
 //> using jsVersion 1.22.0
 //> using jsModuleKind es
-//> using dep com.tjclp::fast-mcp-scala::1.0.0-RC3
+//> using dep com.tjclp::fast-mcp-scala::1.0.0
 //> using options "-experimental"
 
 import com.tjclp.fastmcp.{*, given}
@@ -107,7 +107,7 @@ published with 1.0.0.
 //> using scala 3.9.0
 //> using platform native
 //> using nativeVersion 0.5.12
-//> using dep com.tjclp::fast-mcp-scala::1.0.0-RC3
+//> using dep com.tjclp::fast-mcp-scala::1.0.0
 //> using options "-experimental"
 
 import com.tjclp.fastmcp.{*, given}
