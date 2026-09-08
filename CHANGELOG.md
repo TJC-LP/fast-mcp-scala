@@ -170,6 +170,15 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   single customization point that supplies both the zio-json decoder used
   inside typed request case classes and the JSON Schema advertised for a
   custom wire type.
+- **OSV advisory gate** (TJC-2329): `.github/workflows/osv.yml` queries [OSV.dev](https://osv.dev)
+  for every coordinate on the production classpath of the three published modules
+  (`fast-mcp-scala.{jvm,js,scalaNative}.resolvedMvnDeps` — the same coursier resolution Mill puts
+  on the classpath, netty included) weekly, on every pull request that touches `build.mill`,
+  `fast-mcp-scala/package.mill`, the workflow or the script, and on demand. The job fails on any
+  advisory rated MODERATE or higher (GitHub Advisory Database label, else the CVSS v3 base score)
+  or of unknown severity; LOW advisories are reported only, and an accepted advisory is recorded in
+  `.github/osv-ignore`. Run locally with `scripts/osv-scan.sh`. GitHub's dependency graph cannot
+  see Mill-resolved Maven dependencies, so this is the published classpath's CVE feed.
 
 ### Changed
 
@@ -260,6 +269,14 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 - JSON Schema derivation is now a native Scala 3 macro that emits `zio-json`
   AST values directly on JVM and Scala.js. Typed contracts no longer require
   `sttp.tapir.generic.auto.*` at call sites.
+- **Release workflow dry run** (TJC-2329): `release.yml` accepts `workflow_dispatch` with a
+  `version` input. A dispatch runs the full test suite and then `publishLocal` of all three
+  artifacts at that version on the runner (everything the release does except PGP signing and the
+  Sonatype upload) and asserts the three artifact directories exist; the Sonatype step and the
+  GitHub-release job run only on a `v*` tag push, so no publishing secret is reachable from a
+  dispatch. The pre-publish version check now asserts all three modules' `publishVersion` (the
+  former `show a b c` form printed only the JVM module's). Every CI checkout sets
+  `persist-credentials: false`.
 
 ### Deprecated
 
