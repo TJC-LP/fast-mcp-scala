@@ -75,8 +75,12 @@ The in-repo proof: `fast-mcp-scala.nativeSmoke.stdio` builds
 
 - **Signal handling**: ZIO's `sun.misc.Signal` hooks are unavailable in a native image; ZIO logs
   a warning and falls back to no-op signal handling (fiber dumps are affected, serving is not).
-  For long-running server binaries add `--install-exit-handlers` so SIGINT/SIGTERM terminate the
-  process cleanly.
+  For long-running HTTP server binaries add `--install-exit-handlers` so SIGINT/SIGTERM terminate
+  the process cleanly. A stdio image — like a plain JVM stdio server — acts on those signals only
+  once stdin has reached EOF: the main fiber sits in a blocking `System.in.read` that interruption
+  cannot unblock, so the exit handlers wait for it. Hosts that close the child's stdin before
+  signalling (the TypeScript SDK does) are unaffected; `Ctrl-C`, `timeout` and `docker stop` stall
+  until stdin closes or SIGKILL. An interruptible stdin reader is tracked for 1.0.1.
 - **`MissingRegistrationError` at runtime**: a dependency started using reflection. Reproduce on
   the JVM under the tracing agent (below), and add only the missing entries.
 - **Linker errors on self-hosted runners**: `native-image` needs a C toolchain (`gcc`,
