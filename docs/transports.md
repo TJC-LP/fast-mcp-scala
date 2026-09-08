@@ -190,7 +190,7 @@ Frames carrying large payloads must fit: a `sampling/createMessage` result with 
 stdio may need a larger frame, e.g.
 
 ```scala 3 raw
-import com.tjclp.fastmcp.server.LimitSettings   // not re-exported by the package object
+import com.tjclp.fastmcp.server.LimitSettings   // optional since 1.0.0 (root-exported); the release candidates need it
 
 McpServerSettings(limits = LimitSettings(maxFrameChars = 8 * 1024 * 1024))
 ```
