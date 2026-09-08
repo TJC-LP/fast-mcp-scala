@@ -54,10 +54,11 @@ object JvmHttpBackend extends HttpTransportBackend:
 
   /** Periodically drop streamable sessions idle past `settings.sessionIdleTimeout` — abandoned
     * clients would otherwise grow the store forever. Sessions with a live GET stream are exempt
-    * (push-only consumers may never POST). Eviction calls `session.terminate`, which interrupts the
-    * session's in-flight requests, releases (interrupts) its tasks and shuts the outbound queue
-    * down. The store is additionally bounded by `settings.maxSessions` at mint time (see
-    * [[streamablePostDispatch]]).
+    * here (push-only consumers may never POST, and while capacity is free there is no reason to
+    * close their stream); they become evictable only at the `maxSessions` cap, see [[mintSession]].
+    * Eviction calls `session.terminate`, which interrupts the session's in-flight requests,
+    * releases (interrupts) its tasks and shuts the outbound queue down. The store is additionally
+    * bounded by `settings.maxSessions` at mint time (see [[streamablePostDispatch]]).
     */
   private[fastmcp] def evictIdleSessions(
       store: Ref[Map[String, Session]],
@@ -326,8 +327,13 @@ object JvmHttpBackend extends HttpTransportBackend:
     * initializes are serialised at the cap: the store never exceeds it, and a newcomer is never
     * refused while an evictable session exists. When the store is full the longest-idle session
     * WITHOUT a live GET is evicted — terminated, so its in-flight requests and tasks are released
-    * along with its queue — and the newcomer admitted; only when every stored session holds a live
-    * GET is the request refused with 503.
+    * along with its queue — and the newcomer admitted. When every stored session holds a live GET,
+    * the longest-idle of them is evicted instead, provided it has been idle longer than
+    * `sessionIdleTimeout` (`HttpRequestGuards.pickEvictable` with the idle fallback): terminating
+    * it shuts its outbound queue, which ends the GET stream — the only way a GET peer that vanished
+    * without closing its connection ever frees its slot, since nothing is written on a quiet stream
+    * unless `keepAliveInterval` is set. Only when no session qualifies under either rule is the
+    * request refused with 503.
     */
   private def mintSession[R](
       router: McpRouter[R],
@@ -347,7 +353,9 @@ object JvmHttpBackend extends HttpTransportBackend:
               (s.lastSeen zip s.hasActiveGet).map((seen, live) => (s.sessionId, seen, live))
             }
             .map { snapshot =>
-              HttpRequestGuards.pickEvictable(snapshot) match
+              val now = java.lang.System.currentTimeMillis()
+              val idleMs = settings.sessionIdleTimeout.map(_.toMillis)
+              HttpRequestGuards.pickEvictable(snapshot, now, idleMs) match
                 case Some(victim) => (Right(Some(m(victim))), (m - victim) + (id -> session))
                 case None => (Left(()), m)
             }
@@ -355,9 +363,13 @@ object JvmHttpBackend extends HttpTransportBackend:
       resp <- outcome match
         case Right(None) => respondStreamable(router, session, message, isNew = true, settings)
         case Right(Some(victim)) =>
-          ZIO.logWarning(
-            s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted idle session ${victim.sessionId}"
-          ) *> victim.terminate *>
+          victim.hasActiveGet.flatMap { heldGet =>
+            val detail =
+              if heldGet then " (idle past sessionIdleTimeout; its GET stream is closed)" else ""
+            ZIO.logWarning(
+              s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted idle session ${victim.sessionId}$detail"
+            )
+          } *> victim.terminate *>
             respondStreamable(router, session, message, isNew = true, settings)
         case Left(()) =>
           session.terminate

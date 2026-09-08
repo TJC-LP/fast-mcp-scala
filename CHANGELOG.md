@@ -219,6 +219,16 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Changed
 
+- **Legacy HTTP session cap: idle GET holders become evictable** (TJC-2355): at `maxSessions` the
+  JVM adapter still evicts the longest-idle session without a live GET stream first; when every
+  stored session holds a live GET, it now evicts the longest-idle of them once it has been idle
+  longer than `sessionIdleTimeout` (its GET stream is closed by `Session.terminate`; clients reopen
+  it as usual) instead of refusing the `initialize` with 503. The 503 remains only when no session
+  qualifies under either rule, and `sessionIdleTimeout = None` keeps GET holders exempt. The
+  periodic idle sweeper is unchanged (live GET streams stay exempt while capacity is free). Bun is
+  unaffected (no standalone GET channel). zio-http 3.4.0 exposes no accepted-socket option, so TCP
+  keepalive is not set by the server; `docs/transports.md` describes how a vanished GET peer is
+  detected.
 - **Behaviour changes from the security wave (pre-1.0)** (TJC-2294):
   - Resource template literal text is matched verbatim — a `.` in `file://{name}.txt` is a dot, not
     a regex wildcard. Placeholders in one path segment must be separated by literal text (`{a}{b}`

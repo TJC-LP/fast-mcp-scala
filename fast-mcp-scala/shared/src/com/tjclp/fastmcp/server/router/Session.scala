@@ -67,7 +67,8 @@ final class Session private (
   /** At most one standalone GET SSE stream may drain `outbound` — two would round-robin-steal
     * messages. `tryAcquireGet` is an atomic test-and-set (false = a stream is already live, answer
     * 409); the stream's finalizer must call [[releaseGet]]. Sessions with a live GET are exempt
-    * from idle eviction (push-only consumers may never POST).
+    * from the periodic idle sweep (push-only consumers may never POST); at the `maxSessions` cap a
+    * GET holder idle past `sessionIdleTimeout` may still be evicted, which closes its stream.
     */
   def tryAcquireGet: UIO[Boolean] = ZIO.succeed(activeGetRef.compareAndSet(false, true))
   def releaseGet: UIO[Unit] = ZIO.succeed(activeGetRef.set(false))

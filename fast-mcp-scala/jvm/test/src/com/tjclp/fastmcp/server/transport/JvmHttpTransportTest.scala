@@ -677,6 +677,38 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     post(routes, listFrame, Some(sid3)).status shouldBe Status.Ok
   }
 
+  test("maxSessions: an idle GET-less session is still evicted before an idle GET holder") {
+    val idle = java.time.Duration.ofMillis(300)
+    val routes =
+      buildRoutes(stateless = false, maxSessions = Some(2), sessionIdleTimeout = Some(idle))
+    val holder = initSid(routes)
+    openGet(routes, holder)
+    Thread.sleep(5)
+    val plain = initSid(routes) // younger, but holds no GET
+    Thread.sleep(idle.toMillis + 150) // both are now idle past the timeout
+
+    val third = post(routes, initFrame, None)
+    val _ = bodyOf(third)
+    third.status shouldBe Status.Ok
+    post(routes, listFrame, Some(plain)).status shouldBe Status.NotFound // GET-less goes first
+    post(routes, listFrame, Some(holder)).status shouldBe Status.Ok
+  }
+
+  test("maxSessions: with sessionIdleTimeout = None, GET holders stay exempt from cap eviction (503)") {
+    val routes = buildRoutes(stateless = false, maxSessions = Some(2), sessionIdleTimeout = None)
+    val sid1 = initSid(routes)
+    openGet(routes, sid1)
+    val sid2 = initSid(routes)
+    openGet(routes, sid2)
+    Thread.sleep(50) // any amount of idleness: there is no timeout to exceed
+
+    val refused = post(routes, initFrame, None)
+    refused.status.code shouldBe 503
+    bodyOf(refused) should include("Session limit reached")
+    post(routes, listFrame, Some(sid1)).status shouldBe Status.Ok
+    post(routes, listFrame, Some(sid2)).status shouldBe Status.Ok
+  }
+
   test("maxSessions: concurrent header-less initializes at the cap all admit while idle sessions exist") {
     val routes = buildRoutes(stateless = false, maxSessions = Some(2))
     val idle = List(initSid(routes), initSid(routes))
