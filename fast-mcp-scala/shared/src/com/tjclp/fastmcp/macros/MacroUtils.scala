@@ -108,30 +108,6 @@ private[macros] object MacroUtils:
 
     loop(argTerm)
 
-  // Helper to parse @Tool annotation arguments
-  def parseToolParams(using quotes: Quotes)(
-      term: quotes.reflect.Term
-  ): (Option[String], Option[String], List[String]) =
-    import quotes.reflect.*
-
-    var toolName: Option[String] = None
-    var toolDesc: Option[String] = None
-    var toolTags: List[String] = Nil
-
-    term match {
-      case Apply(Select(New(_), _), argTerms) =>
-        argTerms.foreach {
-          case NamedArg("name", valueTerm) =>
-            toolName = parseOptionStringLiteral(valueTerm, "@Tool(name)")
-          case NamedArg("description", valueTerm) =>
-            toolDesc = parseOptionStringLiteral(valueTerm, "@Tool(description)")
-          case NamedArg("tags", valueTerm) => toolTags = parseListString(valueTerm)
-          case _ => () // Ignore other args
-        }
-      case _ => () // Ignore if not the expected Apply structure
-    }
-    (toolName, toolDesc, toolTags)
-
   // Helper to parse @Prompt annotation arguments
   def parsePromptParams(using quotes: Quotes)(
       term: quotes.reflect.Term
@@ -154,16 +130,21 @@ private[macros] object MacroUtils:
     }
     (promptName, promptDesc)
 
-  // Helper to parse @Param annotation arguments for prompts
+  /** Parse the `@Param` annotation of a `@Prompt` method parameter into `(description, required)`.
+    *
+    * `required` defaults to `!isOptionType`: an `Option[T]` parameter is optional whether or not it
+    * carries a `@Param`, and only an explicit `required = true` re-requires it (TJC-2334).
+    */
   def parsePromptParamArgs(using quotes: Quotes)(
-      paramAnnotOpt: Option[quotes.reflect.Term]
+      paramAnnotOpt: Option[quotes.reflect.Term],
+      isOptionType: Boolean
   ): (Option[String], Boolean) =
     import quotes.reflect.*
 
     paramAnnotOpt match {
       case Some(annotTerm) =>
         var paramDesc: Option[String] = None
-        var paramRequired: Boolean = true // Default required for @Param
+        var paramRequired: Boolean = !isOptionType // Option parameters are optional by default
         var descriptionSetPositionally = false
         var requiredSetByName = false
 
@@ -199,7 +180,7 @@ private[macros] object MacroUtils:
           case _ => () // Ignore if annotation term is not an Apply
         }
         (paramDesc, paramRequired)
-      case None => (None, true) // Defaults if no @Param
+      case None => (None, !isOptionType) // Defaults if no @Param
     }
 
   /** Extract the `@Param` annotation from a method parameter symbol, if present. */
@@ -208,10 +189,16 @@ private[macros] object MacroUtils:
   ): Option[quotes.reflect.Term] =
     extractAnnotation[com.tjclp.fastmcp.core.Param](sym)
 
-  // Helper to parse @Param annotation arguments for @Tool methods
-  // Returns: (description: Option[String], examples: List[String], required: Boolean, schema: Option[String])
+  /** Parse the `@Param` annotation of a `@Tool` method parameter or a typed-request case-class
+    * field into `(description, examples, required, schema)`.
+    *
+    * `required` defaults to `!isOptionType`, matching the derived schema (`JsonSchemaMacro` lists
+    * every non-`Option` parameter in `required`): a description-only `@Param` on an `Option[T]`
+    * parameter no longer re-requires it, and only an explicit `required = true` does (TJC-2334).
+    */
   def parseToolParam(using quotes: Quotes)(
-      paramAnnotOpt: Option[quotes.reflect.Term]
+      paramAnnotOpt: Option[quotes.reflect.Term],
+      isOptionType: Boolean
   ): (Option[String], List[String], Boolean, Option[String]) =
     import quotes.reflect.*
 
@@ -219,7 +206,7 @@ private[macros] object MacroUtils:
       case Some(annotTerm) =>
         var paramDesc: Option[String] = None
         var paramExamples: List[String] = Nil
-        var paramRequired: Boolean = true // Default required for @Param
+        var paramRequired: Boolean = !isOptionType // Option parameters are optional by default
         var paramSchema: Option[String] = None
         var examplesSetByName = false
         var requiredSetByName = false
@@ -277,7 +264,7 @@ private[macros] object MacroUtils:
           case _ => () // Ignore if annotation term is not an Apply
         }
         (paramDesc, paramExamples, paramRequired, paramSchema)
-      case None => (None, Nil, true, None) // Defaults if no @Param
+      case None => (None, Nil, !isOptionType, None) // Defaults if no @Param
     }
 
   def schemaMetadataForType[T: Type](using Quotes): Expr[SchemaMetadataNode] =
@@ -325,9 +312,9 @@ private[macros] object MacroUtils:
             val fieldTpe = tpe.memberType(fieldSym)
             val nested = schemaMetadataForTypeRepr(fieldTpe)
             val parsedMeta = fieldAnnotation(fieldSym, ctorParams).map { annot =>
-              val (desc, examples, required, schema) = parseToolParam(Some(annot))
+              val isOption = fieldTpe <:< TypeRepr.of[Option[?]]
+              val (desc, examples, required, schema) = parseToolParam(Some(annot), isOption)
               if !required then
-                val isOption = fieldTpe <:< TypeRepr.of[Option[?]]
                 // `HasDefault` lives on the primary-constructor parameter itself (pickled), so a
                 // hand-written companion `apply` overload with defaults can no longer satisfy the
                 // gate on behalf of a field that has none.
@@ -597,7 +584,7 @@ private[macros] object MacroUtils:
   ): EffectShape =
     import quotes.reflect.*
 
-    val resType = (methodSym.info match
+    val resType = (methodSym.termRef.widenTermRefByName match
       case mt: MethodType => mt.resType
       case other => other
     ).dealias
@@ -617,7 +604,7 @@ private[macros] object MacroUtils:
   ): Option[quotes.reflect.TypeRepr] =
     import quotes.reflect.*
 
-    val resType = (methodSym.info match
+    val resType = (methodSym.termRef.widenTermRefByName match
       case mt: MethodType => mt.resType
       case other => other
     ).dealias

@@ -20,7 +20,9 @@ use. One durable session per process; shutdown is EOF-driven (the client closing
 loop). The stdio lifecycle (`StdioLoop`: session, single-writer stdout, outbound drainer, EOF
 teardown) is shared by the JVM and Scala Native backends; the Scala.js backend drives Node's
 callback IO directly. Because `runStdio()` has no reachable call path into the HTTP stack,
-stdio-only programs never link zio-http or netty. That is what makes small GraalVM images possible
+stdio-only programs never link zio-http or netty; exclude both `dev.zio:zio-http_3` and `io.netty:*`
+from the dependency (netty is a direct, version-pinned dependency of the JVM artifact) to keep them
+off the classpath too. That is what makes small GraalVM images possible
 (see [native-image.md](./native-image.md)).
 
 ## HTTP
@@ -105,7 +107,7 @@ clients share one session identity, which is why legacy task requests there are 
 | `httpEndpoint` | `/mcp` | JSON-RPC endpoint path. |
 | `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless. |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity (live legacy GET streams are exempt); `None` disables. |
-| `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. |
+| `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. Neither listener closes a quiet stream on its own: the JVM has no idle timeout and Bun runs with `idleTimeout: 0` (its 10 s default used to cut a slow tool's reply). |
 | `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` value must parse as one `host[:port]` authority and its hostname (or the verbatim `host:port`) must be listed — the port itself is not compared; a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, a `Host` or `Origin` sent more than once (seen as its `", "`-joined value), and malformed `Host`/`Origin` ports are refused (403), with or without the other header. IPv6 entries are written bracketed, exactly as they appear in the `Host` header: `Set("[::1]")`, not `Set("::1")`. |
 | `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted alongside the request's own authority; malformed entries fail `runHttp()` at startup. |
 | `maxRequestBodyBytes` | `1 MiB` | Request body cap on every backend; larger bodies get 413 before decoding (empty 413 on the wire from netty/Bun, JSON-RPC `-32000` on first-party paths); must not exceed `limits.maxFrameChars`. |

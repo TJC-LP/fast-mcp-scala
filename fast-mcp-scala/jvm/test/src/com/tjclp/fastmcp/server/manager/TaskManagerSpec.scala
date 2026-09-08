@@ -5,6 +5,7 @@ import org.scalatest.matchers.should.Matchers
 import zio.{Task as _, *}
 
 import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.jsonrpc.McpErrorCarrier
 import com.tjclp.fastmcp.server.TaskSettings
 
 /** Tests for [[TaskManager]] lifecycle, status transitions, session isolation, and cancellation
@@ -199,6 +200,53 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     val tm = newManager()
     val cancelOutcome = runUnsafe(tm.cancel("does-not-exist", Some("s1")))
     cancelOutcome shouldBe Left("Task not found")
+  }
+
+  // TJC-2353: `result` on a cancelled task must fail with a VALUE the dispatch layer can put on
+  // the wire. Re-raising the fiber's interrupt-only cause made the awaiting `tasks/result` handler
+  // look like a cancelled request, and the router answered it with nothing at all.
+  it should "make result fail with an McpErrorCarrier (-32602), parked or after the fact" in {
+    val tm = newManager()
+    val gate = runUnsafe(Promise.make[Nothing, Unit])
+    val never: ZIO[Any, Throwable, Any] = gate.await
+    val created = runUnsafe(
+      tm.create(sessionId = Some("s1"), requestedTtlMs = None, run = never, _ => ZIO.unit)
+    )
+    val taskId = created.task.taskId
+
+    def carrierOf(exit: Exit[Throwable, Any]): McpErrorCarrier =
+      exit match
+        case Exit.Failure(cause) =>
+          cause.failureOption match
+            case Some(c: McpErrorCarrier) => c
+            case other =>
+              fail(s"expected an McpErrorCarrier failure value but got $other (cause: $cause)")
+        case Exit.Success(v) => fail(s"expected a failure but result succeeded with $v")
+
+    // 1. A waiter parked BEFORE the cancel.
+    val (parkedExit, cancelOutcome) = runUnsafe(
+      for
+        waiter <- tm.result(taskId, Some("s1")).exit.fork
+        _ <- ZIO.sleep(100.millis)
+        cancelled <- tm.cancel(taskId, Some("s1"))
+        exit <- waiter.join.timeoutFail(new RuntimeException("parked result never resolved"))(
+          5.seconds
+        )
+      yield (exit, cancelled)
+    )
+    cancelOutcome.map(_.status) shouldBe Right(TaskStatus.Cancelled)
+    val parked = carrierOf(parkedExit)
+    parked.toMcpError.code shouldBe ErrorCodes.InvalidParams
+    parked.toMcpError.message should include(taskId)
+
+    // 2. A result requested AFTER the task is already Cancelled.
+    val late = carrierOf(exitOf(tm.result(taskId, Some("s1"))))
+    late.toMcpError.code shouldBe ErrorCodes.InvalidParams
+    late.toMcpError.message should include("cancelled")
+
+    // The stored status is Cancelled (not Failed): the error value is the waiter's answer, not a
+    // reclassification of the task.
+    runUnsafe(tm.get(taskId, Some("s1"))).map(_.status) shouldBe Some(TaskStatus.Cancelled)
   }
 
   "session isolation" should "hide tasks from other sessions" in {

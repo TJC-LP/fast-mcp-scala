@@ -635,6 +635,13 @@ class TaskManager[R] private[manager] (
       }
       _ <- exit match
         case Exit.Success(value) => promise.succeed(value).unit
+        // Cancelled (tasks/cancel, TTL sweep, session release): complete the promise with a
+        // failure VALUE, never the raw interrupt cause. `result` re-raises whatever is stored in
+        // the awaiting `tasks/result` handler fiber, and an interrupt-only cause there is
+        // indistinguishable from the *request* being cancelled — the router emits no response
+        // frame at all (TJC-2353). Real failures keep their full cause so defects keep traces.
+        case Exit.Failure(cause) if cause.isInterruptedOnly =>
+          promise.fail(new TaskCancelledError(taskId)).unit
         case Exit.Failure(cause) => promise.failCause(cause).unit
       _ <- ZIO.foreachDiscard(updated)(e => onStatusChange(e.toTask).ignore)
     yield ()
@@ -669,6 +676,17 @@ final class TaskCapacityExceeded(val kind: String, val limit: Int)
   */
 final class TaskNotFoundError(val taskId: String)
     extends RuntimeException(s"Unknown task: $taskId")
+    with McpErrorCarrier:
+  def toMcpError: McpError = McpError.invalidParams(getMessage)
+
+/** The answer a `tasks/result` waiter gets for a task that was cancelled — by `tasks/cancel`, by
+  * the TTL sweeper, or with its session's release. The task's promise is completed with this VALUE
+  * rather than the fiber's interrupt-only cause, which a parked handler would re-raise and the
+  * router would mistake for a cancelled request (no frame at all). Maps to JSON-RPC `-32602`, the
+  * same family as [[TaskNotFoundError]] and the "already in terminal status" cancel error.
+  */
+final class TaskCancelledError(val taskId: String)
+    extends RuntimeException(s"Task $taskId was cancelled")
     with McpErrorCarrier:
   def toMcpError: McpError = McpError.invalidParams(getMessage)
 
