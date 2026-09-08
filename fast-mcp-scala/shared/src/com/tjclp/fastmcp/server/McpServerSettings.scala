@@ -91,8 +91,8 @@ case class TaskSettings(
   require(minResultRetentionMs >= 0L, "TaskSettings.minResultRetentionMs must be >= 0")
   require(sweepIntervalMs >= 1L, "TaskSettings.sweepIntervalMs must be >= 1")
 
-/** Settings for an MCP server. HTTP-specific fields (`stateless`, `keepAliveInterval`,
-  * `sessionIdleTimeout`, `disallowDelete`, `httpEndpoint`, `allowedHosts`, `allowedOrigins`,
+/** Settings for an MCP server. HTTP-specific fields (`host`, `port`, `httpEndpoint`, `stateless`,
+  * `keepAliveInterval`, `sessionIdleTimeout`, `disallowDelete`, `allowedHosts`, `allowedOrigins`,
   * `maxRequestBodyBytes`, `maxSessions`) are ignored under stdio transports. `limits` and `tasks`
   * apply on every transport.
   */
