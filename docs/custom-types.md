@@ -82,8 +82,10 @@ private val greetTool = McpTool.withSchema[GreetArgs, GreetResult](
 ## Returning embedded resources
 
 `EmbeddedResource` (re-exported by `com.tjclp.fastmcp`) wraps a `ResourceContents` payload whose
-concrete types live in `com.tjclp.fastmcp.core.wire` and are imported by name; they replaced
-`EmbeddedResourceContent` in 0.5.0:
+concrete types `TextResourceContents` / `BlobResourceContents` live in `com.tjclp.fastmcp.core.wire`
+and are root-exported since 1.0.0 (the named import below is what the release candidates needed;
+it stays valid). They replaced `EmbeddedResourceContent` in 0.5.0 — `mimeType` is `Option[String]`,
+`text` / `blob` are plain `String`:
 
 ```scala 3 raw
 import com.tjclp.fastmcp.{*, given}
