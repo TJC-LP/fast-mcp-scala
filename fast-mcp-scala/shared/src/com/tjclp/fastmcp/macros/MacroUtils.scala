@@ -597,7 +597,7 @@ private[macros] object MacroUtils:
   ): EffectShape =
     import quotes.reflect.*
 
-    val resType = (methodSym.info match
+    val resType = (methodSym.termRef.widenTermRefByName match
       case mt: MethodType => mt.resType
       case other => other
     ).dealias
@@ -617,7 +617,7 @@ private[macros] object MacroUtils:
   ): Option[quotes.reflect.TypeRepr] =
     import quotes.reflect.*
 
-    val resType = (methodSym.info match
+    val resType = (methodSym.termRef.widenTermRefByName match
       case mt: MethodType => mt.resType
       case other => other
     ).dealias

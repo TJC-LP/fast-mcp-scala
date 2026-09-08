@@ -60,7 +60,6 @@ object BuildConfig {
     "-Wnonunit-statement",
     // Macro-specific options (CRITICAL for this project)
     "-Xcheck-macros",
-    "-experimental",
     "-Xmax-inlines:128"
   )
 

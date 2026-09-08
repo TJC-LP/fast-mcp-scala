@@ -225,6 +225,12 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   - `@Tool(description = Some(...))` / `@Prompt(description = Some(...))` without `name` now
     registers under the method name with that description (previously the description text became
     the registered name).
+- **No more `-experimental`** (TJC-2335): fast-mcp-scala is no longer compiled with
+  `-experimental`; consumers may drop the flag (annotation and typed-contract paths, all three
+  platforms). The annotation macros use only stable reflect API: the five `Symbol.info` uses
+  (the only `@experimental` reflect member the macros touched) became
+  `Symbol.termRef.widenTermRefByName`. The Scaladoc-as-description fallback (`Symbol.docstring`,
+  stable) is unchanged.
 - **Scala 3.9.0 LTS** (TJC-2273): all three platforms now build with Scala 3.9.0
   (LTS, released 2026-09-03), up from 3.8.3. Companion bumps: WartRemover
   3.5.6 → 3.6.1 (first release for the 3.9.0 compiler) and the Scala.js
