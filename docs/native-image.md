@@ -20,18 +20,18 @@ reflection need, the smoke goes red on the PR that introduces it, and only then 
 
 ## Building a stdio server (downstream recipe, Mill)
 
+In `build.mill`, after the usual `package build` and `import mill._` / `import mill.scalalib._`
+lines:
+
 ```scala
 object server extends ScalaModule with mill.javalib.NativeImageModule {
   def scalaVersion = "3.9.0"
-  // fast-mcp-scala's annotation macros are @experimental; consumers compile with -experimental
-  // (same requirement as the scala-cli quickstart in the README)
-  def scalacOptions = Seq("-experimental")
   def mainClass = Some("com.example.MyServer")
 
   def mvnDeps = Seq(
     // stdio-only: exclude the HTTP stack. netty arrives only through zio-http, so this single
     // exclusion sheds both — see "The stdio/HTTP split" below
-    mvn"com.tjclp::fast-mcp-scala:1.0.0-RC3"
+    mvn"com.tjclp::fast-mcp-scala:1.0.0"
       .exclude("dev.zio" -> "zio-http_3")
   )
 
@@ -60,14 +60,15 @@ stack: `serveHttp` lives on the separate `HttpTransportBackend` trait, `runHttp(
 therefore drops zio-http and netty from stdio-only binaries entirely.
 
 **Stdio-only builds must also exclude the HTTP stack from the dependency: `dev.zio:zio-http_3`**
-(as in the recipe above). netty reaches `fast-mcp-scala_3` only through zio-http — 3.11.4 declares
-netty 4.2.17.Final, and the JVM artifact declares no `io.netty` dependency of its own, only an
-`import`-scoped `io.netty:netty-bom` entry, which adds no dependency — so excluding
-zio-http removes every netty jar with it. The two-exclusion form
-`.exclude("dev.zio" -> "zio-http_3", "io.netty" -> "*")` is also valid: the second exclusion
-matches nothing in the published tree today, so it is harmless, and it keeps the recipe correct
-should a future release ever have to declare netty directly again (as the 1.0.0 pre-releases did
-briefly to override zio-http 3.4.0's netty 4.2.3.Final; see
+(as in the recipe above; sbt:
+`("com.tjclp" %% "fast-mcp-scala" % "1.0.0").exclude("dev.zio", "zio-http_3")`). netty reaches
+`fast-mcp-scala_3` only through zio-http — 3.11.4 declares netty 4.2.17.Final, and the JVM
+artifact declares no `io.netty` dependency of its own, only an `import`-scoped
+`io.netty:netty-bom` entry, which adds no dependency — so excluding zio-http removes every netty
+jar with it. The two-exclusion form `.exclude("dev.zio" -> "zio-http_3", "io.netty" -> "*")` is
+also valid: the second exclusion matches nothing in the published tree today, so it is harmless,
+and it keeps the recipe correct should a future release ever have to declare netty directly again
+(as the tree did briefly before 1.0.0 to override zio-http 3.4.0's netty 4.2.3.Final; see
 [DEPENDENCY_POLICY.md](../DEPENDENCY_POLICY.md)). Shedding netty is not just size hygiene:
 netty's own in-jar reflect-config unconditionally registers methods whose signatures mention
 netty buffer types, forcing them reachable, and netty's `--initialize-at-build-time=io.netty`
@@ -91,14 +92,25 @@ must print `0` (it does for 1.0.0: nothing but zio-http brings netty in).
 
 - **Signal handling**: ZIO's `sun.misc.Signal` hooks are unavailable in a native image; ZIO logs
   a warning and falls back to no-op signal handling (fiber dumps are affected, serving is not).
-  For long-running server binaries add `--install-exit-handlers` so SIGINT/SIGTERM terminate the
-  process cleanly.
+  GraalVM 25 installs the SIGINT/SIGTERM exit handlers for executables by default, so a
+  long-running HTTP server binary terminates cleanly without extra flags (`--install-exit-handlers`
+  is deprecated there and only needed on older GraalVM releases). A stdio image — like a plain JVM
+  stdio server — acts on those signals only
+  once stdin has reached EOF: the main fiber sits in a blocking `System.in.read` that interruption
+  cannot unblock, so the exit handlers wait for it. Hosts that close the child's stdin before
+  signalling (the TypeScript SDK does) are unaffected; `Ctrl-C`, `timeout` and `docker stop` stall
+  until stdin closes or SIGKILL. An interruptible stdin reader is tracked for 1.0.1.
+- **stderr noise on start**: on JDK 25 the image prints four
+  `sun.misc.Unsafe::objectFieldOffset ... scala.runtime.LazyVals$` warnings to stderr on every
+  start (a plain JVM prints them too; Scala Native prints nothing). stdout stays clean, so MCP
+  hosts are unaffected.
 - **`MissingRegistrationError` at runtime**: a dependency started using reflection. Reproduce on
   the JVM under the tracing agent (below), and add only the missing entries.
 - **Linker errors on self-hosted runners**: `native-image` needs a C toolchain (`gcc`,
   `zlib1g-dev` on Debian/Ubuntu; preinstalled on GitHub-hosted runners).
-- **Build memory**: small servers build in well under 4 GB; pass `-J-Xmx6g` in
-  `nativeImageOptions` if the builder OOMs on a constrained runner.
+- **Build memory**: a stdio image builds in well under 4 GB (about 2.7 GB peak RSS for a small
+  annotated server); an HTTP image with netty peaks above 6 GB — use an 8 GB runner, or pass
+  `-J-Xmx6g` in `nativeImageOptions` to cap the builder if it OOMs on a constrained runner.
 
 ## Regenerating / auditing reachability metadata
 
@@ -128,14 +140,13 @@ CI. To re-audit (e.g. after a major dependency bump):
 ## Building an HTTP server
 
 HTTP native images keep zio-http/netty; relative to the stdio recipe they need one netty-scoped
-build override and four extra flags:
+build override and three extra flags (same `build.mill` preamble as above):
 
 ```scala
 object server extends ScalaModule with mill.javalib.NativeImageModule {
   def scalaVersion = "3.9.0"
-  def scalacOptions = Seq("-experimental")                      // annotation macros require it
   def mainClass = Some("com.example.MyHttpServer")
-  def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:1.0.0-RC3")   // zio-http stays
+  def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:1.0.0")   // zio-http stays
 
   override def jvmVersion = Task { "graalvm-community:25.0.2" }
 
@@ -148,8 +159,6 @@ object server extends ScalaModule with mill.javalib.NativeImageModule {
   override def nativeImageOptions = Task {
     super.nativeImageOptions() ++ Seq(
       "--no-fallback",
-      // SIGINT/SIGTERM must terminate a long-running server binary.
-      "--install-exit-handlers",
       // netty-codec-http ships a blanket `--initialize-at-build-time=io.netty`, which is
       // incompatible with GraalVM on JDK 25 (buffer/handler <clinit>s allocate native memory via
       // the FFM CleanerJava25 and bake response objects into the image heap). Equal specificity +

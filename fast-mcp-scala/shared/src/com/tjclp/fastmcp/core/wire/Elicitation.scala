@@ -3,9 +3,6 @@ package com.tjclp.fastmcp.core.wire
 import zio.json.*
 import zio.json.ast.Json
 
-import com.tjclp.fastmcp.core.ErrorCodes
-import com.tjclp.fastmcp.jsonrpc.McpError
-
 /** Params for the server-initiated `elicitation/create` request, form mode (2025-11-25). On the
   * wire `mode` is an optional `"form"` literal — absent means form, keeping pre-mode clients
   * compatible; [[ElicitRequestUrlParams]] is the `"url"` variant of the union.
@@ -42,19 +39,6 @@ object ElicitRequestUrlParams:
   /** Source-compatible legacy constructor. The identifier is omitted on 2026 MRTR requests. */
   def apply(message: String, url: String, elicitationId: String): ElicitRequestUrlParams =
     new ElicitRequestUrlParams(message, url, Some(elicitationId))
-
-  /** Legacy `-32042 URL elicitation required` error. Modern handlers use `McpContext.elicitUrl` and
-    * MRTR instead.
-    */
-  @deprecated("Use McpContext.elicitUrl/MRTR for MCP 2026-07-28", "1.0.0-RC1")
-  def requiredError(
-      elicitations: List[ElicitRequestUrlParams],
-      message: String = "URL elicitation required"
-  ): McpError =
-    val data = Json.Obj(
-      "elicitations" -> Json.Arr(elicitations.flatMap(_.toJsonAST.toOption)*)
-    )
-    McpError(ErrorCodes.UrlElicitationRequired, message, Some(data))
 
 /** Result of `elicitation/create`: the user's `action` (`accept` | `decline` | `cancel`) and, on
   * accept, the collected flat form values.

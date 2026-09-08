@@ -46,8 +46,6 @@ object ErrorCodes:
   // Reserved by older revisions; modern resource misses use InvalidParams.
   val LegacyResourceNotFound: Int = -32002
 
-  @deprecated("Resource misses use InvalidParams (-32602) as of MCP 2026-07-28", "1.0.0-RC1")
-  val ResourceNotFound: Int = InvalidParams
   val UrlElicitationRequired: Int = -32042
 
   val HeaderMismatch: Int = -32020

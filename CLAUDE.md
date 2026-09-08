@@ -32,7 +32,7 @@ Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **
 ./mill fast-mcp-scala.js.bunLock                    # Regenerate js/bun.lock after changing bunDevDeps
 ./mill fast-mcp-scala.scalaNative.test              # Scala Native tests (links a native binary)
 ./mill fast-mcp-scala.scalaNative.nativeLink        # Standalone LLVM binary of AnnotatedServer
-./mill fast-mcp-scala.jvm.test com.tjclp.fastmcp.macros.ToolProcessorTest
+./mill fast-mcp-scala.jvm.test.testOnly com.tjclp.fastmcp.macros.ToolProcessorTest   # class selectors go through testOnly
 
 # Publish
 ./mill fast-mcp-scala.jvm.publishLocal              # Publish JVM artifact to ~/.ivy2/local
@@ -94,6 +94,9 @@ fast-mcp-scala/
 ### Annotation Path (all platforms)
 
 ```scala
+import com.tjclp.fastmcp.{*, given}
+import zio.*
+
 object MyServer extends ZIOAppDefault:
   @Tool(name = Some("add"), description = Some("Add two numbers"))
   def add(@Param("First number") a: Int, @Param("Second number") b: Int): Int = a + b
@@ -113,9 +116,14 @@ matching environment type (`McpServer.typed[R]("name")`) and provide the layer a
 boundary via `.provide(...)`:
 
 ```scala
+import com.tjclp.fastmcp.{*, given}
+import zio.*
+
 object MyServer extends ZIOAppDefault:
   @Tool() def fetch(): ZIO[zio.http.Client, Throwable, String] =
-    ZIO.serviceWithZIO[zio.http.Client](_.url("https://example.com").get)
+    ZIO.serviceWithZIO[zio.http.Client] { client =>
+      client.batched(zio.http.Request.get("https://example.com")).flatMap(_.body.asString)
+    }
 
   override def run =
     for
@@ -131,6 +139,9 @@ error pointing at the mismatched handler.
 ### Typed Contract Path (cross-platform)
 
 ```scala
+import com.tjclp.fastmcp.{*, given}
+import zio.*
+
 case class AddArgs(@Param("First number") a: Int, @Param("Second number") b: Int)
 
 val addTool = McpTool[AddArgs, Int](
@@ -138,8 +149,9 @@ val addTool = McpTool[AddArgs, Int](
   description = Some("Add two numbers")
 ) { args => ZIO.succeed(args.a + args.b) }
 
-// Mount:
-server.tool(addTool)
+// Mount — `tool` returns a ZIO that registers on evaluation; sequence it, never discard it
+// (a bare `server.tool(addTool)` statement registers nothing):
+server.tool(addTool) *> server.runStdio()
 ```
 
 `.withOutputSchema` (given a `JsonEncoder` for `Out`) additionally advertises a derived
@@ -192,6 +204,9 @@ MCP Tasks are the official **`io.modelcontextprotocol/tasks` extension** (MCP 20
 **Enable per server**:
 
 ```scala
+import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.server.TaskSettings   // optional since 1.0.0 (root-exported); the release candidates need it
+
 val server = McpServer(
   name = "my-server",
   settings = McpServerSettings(tasks = TaskSettings(enabled = true))
@@ -208,11 +223,13 @@ def expensiveOp(@Param("input") x: String): String = ???
 **Opt in per tool** (typed contract):
 
 ```scala
+import com.tjclp.fastmcp.core.TaskSupport   // optional since 1.0.0 (root-exported); the release candidates need it
+
 val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   .withTaskSupport(TaskSupport.Optional)
 ```
 
-`taskSupport` values: `"forbidden"` (default — always synchronous), `"optional"` (may return a task when the client supports the extension), `"required"` (requires the extension; otherwise `-32021`). Modern `tools/list` does not expose `execution.taskSupport`; legacy clients still see it.
+`taskSupport` values: `"forbidden"` (default — always synchronous), `"optional"` (may return a task when the client supports the extension), `"required"` (requires task augmentation: a modern client without the tasks extension gets `-32021`; a bare legacy `tools/call` without `params.task` gets `-32601`). Modern `tools/list` does not expose `execution.taskSupport`; legacy clients still see it.
 
 **Transport policy** (all platforms):
 
@@ -235,7 +252,8 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   in-flight requests and releases the session's tasks. Bearer tasks are bucketed per client by
   `TaskSettings.ownerKey` (`TaskOwnerKey.Transport` = peer address on both HTTP backends; keyless
   requests share one anonymous bucket; `TaskOwnerKey.Custom` behind an authenticating proxy).
-- Not yet implemented: `input_required` suspension and task-status notifications.
+- Not yet implemented: `input_required` suspension. `notifications/tasks/status` is emitted on
+  legacy (2025-11-25) sessions only — never for modern bearer tasks, which are polled via `tasks/get`.
 
 ### Cross-Platform Architecture
 
@@ -245,7 +263,7 @@ The codebase is split into three sibling trees under `fast-mcp-scala/`:
 - `js/` — the Scala.js `TransportBackend` (`Bun.serve` + Node stdio), small JS facades, and the Bun HTTP example
 - `native/` — the Scala Native `TransportBackend` (stdio only, EXPERIMENTAL)
 
-Every module reads exactly `shared/src/ + <platform>/src/`. Nothing reaches across platform trees: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/` compiles standalone on all three targets.
+Every module reads exactly `shared/src/ + <platform>/src/`. Nothing reaches across platform trees: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/src/` plus any one platform tree compiles on its own (the shared examples need that platform's `given TransportBackend`); `shared/` never reaches across platform trees.
 
 ### Native MCP core (no vendored SDK)
 

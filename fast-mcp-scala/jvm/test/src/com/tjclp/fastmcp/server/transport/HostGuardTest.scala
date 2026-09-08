@@ -281,17 +281,6 @@ class HostGuardTest extends AnyFunSuite with Matchers:
     HostGuard.isAllowed(sameHost, Some("http://localhost:3000"), McpServerSettings()) shouldBe true
   }
 
-  test(
-    "deprecated 3-arg overload keeps Host semantics and full-origin matching, no allowedOrigins"
-  ) {
-    @annotation.nowarn("cat=deprecation")
-    def legacy(host: Option[String], origin: Option[String]): Boolean =
-      HostGuard.isAllowed(host, origin, hosts)
-    legacy(sameHost, Some("http://localhost:8000")) shouldBe true
-    legacy(sameHost, Some("http://localhost:3000")) shouldBe false
-    legacy(Some("evil.example.com"), None) shouldBe false
-  }
-
   test("parseOrigin normalises scheme/host case and defaults the port per scheme") {
     HostGuard.parseOrigin("HTTP://LocalHost") shouldBe Some(
       HostGuard.Origin("http", "localhost", 80)

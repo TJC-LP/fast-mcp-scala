@@ -40,8 +40,10 @@ Hardening knobs worth knowing when you deploy over HTTP
 - `allowedHosts` enables the DNS-rebinding / browser-CSRF guard: the `Host` hostname must be
   listed, and a present `Origin` is matched as a full origin (`scheme://host:port`) against the
   request `Host` or the `allowedOrigins` allow-list; cross-port loopback origins, `null`, and
-  malformed ports are refused with 403. It guards against browser-driven attacks only; it is not
-  authentication.
+  malformed ports are refused with 403. IPv6 literals are listed in bracket form (`"[::1]"`). It
+  guards against browser-driven attacks only; it is not authentication.
+- Both HTTP backends serve plaintext HTTP/1.1 only; there is no TLS setting by design. Terminate
+  TLS and authentication at a reverse proxy in front of the MCP endpoint.
 - Every POST must carry `Content-Type: application/json` (415 otherwise), evaluated before the
   body is read or a session is minted.
 - `maxRequestBodyBytes` (1 MiB) caps request bodies on every backend (413 before decoding), and

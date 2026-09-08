@@ -7,6 +7,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-10
+<!-- TAG DATE: re-date at merge -->
+
+Highlights since 0.4.0, the last published stable release (the `[0.5.0]` section
+below was never tagged or published; its changes first shipped in 1.0.0-RC1):
+**MCP 2026-07-28** is the primary protocol (stateless requests,
+`server/discover`, MRTR for roots/sampling/elicitation, `subscriptions/listen`,
+the Tasks extension) with an initialization-based compatibility adapter for
+2025-11-25 and earlier (RC1); `Option` parameter decoding via zio-json (RC2);
+**GraalVM native images** for stdio and HTTP servers on a split transport seam
+(RC3); and, new in this final release, the **Scala Native target**
+(`com.tjclp:fast-mcp-scala_native0.5_3`, published for the first time with
+1.0.0), native JSON Schema derivation replacing Tapir, zero-boilerplate enum
+support, **Scala 3.9.0 LTS**, the modularized build, and the
+**security-hardening wave** (TJC-2294; 12 findings in five arcs, PRs #87–#92):
+every inbound frame is bounded by `LimitSettings` (4 MiB frames, depth 64, 1024
+object members) on every transport; the HTTP `HostGuard` matches `Origin` as a
+full origin and gains `allowedOrigins`; every POST passes the `Content-Type`
+(415) and `maxRequestBodyBytes` (413) gates; `maxSessions` caps the legacy
+session store; the Tasks store is bounded per owner and per pool under a single
+monotonic sweeper; the annotation macros bind to the exact annotated overload
+and turn duplicate or non-literal registrations into compile-time errors; and
+the CI/release pipeline runs on SHA-pinned actions, a frozen conformance harness
+and a split verify → publish → github-release workflow. The wave also carries
+deliberate pre-1.0 behaviour changes (verbatim template literals, the 415/413
+gates, `BunHttpHandle`, compile-time duplicate registrations), listed under
+*Changed* and summarised under *Upgrading*. See the `[1.0.0-RC1]`–`[1.0.0-RC3]`
+sections below for the cumulative RC changes rolled into this release.
+
+### Upgrading
+
+The error-by-error migration guide for 0.x and release-candidate projects is
+[docs/upgrading.md](docs/upgrading.md); the protocol-side changes are in
+[docs/2026-07-28-upgrade.md](docs/2026-07-28-upgrade.md).
+
+- **Consumer compiler floor: Scala 3.9.0 or newer.** 1.0.0 is compiled with Scala 3.9.0 LTS and
+  emits TASTy 28.9, which 3.8 and older compilers cannot read; `1.0.0-RC3` (Scala 3.8.3, TASTy
+  28.8) is the last release a Scala 3.8 project can consume. A 3.8 compiler fails first on the
+  Scala 3.9.0 standard library the POM pulls in transitively (`TASTy file scala/language.tasty
+  could not be read ... version 28.9`), then on the library's own `Exports$package.tasty`; every
+  `Not found: type ...` after that is a cascade. A 3.9.0 module may depend on your remaining 3.8
+  modules, never the reverse. WartRemover users: the `org.wartremover:::wartremover` coordinate
+  has no 3.9.0 build below 3.6.1. Scala.js consumers also need a Scala.js 1.22+ linker, and that
+  failure is link-time only — `compile` passes because the compiler never reads dependency IR,
+  then `fastLinkJS` / `bundle` / `package --js` fails with `IRVersionNotSupportedException ...
+  compiled with Scala.js 1.22 (supported up to: 1.21)`. Mill: mill-bun 0.3.1 with an explicit
+  `scalaJSVersion` (Mill 1.1.x's bundled linker stops at IR 1.20); the plugin bump makes
+  `scalaJSVersion` abstract on every `BunScalaJSModule`, freezes installs (`Missing
+  <module>/bun.lock` until `./mill <module>.bunLock` is run and the lockfile committed; a module
+  whose only Bun-side dependency is fast-mcp-scala needs none) and writes the bundle to
+  `out/<module>/bundle.dest/` instead of `bunBundle.dest/`. scala-cli: `//> using jsVersion
+  1.22.0` plus `--js-version 1.22.0` on `package --js`. Scala Native consumers use 0.5.12.
+- **`-experimental` is no longer required.** The release candidates were compiled with
+  `-experimental`, which stamped every public definition `@experimental` and forced the flag onto
+  every consumer on both registration paths and all three platforms; 1.0.0 is not (TJC-2335), so
+  remove `-experimental` from your build. The annotation macros use only stable reflect API
+  (details under *Changed*).
+- **`import com.tjclp.fastmcp.{*, given}` — the `given` selector is mandatory.** The platform
+  `TransportBackend` and the `McpServerCoreFactory` are `given` instances re-exported from the
+  package object; a plain `import com.tjclp.fastmcp.*` (the 0.3.x idiom, even with the old
+  `McpServer.given` / `TransportRunner.given` lines next to it) no longer compiles for
+  `McpServerApp` users: `[E172] No given instance of type McpServerCoreFactory ... Note: given
+  instance instance in package com.tjclp.fastmcp was not considered because it was not imported
+  with import given`. The root import also exports, since 1.0.0, `TaskSettings`,
+  `LimitSettings`, `TaskSupport`, `TaskOwnerKey`, `LoggingLevel`, `ProgressToken` and the
+  `ResourceContents` / `TextResourceContents` / `BlobResourceContents` payloads (TJC-2336), so
+  every documented fence compiles with the root import alone; the release candidates needed them
+  imported by name (`com.tjclp.fastmcp.server.{TaskSettings, LimitSettings}`,
+  `core.{TaskSupport, TaskOwnerKey}`, `core.wire.{TextResourceContents, BlobResourceContents}`)
+  and those imports stay valid.
+- **stdio servers log to stderr.** The stdio runner now swaps ZIO's stock stdout logger for the
+  same format on stderr (TJC-2338), because stdout is the wire; a project that relied on ZIO log
+  lines reaching stdout must override `bootstrap` (`override val`) with a logger of its own. Loggers
+  you install yourself are never touched (details under *Changed*).
+- **First Scala Native publish.** `com.tjclp:fast-mcp-scala_native0.5_3` (stdio only,
+  experimental) is on Maven Central for the first time; `%%%` / `::` coordinates resolve it.
+- **Client-facing codes changed by the security wave.** Every POST without
+  `Content-Type: application/json` is refused **415**; bodies over `maxRequestBodyBytes` (1 MiB)
+  are refused **413** (an empty 413 from netty/Bun when they refuse the body first, a JSON-RPC
+  `-32000` body on first-party paths); frames over `limits` answer **`-32700`** (HTTP 400)
+  before dispatch; with `allowedHosts` set, a browser page on another loopback port or scheme
+  is refused **403** unless its origin is listed in the new `allowedOrigins`. Over HTTP a large
+  `sampling/createMessage` or elicitation result meets `maxRequestBodyBytes` first: raise it
+  together with `limits.maxFrameChars` (it must stay ≤ `maxFrameChars`).
+- **Resource template literals are matched verbatim** — `.` is a dot, not a wildcard — and
+  adjacent placeholders (`{a}{b}`), duplicate placeholder names, unbalanced braces and `/`
+  inside a placeholder are rejected at registration (the server fails to start).
+- **Duplicate registrations are compile-time errors.** Two annotated methods on one object that
+  register the same tool/prompt name, static URI or template pattern fail `scanAnnotations` at
+  compile time (previously last-writer-wins with a warning); non-literal annotation `Option`
+  arguments are compile-time errors too.
+- **New compile-time guards on both registration paths** (TJC-2331). Shapes that compiled but
+  were broken on the wire or crashed the macro now fail at expansion with a message naming the
+  member and the fix: an annotated method with no parameter list, more than one parameter list
+  (curried, or a `using` clause), type parameters, or more than 22 parameters; an annotated
+  member the declared-only scan skips (inherited from a trait or class, a `val`, a nested
+  object's method); a typed `McpTool` whose `In` does not derive an object schema (`String`,
+  `Int`, `Option`, a collection, `Either`, an enum — use a case class, `case class NoArgs()` for
+  no arguments); and `.withOutputSchema` on a non-object `Out` (wrap it in a case class). Nothing
+  that produced a correct `tools/list` entry and a callable tool is rejected (details under
+  *Changed*).
+- **Bun HTTP API.** `startStatefulHttp()` / `startStatelessHttp()` return a `BunHttpHandle`
+  (`port`, `hostname`, `url`, `server`, `stop()`) instead of a `BunServer`, and
+  `BunServeOptions.apply` changed shape (details under *Changed*). There is no public
+  per-request handler to wrap: 0.x Bun servers that built their own `Bun.serve(fetch = ...)`
+  around the SDK transport to add CORS headers, an `OPTIONS` preflight or a `/health` route
+  cannot reproduce that shape — `runHttp()` owns the listener and non-endpoint paths answer 404.
+  Put those concerns on a reverse proxy in front of the server; a composable fetch handler /
+  route hook is tracked for 1.1.0.
+- **Removed members.** The RC1 deprecations (`ErrorCodes.ResourceNotFound`,
+  `ElicitRequestUrlParams.requiredError`) and the RC4-cycle
+  `HostGuard.isAllowed(host, origin, Set[String])` overload are gone (see *Removed*), as are the
+  six never-read `McpServerSettings` fields (`debug`, `logLevel`, `warnOnDuplicate*`,
+  `dependencies`) and `McpServer.dependencies` (TJC-2336, see *Changed*) — construct settings by
+  name. Coming
+  from 0.4.0: the removals listed under `[0.5.0] ### Removed` (`FastMcpServer`, `JsMcpServer`,
+  `JacksonConverter`, `EmbeddedResourceContent`) and below apply too. Coming from 0.2.x or
+  earlier: `@ToolParam` / `@ResourceParam` / `@PromptParam` were removed in 0.3.0 in favour of
+  `@Param` (see `[0.3.0] ### Removed`).
+- **`Content` and `ResourceContents` ADTs (coming from 0.4.0).** `EmbeddedResourceContent`
+  became the sealed `ResourceContents` with `TextResourceContents(uri, text, mimeType, _meta)` /
+  `BlobResourceContents(uri, blob, mimeType, _meta)` in `core.wire` (root-exported since 1.0.0);
+  `mimeType` is `Option[String]` and `text` / `blob` are plain `String`.
+  `EmbeddedResource.resource` exposes only `uri`, `mimeType` and `_meta`, so `resource.text` /
+  `resource.blob` no longer compile — match on the two cases instead. `Content` gained
+  `AudioContent` and `ResourceLink` in 0.5.0: an exhaustive match written against the 0.4.0 shape
+  (`TextContent` / `ImageContent` / `EmbeddedResource`) now warns `match may not be exhaustive`
+  and fails under `-Werror`; add the two cases (both root-exported) or a wildcard.
+- **Compatibility scope.** The 1.x compatibility promise
+  ([DEPENDENCY_POLICY.md](DEPENDENCY_POLICY.md)) covers the public API of `fast-mcp-scala_3`
+  except `com.tjclp.fastmcp.examples.*` and `com.tjclp.fastmcp.macros.*`, which ship for the
+  example servers and the annotation macros' own use and may change in minor releases. The MiMa
+  baseline for 1.1.0 is 1.0.0; the RCs are not baselines.
+
 ### Security
 
 Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Umbrella for TJC-2295 (core input limits), TJC-2296 (HTTP transport), TJC-2297 (tasks), TJC-2298 (macro binding) and TJC-2299 (CI supply chain).
@@ -64,9 +198,10 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   non-interrupt defects, including a synchronous throw while the handler is built (tool-handler
   defects are still answered in-band by the router as `-32603` with the handler's message) (F10).
   A `Host` or `Origin` header sent more than once is evaluated as its `", "`-joined value on both
-  backends (the JVM used to check only the first), so the fail-closed origin parser refuses it with
-  403; a request whose URL cannot be parsed on Bun (e.g. `Host: 127.0.0.1:99999`) answers the host
-  gate's 403 (guard on) or a JSON-RPC 400 instead of a 500 defect. The Bun session mint takes its
+  backends (the JVM used to check only the first), so the fail-closed parsers refuse it with 403
+  (the `Host` side since TJC-2354 — see *Fixed*); a request whose URL cannot be parsed on Bun
+  (e.g. `Host: 127.0.0.1:99999`) answers the host gate's 403 when the guard is on, otherwise a
+  JSON-RPC 400 (`Malformed request URL`), instead of a 500 defect. The Bun session mint takes its
   idle/live snapshot in the same synchronous step as the eviction and insert, so concurrent
   header-less initializes at `maxSessions` are never refused while an evictable session exists
   (JVM parity, F12). The Bun stdio dispatch bridge gained the same `catchAllCause` boundary as the
@@ -168,6 +303,13 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   classpath reports 0 advisories.
 
 ### Added
+
+- **Project governance for 1.0** (TJC-2277, #86): `CONTRIBUTING.md`,
+  `SECURITY.md` (private vulnerability reporting enabled), `CODE_OF_CONDUCT.md`
+  (Contributor Covenant 2.1), `DEPENDENCY_POLICY.md`, `ROADMAP.md`, issue
+  templates, and the MCP SDK-tiering triage labels. The README is slimmed to a
+  quickstart plus index; transports, Tasks, custom types, platforms, spec
+  coverage, and examples each have a page under `docs/`.
 
 - **Scala Native target (experimental)** (TJC-2188, #82):
   `com.tjclp:fast-mcp-scala_native0.5_3` — stdio MCP servers compiled to
@@ -310,7 +452,9 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
     `ResourceManager.findMatchingTemplate` keeps its tuple shape.
   - Frames larger than 4 MiB (any transport) are refused unless `limits.maxFrameChars` is raised —
     sampling/createMessage results carrying large base64 images over stdio may need
-    `McpServerSettings(limits = LimitSettings(maxFrameChars = 16 * 1024 * 1024))`. `LimitSettings`
+    `McpServerSettings(limits = LimitSettings(maxFrameChars = 8 * 1024 * 1024))`; over HTTP the
+    same result meets `maxRequestBodyBytes` (1 MiB, 413) first, so raise that in step (it must
+    stay ≤ `maxFrameChars`). `LimitSettings`
     validates its values at construction (`IllegalArgumentException`). `DefaultDecodeContext` gained
     constructor parameters `(maxDepth, maxObjectFields)`; `DefaultDecodeContext.default` is
     unchanged for callers. JSON-RPC ids such as `1e30` or `1.5` are now `-32600` (`id: null`).
@@ -408,10 +552,6 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Deprecated
 
-- `HostGuard.isAllowed(host, origin, allowed: Set[String])` (TJC-2296): use the new
-  `HostGuard.isAllowed(host, origin, settings: McpServerSettings)` overload, which matches `Origin`
-  as a full origin and honours `allowedOrigins`; the 3-arg form still works but never consults
-  `allowedOrigins`. Slated for removal in 1.0.0.
 - The six inert `@Tool` parameters `examples`, `version`, `deprecated`, `deprecationMessage`,
   `tags` and `timeoutMillis`, the matching `ToolDefinition` fields and `ToolExample` (TJC-2336):
   `@deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")`.
@@ -540,7 +680,24 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 - Tapir, ApiSpec, Circe, and Cats production dependencies. Existing
   `sttp.tapir.Schema` overrides should migrate to `McpInputCodec`,
-  `McpSchema`, `@Param(schema = ...)`, or `McpTool.withSchema`.
+  `McpSchema`, `@Param(schema = ...)`, or `McpTool.withSchema`. Consumers that
+  relied on Tapir, ApiSpec, sttp, Circe, Cats or jawn arriving transitively
+  through `fast-mcp-scala_3` / `_sjs1_3` (they were in the RC3 POMs) must now
+  declare them explicitly.
+- The Scala.js TS-SDK facades (`com.tjclp.fastmcp.facades.server`) and
+  `McpServer#connect`, removed in the 0.5.0 development cycle and never
+  published: the library now owns the listener — use `runHttp()` /
+  `runStdio()` (or `startStatefulHttp()` / `startStatelessHttp()` on Bun).
+- The members deprecated at RC1, neither of which shipped in a stable release
+  (TJC-2277): `ErrorCodes.ResourceNotFound` (modern resource misses use
+  `InvalidParams`, `-32602`; legacy sessions keep `LegacyResourceNotFound`,
+  `-32002`) and `ElicitRequestUrlParams.requiredError` (the legacy `-32042`
+  helper; modern handlers use `McpContext.elicitUrl` and MRTR).
+- `HostGuard.isAllowed(host, origin, allowed: Set[String])` (TJC-2296, TJC-2277): deprecated
+  during the RC4 development cycle, never shipped in a stable release. Use
+  `HostGuard.isAllowed(host, origin, settings: McpServerSettings)`, which matches `Origin` as a
+  full origin and honours `allowedOrigins`. RC3 callers passed a `Set[String]` to the only
+  overload that existed then and must migrate to the settings overload.
 
 ## [1.0.0-RC3] - 2026-08-31
 
@@ -710,6 +867,9 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ## [0.5.0] - 2026-07-29
 
+_Never tagged or published to Maven Central; these changes first shipped in
+`1.0.0-RC1`. Kept as a section because the 1.0.0 rollup refers to it._
+
 Highlights: **the entire MCP protocol layer is now native pure-Scala 3** — both
 vendored SDKs are gone from the production classpath. The JSON-RPC core, wire
 types, router, built-in handlers, middleware, and the Tasks state machine all
@@ -816,7 +976,13 @@ conformance suite: **42/42 on both platforms**, zero expected failures.
 - **Content ADT reshape** (spec alignment): `audience`/`priority` moved off the
   content constructors into `annotations` (`ContentAnnotations`), and
   `EmbeddedResourceContent` is replaced by `ResourceContents`
-  (`TextResourceContents` / `BlobResourceContents`).
+  (`TextResourceContents` / `BlobResourceContents` in `com.tjclp.fastmcp.core.wire`, with
+  `mimeType: Option[String]` and plain-`String` `text` / `blob`). `Content` also gained the
+  `AudioContent` and `ResourceLink` cases, so exhaustive matches over the 0.4.0 shape need two
+  more cases (see `[1.0.0] ### Upgrading`).
+- The Scala.js TS-SDK facade package `com.tjclp.fastmcp.facades.server` and
+  `McpServer#connect(transport)` went with the vendored SDK — the library now owns the listener
+  (migration under `[1.0.0] ### Removed`).
 - Stale GraalVM native-image reachability metadata (it described the removed
   Java SDK + Jackson reflection). Regenerate with the `native-image-agent`
   against a native-core server if you build native images.
@@ -929,6 +1095,12 @@ through the entire server stack, plus a fix for issue #56.
 - **GraalVM native-image reachability metadata** shipped with the JVM artifact at `META-INF/native-image/com.tjclp/fast-mcp-scala_3/reachability-metadata.json`. Covers Jackson record introspection over `io.modelcontextprotocol.spec.McpSchema$*`, zio-json's derivation, reactor-core, izumi-reflect, and `JacksonConversionContext`. Downstream apps can now build a working `native-image` of a fast-mcp-scala stdio server with zero hand-written config — just add `mill.javalib.NativeImageModule` and `jvmId = "graalvm-community:25.0.1"`. Covers initialize / notifications/initialized / tools/list / tools/call / ping / resources/list / prompts/list — the full protocol surface the Claude Agent SDK exercises during handshake.
 
 See the `[0.3.0-rc4]` section below for the cumulative rc1..rc4 changes rolled into this release (shared typed contracts, `McpServerApp` sugar, Jackson 3 migration, cross-platform Scala.js split, unified HTTP transport, MCP Tool Annotations, `$schema` key fix).
+
+### Removed
+
+- The `@ToolParam`, `@ResourceParam` and `@PromptParam` annotations, deprecated in favour of the
+  single `@Param` annotation (`@since 0.2.1`), were removed (#34). Replace each with `@Param`;
+  the parameter shape (`description`, `example`, `required`, `schema`) is unchanged.
 
 ## [0.3.0-rc4] - Strip `$schema` root key from tool inputSchema
 

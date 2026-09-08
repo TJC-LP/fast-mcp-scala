@@ -73,8 +73,9 @@ scripts/native-smoke.sh "$(./mill --no-server show fast-mcp-scala.scalaNative.na
 **Conformance suite**, locally, against any platform:
 
 ```bash
-scripts/conformance.sh jvm            # active suite, both protocol eras, empty baseline
-scripts/conformance.sh js 8078 2026   # Bun, only the scenarios 2026-07-28 requires
+scripts/conformance.sh jvm            # active suite (31 scenarios / 73 checks, 2025-11-25 wire), empty baseline
+scripts/conformance.sh jvm 8077 2026  # the 37 scored 2026-07-28 scenarios (the only mode that sends 2026-07-28 requests)
+scripts/conformance.sh js 8078 2026   # Bun, the same 2026-07-28 requirements run
 scripts/conformance.sh native         # the GraalVM HTTP image against the JVM baseline
 ```
 

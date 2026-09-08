@@ -34,6 +34,14 @@ compile-time property, not a runtime failure. A socket-based HTTP backend is in 
 Node and Deno parity for the HTTP listener is a follow-up; only the `Bun.serve(...)` entry point is
 Bun-specific today.
 
+## JVM notes
+
+JDK 17 or newer (CI tests 17, 21 and 25). On JDK 24+ the HTTP transport's netty prints
+`WARNING: A restricted method in java.lang.System has been called` once at startup (native-transport
+probing); it is harmless, and `--enable-native-access=ALL-UNNAMED` silences it. Scala 3.9's
+`LazyVals` trigger a similar one-time `sun.misc.Unsafe` deprecation warning on JDK 25. Both go to
+stderr and never touch the stdio protocol channel.
+
 ## Scala.js on Bun
 
 What the Scala.js target gives you:
@@ -58,8 +66,7 @@ What the Scala.js target gives you:
 //> using platform scala-js
 //> using jsVersion 1.22.0
 //> using jsModuleKind es
-//> using dep com.tjclp::fast-mcp-scala::1.0.0-RC3
-//> using options "-experimental"
+//> using dep com.tjclp::fast-mcp-scala::1.0.0
 
 import com.tjclp.fastmcp.{*, given}
 
@@ -70,15 +77,17 @@ object HelloBun extends McpServerApp[Stdio, HelloBun.type]:
 
 Same shape as the JVM: the `McpServerApp` trait picks up the shared `McpServerCoreFactory` given
 and builds the one shared `McpServer` over the Bun `TransportBackend`. Note the double `::` before
-the version, which selects the platform artifact (`fast-mcp-scala_sjs1_3`), and `-experimental`,
-which the annotation macros require.
+the version, which selects the platform artifact (`fast-mcp-scala_sjs1_3`).
 
 Package it to an ES module and run it on Bun:
 
 ```bash
-scala-cli --power package --js --js-version 1.22.0 HelloBun.scala -o hello.mjs
+scala-cli --power package --js --js-version 1.22.0 HelloBun.scala -o hello.mjs -f
 bun run hello.mjs
 ```
+
+(`-f` overwrites an existing bundle on rebuilds; without it the second run stops with "already
+exists".)
 
 Scala 3.9 emits Scala.js IR 1.22, so the linker must be 1.22 or newer. scala-cli 1.14 applies the
 `//> using jsVersion` directive to compilation but not to the `package --js` linker, which is why
@@ -108,8 +117,7 @@ published with 1.0.0.
 //> using scala 3.9.0
 //> using platform native
 //> using nativeVersion 0.5.12
-//> using dep com.tjclp::fast-mcp-scala::1.0.0-RC3
-//> using options "-experimental"
+//> using dep com.tjclp::fast-mcp-scala::1.0.0
 
 import com.tjclp.fastmcp.{*, given}
 
@@ -118,12 +126,20 @@ object HelloNative extends McpServerApp[Stdio, HelloNative.type]:
   def add(@Param("First operand") a: Int, @Param("Second operand") b: Int): Int = a + b
 ```
 
-`scala-cli package HelloNative.scala -o hello-native` produces the binary; clang/LLVM ≥ 17 must be
-installed.
+`scala-cli --power package HelloNative.scala -o hello-native -f` produces the binary (`package` and
+`-o` are power-mode features, as in the Bun recipe above); clang/LLVM ≥ 17 must be installed.
 
 In this repository, `./mill fast-mcp-scala.scalaNative.nativeLink` builds the `AnnotatedServer`
 demo binary and `scripts/native-smoke.sh <binary>` drives it through the full MCP handshake, the
-same script that gates the GraalVM images.
+same script that gates the GraalVM images. Its assertions are bound to the `AnnotatedServer`
+fixture (`add`, `calculator`, `hello_prompt`, `static://welcome`): against your own binary only the
+first three exchanges — initialize, `tools/list`, `tools/call` — are meaningful, and the later
+asserts fail by design. The script also feeds stdin through a named FIFO, and Node and Bun never
+observe EOF on a FIFO (`process.stdin` emits no `end` when the FIFO's writer closes — Bun 1.4.1 and
+Node 26 alike), so its final exit-on-EOF assertion fails for a Scala.js bundle too: grade a Bun or
+Node bundle on the `--- stdout ---` dump, or feed it through an anonymous pipe
+(`printf '...' | bun run hello.mjs`), where every runtime exits 0 on EOF — which is what MCP hosts,
+which spawn servers over pipes, see.
 
 Caveats (experimental):
 

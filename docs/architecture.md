@@ -82,7 +82,7 @@ fast-mcp-scala/
     └── server/transport/NativeTransportBackend.scala # System.in/out + /dev/urandom ids
 ```
 
-Every module's sources are exactly `shared/src/` + its own platform tree — no module reaches across into another's. That is an invariant worth preserving: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/` compiles standalone on all three targets. Mill wires this in `fast-mcp-scala/package.mill` (module definitions live next to the code; the root `build.mill` holds only versions, compiler flags, and shared traits).
+Every module's sources are exactly `shared/src/` + its own platform tree — no module reaches across into another's. That is an invariant worth preserving: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/src/` plus any one platform tree compiles on its own (the shared examples need that platform's `given TransportBackend`), and `shared/` never reaches across platform trees. Mill wires this in `fast-mcp-scala/package.mill` (module definitions live next to the code; the root `build.mill` holds only versions, compiler flags, and shared traits).
 
 The stdio serving lifecycle is shared too: `StdioLoop` owns the session, the single-writer stdout lock, the outbound drainer fiber, and EOF teardown, so the JVM and Scala Native backends contribute only their stdin stream and their `randomId` source. The JS backend drives Node's callback IO directly and does not use it.
 

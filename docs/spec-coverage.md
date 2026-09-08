@@ -32,14 +32,15 @@ of them, newest first.
 | Per-request log level | ✅ (opt-in) |
 | Deprecated Roots, Sampling, Logging legacy surfaces | ✅ (compatibility only) |
 | Cancellation (`notifications/cancelled`) | ✅ |
-| Tasks extension | ✅ (opt-in; no task `input_required` production yet) |
+| Tasks extension | ✅ (opt-in; no task `input_required` production yet). Known SEP-2663 deviations, all 1.0.1 items: `tasks/get`/`update`/`cancel` are served without the `io.modelcontextprotocol/tasks` client capability; `Mcp-Name: <taskId>` is not validated on the tasks-namespace methods; a legacy `params.task` on a 2026-07-28 request is rejected `-32602` rather than ignored; `tasks/cancel` on a terminal task answers `-32602` rather than an idempotent empty ack; the 2025-11-25 `tasks` capability advertises only `requests.tools.call`. Details in the [1.0.0 gate ledger](./2026-07-28-upgrade.md#100-gate-ledger). |
 | DNS-rebinding / browser-origin protection (`allowedHosts`, `allowedOrigins`) | ✅ (opt-in) |
 | Input limits (`limits: LimitSettings`) + HTTP body / session caps (`maxRequestBodyBytes`, `maxSessions`) | ✅ (on by default) |
 | Legacy session idle eviction + SSE keepalives | ✅ |
 
 The deliberately unimplemented pieces (no dynamic subscription publishers, no `input_required`
-task suspension, no task-status notifications, no authorization server) are enumerated in the
-upgrade guide's [Deliberate boundaries](./2026-07-28-upgrade.md#deliberate-boundaries).
+task suspension, no task-status notifications for modern bearer tasks — legacy 2025-11-25 sessions
+do receive `notifications/tasks/status` — no authorization server) are enumerated in the upgrade
+guide's [Deliberate boundaries](./2026-07-28-upgrade.md#deliberate-boundaries).
 
 ## How coverage is verified
 

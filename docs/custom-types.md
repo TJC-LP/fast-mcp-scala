@@ -26,10 +26,26 @@ typed contracts.
   (Mirror-based, `NotGiven`-guarded).
 - Enums with parameterized cases keep zio-json's wrapper-object encoding. Provide an
   `McpInputCodec` for a custom shape.
+- Union types (`A | B`), literal types (`"asc" | "desc"`) and opaque types are **not** derived: the
+  macro aborts with `Cannot derive an MCP JSON Schema for ...`. Supply a `given McpInputCodec[T]`
+  (below) for such a field.
+- Sealed-trait hierarchies as a field type and Java enums (`java.util.concurrent.TimeUnit`,
+  `java.time.DayOfWeek`) are not derived either: provide a `given McpInputCodec[T]` for them.
+  Prefer case classes to tuples — a tuple field advertises an object schema (`_1`, `_2`) while the
+  decoder reads a JSON array.
 - A typed tool's `In` must be a case class (`case class NoArgs()` for no arguments; `Map[String, V]`
   and types with a user `McpSchema` also qualify) and `.withOutputSchema` needs a case-class (or
   `Unit`) `Out`: MCP `arguments` and `structuredContent` are always JSON objects, so a scalar,
   `Option`, collection, `Either` or enum root is a compile-time error naming the type and the fix.
+  (`McpTool[Unit, _]` has a schema but no `McpDecoder[Unit]` in 1.0.0, hence `NoArgs`.)
+- Typed results without `.withOutputSchema`: an enum *field* of `Out` derives, but a bare enum
+  `Out` (`McpTool[In, Color]`) needs a `given JsonEncoder[Color]`; for collection results use
+  `Seq[T]` / `Set[T]` or a case class rather than `List[T]` / `Vector[T]` (the encoder summon is
+  ambiguous for those); write `Option.empty[T]` rather than `None` where the builder overloads
+  would otherwise be ambiguous.
+- Derived schemas use the `format` keywords `date-time`, `date`, `time`, `duration`, `uuid` and
+  `uri` for the matching `java.time` / `UUID` / `URI` types; validators running in strict mode
+  (`ajv --strict`) need their formats plugin (`ajv-formats`) to accept them.
 
 ## `McpInputCodec[T]`: one value, decoder plus schema
 
@@ -55,8 +71,9 @@ case class LookupArgs(id: UserId)
 ## Per-field override: `@Param(schema = ...)`
 
 For a one-off field, `@Param(schema = Some("..."))` replaces that field's generated schema with a
-raw JSON Schema fragment. This is the right tool for enum constraints, patterns, or numeric bounds
-that Scala types cannot express:
+raw JSON Schema fragment — the whole property, `description` and `examples` included, so repeat
+the description inside the fragment. This is the right tool for enum constraints, patterns, or
+numeric bounds that Scala types cannot express:
 
 ```scala 3 raw
 @Param(
@@ -84,6 +101,25 @@ private val greetTool = McpTool.withSchema[GreetArgs, GreetResult](
 )(args => GreetResult(s"Hello, ${args.name}!"))
 ```
 
+## Returning embedded resources
+
+`EmbeddedResource` (re-exported by `com.tjclp.fastmcp`) wraps a `ResourceContents` payload whose
+concrete types `TextResourceContents` / `BlobResourceContents` live in `com.tjclp.fastmcp.core.wire`
+and are root-exported since 1.0.0 (the named import below is what the release candidates needed;
+it stays valid). They replaced `EmbeddedResourceContent` in 0.5.0 — `mimeType` is `Option[String]`,
+`text` / `blob` are plain `String`:
+
+```scala 3 raw
+import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.core.wire.{BlobResourceContents, TextResourceContents}
+
+val memo: Content =
+  EmbeddedResource(TextResourceContents("memo://today", "Ship it.", mimeType = Some("text/plain")))
+
+val logo: Content =
+  EmbeddedResource(BlobResourceContents("img://logo", base64Png, mimeType = Some("image/png")))
+```
+
 ## `McpSchema[T]` for output-only nested types
 
 For a nested type that only appears in results, `McpSchema[T]` provides the schema without
@@ -97,12 +133,14 @@ automatically on every platform.
 
 ## Migrating from Tapir `Schema` overrides
 
-Tapir, ApiSpec, Circe, and Cats are no longer production dependencies (since the 1.0.0 line).
+Tapir, ApiSpec, Circe, and Cats are no longer production dependencies since 1.0.0 (the RC1–RC3
+prereleases still shipped them and required `sttp.tapir.generic.auto.*` for typed contracts).
 Existing `sttp.tapir.Schema` overrides map onto the tools above:
 
 | Before | After |
 |---|---|
 | `given Schema[T]` for a wire-shape change | `given McpInputCodec[T]` |
 | `given Schema[T]` for an output-only type | `given McpSchema[T]` |
+| `given Schema[T]` for a union- or literal-typed field | `given McpInputCodec[T]` |
 | Per-field `.description` / constraint tweaks | `@Param(description = ..., schema = ...)` |
 | Whole-tool hand-written schema | `McpTool.withSchema` |
