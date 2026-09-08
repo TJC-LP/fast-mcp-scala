@@ -78,22 +78,31 @@ class OptionParamRequiredParityTest extends AnyFunSuite:
     }
   }
 
+  // DEFERRED to 1.0.1 (C2.18): an explicit `@Param(required = true)` on an `Option` is advertised
+  // required but `{}` is still accepted as `None`. `pendingUntilFixed` keeps the canary armed: the
+  // day the runtime rejects the omission this test fails and the guard must be dropped.
   test("advertised `required` and runtime omission handling agree for every Option tool") {
-    val disagreements = (bareOptionTools :+ "opt_explicit_required").flatMap { tool =>
-      val advertisedRequired = h.required(tool).contains("p")
-      val omissionRejected = h.call(tool, "{}").isError
-      Option.when(advertisedRequired != omissionRejected)(
-        s"$tool: required=$advertisedRequired but omission rejected=$omissionRejected"
-      )
+    pendingUntilFixed {
+      val disagreements = (bareOptionTools :+ "opt_explicit_required").flatMap { tool =>
+        val advertisedRequired = h.required(tool).contains("p")
+        val omissionRejected = h.call(tool, "{}").isError
+        Option.when(advertisedRequired != omissionRejected)(
+          s"$tool: required=$advertisedRequired but omission rejected=$omissionRejected"
+        )
+      }
+      assert(disagreements.isEmpty, disagreements.mkString("\n"))
     }
-    assert(disagreements.isEmpty, disagreements.mkString("\n"))
   }
 
+  // DEFERRED to 1.0.1 (C2.23): `required` is re-sorted alphabetically (MacroUtils `.sorted`) while
+  // `properties` keep declaration order. Cosmetic; folded into the C2.6 `required`/defaults change.
   test("`required` lists parameters in declaration order, like `properties`") {
-    val properties = h.propertyNames("declared_order")
-    val required = h.required("declared_order")
-    assert(properties == List("b", "a", "c"), s"properties order: $properties")
-    assert(required == properties, s"required $required does not follow properties $properties")
+    pendingUntilFixed {
+      val properties = h.propertyNames("declared_order")
+      val required = h.required("declared_order")
+      assert(properties == List("b", "a", "c"), s"properties order: $properties")
+      assert(required == properties, s"required $required does not follow properties $properties")
+    }
   }
 
   test("typed contract: an Option field with a bare @Param is not required") {

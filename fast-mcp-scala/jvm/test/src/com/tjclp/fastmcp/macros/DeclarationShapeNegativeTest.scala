@@ -7,7 +7,7 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.MacroDxHarness.{assertSomeMessageContains, messages}
-import com.tjclp.fastmcp.macros.RegistrationMacro.{scanAnnotations, scanAnnotationsQuiet}
+import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
@@ -72,6 +72,33 @@ object DxArity23:
     p1 + p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9 + p10 + p11 + p12 + p13 + p14 + p15 + p16 + p17 +
       p18 + p19 + p20 + p21 + p22 + p23
 
+object DxNoParens:
+  @Tool(name = Some("no_parens"))
+  def ping: String = "pong"
+
+object DxUsingClause:
+  @Tool(name = Some("with_using"))
+  def withUsing(@Param("p") p: Int)(using ctx: McpContext): String = p.toString
+
+object DxPromptNoParens:
+  @Prompt(name = Some("prompt_no_parens"))
+  def hello: String = "hi"
+
+object DxResourceGeneric:
+  @Resource("res://generic")
+  def read[T](): String = "x"
+
+/** Declared tools next to a nested annotated object: the nested one is not registered by this scan
+  * (warning only — it may be scanned separately), the declared one is.
+  */
+object DxOuterWithOwnTools:
+  @Tool(name = Some("outer_ping"))
+  def ping(@Param("p") p: Int): String = p.toString
+
+  object Inner:
+    @Tool(name = Some("inner_ping"))
+    def innerPing(@Param("p") p: Int): String = p.toString
+
 object DxPlain:
   @Tool(name = Some("plain_ping"))
   def ping(@Param("p") p: Int): String = p.toString
@@ -80,7 +107,11 @@ object DxPlain:
   * declaration shapes the scan accepts without a diagnostic and then mis-registers.
   *
   *   - `@Tool` on a `val`, inside a nested object, or inherited from a trait: silently ignored
-  *     (RegistrationMacro.scala:46 walks `declaredMethods` only), `tools/list` is empty.
+  *     (RegistrationMacro.scala:46 walks `declaredMethods` only), `tools/list` is empty. The scan
+  *     stays declared-only (inherited members would break `$default$N` getter lookup and overload
+  *     binding); it must say so instead of registering nothing.
+  *   - no parameter list (`def m: String`) / a `using` clause: the eta-expansion fails with a
+  *     message naming only the return type or a raw `?=>` type mismatch at the object header.
   *   - curried methods: only the first parameter list registers (ToolProcessor.scala:107 takes
   *     `paramSymss.head`); the partially applied `Function1`'s `toString` goes on the wire.
   *   - generic methods: the macro crashes ("Exception occurred while executing macro expansion ...
@@ -93,14 +124,22 @@ class DeclarationShapeNegativeTest extends AnyFunSuite:
   private inline def scan(inline obj: String): String =
     "val s = McpServer.typed[Any](\"neg\"); s.scanAnnotations[" + obj + ".type]"
 
-  test("@Tool inherited from a trait mixin is registered") {
-    val server = McpServer("from-trait")
-    val _ = server.scanAnnotationsQuiet[DxFromTrait.type]
-    val names = server.toolManager.listDefinitions().map(_.name)
+  test("@Tool inherited from a trait mixin is a compile-time error naming the member and the rule") {
+    val errs: List[Error] = typeCheckErrors(scan("DxFromTrait"))
     assert(
-      names.contains("inherited_ping"),
-      s"trait-inherited @Tool silently dropped; registered tools = $names"
+      errs.nonEmpty,
+      "scanAnnotations[DxFromTrait.type] compiled and registered nothing: the trait-inherited " +
+        "@Tool was silently dropped"
     )
+    assertSomeMessageContains(errs, "ping", "DxPingBase", "inherited")
+  }
+
+  test("scanAnnotationsQuiet (McpServerApp) is just as loud about an inherited @Tool") {
+    val errs: List[Error] = typeCheckErrors(
+      "val s = McpServer.typed[Any](\"neg\"); s.scanAnnotationsQuiet[DxFromTrait.type]"
+    )
+    assert(errs.nonEmpty, "scanAnnotationsQuiet[DxFromTrait.type] compiled and registered nothing")
+    assertSomeMessageContains(errs, "ping", "inherited")
   }
 
   test("@Tool on a val is a compile-time error, not a silent skip") {
@@ -113,6 +152,42 @@ class DeclarationShapeNegativeTest extends AnyFunSuite:
     val errs: List[Error] = typeCheckErrors(scan("DxOuter"))
     assert(errs.nonEmpty, "scanAnnotations[DxOuter.type] compiled and registered nothing")
     assertSomeMessageContains(errs, "Inner")
+  }
+
+  test("declared tools register even when a nested object also carries annotations") {
+    val errs: List[Error] = typeCheckErrors(scan("DxOuterWithOwnTools"))
+    assert(errs.isEmpty, messages(errs))
+    val server = McpServer("outer-with-own")
+    val _ = server.scanAnnotations[DxOuterWithOwnTools.type]
+    assert(server.toolManager.listDefinitions().map(_.name) == List("outer_ping"))
+  }
+
+  test("a @Tool method without a parameter list is rejected, naming the method and `()`") {
+    val errs: List[Error] = typeCheckErrors(scan("DxNoParens"))
+    assert(errs.nonEmpty, "`@Tool def ping: String` compiled")
+    assertSomeMessageContains(errs, "'ping'", "()")
+  }
+
+  test("a @Tool method with a `using` clause is rejected as a second parameter list") {
+    val errs: List[Error] = typeCheckErrors(scan("DxUsingClause"))
+    assert(errs.nonEmpty, "@Tool with a `using` clause compiled")
+    assertSomeMessageContains(errs, "withUsing", "parameter list")
+  }
+
+  test("a @Prompt method without a parameter list is rejected, naming the method and `()`") {
+    val errs: List[Error] = typeCheckErrors(scan("DxPromptNoParens"))
+    assert(errs.nonEmpty, "`@Prompt def hello: String` compiled")
+    assertSomeMessageContains(errs, "'hello'", "()")
+  }
+
+  test("a generic @Resource method is rejected, naming the method and the type parameter") {
+    val errs: List[Error] = typeCheckErrors(scan("DxResourceGeneric"))
+    assert(errs.nonEmpty, "generic @Resource compiled")
+    assert(
+      !errs.exists(_.message.contains("Exception occurred while executing macro expansion")),
+      s"macro crashed instead of reporting:\n${messages(errs)}"
+    )
+    assertSomeMessageContains(errs, "'read'", "type parameter")
   }
 
   test("a curried @Tool method is rejected, naming the method and the extra parameter list") {
