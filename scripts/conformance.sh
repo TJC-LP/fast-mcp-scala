@@ -10,9 +10,11 @@
 # follows the harness (0 = all scored scenarios pass or match the platform baseline; 1 = regression /
 # stale baseline).
 #
-# Modes: "active" (default) runs the active suite across both protocol eras with the per-platform
-# baseline; "2026" runs `--requirements 2026-07-28` — exactly the scenarios that revision requires,
-# frozen at its release (extension/pending scenarios are reported but not scored by the harness).
+# Modes: "active" (default) runs the harness's active suite — 31 scenarios / 73 checks, every one at
+# the 2025-11-25 wire — with the per-platform baseline; "2026" runs `--requirements 2026-07-28` —
+# exactly the scenarios that revision requires, frozen at its release (37 scored; extension/pending
+# scenarios are reported but not scored by the harness) — and is the only mode that sends
+# 2026-07-28 requests. CI runs both modes on every platform (conformance.yml, native.yml).
 #
 # Requires: a JDK (jvm) and Bun >= 1.4 (every platform). Bun resolution order: $FAST_MCP_BUN when
 # set (must be executable — a bad pin is an error, never a silent fallback), else the Mill-managed
@@ -183,7 +185,7 @@ case "$PLATFORM" in
   jvm) start_jvm ;;
   js) start_js ;;
   native) start_native ;;
-  *) echo "usage: $0 [jvm|js|native] [port]" >&2; exit 2 ;;
+  *) echo "usage: $0 [jvm|js|native] [port] [active|2026]" >&2; exit 2 ;;
 esac
 
 echo "→ waiting for $URL" >&2

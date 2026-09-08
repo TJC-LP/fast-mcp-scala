@@ -219,6 +219,14 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Changed
 
+- **CI gates the 2026-07-28 requirements run on every PR** (TJC-2356): `conformance.yml` now runs
+  both `scripts/conformance.sh` modes per platform — the active suite (31 scenarios / 73 checks,
+  every one at the 2025-11-25 wire, empty baselines) and `--requirements 2026-07-28` (37 scored
+  scenarios) — on the JVM and Bun. Until now only the active suite was gated, so no workflow sent a
+  2026-07-28 request as a pass/fail check; `native.yml`'s JVM-vs-native 2026 parity step ran the
+  mode, but as a diff whose `grep` filter masked the harness verdict. That step now runs under
+  `pipefail` (a harness failure fails the job) and rejects an empty normalized result instead of
+  diffing two empty files.
 - **Legacy HTTP session cap: idle GET holders become evictable** (TJC-2355): at `maxSessions` the
   JVM adapter still evicts the longest-idle session without a live GET stream first; when every
   stored session holds a live GET, it now evicts the longest-idle of them once it has been idle
