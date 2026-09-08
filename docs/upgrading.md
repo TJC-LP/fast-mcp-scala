@@ -448,6 +448,7 @@ missing its `given` selector — §2.1.
 **The server starts but `tools/list` is empty.** A registration effect was discarded — §5.1.
 
 **Different zio / zio-json versions in your build.** fast-mcp-scala 1.0.0 is built against
-zio 2.1.20 and zio-json 0.7.44. A consumer pinning newer versions (zio 2.1.24, zio-json 0.9.0
-were seen) evicts the library's pins; it compiles, but run your test suite before trusting the
+zio 2.1.26, zio-json 0.10.0 and, on the JVM, zio-http 3.11.4 (netty 4.2.17.Final arrives only
+through it). A consumer pinning other versions (zio 2.1.24 / zio-json 0.9.0 were seen in the
+wild) gets the higher one by eviction; it compiles, but run your test suite before trusting the
 eviction at runtime.

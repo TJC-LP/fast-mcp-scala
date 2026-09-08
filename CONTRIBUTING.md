@@ -133,9 +133,9 @@ declare the ZIO libraries the build pins (`Versions` in `build.mill`) alongside 
 ```scala 3 ignore
 //> using scala 3.9.0
 //> using jar "/absolute/path/to/out/fast-mcp-scala/jvm/jar.dest/out.jar"
-//> using dep dev.zio::zio:2.1.20
-//> using dep dev.zio::zio-json:0.7.44
-//> using dep dev.zio::zio-http:3.4.0
+//> using dep dev.zio::zio:2.1.26
+//> using dep dev.zio::zio-json:0.10.0
+//> using dep dev.zio::zio-http:3.11.4
 ```
 
 ## Making changes

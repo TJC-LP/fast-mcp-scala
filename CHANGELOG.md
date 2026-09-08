@@ -98,6 +98,16 @@ The error-by-error migration guide for 0.x and release-candidate projects is
   register the same tool/prompt name, static URI or template pattern fail `scanAnnotations` at
   compile time (previously last-writer-wins with a warning); non-literal annotation `Option`
   arguments are compile-time errors too.
+- **New compile-time guards on both registration paths** (TJC-2331). Shapes that compiled but
+  were broken on the wire or crashed the macro now fail at expansion with a message naming the
+  member and the fix: an annotated method with no parameter list, more than one parameter list
+  (curried, or a `using` clause), type parameters, or more than 22 parameters; an annotated
+  member the declared-only scan skips (inherited from a trait or class, a `val`, a nested
+  object's method); a typed `McpTool` whose `In` does not derive an object schema (`String`,
+  `Int`, `Option`, a collection, `Either`, an enum — use a case class, `case class NoArgs()` for
+  no arguments); and `.withOutputSchema` on a non-object `Out` (wrap it in a case class). Nothing
+  that produced a correct `tools/list` entry and a callable tool is rejected (details under
+  *Changed*).
 - **Bun HTTP API.** `startStatefulHttp()` / `startStatelessHttp()` return a `BunHttpHandle`
   (`port`, `hostname`, `url`, `server`, `stop()`) instead of a `BunServer`, and
   `BunServeOptions.apply` changed shape (details under *Changed*). There is no public
