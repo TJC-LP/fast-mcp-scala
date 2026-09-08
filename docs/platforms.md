@@ -133,7 +133,12 @@ demo binary and `scripts/native-smoke.sh <binary>` drives it through the full MC
 same script that gates the GraalVM images. Its assertions are bound to the `AnnotatedServer`
 fixture (`add`, `calculator`, `hello_prompt`, `static://welcome`): against your own binary only the
 first three exchanges — initialize, `tools/list`, `tools/call` — are meaningful, and the later
-asserts fail by design.
+asserts fail by design. The script also feeds stdin through a named FIFO, and Node and Bun never
+observe EOF on a FIFO (`process.stdin` emits no `end` when the FIFO's writer closes — Bun 1.4.1 and
+Node 26 alike), so its final exit-on-EOF assertion fails for a Scala.js bundle too: grade a Bun or
+Node bundle on the `--- stdout ---` dump, or feed it through an anonymous pipe
+(`printf '...' | bun run hello.mjs`), where every runtime exits 0 on EOF — which is what MCP hosts,
+which spawn servers over pipes, see.
 
 Caveats (experimental):
 
