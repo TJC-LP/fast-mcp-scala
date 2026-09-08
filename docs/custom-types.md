@@ -26,6 +26,10 @@ typed contracts.
   (Mirror-based, `NotGiven`-guarded).
 - Enums with parameterized cases keep zio-json's wrapper-object encoding. Provide an
   `McpInputCodec` for a custom shape.
+- A typed tool's `In` must be a case class (`case class NoArgs()` for no arguments; `Map[String, V]`
+  and types with a user `McpSchema` also qualify) and `.withOutputSchema` needs a case-class (or
+  `Unit`) `Out`: MCP `arguments` and `structuredContent` are always JSON objects, so a scalar,
+  `Option`, collection, `Either` or enum root is a compile-time error naming the type and the fix.
 
 ## `McpInputCodec[T]`: one value, decoder plus schema
 

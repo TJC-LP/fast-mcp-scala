@@ -161,6 +161,12 @@ object McpEncoder extends McpEncoderLowPriority:
     def encode(value: Unit): List[Content] =
       Nil
 
+    /** `Unit` derives the empty-object `outputSchema`; `{}` is the conforming structured form (the
+      * spec requires a `structuredContent` whenever `outputSchema` is declared).
+      */
+    override def encodeStructured(value: Unit): Option[zio.json.ast.Json] =
+      Some(zio.json.ast.Json.Obj())
+
   given McpEncoder[Content] with
 
     def encode(value: Content): List[Content] =

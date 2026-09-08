@@ -219,6 +219,12 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Changed
 
+- **`.withOutputSchema` requires an object `Out`** (TJC-2331, C2.5; rejects a shape that was silently
+  broken): `Out = String`, `Option[_]`, a collection or an enum advertised a non-object
+  `outputSchema` and emitted no `structuredContent` (the spec says a tool with `outputSchema` MUST
+  return a conforming one). The derived `ToolOutputSchemaProvider` now aborts at compile time naming
+  the type and the remedy (wrap the result in a case class, or drop `.withOutputSchema`). Case
+  classes, `Map[String, V]` and `Unit` are unaffected.
 - **`McpTool` `In` must derive an object schema** (TJC-2331, C2.4; rejects a shape that was silently
   broken): `McpTool[String, _]`, `McpTool[Int, _]`, a collection, `Option`, `Either`, an enum or a
   sealed trait as `In` used to compile and advertise a non-object `inputSchema` that no MCP
@@ -371,6 +377,10 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Fixed
 
+- **`Out = Unit` with `.withOutputSchema` emits `structuredContent: {}`** (TJC-2331, C2.5): the
+  tool advertised the empty-object `outputSchema` but emitted no `structuredContent` at all (the
+  spec requires a conforming one whenever `outputSchema` is declared);
+  `McpEncoder[Unit].encodeStructured` is now `Some(Json.Obj())`.
 - **`Either[A, B]` parameters decode the shape their schema advertises** (TJC-2331, C2.3): when a
   side needed derivation (`Either[Color, String]`), the Mirror sum fallback produced a decoder
   wanting `{"Left":{"value":"Red"}}` while the schema advertises zio-json's `{"Left":"Red"}` — every
