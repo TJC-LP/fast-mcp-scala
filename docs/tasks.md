@@ -16,6 +16,9 @@ on modern requests.
 ## Enabling per server
 
 ```scala 3 raw
+import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.server.TaskSettings   // not re-exported by the package object
+
 val server = McpServer(
   name = "my-server",
   settings = McpServerSettings(tasks = TaskSettings(enabled = true))
@@ -50,6 +53,9 @@ def expensiveOp(@Param("input") x: String): String = ???
 Typed-contract path:
 
 ```scala 3 raw
+import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.core.TaskSupport      // not re-exported by the package object
+
 val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   .withTaskSupport(TaskSupport.Optional)
 ```
@@ -58,7 +64,10 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
 
 - `"forbidden"` (default) — always runs synchronously.
 - `"optional"` — may return a task when the client supports the extension.
-- `"required"` — requires the extension and otherwise returns `-32021`.
+- `"required"` — requires task augmentation. A modern (2026-07-28) client that does not declare
+  the tasks extension gets `-32021` (missing required client capability, naming
+  `extensions['io.modelcontextprotocol/tasks']`); a legacy (2025-11-25) client that sends a
+  bare `tools/call` without `params.task` gets `-32601`.
 
 Modern `tools/list` does not expose the removed `execution.taskSupport` field; legacy clients still
 see and use it.
@@ -73,7 +82,8 @@ session.
 Tasks dispatch is native router middleware; there is no transport-layer special-casing.
 
 Modern bearer tasks are bucketed per client for the running and stored caps above. By default
-(`TaskOwnerKey.Transport`) the bucket key is the peer address supplied by the HTTP transport
+(`TaskOwnerKey.Transport`; `TaskOwnerKey` lives in `com.tjclp.fastmcp.core` and is imported by
+name) the bucket key is the peer address supplied by the HTTP transport
 (zio-http `remoteAddress`, Bun `server.requestIP`); requests that arrive without a key share one
 anonymous bucket bounded by the per-owner cap. Behind a reverse proxy every peer collapses to one
 address, so use `TaskOwnerKey.Custom` to derive the key from an authenticated principal instead;
@@ -96,9 +106,11 @@ still fill a pool, so pair the peer-address key with edge rate limiting.
   the session's in-flight requests and releases (interrupts) that session's running legacy tasks;
   `runStdio()` / `runHttp()` stop the sweeper and running tasks on shutdown.
 - The server creates working / completed / failed / cancelled tool tasks. It implements
-  `tasks/update` validation but does **not yet** suspend a task in `input_required`, and
-  task-status notifications are not emitted. These boundaries are listed in the
-  [upgrade guide](./2026-07-28-upgrade.md#deliberate-boundaries).
+  `tasks/update` validation but does **not yet** suspend a task in `input_required`.
+- `notifications/tasks/status` is emitted on legacy (2025-11-25) sessions on every terminal
+  transition, as that revision's Tasks surface specifies; modern bearer tasks do not emit it —
+  the 2026-07-28 extension moved status to polling (`tasks/get`). These boundaries are listed in
+  the [upgrade guide](./2026-07-28-upgrade.md#deliberate-boundaries).
 
 ## Legacy (2025-11-25) task surface
 

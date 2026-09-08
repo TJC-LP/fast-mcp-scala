@@ -22,6 +22,9 @@ typed contracts.
   (Mirror-based, `NotGiven`-guarded).
 - Enums with parameterized cases keep zio-json's wrapper-object encoding. Provide an
   `McpInputCodec` for a custom shape.
+- Union types (`A | B`), literal types (`"asc" | "desc"`) and opaque types are **not** derived: the
+  macro aborts with `Cannot derive an MCP JSON Schema for ...`. Supply a `given McpInputCodec[T]`
+  (below) for such a field.
 
 ## `McpInputCodec[T]`: one value, decoder plus schema
 
@@ -76,6 +79,23 @@ private val greetTool = McpTool.withSchema[GreetArgs, GreetResult](
 )(args => GreetResult(s"Hello, ${args.name}!"))
 ```
 
+## Returning embedded resources
+
+`EmbeddedResource` (re-exported by `com.tjclp.fastmcp`) wraps a `ResourceContents` payload whose
+concrete types live in `com.tjclp.fastmcp.core.wire` and are imported by name; they replaced
+`EmbeddedResourceContent` in 0.5.0:
+
+```scala 3 raw
+import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.core.wire.{BlobResourceContents, TextResourceContents}
+
+val memo: Content =
+  EmbeddedResource(TextResourceContents("memo://today", "Ship it.", mimeType = Some("text/plain")))
+
+val logo: Content =
+  EmbeddedResource(BlobResourceContents("img://logo", base64Png, mimeType = Some("image/png")))
+```
+
 ## `McpSchema[T]` for output-only nested types
 
 For a nested type that only appears in results, `McpSchema[T]` provides the schema without
@@ -89,12 +109,14 @@ automatically on every platform.
 
 ## Migrating from Tapir `Schema` overrides
 
-Tapir, ApiSpec, Circe, and Cats are no longer production dependencies (since the 1.0.0 line).
+Tapir, ApiSpec, Circe, and Cats are no longer production dependencies since 1.0.0 (the RC1–RC3
+prereleases still shipped them and required `sttp.tapir.generic.auto.*` for typed contracts).
 Existing `sttp.tapir.Schema` overrides map onto the tools above:
 
 | Before | After |
 |---|---|
 | `given Schema[T]` for a wire-shape change | `given McpInputCodec[T]` |
 | `given Schema[T]` for an output-only type | `given McpSchema[T]` |
+| `given Schema[T]` for a union- or literal-typed field | `given McpInputCodec[T]` |
 | Per-field `.description` / constraint tweaks | `@Param(description = ..., schema = ...)` |
 | Whole-tool hand-written schema | `McpTool.withSchema` |

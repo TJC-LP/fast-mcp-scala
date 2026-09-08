@@ -5,8 +5,9 @@ dependency updates: versions stay stable unless there is a concrete reason to mo
 
 ## Where versions live
 
-All production dependency versions are pinned in one place, the `Versions` object in
-[`build.mill`](build.mill). The test-only TypeScript MCP SDK used as a conformance client is pinned
+All production dependency versions are pinned in [`build.mill`](build.mill): the `Versions`
+object (ZIO, zio-json, zio-http, Scala.js, Scala Native and the test libraries), `scala3Version`,
+and the `//| mvnDeps` header that pins the mill-bun plugin. The test-only TypeScript MCP SDK used as a conformance client is pinned
 in the js module's `bunDevDeps` and frozen by the committed
 [`fast-mcp-scala/js/bun.lock`](fast-mcp-scala/js/bun.lock); it never appears in the published
 artifacts.
@@ -51,6 +52,11 @@ dependency policies are not forced to move transitively.
   reserved for major versions and announced in the [CHANGELOG](CHANGELOG.md).
 - Removing a deprecated member happens at the next major version after the deprecation, unless the
   member never shipped in a stable release.
+- The promise covers the public API of `fast-mcp-scala_3` except `com.tjclp.fastmcp.examples.*`
+  (the example servers) and `com.tjclp.fastmcp.macros.*` (the annotation macros' own machinery),
+  which may change in minor releases. The `_sjs1_3` and `_native0.5_3` artifacts follow the same
+  source-compatibility rules; binary compatibility is checked for the JVM artifact only, with
+  `1.0.0` as the MiMa baseline (the release candidates are not baselines).
 - Protocol-version support (which MCP revisions the server negotiates) is documented in
   [docs/spec-coverage.md](docs/spec-coverage.md) and changes only in minor or major releases.
 

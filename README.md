@@ -31,7 +31,7 @@ libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "1.0.0"
 //> using dep com.tjclp::fast-mcp-scala::1.0.0   // scala-cli, Scala.js or Native (with `//> using platform ...`)
 ```
 
-Built against Scala 3.9.0 LTS; consumers compile with `-experimental` (the annotation macros require it). JVM: JDK 17+ (CI tests the LTS releases 17, 21, and 25). Scala.js: `sjs1_3`, runs on Bun (first-class) and Node 18+; Scala 3.9 output needs a 1.22+ linker. Scala Native: `native0.5_3`, stdio only, experimental. Platform details and quickstarts: [docs/platforms.md](docs/platforms.md).
+Built against Scala 3.9.0 LTS: **consuming 1.0.0 requires Scala 3.9.0 or newer** (it emits TASTy 28.9, which 3.8 and older compilers cannot read; the RC3 prerelease, built with Scala 3.8.3, is the last release a Scala 3.8 project can use). Consumers compile with `-experimental` (the annotation macros require it). JVM: JDK 17+ (CI tests the LTS releases 17, 21, and 25). Scala.js: `sjs1_3`, runs on Bun (first-class; Node is untested); Scala 3.9 output needs a Scala.js 1.22+ linker (Mill: mill-bun 0.3.x with an explicit `scalaJSVersion`; scala-cli: `--js-version 1.22.0`). Scala Native: `native0.5_3`, stdio only, experimental. Platform details and quickstarts: [docs/platforms.md](docs/platforms.md).
 
 ## Quickstart
 
@@ -58,6 +58,11 @@ Exercise it through the MCP Inspector:
 npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc
 ```
 
+The first run downloads the compiler and dependencies (about 60 MB) and compiles the script, which
+can exceed the Inspector's 15 s connect timeout (it then reports only `Connection closed`). Run
+`scala-cli compile scripts/quickstart.sc` once beforehand, or pass `--connect-timeout <ms>` to the
+Inspector.
+
 ## Choosing a registration path
 
 | | Annotations (`@Tool` + `scanAnnotations`) | Typed contracts (`McpTool`) |
@@ -71,6 +76,9 @@ npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc
 Both work on every platform and coexist on the same server: override `tools` / `prompts` / `staticResources` / `templateResources` on your `McpServerApp` to mount typed contracts alongside annotated methods.
 
 ```scala 3 raw
+case class AddArgs(a: Int, b: Int)
+case class AddResult(sum: Int)
+
 object MyServer extends McpServerApp[Stdio, MyServer.type]:
   @Tool(name = Some("ping")) def ping(): String = "pong"
 
@@ -81,7 +89,7 @@ object MyServer extends McpServerApp[Stdio, MyServer.type]:
   )
 ```
 
-Handler lambdas return plain values, `ZIO`, `Either[Throwable, _]`, or `scala.util.Try`; the `ToHandlerEffect[F[_]]` typeclass picks the right lift, and you can bring your own given for other effect systems. See [`AnnotatedServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts.
+Handler lambdas return plain values, `ZIO`, `Either[Throwable, _]`, or `scala.util.Try`; the `ToHandlerEffect[F[_], R]` typeclass picks the right lift (`R` is the ZIO environment — `Any` for the plain builders), and you can bring your own given for other effect systems by implementing `ToHandlerEffect[F, Any]` for your effect type `F`. See [`AnnotatedServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts.
 
 ## Tools and `@Param` metadata
 
@@ -108,6 +116,8 @@ def search(
 - `schema` is a raw JSON Schema fragment that overrides the derived schema entirely
 
 Overloading is fine: only the annotated overload is registered, and its schema and handler come from that exact declaration; two annotated overloads must register distinct `name`s — duplicate names or resource URI patterns within one object are a compile-time error. Annotation arguments such as `name`, `description` and the hints must be literals (`Some("...")`, `Option("...")`, `None`, or a `final val` constant); anything else is a compile-time error.
+
+Two scanning rules to know: `scanAnnotations` (and therefore `McpServerApp`) registers the annotated methods **declared on the object itself** — annotated methods inherited from a trait or parent class are not scanned — and visibility does not gate exposure: a `private` annotated method is still advertised and callable, so annotate only what you mean to publish.
 
 Enums, nested case classes, `Option`, collections, and `java.time` values derive with no user-supplied givens; custom wire shapes go through `McpInputCodec`. See [docs/custom-types.md](docs/custom-types.md).
 
@@ -143,10 +153,21 @@ Templated resources use `{placeholders}` in the URI, matched against method para
   description = Some("User profile as JSON"),
   mimeType = Some("application/json")
 )
-def userProfile(@Param("The user id") userId: String): String = ...
+def userProfile(@Param("The user id") userId: String): String =
+  s"""{"userId":"$userId"}"""
 ```
 
-A placeholder matches a non-empty run of characters within one path segment (never `/`); literal text is matched verbatim (not as a regex); placeholders in the same segment must be separated by literal text. Client URIs longer than `limits.maxUriChars` (8192) are rejected with `-32602`.
+Templates are listed through `resources/templates/list` only when `exposeTemplatesEndpoint` is set
+(`resources/list` never lists templates; with the default `false` the templates endpoint answers an
+empty page and clients derive templates from `{}` URIs; `resources/read` on a matching URI works
+either way). [`AnnotatedServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala)
+turns it on:
+
+```scala 3 raw
+override def settings = McpServerSettings(exposeTemplatesEndpoint = true)
+```
+
+A placeholder matches a non-empty run of characters within one path segment (never `/`); literal text is matched verbatim (not as a regex); placeholders in the same segment must be separated by literal text (a template such as `x://{a}{b}` is rejected at registration, so the server fails to start). Client URIs longer than `limits.maxUriChars` (8192) are rejected with `-32602`.
 
 ## Prompts
 
@@ -165,7 +186,7 @@ A prompt that returns a single `String` is automatically wrapped into a `User` m
 
 ## Context (`McpContext`)
 
-Add a `ctx: McpContext` parameter to an annotated method to read the client's declared info and capabilities, request metadata, and to send progress or logging:
+Add a parameter named exactly `ctx` of type `McpContext` to a `@Tool` method to read the client's declared info and capabilities, request metadata, and to send progress or logging (the parameter is recognised by its name and is not part of the tool's schema; `@Prompt` and `@Resource` methods do not take a context parameter):
 
 ```scala 3 raw
 @Tool(name = Some("echo"), description = Some("Echo client and request context"))
@@ -177,7 +198,7 @@ def echo(
   s"Hello from $clientName${note.fold("")(n => s": $n")}"
 ```
 
-Typed contracts use `McpTool.contextual`, whose handler receives `(In, Option[McpContext])`. Runnable demo: [`ContextEchoServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContextEchoServer.scala).
+Typed contracts use the builder's `.contextual` — `McpTool[In, Out](name = "echo").contextual { (in, ctx) => ... }` — whose handler receives `(In, Option[McpContext])`. Runnable demo: [`ContextEchoServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContextEchoServer.scala).
 
 ## Transports
 

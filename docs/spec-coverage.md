@@ -38,8 +38,9 @@ of them, newest first.
 | Legacy session idle eviction + SSE keepalives | ✅ |
 
 The deliberately unimplemented pieces (no dynamic subscription publishers, no `input_required`
-task suspension, no task-status notifications, no authorization server) are enumerated in the
-upgrade guide's [Deliberate boundaries](./2026-07-28-upgrade.md#deliberate-boundaries).
+task suspension, no task-status notifications for modern bearer tasks — legacy 2025-11-25 sessions
+do receive `notifications/tasks/status` — no authorization server) are enumerated in the upgrade
+guide's [Deliberate boundaries](./2026-07-28-upgrade.md#deliberate-boundaries).
 
 ## How coverage is verified
 

@@ -17,7 +17,10 @@ object MyServer extends McpServerApp[Stdio, MyServer.type]:
 
 Newline-delimited JSON-RPC over stdin/stdout, the transport Claude Desktop and the MCP Inspector
 use. One durable session per process; shutdown is EOF-driven (the client closing stdin ends the
-loop). The stdio lifecycle (`StdioLoop`: session, single-writer stdout, outbound drainer, EOF
+loop). Each inbound frame is dispatched in its own fiber, so a handler awaiting a server→client
+round trip (roots, sampling, elicitation) cannot deadlock the loop; replies may therefore be written
+in a different order from the requests — correlate by `id`, and wait for the `initialize` result
+before pipelining further requests. The stdio lifecycle (`StdioLoop`: session, single-writer stdout, outbound drainer, EOF
 teardown) is shared by the JVM and Scala Native backends; the Scala.js backend drives Node's
 callback IO directly. Because `runStdio()` has no reachable call path into the HTTP stack,
 stdio-only programs never link zio-http or netty. That is what makes small GraalVM images possible
@@ -40,12 +43,15 @@ its final response. Protocol sessions, `Mcp-Session-Id`, the standalone GET stre
 and HTTP DELETE are **not used** by the modern path. Closing a response stream interrupts its
 dispatch fiber; `subscriptions/listen` uses the same long-lived POST response.
 
-Modern Streamable HTTP is identical on the JVM (ZIO HTTP) and Bun (`Bun.serve`).
+Modern Streamable HTTP is identical on the JVM (ZIO HTTP) and Bun (`Bun.serve`). Both backends
+serve plaintext HTTP/1.1 only — there is no TLS setting by design; terminate TLS and authentication
+at a reverse proxy in front of the MCP endpoint.
 
 ### Request requirements and error mapping
 
-Every POST — legacy and modern — must carry `Content-Type: application/json`; anything else is
-refused with 415 before the body is read or a session is minted. Modern POST requests must
+Every POST — legacy and modern — must carry `Content-Type: application/json` (media-type
+parameters are allowed, but a `charset` other than utf-8 is refused); anything else is refused with
+415 before the body is read or a session is minted. Modern POST requests must
 additionally include:
 
 - an `Accept` header listing both `application/json` and `text/event-stream`
@@ -58,7 +64,7 @@ Schema-driven `Mcp-Param-*` values may be supplied through `x-mcp-header`.
 | Condition | HTTP | JSON-RPC code |
 |---|---|---|
 | `Host`/`Origin` refused by `allowedHosts` / `allowedOrigins` | 403 | `-32000` |
-| Missing or wrong `Content-Type` (any POST) | 415 | `-32000` |
+| Missing or wrong `Content-Type` (any POST; a non-utf-8 `charset` counts as wrong) | 415 | `-32000` |
 | Body larger than `maxRequestBodyBytes` | 413 | `-32000` on first-party paths; netty and Bun answer an empty 413 when they refuse the body first |
 | Frame over `limits` (`maxFrameChars` / `maxDepth` / `maxObjectFields`) | 400 | `-32700` |
 | Header/body mismatch | 400 | `-32020` |
@@ -70,9 +76,12 @@ The admission gates run in a fixed order on every backend, on headers first and 
 state is touched: unknown path 404 → `allowedHosts`/`allowedOrigins` 403 → `Content-Type` 415 →
 declared `Content-Length` over `maxRequestBodyBytes` 413 → `Accept` 406 → body read (platform byte
 cap, then a first-party post-read check → 413) → frame limits (`-32700`, HTTP 400) → dispatch. The
-legacy session cap (`maxSessions`) is applied when an `initialize` is dispatched. Any defect on the
-way is answered by a fixed JSON-RPC 500 boundary (`Internal server error`) on both backends: no
-exception text, stack trace, or path ever reaches the client.
+legacy session cap (`maxSessions`) is applied when an `initialize` is dispatched. Any transport or
+handler-construction defect on the way is answered by a fixed JSON-RPC 500 boundary
+(`Internal server error`) on both backends, with no exception text, stack trace, or path. A defect
+raised *inside* a tool handler (`ZIO.die`, an uncaught exception) is not on this path: the router
+answers it in-band as `-32603` carrying the handler's message, on the legacy and the modern path
+alike — so keep secrets out of the exception messages your tools can throw.
 
 The complete wire-behavior and review matrix is in the
 [2026-07-28 upgrade guide](./2026-07-28-upgrade.md#wire-behavior).
@@ -82,7 +91,8 @@ The complete wire-behavior and review matrix is in the
 Requests that speak an older protocol version (`Protocol.LegacyProtocolVersions`) are routed to an
 initialization-based adapter: `initialize` mints an `Mcp-Session-Id`, the standalone GET stream
 pushes server→client messages (JVM; Bun answers 405 because per-request SSE already covers
-server→client traffic), and DELETE terminates the session. Legacy POSTs are subject to the same
+server→client traffic), and DELETE terminates the session (`disallowDelete = true` answers 405
+instead). Legacy POSTs are subject to the same
 `Content-Type: application/json` gate (415) as modern ones. Only `initialize` mints a session; idle
 sessions are evicted after `sessionIdleTimeout`, and the store is capped by `maxSessions`
 (`Some(1000)` by default): at the cap the longest-idle session without a live GET stream is evicted
@@ -104,18 +114,20 @@ clients share one session identity, which is why legacy task requests there are 
 | `port` | `8000` | Listen port. |
 | `httpEndpoint` | `/mcp` | JSON-RPC endpoint path. |
 | `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless. |
+| `disallowDelete` | `false` | Legacy adapter: answer 405 to HTTP DELETE instead of terminating the session. |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity (live legacy GET streams are exempt); `None` disables. |
-| `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. |
-| `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` hostname must be listed (port ignored); a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, and malformed `Host`/`Origin` ports are refused (403). |
-| `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted alongside the request's own authority; malformed entries fail `runHttp()` at startup. |
-| `maxRequestBodyBytes` | `1 MiB` | Request body cap on every backend; larger bodies get 413 before decoding (empty 413 on the wire from netty/Bun, JSON-RPC `-32000` on first-party paths); must not exceed `limits.maxFrameChars`. |
+| `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. Legacy POST/GET streams heartbeat from the first byte; a modern per-request stream is opened — and its first heartbeat sent — only once the first frame is available, so a silent long tool call sends nothing until then (tracked for 1.0.1). |
+| `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` hostname must be listed (port ignored); a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, and malformed `Host`/`Origin` ports are refused (403). IPv6 literals are listed in bracket form, e.g. `"[::1]"`. |
+| `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted in addition to the request's own authority **when `allowedHosts` is also set**; with `allowedOrigins` alone only the listed origins pass (the request's own authority is then refused 403 too). Malformed entries fail `runHttp()` at startup. |
+| `maxRequestBodyBytes` | `1 MiB` | Request body cap on every backend; larger bodies get 413 before decoding (empty 413 on the wire from netty/Bun, JSON-RPC `-32000` on first-party paths); must not exceed `limits.maxFrameChars`. This is the cap a large `sampling/createMessage` or elicitation *result* meets over HTTP (a legacy client then waits out its 60 s request timeout): raise it together with `limits.maxFrameChars` — see [Input limits](#input-limits). |
 | `maxSessions` | `Some(1000)` | Cap on stored legacy sessions; at the cap the longest-idle session without a live GET is evicted (unauthenticated initializes can evict idle sessions — front non-loopback deployments with auth), 503 only if none is evictable; `None` disables. |
 | `loggingEnabled` | `false` | Advertise logging; modern clients use per-request `_meta` levels, legacy clients `logging/setLevel`. |
 | `resourcesSubscribe` | `false` | Enable legacy `resources/subscribe`; modern clients use `subscriptions/listen`. |
+| `exposeTemplatesEndpoint` | `false` | List registered resource templates through `resources/templates/list`. `resources/list` never lists templates; with the default the templates endpoint answers an empty page (clients derive templates from `{}` URIs) and `resources/read` on a matching URI works either way. Applies on every transport. |
 | `tasks` | `TaskSettings()` | The Tasks extension, off by default (see [tasks.md](./tasks.md)). |
 | `limits` | `LimitSettings()` | Input bounds on every transport: `maxFrameChars` 4 MiB, `maxDepth` 64, `maxObjectFields` 1024 (`-32700` / HTTP 400 before dispatch), `maxUriChars` 8192 and `maxSubscriptionsPerSession` 1024 (`-32602`). See [Input limits](#input-limits). |
 
-HTTP-specific fields are ignored under stdio; `limits` and `tasks` apply on every transport.
+HTTP-specific fields are ignored under stdio; `limits`, `tasks` and `exposeTemplatesEndpoint` apply on every transport.
 
 ### Input limits
 
@@ -150,7 +162,20 @@ Frames carrying large payloads must fit: a `sampling/createMessage` result with 
 stdio may need a larger frame, e.g.
 
 ```scala 3 raw
+import com.tjclp.fastmcp.server.LimitSettings   // not re-exported by the package object
+
 McpServerSettings(limits = LimitSettings(maxFrameChars = 8 * 1024 * 1024))
+```
+
+Over HTTP the same result arrives as a POST body and meets `maxRequestBodyBytes` (1 MiB) first — a
+bodiless 413 from netty/Bun, which a legacy client only surfaces after its 60 s request timeout — so
+raise both knobs together, keeping `maxRequestBodyBytes ≤ limits.maxFrameChars`:
+
+```scala 3 raw
+McpServerSettings(
+  maxRequestBodyBytes = 4 * 1024 * 1024,
+  limits = LimitSettings(maxFrameChars = 8 * 1024 * 1024)
+)
 ```
 
 ### Lower-level construction
@@ -159,9 +184,14 @@ Skip the sugar trait and construct directly when you need control over the lifec
 
 ```scala 3 raw
 val server = McpServer("name", "0.1.0")   // platform-appropriate server
-server.tool(addTool)
-server.runHttp()                          // inside your own ZIOAppDefault
+server.tool(addTool) *> server.runHttp()  // inside your own ZIOAppDefault
 ```
+
+`tool`, `prompt` and `resource` return `ZIO` effects that register on evaluation, so sequence them
+(`*>`, or `_ <- server.tool(addTool)` in a `for` comprehension) rather than calling them as bare
+statements: a discarded `server.tool(addTool)` registers nothing and the server advertises no
+tools. Compiling with `-Wnonunit-statement` flags exactly this mistake
+(`unused value of type zio.ZIO[...]`).
 
 `McpServer.typed[R]("name")` builds a server whose handlers may require a ZIO environment `R`;
 provide the layer at the boundary with `.provide(...)` on `runStdio()` / `runHttp()`.
