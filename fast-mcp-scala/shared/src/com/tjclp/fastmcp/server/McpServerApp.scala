@@ -39,6 +39,15 @@ object SelfScan:
   * don't depend on a ZIO environment. For layer-aware servers, build an `McpServer.typed[R]`
   * directly and call `runHttp().provide(...)`.
   *
+  * The ZIO `bootstrap` layer defaults to the transport's ([[TransportRunner.bootstrap]]): on stdio,
+  * ZIO's default logger is replaced by the same format on stderr, because stdout is the wire
+  * ([[transport.StdioLogging]]). To install your own logger, override it — as a `val`, which is how
+  * `ZIOAppDefault` declares it:
+  * {{{
+  *   override val bootstrap: ZLayer[ZIOAppArgs, Any, Any] =
+  *     Runtime.removeDefaultLoggers ++ Runtime.addLogger(myLogger)
+  * }}}
+  *
   * @tparam T
   *   transport marker ([[Transport.Stdio]] or [[Transport.Http]])
   * @tparam Self
@@ -59,6 +68,11 @@ trait McpServerApp[T <: Transport, Self <: Singleton](using
   def prompts: List[McpPrompt[?]] = Nil
   def staticResources: List[McpStaticResource] = Nil
   def templateResources: List[McpTemplateResource[?]] = Nil
+
+  /** Transport-provided runtime layer (stdio: ZIO logs to stderr, see [[transport.StdioLogging]]).
+    * Override with your own `val` to install a different logger.
+    */
+  override val bootstrap: ZLayer[ZIOAppArgs, Any, Any] = runner.bootstrap
 
   final def buildCore: ZIO[Any, Throwable, McpServerCore[Any]] =
     val core = factory.build(name, version, settings)
