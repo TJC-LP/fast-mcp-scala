@@ -219,6 +219,35 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Changed
 
+- **Misplaced annotations are a compile error** (TJC-2331, C2.8): the scan still registers only
+  members declared directly on the scanned object (inherited members would break default-argument
+  getter lookup and exact-overload binding), but an annotated member it skips — inherited from a
+  trait or class, on a `val`, or in a nested object — is now reported by name with the rule and the
+  remedy instead of silently producing an empty `tools/list` (`McpServerApp`'s quiet scan included).
+  A nested annotated object next to declared members is a warning, since it may be scanned
+  separately; `private` / `protected` declared members are registered as before.
+- **Annotated method shapes are checked at expansion** (TJC-2331, C2.7; rejects shapes that were
+  silently broken or crashed): a `@Tool` / `@Prompt` / `@Resource` method with no parameter list
+  (`def m: String`), more than one parameter list (curried, or a `using` / implicit clause), type
+  parameters, or more than 22 parameters is now a compile error positioned at the method, naming it
+  and the fix. Before: a curried method registered its first list only and put a
+  `Function1.toString` on the wire; a generic method crashed the macro ("partially applied Term"); a
+  `using` clause failed with a raw `?=>` type mismatch at the object header; a no-parens method failed
+  naming only its return type; a 23-parameter method registered and every call died at the
+  `RefResolver` arity guard.
+- **`.withOutputSchema` requires an object `Out`** (TJC-2331, C2.5; rejects a shape that was silently
+  broken): `Out = String`, `Option[_]`, a collection or an enum advertised a non-object
+  `outputSchema` and emitted no `structuredContent` (the spec says a tool with `outputSchema` MUST
+  return a conforming one). The derived `ToolOutputSchemaProvider` now aborts at compile time naming
+  the type and the remedy (wrap the result in a case class, or drop `.withOutputSchema`). Case
+  classes, `Map[String, V]` and `Unit` are unaffected.
+- **`McpTool` `In` must derive an object schema** (TJC-2331, C2.4; rejects a shape that was silently
+  broken): `McpTool[String, _]`, `McpTool[Int, _]`, a collection, `Option`, `Either`, an enum or a
+  sealed trait as `In` used to compile and advertise a non-object `inputSchema` that no MCP
+  `arguments` object could ever satisfy — the tool could not be called. The derived
+  `ToolSchemaProvider` now aborts at compile time: `McpTool In must be a case class (use `case class
+  NoArgs()` for no arguments)`. Case classes, `Map[String, V]`, `Unit` and types with a user
+  `McpSchema` / `McpInputCodec` are unaffected.
 - **CI gates the 2026-07-28 requirements run on every PR** (TJC-2356): `conformance.yml` now runs
   both `scripts/conformance.sh` modes per platform — the active suite (31 scenarios / 73 checks,
   every one at the 2025-11-25 wire, empty baselines) and `--requirements 2026-07-28` (37 scored
@@ -372,6 +401,31 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Fixed
 
+- **`Out = Unit` with `.withOutputSchema` emits `structuredContent: {}`** (TJC-2331, C2.5): the
+  tool advertised the empty-object `outputSchema` but emitted no `structuredContent` at all (the
+  spec requires a conforming one whenever `outputSchema` is declared);
+  `McpEncoder[Unit].encodeStructured` is now `Some(Json.Obj())`.
+- **`Either[A, B]` parameters decode the shape their schema advertises** (TJC-2331, C2.3): when a
+  side needed derivation (`Either[Color, String]`), the Mirror sum fallback produced a decoder
+  wanting `{"Left":{"value":"Red"}}` while the schema advertises zio-json's `{"Left":"Red"}` — every
+  schema-conforming call was rejected, bare or inside `Option` / `List` / `Map[String, _]`. An
+  `Either` arm now derives both sides and summons zio-json's `Either` instance, so the annotation
+  path matches the typed path and the docs' "collections derive with no givens" promise holds for
+  `List`, `Vector`, `Set`, `Seq`, `Array`, `Map[String, V]` and `Either`.
+- **`Set[T]` parameters derive a decoder like `List[T]`** (TJC-2331, C2.2): `Set[T]` of a derived
+  element type advertised a `uniqueItems` array schema but decoder synthesis aborted with `No
+  McpDecoder or derivable JsonDecoder found for type: Set[...]` (no `Set` arm; `Set` is not a
+  `Seq`), while the typed path decoded it. Every decoder abort on the annotation path now names the
+  parameter and states the remedy (`given JsonDecoder[T]` or `McpInputCodec[T]`) and lists what
+  derives automatically.
+- **`Vector[T]` parameters of derived element types no longer crash the macro** (TJC-2331, C2.1):
+  an annotated `Vector[T]` parameter whose `T` needs derivation (an enum, a case class, an `Option`
+  or `Either` of one) aborted expansion with an `ExprCastException` and a compiler stack trace — the
+  `Seq[a]` decoder arm matched `Vector` by conformance, built a `JsonDecoder[Seq[T]]` and cast it to
+  the invariant `JsonDecoder[Vector[T]]`. A dedicated `Vector` arm now derives the element decoder
+  and summons zio-json's `Vector` instance (the shape the schema already advertised), and a derived
+  decoder that does not fit its parameter's type (e.g. `IndexedSeq[T]`) is a compile error naming
+  the parameter and the `given JsonDecoder[T]` / `McpInputCodec[T]` remedy instead of a crash.
 - **`allowedHosts` parses the `Host` header fail-closed** (TJC-2354): the `Host` value must be one
   `host[:port]` authority. A value containing a comma — the `", "`-joined form of a `Host` sent
   more than once, or any second authority — is refused with 403 in either order instead of being

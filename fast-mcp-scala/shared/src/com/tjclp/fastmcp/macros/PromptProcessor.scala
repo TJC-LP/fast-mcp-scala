@@ -33,6 +33,8 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
       report.errorAndAbort(s"No @Prompt annotation found on method '$methodName'")
     }
 
+    requireRegistrableShape("@Prompt", methodSym)
+
     val (finalName, finalDesc) = nameAndDescription(promptAnnot, methodSym)
 
     val argExprs: List[Expr[PromptArgument]] =

@@ -42,13 +42,10 @@ object RegistrationMacro:
     val tpe = TypeRepr.of[T]
     val sym = tpe.typeSymbol
 
-    val annotatedMethods = sym.declaredMethods.filter { method =>
-      method.annotations.exists(annot =>
-        annot.tpe <:< TypeRepr.of[Tool] ||
-          annot.tpe <:< TypeRepr.of[Prompt] ||
-          annot.tpe <:< TypeRepr.of[Resource]
-      )
-    }
+    val annotatedMethods = sym.declaredMethods.filter(isAnnotated)
+
+    if sym.flags.is(Flags.Module) then
+      reportMisplacedAnnotations[T](sym, hasDeclared = annotatedMethods.nonEmpty)
 
     if annotatedMethods.isEmpty then
       val shouldWarn = warnOnEmpty.valueOrAbort
@@ -143,3 +140,78 @@ object RegistrationMacro:
       else
         val registrationTerms = registrationExprs.map(_.asTerm)
         Block(registrationTerms.init, registrationTerms.last).asExprOf[McpServerCore[R]]
+
+  private def isAnnotated(using Quotes)(member: quotes.reflect.Symbol): Boolean =
+    annotationLabel(member).isDefined
+
+  private def annotationLabel(using Quotes)(member: quotes.reflect.Symbol): Option[String] =
+    import quotes.reflect.*
+    member.annotations.collectFirst {
+      case a if a.tpe <:< TypeRepr.of[Tool] => "@Tool"
+      case a if a.tpe <:< TypeRepr.of[Prompt] => "@Prompt"
+      case a if a.tpe <:< TypeRepr.of[Resource] => "@Resource"
+    }
+
+  /** Loud failure for annotated members the declared-only scan cannot register: a member inherited
+    * from a parent trait or class, a `val`, or a method of a nested object. Registering them is not
+    * an option — the `<method>$default$N` getter lookup and exact-overload binding rely on the
+    * member being declared on the scanned object — so the scan names what it skipped and the fix
+    * instead of registering nothing (`McpServerApp` scans quietly, which used to mean an empty
+    * `tools/list` with no hint at all). A nested object's annotations are only a warning when the
+    * scanned object registers members of its own: the nested object may be scanned separately.
+    */
+  private def reportMisplacedAnnotations[T: Type](using Quotes)(
+      sym: quotes.reflect.Symbol,
+      hasDeclared: Boolean
+  ): Unit =
+    import quotes.reflect.*
+    val scanned = s"scanAnnotations[${Type.show[T]}]"
+    val objectName = sym.companionModule.fullName
+    val rule = "only members declared directly on the scanned object are registered"
+    def position(m: Symbol): Position =
+      if m.isDefinedInCurrentRun then m.pos.getOrElse(Position.ofMacroExpansion)
+      else Position.ofMacroExpansion
+
+    val inherited = sym.memberMethods.filter(m => m.owner != sym && isAnnotated(m))
+    inherited.foreach { m =>
+      val label = annotationLabel(m).getOrElse("annotated")
+      report.error(
+        s"$label method '${m.name}' is inherited from ${m.owner.fullName} and is NOT registered by " +
+          s"$scanned: $rule. Declare the annotated method on $objectName itself, or move it into an " +
+          "object of its own and scan that object.",
+        position(m)
+      )
+    }
+
+    val fields = sym.declaredFields
+    val annotatedVals = fields.filter(f => !f.flags.is(Flags.Module) && isAnnotated(f))
+    annotatedVals.foreach { f =>
+      val label = annotationLabel(f).getOrElse("annotated")
+      report.error(
+        s"$label on val '${f.name}' in $objectName is NOT registered by $scanned: only methods " +
+          s"(`def`) are registered. Write `def ${f.name}(...)` with one parameter list instead.",
+        position(f)
+      )
+    }
+
+    val nested = fields.filter(_.flags.is(Flags.Module)).flatMap { module =>
+      module.moduleClass.declaredMethods.filter(isAnnotated).map(m => (module, m))
+    }
+    nested.foreach { case (module, m) =>
+      val label = annotationLabel(m).getOrElse("annotated")
+      val nestedName =
+        s"$objectName.${module.name}" // not module.fullName: it renders `Outer$.Inner`
+      val msg =
+        s"$label method '${m.name}' is declared in the nested object $nestedName, which " +
+          s"$scanned does not descend into: $rule. Scan the nested object too " +
+          s"(scanAnnotations[$nestedName.type]) or move the method onto $objectName."
+      if hasDeclared then report.warning(msg, position(m))
+      else report.error(msg, position(m))
+    }
+
+    val errors = inherited.size + annotatedVals.size + (if hasDeclared then 0 else nested.size)
+    if errors > 0 then
+      report.errorAndAbort(
+        s"$scanned: $errors annotated member(s) of $objectName cannot be registered — $rule " +
+          "(see the errors above)."
+      )

@@ -53,6 +53,56 @@ private[macros] trait AnnotationProcessorBase:
 
     (maybeName.getOrElse(methodSym.name), maybeDesc.orElse(methodSym.docstring))
 
+  /** `FunctionN` / `RefResolver.invokeFunctionWithArgs` ceiling on the number of parameters. */
+  protected val MaxParameters: Int = 22
+
+  /** Abort unless `methodSym` has the one declaration shape the generated handler can invoke:
+    * exactly one term parameter list (so curried methods and `using` / implicit clauses are out),
+    * no type parameters, at most [[MaxParameters]] parameters. Each other shape used to slip
+    * through and then mis-register — curried: the first list only, with a `Function1.toString` on
+    * the wire; type parameters: a macro crash ("partially applied Term"); a `using` clause: a raw
+    * `?=>` type mismatch at the object header; no parameter list: an error naming only the return
+    * type; 23+ parameters: registered, and every call died at the arity guard. Positioned at the
+    * method when it is compiled in this run.
+    */
+  protected def requireRegistrableShape(using Quotes)(
+      kind: String,
+      methodSym: quotes.reflect.Symbol
+  ): Unit =
+    import quotes.reflect.*
+    val name = methodSym.name
+    val pos =
+      if methodSym.isDefinedInCurrentRun then methodSym.pos.getOrElse(Position.ofMacroExpansion)
+      else Position.ofMacroExpansion
+    def abort(problem: String, remedy: String): Nothing =
+      report.errorAndAbort(s"$kind method '$name' $problem. $remedy", pos)
+
+    val (typeLists, termLists) = methodSym.paramSymss.partition(_.exists(_.isTypeParam))
+    if typeLists.nonEmpty then
+      abort(
+        s"has type parameters [${typeLists.flatten.map(_.name).mkString(", ")}], which are not " +
+          "supported",
+        "An MCP schema needs concrete parameter types: remove the type parameters, or add a " +
+          "non-generic annotated method that delegates to this one."
+      )
+    if termLists.isEmpty then
+      abort(
+        "has no parameter list",
+        s"Write `def $name(): ...` (add `()`): only methods with a parameter list are registered."
+      )
+    if termLists.sizeIs > 1 then
+      abort(
+        s"has ${termLists.size} parameter lists (`using` / implicit clauses count)",
+        "Exactly one parameter list is supported: merge them into one, or add a single-list " +
+          "annotated method that delegates to this one."
+      )
+    val arity = termLists.head.size
+    if arity > MaxParameters then
+      abort(
+        s"has $arity parameters; at most $MaxParameters are supported",
+        "Group parameters into a case class, or split the tool."
+      )
+
   /** Build a method reference expression that survives inlining and denotes EXACTLY `method` (the
     * annotated symbol), never a same-named sibling overload — see [[MacroUtils.getMethodRefExpr]].
     */

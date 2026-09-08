@@ -14,6 +14,10 @@ typed contracts.
 - An enum field derives a string-enum JSON Schema (`{"type":"string","enum":[...]}`) and a
   string-based codec, at any nesting depth, including through `Option`, collections, and nested
   case classes.
+- "Collections" means `List`, `Vector`, `Set`, `Seq`, `Array`, `Map[String, V]` and `Either` (as
+  zio-json's `{"Left": ...}` / `{"Right": ...}` objects), each with derived element types; a
+  parameter type the annotation path cannot derive is a compile error naming the parameter and the
+  `given JsonDecoder[T]` / `McpInputCodec[T]` remedy.
 - A hand-written `given JsonDecoder` / `JsonEncoder` for a type always wins over the derived one,
   custom naming and all. Derivation is macro-side and summon-first; the library never exports
   givens that could shadow yours.
@@ -22,6 +26,10 @@ typed contracts.
   (Mirror-based, `NotGiven`-guarded).
 - Enums with parameterized cases keep zio-json's wrapper-object encoding. Provide an
   `McpInputCodec` for a custom shape.
+- A typed tool's `In` must be a case class (`case class NoArgs()` for no arguments; `Map[String, V]`
+  and types with a user `McpSchema` also qualify) and `.withOutputSchema` needs a case-class (or
+  `Unit`) `Out`: MCP `arguments` and `structuredContent` are always JSON objects, so a scalar,
+  `Option`, collection, `Either` or enum root is a compile-time error naming the type and the fix.
 
 ## `McpInputCodec[T]`: one value, decoder plus schema
 
