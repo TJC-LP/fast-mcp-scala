@@ -39,6 +39,8 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       report.errorAndAbort(s"No @Tool annotation found on method '$methodName'")
     }
 
+    requireRegistrableShape("@Tool", methodSym)
+
     val (finalName, finalDesc) = nameAndDescription(toolAnnot, methodSym)
 
     val (

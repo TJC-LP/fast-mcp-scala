@@ -219,6 +219,15 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Changed
 
+- **Annotated method shapes are checked at expansion** (TJC-2331, C2.7; rejects shapes that were
+  silently broken or crashed): a `@Tool` / `@Prompt` / `@Resource` method with no parameter list
+  (`def m: String`), more than one parameter list (curried, or a `using` / implicit clause), type
+  parameters, or more than 22 parameters is now a compile error positioned at the method, naming it
+  and the fix. Before: a curried method registered its first list only and put a
+  `Function1.toString` on the wire; a generic method crashed the macro ("partially applied Term"); a
+  `using` clause failed with a raw `?=>` type mismatch at the object header; a no-parens method failed
+  naming only its return type; a 23-parameter method registered and every call died at the
+  `RefResolver` arity guard.
 - **`.withOutputSchema` requires an object `Out`** (TJC-2331, C2.5; rejects a shape that was silently
   broken): `Out = String`, `Option[_]`, a collection or an enum advertised a non-object
   `outputSchema` and emitted no `structuredContent` (the spec says a tool with `outputSchema` MUST
