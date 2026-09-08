@@ -25,6 +25,41 @@ from the dependency (netty is a direct, version-pinned dependency of the JVM art
 off the classpath too. That is what makes small GraalVM images possible
 (see [native-image.md](./native-image.md)).
 
+### stdout is the wire — log to stderr
+
+Every byte a stdio server writes to stdout must be a JSON-RPC frame: a stray line confuses the host
+at best, and a line that lands *inside* a frame loses that reply. Two guarantees hold on the JVM,
+Scala.js/Bun and Scala Native alike:
+
+- **ZIO logs go to stderr.** ZIO's default logger prints to stdout (`console.log` on Bun), so the
+  stdio runner replaces it with the same format on stderr: `McpServerApp[Stdio]` installs
+  `TransportRunner.stdio.bootstrap` (`Runtime.removeDefaultLoggers ++
+  Runtime.addLogger(StdioLogging.stderrLogger)`) as its ZIO `bootstrap`, and `McpServer.runStdio()`
+  makes the same swap for a plain `ZIOAppDefault` as long as ZIO's stock logger is still installed.
+  `ZIO.logInfo` inside a tool is therefore safe. Loggers you install yourself are never touched.
+- **Frames are written atomically.** A reply and its newline go out in one `PrintStream` call, so
+  anything else that prints to `System.out` can only add a whole stray line between frames, never
+  split one. Still: never `println` from a stdio server — a stray line is a protocol error for
+  strict hosts. Use `ZIO.log*` or `System.err`.
+
+To use your own logger, override `bootstrap` — as a `val`, which is how `ZIOAppDefault` declares it
+(`override def` does not compile):
+
+```scala 3 raw
+import zio.*
+
+object MyServer extends McpServerApp[Stdio, MyServer.type]:
+  override val bootstrap: ZLayer[ZIOAppArgs, Any, Any] =
+    Runtime.removeDefaultLoggers ++
+      Runtime.addLogger(ZLogger.default.map(line => java.lang.System.err.println(line)))
+
+  @Tool(...) def hello(name: String): String = s"Hello, $name!"
+```
+
+Whatever the override installs is left alone by `runStdio()`; only ZIO's stock stdout logger is
+ever swapped. Before 1.0.0 the stdio runner installed no logger at all, so ZIO log lines went to
+stdout — if you relied on that, override `bootstrap` with a stdout logger of your own.
+
 ## HTTP
 
 ```scala 3 raw
@@ -118,7 +153,7 @@ clients share one session identity, which is why legacy task requests there are 
 | `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless. |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity. Live legacy GET streams are exempt from the periodic sweep but become evictable at the `maxSessions` cap once idle this long; `None` disables both. |
 | `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. Neither listener closes a quiet stream on its own: the JVM has no idle timeout and Bun runs with `idleTimeout: 0` (its 10 s default used to cut a slow tool's reply). Heartbeats are also what lets the OS detect a GET peer that vanished without closing its connection (the socket is only probed when the server writes to it, and the OS gives up after its retransmission budget); without them such a stream stays live until the cap-time eviction described under `maxSessions`. |
-| `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` hostname must be listed (port ignored); a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, and malformed `Host`/`Origin` ports are refused (403). |
+| `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` value must parse as one `host[:port]` authority and its hostname (or the verbatim `host:port`) must be listed — the port itself is not compared; a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, a `Host` or `Origin` sent more than once (seen as its `", "`-joined value), and malformed `Host`/`Origin` ports are refused (403), with or without the other header. IPv6 entries are written bracketed, exactly as they appear in the `Host` header: `Set("[::1]")`, not `Set("::1")`. |
 | `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted alongside the request's own authority; malformed entries fail `runHttp()` at startup. |
 | `maxRequestBodyBytes` | `1 MiB` | Request body cap on every backend; larger bodies get 413 before decoding (empty 413 on the wire from netty/Bun, JSON-RPC `-32000` on first-party paths); must not exceed `limits.maxFrameChars`. |
 | `maxSessions` | `Some(1000)` | Cap on stored legacy sessions; at the cap the longest-idle session without a live GET is evicted, else the longest-idle GET-holding session that has been idle longer than `sessionIdleTimeout` (its GET stream is closed). Unauthenticated initializes can evict idle sessions — front non-loopback deployments with auth. 503 only if neither rule finds a victim; `None` disables. |
