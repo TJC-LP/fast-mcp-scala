@@ -88,7 +88,7 @@ object MyServer extends McpServerApp[Stdio, MyServer.type]:
   )
 ```
 
-Handler lambdas return plain values, `ZIO`, `Either[Throwable, _]`, or `scala.util.Try`; the `ToHandlerEffect[F[_], R]` typeclass picks the right lift (`R` is the ZIO environment — `Any` for the plain builders), and you can bring your own given for other effect systems by implementing `ToHandlerEffect[F, Any]` for your effect type `F`. See [`AnnotatedServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts.
+A typed tool's `In` is a case class (its schema must be a JSON object, as MCP `arguments` always are); a tool with no arguments takes an empty one — `case class NoArgs()` — since `McpTool[Unit, _]` has no decoder. Handler lambdas return plain values, `ZIO`, `Either[Throwable, _]`, or `scala.util.Try`; the `ToHandlerEffect[F[_], R]` typeclass picks the right lift (`R` is the ZIO environment — `Any` for the plain builders), and you can bring your own given for other effect systems by implementing `ToHandlerEffect[F, Any]` for your effect type `F`. See [`AnnotatedServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts.
 
 ## Tools and `@Param` metadata
 
@@ -111,8 +111,10 @@ def search(
 
 - `description` populates the schema's `description` field
 - `examples` populates the JSON Schema `examples` array (clients can show suggestions)
-- `required = false`, combined with `Option[...]` or a default value, marks the field optional
-- `schema` is a raw JSON Schema fragment that overrides the derived schema entirely
+- `required = false`, combined with `Option[...]` or a default value, marks the field optional; a bare `Option[...]` parameter is optional without it, but a default value alone does not remove the field from `required` — the default is applied when the argument is omitted, so write `required = false` to advertise it as optional
+- `schema` is a raw JSON Schema fragment that overrides the derived schema entirely — repeat the `description` inside the fragment, since the derived property (description and examples included) is replaced wholesale
+
+An annotated method's result is sent as `TextContent(result.toString)` unless it is a `String`, a `Content`, a `List[Content]`, an `Array[Byte]` (or a `ZIO` of one of those): a `Some(1)`, a case class or a `Map` arrives as Scala's `toString` text, not JSON. Return a `String`/`Content`, or use a typed `McpTool` (with `.withOutputSchema` for `structuredContent`) when clients need JSON.
 
 Overloading is fine: only the annotated overload is registered, and its schema and handler come from that exact declaration; two annotated overloads must register distinct `name`s — duplicate names or resource URI patterns within one object are a compile-time error. Annotation arguments such as `name`, `description` and the hints must be literals (`Some("...")`, `Option("...")`, `None`, or a `final val` constant); anything else is a compile-time error.
 

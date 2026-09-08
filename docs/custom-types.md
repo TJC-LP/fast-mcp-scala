@@ -25,6 +25,18 @@ typed contracts.
 - Union types (`A | B`), literal types (`"asc" | "desc"`) and opaque types are **not** derived: the
   macro aborts with `Cannot derive an MCP JSON Schema for ...`. Supply a `given McpInputCodec[T]`
   (below) for such a field.
+- Sealed-trait hierarchies as a field type and Java enums (`java.util.concurrent.TimeUnit`,
+  `java.time.DayOfWeek`) are not derived either: provide a `given McpInputCodec[T]` for them.
+  Prefer case classes to tuples — a tuple field advertises an object schema (`_1`, `_2`) while the
+  decoder reads a JSON array.
+- Typed results: an enum *field* of `Out` derives, but a bare enum `Out` (`McpTool[In, Color]`)
+  needs a `given JsonEncoder[Color]`; for collection results use `Seq[T]` / `Set[T]` or a case
+  class rather than `List[T]` / `Vector[T]` (the encoder summon is ambiguous for those); write
+  `Option.empty[T]` rather than `None` where the builder overloads would otherwise be ambiguous.
+  A typed tool with no arguments takes `case class NoArgs()` (there is no `McpDecoder[Unit]`).
+- Derived schemas use the `format` keywords `date-time`, `date`, `time`, `duration`, `uuid` and
+  `uri` for the matching `java.time` / `UUID` / `URI` types; validators running in strict mode
+  (`ajv --strict`) need their formats plugin (`ajv-formats`) to accept them.
 
 ## `McpInputCodec[T]`: one value, decoder plus schema
 
