@@ -23,6 +23,41 @@ callback IO directly. Because `runStdio()` has no reachable call path into the H
 stdio-only programs never link zio-http or netty. That is what makes small GraalVM images possible
 (see [native-image.md](./native-image.md)).
 
+### stdout is the wire — log to stderr
+
+Every byte a stdio server writes to stdout must be a JSON-RPC frame: a stray line confuses the host
+at best, and a line that lands *inside* a frame loses that reply. Two guarantees hold on the JVM,
+Scala.js/Bun and Scala Native alike:
+
+- **ZIO logs go to stderr.** ZIO's default logger prints to stdout (`console.log` on Bun), so the
+  stdio runner replaces it with the same format on stderr: `McpServerApp[Stdio]` installs
+  `TransportRunner.stdio.bootstrap` (`Runtime.removeDefaultLoggers ++
+  Runtime.addLogger(StdioLogging.stderrLogger)`) as its ZIO `bootstrap`, and `McpServer.runStdio()`
+  makes the same swap for a plain `ZIOAppDefault` as long as ZIO's stock logger is still installed.
+  `ZIO.logInfo` inside a tool is therefore safe. Loggers you install yourself are never touched.
+- **Frames are written atomically.** A reply and its newline go out in one `PrintStream` call, so
+  anything else that prints to `System.out` can only add a whole stray line between frames, never
+  split one. Still: never `println` from a stdio server — a stray line is a protocol error for
+  strict hosts. Use `ZIO.log*` or `System.err`.
+
+To use your own logger, override `bootstrap` — as a `val`, which is how `ZIOAppDefault` declares it
+(`override def` does not compile):
+
+```scala 3 raw
+import zio.*
+
+object MyServer extends McpServerApp[Stdio, MyServer.type]:
+  override val bootstrap: ZLayer[ZIOAppArgs, Any, Any] =
+    Runtime.removeDefaultLoggers ++
+      Runtime.addLogger(ZLogger.default.map(line => java.lang.System.err.println(line)))
+
+  @Tool(...) def hello(name: String): String = s"Hello, $name!"
+```
+
+Whatever the override installs is left alone by `runStdio()`; only ZIO's stock stdout logger is
+ever swapped. Before 1.0.0 the stdio runner installed no logger at all, so ZIO log lines went to
+stdout — if you relied on that, override `bootstrap` with a stdout logger of your own.
+
 ## HTTP
 
 ```scala 3 raw

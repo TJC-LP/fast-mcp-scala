@@ -173,6 +173,17 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Changed
 
+- **stdio servers log to stderr by default** (TJC-2338): on the stdio transport stdout is the wire,
+  but ZIO's default logger prints there (`println` on the JVM and Scala Native, `console.log` on
+  Scala.js/Bun for every level below Error), so a `ZIO.logInfo` inside a tool put a non-JSON line on
+  the channel and, under load, spliced it into a reply the client could never parse. The stdio
+  runner now installs the same log format on stderr: `McpServerApp[Stdio]` gets
+  `Runtime.removeDefaultLoggers ++ Runtime.addLogger(StdioLogging.stderrLogger)` as its ZIO
+  `bootstrap` (new `TransportRunner.bootstrap`; `McpServerApp[Http]` keeps `ZLayer.empty`), and
+  `McpServer.runStdio()` makes the same swap for a plain `ZIOAppDefault` while ZIO's stock logger is
+  still installed. Loggers you install yourself are never touched. Anyone who relied on ZIO log
+  lines appearing on stdout must override `bootstrap` (`override val`, not `def`) — see
+  docs/transports.md "stdout is the wire".
 - **Behaviour changes from the security wave (pre-1.0)** (TJC-2294):
   - Resource template literal text is matched verbatim — a `.` in `file://{name}.txt` is a dot, not
     a regex wildcard. Placeholders in one path segment must be separated by literal text (`{a}{b}`
@@ -270,6 +281,13 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Fixed
 
+- **stdio frames are written atomically** (TJC-2338): `StdioLoop.writeLine` (JVM and Scala Native)
+  emitted a reply as three `PrintStream` calls — the frame, its newline, then the flush — so any
+  concurrent `System.out` writer (a stray `println`, or ZIO's stdout logger above) could land
+  between the frame and its newline; the client then saw `{...}noise` plus an empty line and never
+  got that reply (the dogfooding stress lost one reply per 200 calls; 90-183 of 201 under `println`
+  spam). Frame and newline now go out in one call, so a foreign line can only ever land *between*
+  frames. Bun already wrote `line + "\n"` in one `process.stdout.write`.
 - **Annotation macros bind to the annotated overload** (F4 / CWE-706, TJC-2298): `scanAnnotations`
   used to re-resolve `@Tool` / `@Resource` / `@Prompt` targets by method name and could register,
   schema-describe and invoke a different same-named overload (for example an un-annotated raw
