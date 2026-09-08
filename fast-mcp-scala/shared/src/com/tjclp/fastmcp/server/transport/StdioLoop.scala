@@ -72,7 +72,7 @@ private[fastmcp] object StdioLoop:
   /** Blocking line write to `System.out`. Identical on the JVM and Scala Native (SN's javalib
     * provides the same `System.out` surface).
     */
-  private def writeLine(line: String): Task[Unit] =
+  private[fastmcp] def writeLine(line: String): Task[Unit] =
     ZIO.attempt {
       val out = java.lang.System.out
       out.print(line)
