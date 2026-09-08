@@ -423,3 +423,111 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     val overflowAnon = bodyOf(modernPost(routes, blockyCall(64), "tools/call", "blocky", None))
     overflowAnon should include(""""code":-32602""")
   }
+
+  // ---------------------------------------------------------------------------------------------
+  // TJC-2353: a legacy `tasks/result` must ALWAYS be answered. A cancelled task (tasks/cancel, TTL
+  // sweep) used to complete its promise with the fiber's interrupt-only cause; the awaiting handler
+  // re-raised it and the router read that as "the request itself was cancelled" — no frame at all
+  // (the SSE stream closed after a keepalive ping; the TS SDK's getTaskResult hung 60 s).
+  // ---------------------------------------------------------------------------------------------
+
+  private def augmentedCallTtl(id: Int, tool: String, ttlMs: Long): String =
+    s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"$tool","arguments":{},"task":{"ttl":$ttlMs}}}"""
+
+  private val CancelledFrame = """"code":-32602"""
+
+  test("tasks/result after tasks/cancel answers an error frame (-32602), never silence") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    val taskId = extractTaskId(bodyOf(post(routes, augmentedCall(70, "blocky"), Some(sid))))
+    bodyOf(post(routes, tasksCancel(71, taskId), Some(sid))) should include(""""status":"cancelled"""")
+    val result = bodyOf(post(routes, tasksResult(72, taskId), Some(sid)))
+    withClue(s"tasks/result body after cancel: <$result> ") {
+      result should include(""""id":72""")
+      result should include(CancelledFrame)
+      result should include(s"Task $taskId was cancelled")
+    }
+  }
+
+  test("a parked tasks/result waiter is answered when the task is cancelled") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    val taskId = extractTaskId(bodyOf(post(routes, augmentedCall(73, "blocky"), Some(sid))))
+    val result = runUnsafe(
+      for
+        waiter <- ZIO.attemptBlocking(bodyOf(post(routes, tasksResult(74, taskId), Some(sid)))).fork
+        _ <- ZIO.sleep(300.millis) // let the waiter park on the task promise
+        cancelled <- ZIO.attemptBlocking(bodyOf(post(routes, tasksCancel(75, taskId), Some(sid))))
+        _ = cancelled should include(""""status":"cancelled"""")
+        body <- waiter.join.timeoutFail(
+          new RuntimeException("parked tasks/result was never answered after tasks/cancel")
+        )(10.seconds)
+      yield body
+    )
+    withClue(s"parked tasks/result body: <$result> ") {
+      result should include(""""id":74""")
+      result should include(CancelledFrame)
+      result should include(s"Task $taskId was cancelled")
+    }
+  }
+
+  test("a parked tasks/result waiter is answered when the task's TTL expires") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    // ttl 300 ms on a 2 s tool: the sweeper removes the entry and interrupts the fiber while the
+    // waiter is parked. The waiter must get a frame, not an EOF.
+    val created = bodyOf(post(routes, augmentedCallTtl(76, "blocky", 300L), Some(sid)))
+    created should include(""""ttl":300""")
+    val taskId = extractTaskId(created)
+    val result = runUnsafe(
+      ZIO
+        .attemptBlocking(bodyOf(post(routes, tasksResult(77, taskId), Some(sid))))
+        .timeoutFail(
+          new RuntimeException("parked tasks/result was never answered after TTL expiry")
+        )(10.seconds)
+    )
+    withClue(s"tasks/result body during TTL expiry: <$result> ") {
+      result should include(""""id":77""")
+      result should include(CancelledFrame)
+    }
+    // Once swept, the id is simply unknown — same -32602 family as tasks/get.
+    val gone = bodyOf(post(routes, tasksGet(78, taskId), Some(sid)))
+    gone should include(""""code":-32602""")
+    gone should include("Unknown task")
+  }
+
+  test("a cancelled bearer task's tasks/get snapshot renders no result or error block (guard)") {
+    // The promise now completes with a TaskCancelledError value; `renderSnapshot` must keep
+    // treating a Cancelled task as detail-less (details are for Completed / Failed only).
+    val routes = buildRoutes()
+    val created = bodyOf(
+      modernPost(
+        routes,
+        s"""{"jsonrpc":"2.0","id":80,"method":"tools/call","params":{"name":"blocky","arguments":{},$taskMeta}}""",
+        "tools/call",
+        "blocky"
+      )
+    )
+    val taskId = extractTaskId(created)
+    val cancelled = bodyOf(
+      modernPost(
+        routes,
+        s"""{"jsonrpc":"2.0","id":81,"method":"tasks/cancel","params":{"taskId":"$taskId",$taskMeta}}""",
+        "tasks/cancel",
+        taskId
+      )
+    )
+    cancelled should include(""""resultType":"complete"""")
+    val snapshot = bodyOf(
+      modernPost(
+        routes,
+        s"""{"jsonrpc":"2.0","id":82,"method":"tasks/get","params":{"taskId":"$taskId",$taskMeta}}""",
+        "tasks/get",
+        taskId
+      )
+    )
+    snapshot should include(""""status":"cancelled"""")
+    snapshot should not include """"error":"""
+    // Exactly one "result": the JSON-RPC envelope's — no nested task result payload.
+    snapshot.sliding(9).count(_ == "\"result\":") shouldBe 1
+  }
