@@ -48,7 +48,8 @@ What the Scala.js target gives you:
 
 - The same native MCP **server runtime** on Bun: stdio (`runStdio`, Node stdin) and modern
   stateless Streamable HTTP (`runHttp`, `Bun.serve`), plus the version-selected legacy session
-  adapter. The Bun listener runs with `development: false`, an `error` callback and a first-party
+  adapter. The Bun listener runs with `development: false`, an `error` callback, `idleTimeout: 0`
+  (Bun's 10 s default would close a quiet SSE response before a slow tool replies) and a first-party
   `catchAllCause` boundary (`NODE_ENV` is not security-relevant); `startStatefulHttp()` /
   `startStatelessHttp()` return a `BunHttpHandle` (call `.stop()`), and idle-session eviction plus
   the `maxSessions` cap run on every entry.

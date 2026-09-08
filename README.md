@@ -245,7 +245,7 @@ All settings, required request headers, error-code mapping, the legacy adapter, 
 
 ## Native image (GraalVM)
 
-Stdio servers compile to self-contained GraalVM binaries with **zero hand-written reachability metadata** (about 35 MB, instant startup, no JVM in the container): registration and schema derivation are compile-time macros, and the transport-seam split keeps zio-http/netty out of stdio-only images. HTTP servers compile too and pass the official conformance suite as a native binary in CI. Recipes, flags, and the metadata audit loop: [docs/native-image.md](docs/native-image.md).
+Stdio servers compile to self-contained GraalVM binaries with **zero hand-written reachability metadata** (about 35 MB, instant startup, no JVM in the container): registration and schema derivation are compile-time macros, and the transport-seam split keeps zio-http/netty out of stdio-only images — exclude both `dev.zio:zio-http_3` and `io.netty:*` from the dependency (netty is a direct, version-pinned dependency of the JVM artifact, so excluding zio-http alone is not enough). HTTP servers compile too and pass the official conformance suite as a native binary in CI. Recipes, flags, and the metadata audit loop: [docs/native-image.md](docs/native-image.md).
 
 ## Platforms
 

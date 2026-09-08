@@ -104,7 +104,15 @@ still fill a pool, so pair the peer-address key with edge rate limiting.
   leaves no entry and no parked fiber behind).
 - `Session.terminate` — used by HTTP DELETE, idle eviction, and session-cap eviction — interrupts
   the session's in-flight requests and releases (interrupts) that session's running legacy tasks;
-  `runStdio()` / `runHttp()` stop the sweeper and running tasks on shutdown.
+  `runStdio()` / `runHttp()` stop the sweeper and running tasks on shutdown. A request in flight is
+  not session activity (activity is stamped on arrival), so a legacy `tasks/result` parked longer
+  than `sessionIdleTimeout` on an otherwise quiet session can be evicted mid-wait and gets no reply.
+- Cancellation is cooperative. `tasks/cancel`, TTL expiry and session release interrupt the task
+  fiber, but a synchronous body (`ZIO.attempt`, or a plain method on the annotation path) observes
+  the interrupt only when it returns, so the status flips — and the `tasks/cancel` reply arrives —
+  when the body finishes; on Scala.js a running synchronous body cannot be interrupted at all.
+  Write long task bodies as ZIO effects (`ZIO.sleep`, streams, `attemptBlockingInterrupt` on the
+  JVM) so they stop promptly; a grace-bounded cancel is tracked for 1.0.1.
 - The server creates working / completed / failed / cancelled tool tasks. It implements
   `tasks/update` validation but does **not yet** suspend a task in `input_required`.
 - `notifications/tasks/status` is emitted on legacy (2025-11-25) sessions on every terminal
@@ -119,4 +127,7 @@ On the compatibility adapter, clients send `params.task: {ttl}` and poll `tasks/
 outlives a single request: the legacy streamable-HTTP adapter and stdio (one durable session per
 process). On the **stateless** legacy adapter all clients share one session identity, so legacy
 task requests there are rejected with `-32601`. Bearer tasks are invisible to legacy sessions and
-vice versa.
+vice versa. `tasks/result` is always answered: for a task that was cancelled (`tasks/cancel`, TTL
+sweep, session release) — whether already terminal or cancelled while the waiter was parked — it
+fails with `-32602` (`Task <id> was cancelled`); once the TTL has swept the entry, with `-32602`
+`Unknown task`, the same code `tasks/get` uses.

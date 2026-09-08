@@ -24,6 +24,13 @@ object Versions {
   val zio = "2.1.20"
   val zioJson = "0.7.44"
   val zioHttp = "3.4.0"
+  // Netty is zio-http's transitive dependency, but it is the JVM artifact's largest CVE surface, so
+  // its version is pinned here rather than inherited: zio-http 3.4.0 declares 4.2.3.Final, which
+  // carries 27 OSV advisories (7 reachable on the default HTTP path). The jvm module pins every
+  // io.netty module zio-http brings AND imports the netty BOM, so the resolved classpath and every
+  // downstream POM consumer see a single netty version. Bump when a netty 4.2.x advisory lands;
+  // re-run the OSV audit (DEPENDENCY_POLICY.md) and the native-image HTTP smoke afterwards.
+  val netty = "4.2.17.Final"
   val scalaTest = "3.2.19"
   // Scala 3.9.0 emits Scala.js 1.22 IR, so the linker must be at least 1.22. mill-bun 0.3.x
   // delegates to Mill's standard ScalaJSModule and makes this pin explicit (Mill 1.1.x's own
@@ -60,7 +67,6 @@ object BuildConfig {
     "-Wnonunit-statement",
     // Macro-specific options (CRITICAL for this project)
     "-Xcheck-macros",
-    "-experimental",
     "-Xmax-inlines:128"
   )
 

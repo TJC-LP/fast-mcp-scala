@@ -177,7 +177,7 @@ class MapToFunctionMacroTest extends AnyFunSuite with Matchers {
       mapFunction.asInstanceOf[Map[String, Any] => String](Map.empty)
     }
 
-    exception.getMessage should include("Key not found in map")
+    exception.getMessage should include("Missing required argument 'name'")
   }
 
   // Test for error handling with incorrect parameter types

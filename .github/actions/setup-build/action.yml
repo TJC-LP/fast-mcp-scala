@@ -42,7 +42,7 @@ runs:
   using: composite
   steps:
     - name: Set up JDK ${{ inputs.java-version }}
-      uses: coursier/setup-action@039f736548afa5411c1382f40a5bd9c2d30e0383 # v1.3.9
+      uses: coursier/setup-action@9b7939bf01fd1185ce2babe16135168361bf2c62 # v3.0.2
       with:
         jvm: temurin:${{ inputs.java-version }}
 
@@ -64,7 +64,7 @@ runs:
     # that scripts/conformance.sh relies on.
     - name: Cache Coursier
       if: inputs.cache == 'true' && inputs.cache-write == 'true'
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/.cache/coursier
@@ -75,7 +75,7 @@ runs:
 
     - name: Restore Coursier (read-only)
       if: inputs.cache == 'true' && inputs.cache-write != 'true'
-      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/.cache/coursier
@@ -88,7 +88,7 @@ runs:
     # launchers used ~/.mill. Caching both keeps every job on one warm path.
     - name: Cache Mill
       if: inputs.cache == 'true' && inputs.cache-write == 'true'
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/.cache/mill
@@ -99,7 +99,7 @@ runs:
 
     - name: Restore Mill (read-only)
       if: inputs.cache == 'true' && inputs.cache-write != 'true'
-      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/.cache/mill

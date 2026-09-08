@@ -31,24 +31,48 @@ when stdin closes — wait for every reply before closing the pipe (Scala Native
 them). The stdio lifecycle (`StdioLoop`: session, single-writer stdout, outbound drainer, EOF
 teardown) is shared by the JVM and Scala Native backends; the Scala.js backend drives Node's
 callback IO directly. Because `runStdio()` has no reachable call path into the HTTP stack,
-stdio-only programs never link zio-http or netty. That is what makes small GraalVM images possible
+stdio-only programs never link zio-http or netty; exclude both `dev.zio:zio-http_3` and `io.netty:*`
+from the dependency (netty is a direct, version-pinned dependency of the JVM artifact) to keep them
+off the classpath too. That is what makes small GraalVM images possible
 (see [native-image.md](./native-image.md)).
 
-**stdout is the wire; log to stderr.** ZIO's default logger prints to stdout, so a handler that
-calls `ZIO.logInfo` (or anything else that writes `System.out`) puts a non-JSON line on the protocol
-channel — and under concurrent calls can splice it into a reply frame, which the client then never
-parses. Until 1.0.0's stdio runner installs it by default (TJC-2338), route the logger to stderr in
-your app (`val`, not `def`: `bootstrap` must be a stable value):
+### stdout is the wire — log to stderr
+
+Every byte a stdio server writes to stdout must be a JSON-RPC frame: a stray line confuses the host
+at best, and a line that lands *inside* a frame loses that reply. Two guarantees hold on the JVM,
+Scala.js/Bun and Scala Native alike:
+
+- **ZIO logs go to stderr.** ZIO's default logger prints to stdout (`console.log` on Bun), so the
+  stdio runner replaces it with the same format on stderr: `McpServerApp[Stdio]` installs
+  `TransportRunner.stdio.bootstrap` (`Runtime.removeDefaultLoggers ++
+  Runtime.addLogger(StdioLogging.stderrLogger)`) as its ZIO `bootstrap`, and `McpServer.runStdio()`
+  makes the same swap for a plain `ZIOAppDefault` as long as ZIO's stock logger is still installed.
+  `ZIO.logInfo` inside a tool is therefore safe. Loggers you install yourself are never touched.
+- **Frames are written atomically.** A reply and its newline go out in one `PrintStream` call, so
+  anything else that prints to `System.out` can only add a whole stray line between frames, never
+  split one. Still: never `println` from a stdio server — a stray line is a protocol error for
+  strict hosts. Use `ZIO.log*` or `System.err`.
+
+To use your own logger, override `bootstrap` — as a `val`, which is how `ZIOAppDefault` declares it
+(`override def` does not compile):
 
 ```scala 3 raw
 import zio.*
 
 object MyServer extends McpServerApp[Stdio, MyServer.type]:
-  override val bootstrap =
-    Runtime.removeDefaultLoggers ++ Runtime.addLogger(ZLogger.default.map(java.lang.System.err.println))
+  override val bootstrap: ZLayer[ZIOAppArgs, Any, Any] =
+    Runtime.removeDefaultLoggers ++
+      Runtime.addLogger(ZLogger.default.map(line => java.lang.System.err.println(line)))
 
   @Tool(...) def hello(name: String): String = s"Hello, $name!"
 ```
+
+Whatever the override installs is left alone by `runStdio()`; only ZIO's stock stdout logger is
+ever swapped. Before 1.0.0 the stdio runner installed no logger at all, so ZIO log lines went to
+stdout — if you relied on that, override `bootstrap` with a stdout logger of your own. The ZIO
+runtime itself has two stdout prints outside the logger — the `gracefulShutdownTimeout` expiry
+warning and the notice it prints when a logger throws — both unreachable at the defaults
+(`gracefulShutdownTimeout` is infinite), so leave that default alone on stdio.
 
 ## HTTP
 
@@ -69,7 +93,9 @@ dispatch fiber; `subscriptions/listen` uses the same long-lived POST response.
 
 Modern Streamable HTTP is identical on the JVM (ZIO HTTP) and Bun (`Bun.serve`). Both backends
 serve plaintext HTTP/1.1 only — there is no TLS setting by design; terminate TLS and authentication
-at a reverse proxy in front of the MCP endpoint.
+at a reverse proxy in front of the MCP endpoint. Neither backend adds CORS headers or answers an
+`OPTIONS` preflight: a browser-hosted client on another origin needs a CORS-terminating proxy in
+front of the endpoint (and, with `allowedHosts` on, its origin listed in `allowedOrigins`).
 
 ### Request requirements and error mapping
 
@@ -122,7 +148,10 @@ sessions are evicted after `sessionIdleTimeout`, and the store is capped by `max
 (`Some(1000)` by default): at the cap the longest-idle session without a live GET stream is evicted
 to make room, and the `initialize` is refused with 503 only when every stored session holds a live
 GET. DELETE, idle eviction, and cap eviction all go through `Session.terminate`: a request still in
-flight on that session is interrupted (no reply) and its running legacy tasks are released. An
+flight on that session is interrupted (no reply) and its running legacy tasks are released. Activity
+is stamped when a request arrives, not while it runs, so a call that outlasts `sessionIdleTimeout`
+on an otherwise quiet session can be evicted mid-flight and never answered (a `-32001` reply is
+tracked for 1.0.1) — keep the timeout above your longest call, or poll through Tasks. An
 empty `mcp-session-id` header counts as an unknown session on the JVM (404) and as a missing header
 on Bun (400). On Bun a legacy session has no GET channel, so a server→client message emitted outside
 a request (a future `notifications/resources/updated`) has no delivery path; nothing publishes such
@@ -144,11 +173,11 @@ clients share one session identity, which is why legacy task requests there are 
 | `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless. |
 | `disallowDelete` | `false` | Legacy adapter: answer 405 to HTTP DELETE instead of terminating the session. |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity (live legacy GET streams are exempt); `None` disables. |
-| `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. Legacy POST/GET streams heartbeat from the first byte; a modern per-request stream is opened — and its first heartbeat sent — only once the first frame is available, so a silent long tool call sends nothing until then (tracked for 1.0.1). |
-| `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` hostname must be listed (port ignored); a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, and malformed `Host`/`Origin` ports are refused (403). IPv6 literals are listed in bracket form, e.g. `"[::1]"`. |
+| `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. Legacy POST/GET streams heartbeat from the first byte; a modern per-request stream is opened — and its first heartbeat sent — only once the first frame is available, so a silent long tool call sends nothing until then (tracked for 1.0.1). Neither listener closes a quiet stream on its own: the JVM has no idle timeout and Bun runs with `idleTimeout: 0` (its 10 s default used to cut a slow tool's reply). |
+| `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` value must parse as one `host[:port]` authority and its hostname (or the verbatim `host:port`) must be listed — the port itself is not compared; a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, a `Host` or `Origin` sent more than once (seen as its `", "`-joined value), and malformed `Host`/`Origin` ports are refused (403), with or without the other header. IPv6 entries are written bracketed, exactly as they appear in the `Host` header: `Set("[::1]")`, not `Set("::1")`. |
 | `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted in addition to the request's own authority **when `allowedHosts` is also set**; with `allowedOrigins` alone only the listed origins pass (the request's own authority is then refused 403 too). Malformed entries fail `runHttp()` at startup. |
 | `maxRequestBodyBytes` | `1 MiB` | Request body cap on every backend; larger bodies get 413 before decoding (empty 413 on the wire from netty/Bun, JSON-RPC `-32000` on first-party paths); must not exceed `limits.maxFrameChars`. This is the cap a large `sampling/createMessage` or elicitation *result* meets over HTTP (a legacy client then waits out its 60 s request timeout): raise it together with `limits.maxFrameChars` — see [Input limits](#input-limits). |
-| `maxSessions` | `Some(1000)` | Cap on stored legacy sessions; at the cap the longest-idle session without a live GET is evicted (unauthenticated initializes can evict idle sessions — front non-loopback deployments with auth), 503 only if none is evictable; `None` disables. |
+| `maxSessions` | `Some(1000)` | Cap on stored legacy sessions; at the cap the longest-idle session without a live GET is evicted (unauthenticated initializes can evict idle sessions — front non-loopback deployments with auth), 503 only if none is evictable; `None` disables. A session whose GET peer disappeared without closing the connection still counts as holding a live GET until the OS reports the dead socket — sooner with `keepAliveInterval` set, since each heartbeat write probes the connection (TJC-2355 adds an idle-based fallback eviction). |
 | `loggingEnabled` | `false` | Advertise logging; modern clients use per-request `_meta` levels, legacy clients `logging/setLevel`. |
 | `resourcesSubscribe` | `false` | Enable legacy `resources/subscribe`; modern clients use `subscriptions/listen`. |
 | `exposeTemplatesEndpoint` | `false` | List registered resource templates through `resources/templates/list`. `resources/list` never lists templates; with the default the templates endpoint answers an empty page (clients derive templates from `{}` URIs) and `resources/read` on a matching URI works either way. Applies on every transport. |
