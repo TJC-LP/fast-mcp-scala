@@ -93,6 +93,11 @@ Every pull request must pass:
   is what `--frozen-lockfile` enforces).
 - **Native stdio smoke** (`native.yml`) — `scripts/native-smoke.sh [binary]` drives a stdio binary
   through the full MCP handshake.
+- **OSV advisories** (`osv.yml`) — weekly, and on pull requests that change `build.mill` or
+  `fast-mcp-scala/package.mill`: `scripts/osv-scan.sh` queries OSV.dev for the production classpath
+  of the three published modules and fails on any advisory rated MODERATE or higher (or of unknown
+  severity). The rule and the `.github/osv-ignore` format for an accepted advisory are documented
+  in the script header; run it locally with `scripts/osv-scan.sh`.
 
 ## Consuming a local build
 
@@ -153,6 +158,11 @@ through [SECURITY.md](SECURITY.md), never a public issue.
 - `build.mill` holds a `-SNAPSHOT` default during development.
 - A release-prep PR strips the suffix, dates the CHANGELOG section, and updates version pins in
   the README and docs.
+- Before tagging, dry-run the release workflow by hand: Actions → Release → Run workflow, with
+  `version` set to the version about to be tagged (no leading `v`). The dispatch runs the same
+  test job and then `publishLocal` of all three artifacts at that version on the runner; the
+  Sonatype step and the GitHub-release job run only on a tag push, so a dispatch can never upload
+  or create a release.
 - An annotated tag `vX.Y.Z` on the merge commit triggers `.github/workflows/release.yml`, which
   runs the full test suite and publishes all three artifacts to Maven Central. A `-` qualifier in
   the tag (`v1.0.0-RC1`) marks the GitHub release as a prerelease. The workflow is three jobs —

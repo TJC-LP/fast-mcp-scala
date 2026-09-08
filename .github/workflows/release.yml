@@ -1,9 +1,22 @@
 name: Release
 
+# Two triggers, one workflow:
+#   * push of a `v*` tag — the release: verify → publish (Sonatype Central) → github-release;
+#   * workflow_dispatch with `version` — a DRY RUN a maintainer starts by hand before tagging (Actions
+#     → Release → Run workflow): the same verify job, then `publishLocal` of all three artifacts at
+#     that version on the runner — the whole publish pipeline except PGP signing and the Sonatype
+#     upload. Nothing leaves the runner: the Sonatype step and the github-release job carry
+#     `if: github.event_name == 'push'`, so every `secrets.` reference is unreachable from a dispatch.
 on:
   push:
     tags:
       - 'v*'  # Triggers on version tags like v0.1.0, v1.0.0
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to dry-run, without the leading v (e.g. 1.0.0). publishLocal only — nothing is uploaded or released.
+        required: true
+        type: string
 
 # Prevent concurrent releases
 concurrency:
@@ -42,7 +55,7 @@ jobs:
         run: ./mill -i fast-mcp-scala.test
 
   publish:
-    name: Publish to Maven Central
+    name: ${{ github.event_name == 'push' && 'Publish to Maven Central' || 'Publish dry run (publishLocal, nothing uploaded)' }}
     needs: verify
     runs-on: ubuntu-latest
     if: github.repository == 'TJC-LP/fast-mcp-scala'
@@ -65,29 +78,61 @@ jobs:
       - name: Fetch annotated tags
         run: git fetch --tags --force   # unauthenticated: public repo
 
+      # Tag push: the version is the tag name minus `v`. Dispatch: the `version` input (read through
+      # env, never interpolated into the script). Both paths must pass the same semver check.
       - name: Extract version
         id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }} # dispatch only; empty on a tag push
         run: |
-          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "Publishing version: $TAG_VERSION"
-          # Verify the tag matches semver pattern
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            TAG_VERSION="$INPUT_VERSION"
+            echo "Dry-run version (workflow_dispatch): $TAG_VERSION"
+          else
+            TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+            echo "Publishing version: $TAG_VERSION"
+          fi
+          # Verify the version matches semver pattern
           if ! [[ "$TAG_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
-            echo "Error: Tag must be a valid semver version (e.g., v0.1.0, v1.0.0-RC1)"
+            echo "Error: version must be a valid semver version (tag v0.1.0 / v1.0.0-RC1; dispatch input without the leading v)"
             exit 1
           fi
           echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
 
+      # `./mill show a b c` prints only a's value (b and c are parsed as arguments to a); the wildcard
+      # yields all three modules keyed by task, and jq asserts each equals the extracted version.
+      # --no-server: build.mill reads PUBLISH_VERSION inside a task and a warm daemon would keep the
+      # environment it was started with.
       - name: Verify Publishing Setup
         run: |
           echo "Version: $PUBLISH_VERSION"
-          ./mill show fast-mcp-scala.jvm.publishVersion fast-mcp-scala.js.publishVersion fast-mcp-scala.scalaNative.publishVersion
+          ./mill --no-server show fast-mcp-scala.__.publishVersion | tee publish-versions.json
+          jq -e --arg v "$PUBLISH_VERSION" 'to_entries | length == 3 and all(.[]; .value == $v)' publish-versions.json >/dev/null \
+            || { echo "Error: the three modules' publishVersion must all equal $PUBLISH_VERSION"; exit 1; }
         env:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
 
-      # LAST step of the job. The only code that runs after the secrets appear is actions/checkout's
-      # GitHub-owned, SHA-pinned post step (credential cleanup — a no-op with persist-credentials:
-      # false); coursier/setup-action has no post hook and setup-bun is not used in this job.
+      # DRY RUN ONLY (workflow_dispatch): builds and publishes all three artifacts to the runner's
+      # ~/.ivy2/local at the requested version — everything the release does except PGP signing and
+      # the Sonatype upload — then asserts every artifact directory exists. Nothing leaves the runner.
+      - name: Local publish (dispatch dry run)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          ./mill --no-server fast-mcp-scala.__.publishLocal
+          for artifact in fast-mcp-scala_3 fast-mcp-scala_sjs1_3 fast-mcp-scala_native0.5_3; do
+            dir="$HOME/.ivy2/local/com.tjclp/$artifact/$PUBLISH_VERSION"
+            [ -d "$dir" ] || { echo "Error: publishLocal produced no $dir"; exit 1; }
+            find "$dir" -type f | sort
+          done
+        env:
+          PUBLISH_VERSION: ${{ steps.version.outputs.version }}
+
+      # LAST step of the job, tag pushes only. The only code that runs after the secrets appear is
+      # actions/checkout's GitHub-owned, SHA-pinned post step (credential cleanup — a no-op with
+      # persist-credentials: false); coursier/setup-action has no post hook and setup-bun is not
+      # used in this job.
       - name: Publish to Maven Central
+        if: github.event_name == 'push'
         run: ./mill -i mill.javalib.SonatypeCentralPublishModule/
         env:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
@@ -100,7 +145,8 @@ jobs:
     name: Create GitHub Release
     needs: publish
     runs-on: ubuntu-latest
-    if: github.repository == 'TJC-LP/fast-mcp-scala'
+    # Tag pushes only: a dispatch dry run never creates a release.
+    if: github.repository == 'TJC-LP/fast-mcp-scala' && github.event_name == 'push'
     permissions:
       contents: write   # the ONLY write grant in the workflow
 
