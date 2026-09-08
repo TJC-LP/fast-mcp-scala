@@ -46,11 +46,12 @@ class TypedContractSurfaceNegativeTest extends AnyFunSuite:
     assertSomeMessageContains(errs, "case class", "NoArgs")
   }
 
-  test("McpTool[List[DxItem], _] is rejected at compile time: an array root is not an object") {
+  // List[Int] (not List[DxItem]): its McpDecoder resolves, so the schema guard is what fails.
+  test("McpTool[List[Int], _] is rejected at compile time: an array root is not an object") {
     val errs: List[Error] =
-      typeCheckErrors("""McpTool[List[DxItem], String](name = "l")(_.size.toString)""")
-    assert(errs.nonEmpty, "McpTool[List[DxItem], String] compiled with an array inputSchema root")
-    assertSomeMessageContains(errs, "case class")
+      typeCheckErrors("""McpTool[List[Int], String](name = "l")(_.size.toString)""")
+    assert(errs.nonEmpty, "McpTool[List[Int], String] compiled with an array inputSchema root")
+    assertSomeMessageContains(errs, "case class", "array")
   }
 
   test("control: a Map[String, Int] In is an object root and compiles") {

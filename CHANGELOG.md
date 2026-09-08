@@ -219,6 +219,13 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Changed
 
+- **`McpTool` `In` must derive an object schema** (TJC-2331, C2.4; rejects a shape that was silently
+  broken): `McpTool[String, _]`, `McpTool[Int, _]`, a collection, `Option`, `Either`, an enum or a
+  sealed trait as `In` used to compile and advertise a non-object `inputSchema` that no MCP
+  `arguments` object could ever satisfy — the tool could not be called. The derived
+  `ToolSchemaProvider` now aborts at compile time: `McpTool In must be a case class (use `case class
+  NoArgs()` for no arguments)`. Case classes, `Map[String, V]`, `Unit` and types with a user
+  `McpSchema` / `McpInputCodec` are unaffected.
 - **Legacy HTTP session cap: idle GET holders become evictable** (TJC-2355): at `maxSessions` the
   JVM adapter still evicts the longest-idle session without a live GET stream first; when every
   stored session holds a live GET, it now evicts the longest-idle of them once it has been idle
