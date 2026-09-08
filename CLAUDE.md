@@ -336,9 +336,9 @@ Then use the version printed by `./mill show fast-mcp-scala.jvm.publishVersion` 
 
 Key dependencies (versions in `build.mill`):
 - Scala 3.9.0 LTS
-- ZIO 2.1.20 - Effect system
-- ZIO JSON 0.7.44 - JSON codecs (shared)
-- ZIO HTTP 3.4.0 - HTTP transport
+- ZIO 2.1.26 - Effect system
+- ZIO JSON 0.10.0 - JSON codecs (shared)
+- ZIO HTTP 3.11.4 - HTTP transport (brings netty 4.2.17.Final transitively; the JVM module imports `io.netty:netty-bom` at `Versions.netty` but declares no `io.netty` dependency)
 - Native Scala 3 macros - Compile-time JSON Schema derivation
 - mill-bun-plugin 0.3.1 - Scala.js + Bun build integration (Scala.js 1.22.0 pinned via `Versions.scalaJs`)
 - `@modelcontextprotocol/sdk` 1.29.0 - TS MCP SDK, pinned in the js module's `bunDevDeps` and frozen by the committed `fast-mcp-scala/js/bun.lock`; consumed only by the `js.test` conformance client (zero production `@JSImport`s, absent from the published bun manifest)

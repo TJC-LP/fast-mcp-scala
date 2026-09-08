@@ -153,7 +153,9 @@ Tool handlers return `ZIO[Any, Throwable, Out]`. Handler failures surface in-ban
 Pinned in `build.mill`:
 
 - **Scala** 3.9.0 LTS
-- **ZIO** 2.1.20, **zio-json** 0.7.44 (the wire codec on both platforms), **zio-http** 3.4.0
+- **ZIO** 2.1.26, **zio-json** 0.10.0 (the wire codec on both platforms), **zio-http** 3.11.4
+  (JVM HTTP transport; netty 4.2.17.Final arrives only through it — the JVM module imports
+  `io.netty:netty-bom` at `Versions.netty` but declares no `io.netty` dependency)
 - **Native Scala 3 macros** for JSON Schema derivation, emitted as `zio-json` ASTs
 - **mill-bun-plugin** 0.3.1 (Scala.js + Bun integration)
 - **WartRemover** 3.6.1 (linting)

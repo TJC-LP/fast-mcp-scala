@@ -21,15 +21,19 @@ val organization = "com.tjclp"
 
 /** Version constants - centralized for maintenance */
 object Versions {
-  val zio = "2.1.20"
-  val zioJson = "0.7.44"
-  val zioHttp = "3.4.0"
-  // Netty is zio-http's transitive dependency, but it is the JVM artifact's largest CVE surface, so
-  // its version is pinned here rather than inherited: zio-http 3.4.0 declares 4.2.3.Final, which
-  // carries 27 OSV advisories (7 reachable on the default HTTP path). The jvm module pins every
-  // io.netty module zio-http brings AND imports the netty BOM, so the resolved classpath and every
-  // downstream POM consumer see a single netty version. Bump when a netty 4.2.x advisory lands;
-  // re-run the OSV audit (DEPENDENCY_POLICY.md) and the native-image HTTP smoke afterwards.
+  val zio = "2.1.26"
+  val zioJson = "0.10.0"
+  val zioHttp = "3.11.4"
+  // Netty reaches the JVM artifact only through zio-http: 3.11.4 declares 4.2.17.Final, so the
+  // io.netty modules are transitive again and nothing in the build declares them directly (the
+  // TJC-2327 direct pins were a stopgap while zio-http 3.4.0 still declared 4.2.3.Final, which
+  // carried 27 OSV advisories). This constant is what the jvm module's netty BOM import speaks:
+  // it keeps every io.netty module zio-http requests — the classified native artifacts included —
+  // on ONE version for POM consumers, and it is the single switch to flip should a netty 4.2.x
+  // advisory land before zio-http moves. Keep it equal to what zio-http declares
+  // (`cs resolve dev.zio:zio-http_3:<zioHttp> | grep io.netty`) unless an advisory forces it
+  // ahead; after any change re-run the OSV audit (DEPENDENCY_POLICY.md) and the native-image HTTP
+  // smoke. It is the JVM artifact's largest CVE surface, so it stays visible here.
   val netty = "4.2.17.Final"
   val scalaTest = "3.2.19"
   // Scala 3.9.0 emits Scala.js 1.22 IR, so the linker must be at least 1.22. mill-bun 0.3.x

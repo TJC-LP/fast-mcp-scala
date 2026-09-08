@@ -112,8 +112,8 @@ case class McpServerSettings(
     stateless: Boolean = false,
     // SSE heartbeat period. Also the only thing that makes the OS probe a GET peer that vanished
     // without closing its connection (a socket is probed only when written to; the OS then gives
-    // up after its own retransmission budget) — zio-http 3.4.0 exposes no accepted-socket option,
-    // so the server sets no TCP keepalive itself.
+    // up after its own retransmission budget) — zio-http 3.11.4 exposes no accepted-socket option
+    // (only TCP_NODELAY is set on accepted channels), so the server sets no TCP keepalive itself.
     keepAliveInterval: Option[java.time.Duration] = None,
     // Streamable HTTP only: evict sessions idle longer than this (no POST/GET/DELETE activity).
     // Sessions with a live GET stream are exempt from the periodic sweep, but at the `maxSessions`
