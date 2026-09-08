@@ -114,10 +114,11 @@ version in your project:
 // sbt
 libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "<version>"   // %%% for Scala.js / Native
 
-// Mill
+// Mill — write `::` before the version on a ScalaJSModule / ScalaNativeModule (the single-colon
+// form resolves the JVM jar, compiles with only a Mill warning, and fails at fastLinkJS)
 def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:<version>")
 
-// scala-cli
+// scala-cli — `::` before the version for Scala.js / Native (with `//> using platform ...`)
 //> using dep com.tjclp::fast-mcp-scala:<version>
 ```
 
