@@ -189,6 +189,15 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   single customization point that supplies both the zio-json decoder used
   inside typed request case classes and the JSON Schema advertised for a
   custom wire type.
+- **OSV advisory gate** (TJC-2329): `.github/workflows/osv.yml` queries [OSV.dev](https://osv.dev)
+  for every coordinate on the production classpath of the three published modules
+  (`fast-mcp-scala.{jvm,js,scalaNative}.resolvedMvnDeps` — the same coursier resolution Mill puts
+  on the classpath, netty included) weekly, on every pull request that touches `build.mill`,
+  `fast-mcp-scala/package.mill`, the workflow or the script, and on demand. The job fails on any
+  advisory rated MODERATE or higher (GitHub Advisory Database label, else the CVSS v3 base score)
+  or of unknown severity; LOW advisories are reported only, and an accepted advisory is recorded in
+  `.github/osv-ignore`. Run locally with `scripts/osv-scan.sh`. GitHub's dependency graph cannot
+  see Mill-resolved Maven dependencies, so this is the published classpath's CVE feed.
 - **Root-import surface** (TJC-2336): `import com.tjclp.fastmcp.{*, given}` now also exports the
   settings sub-records `TaskSettings` and `LimitSettings`, the per-tool task policy `TaskSupport`
   and `TaskOwnerKey`, and the `resources/read` payload ADT `ResourceContents` /
@@ -314,6 +323,14 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 - JSON Schema derivation is now a native Scala 3 macro that emits `zio-json`
   AST values directly on JVM and Scala.js. Typed contracts no longer require
   `sttp.tapir.generic.auto.*` at call sites.
+- **Release workflow dry run** (TJC-2329): `release.yml` accepts `workflow_dispatch` with a
+  `version` input. A dispatch runs the full test suite and then `publishLocal` of all three
+  artifacts at that version on the runner (everything the release does except PGP signing and the
+  Sonatype upload) and asserts the three artifact directories exist; the Sonatype step and the
+  GitHub-release job run only on a `v*` tag push, so no publishing secret is reachable from a
+  dispatch. The pre-publish version check now asserts all three modules' `publishVersion` (the
+  former `show a b c` form printed only the JVM module's). Every CI checkout sets
+  `persist-credentials: false`.
 - **Never-read `McpServerSettings` fields removed** (TJC-2336): `debug`, `logLevel`,
   `warnOnDuplicateResources`, `warnOnDuplicateTools`, `warnOnDuplicatePrompts` and `dependencies`
   were accepted and silently ignored (nothing read them; duplicate registrations always warn on
@@ -344,6 +361,16 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   got that reply (the dogfooding stress lost one reply per 200 calls; 90-183 of 201 under `println`
   spam). Frame and newline now go out in one call, so a foreign line can only ever land *between*
   frames. Bun already wrote `line + "\n"` in one `process.stdout.write`.
+- **Legacy `tasks/result` always answers** (TJC-2353): a `tasks/result` for a task that was
+  cancelled — by `tasks/cancel`, by the TTL sweep, or with its session's release, whether the task
+  was already terminal or the waiter was parked when it happened — now fails with JSON-RPC
+  `-32602` (`Task <id> was cancelled`, the same family as `Unknown task`; new
+  `TaskCancelledError` carrier in `server.manager`). The awaiting handler used to re-raise the
+  task fiber's interrupt-only cause, which the router treated as a client-cancelled request and
+  answered with nothing: the streamable-HTTP SSE stream closed after at most a keepalive ping (JVM
+  and Bun), stdio wrote no frame, and the TypeScript SDK's `getTaskResult` hung until its 60 s
+  timeout. Real task failures keep their full cause; `tasks/get` snapshots of a cancelled task are
+  unchanged (no `result` / `error` block).
 - **Scala default arguments are applied on the annotation path** (TJC-2334): a `tools/call` or
   `prompts/get` that omits a parameter declared with a default (`operation: String = "add"`,
   `title: String = ""`) now invokes the method with that default — exactly what a direct Scala

@@ -107,4 +107,7 @@ On the compatibility adapter, clients send `params.task: {ttl}` and poll `tasks/
 outlives a single request: the legacy streamable-HTTP adapter and stdio (one durable session per
 process). On the **stateless** legacy adapter all clients share one session identity, so legacy
 task requests there are rejected with `-32601`. Bearer tasks are invisible to legacy sessions and
-vice versa.
+vice versa. `tasks/result` is always answered: for a task that was cancelled (`tasks/cancel`, TTL
+sweep, session release) — whether already terminal or cancelled while the waiter was parked — it
+fails with `-32602` (`Task <id> was cancelled`); once the TTL has swept the entry, with `-32602`
+`Unknown task`, the same code `tasks/get` uses.
