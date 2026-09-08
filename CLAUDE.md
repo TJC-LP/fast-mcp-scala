@@ -94,6 +94,9 @@ fast-mcp-scala/
 ### Annotation Path (all platforms)
 
 ```scala
+import com.tjclp.fastmcp.{*, given}
+import zio.*
+
 object MyServer extends ZIOAppDefault:
   @Tool(name = Some("add"), description = Some("Add two numbers"))
   def add(@Param("First number") a: Int, @Param("Second number") b: Int): Int = a + b
@@ -113,9 +116,14 @@ matching environment type (`McpServer.typed[R]("name")`) and provide the layer a
 boundary via `.provide(...)`:
 
 ```scala
+import com.tjclp.fastmcp.{*, given}
+import zio.*
+
 object MyServer extends ZIOAppDefault:
   @Tool() def fetch(): ZIO[zio.http.Client, Throwable, String] =
-    ZIO.serviceWithZIO[zio.http.Client](_.url("https://example.com").get)
+    ZIO.serviceWithZIO[zio.http.Client] { client =>
+      client.batched(zio.http.Request.get("https://example.com")).flatMap(_.body.asString)
+    }
 
   override def run =
     for
@@ -131,6 +139,9 @@ error pointing at the mismatched handler.
 ### Typed Contract Path (cross-platform)
 
 ```scala
+import com.tjclp.fastmcp.{*, given}
+import zio.*
+
 case class AddArgs(@Param("First number") a: Int, @Param("Second number") b: Int)
 
 val addTool = McpTool[AddArgs, Int](
