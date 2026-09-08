@@ -8,7 +8,7 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.wire.{CompleteRequestParams, Completion, Implementation}
 import com.tjclp.fastmcp.server.manager.*
 import com.tjclp.fastmcp.server.router.{McpRouter, RouterBuilder}
-import com.tjclp.fastmcp.server.transport.{HttpTransportBackend, TransportBackend}
+import com.tjclp.fastmcp.server.transport.{HttpTransportBackend, StdioLogging, TransportBackend}
 
 /** A completion provider for `completion/complete` (argument autocompletion): given the request
   * (ref + argument + optional context), return candidate values. Registered via
@@ -144,9 +144,16 @@ final class McpServer[R](
       (router, tm)
     }
 
+  /** stdout is the wire: if ZIO's stock stdout logger is still installed (a `ZIOAppDefault` that
+    * calls `runStdio()` directly, without `McpServerApp`'s `bootstrap`), it is swapped for the same
+    * format on stderr for the loop's lifetime; user-installed loggers are left alone
+    * ([[transport.StdioLogging]]).
+    */
   override def runStdio(): ZIO[R, Throwable, Unit] =
-    buildRouterWithTasks.flatMap { (router, tm) =>
-      backend.serveStdio(router, settings).ensuring(tm.fold(ZIO.unit)(_.shutdown))
+    StdioLogging.redirectDefaultLoggers {
+      buildRouterWithTasks.flatMap { (router, tm) =>
+        backend.serveStdio(router, settings).ensuring(tm.fold(ZIO.unit)(_.shutdown))
+      }
     }
 
   override def runHttp()(using http: HttpTransportBackend): ZIO[R, Throwable, Unit] =
