@@ -354,6 +354,15 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Fixed
 
+- **`allowedHosts` parses the `Host` header fail-closed** (TJC-2354): the `Host` value must be one
+  `host[:port]` authority. A value containing a comma — the `", "`-joined form of a `Host` sent
+  more than once, or any second authority — is refused with 403 in either order instead of being
+  matched on its first hostname, and an explicit port that is not 1..65535 decimal digits refuses
+  the request whether or not an `Origin` is present (it used to be admitted as "port-less" when no
+  `Origin` was sent; the `Origin` side was already fail-closed). Bracketed IPv6 authorities
+  (`[::1]:8080`) are unchanged, and `allowedHosts` IPv6 entries must be written bracketed
+  (`Set("[::1]")`). Same rule on the JVM and Bun backends through the shared `HostGuard`; on Bun a
+  `Host: 127.0.0.1:99999` with the guard on now consistently answers the host gate's 403.
 - **stdio frames are written atomically** (TJC-2338): `StdioLoop.writeLine` (JVM and Scala Native)
   emitted a reply as three `PrintStream` calls — the frame, its newline, then the flush — so any
   concurrent `System.out` writer (a stray `println`, or ZIO's stdout logger above) could land
