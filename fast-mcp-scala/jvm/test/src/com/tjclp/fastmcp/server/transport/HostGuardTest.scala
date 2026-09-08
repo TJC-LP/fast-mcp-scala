@@ -128,9 +128,61 @@ class HostGuardTest extends AnyFunSuite with Matchers:
         allowed(Some(badHost), Some("https://localhost")) shouldBe false
         allowed(Some(badHost), Some("http://localhost:8000")) shouldBe false
         allowed(Some(badHost), Some("http://localhost:99999")) shouldBe false
-        // Host-only matching (no Origin) is unchanged: the hostname is listed.
-        allowed(Some(badHost), None) shouldBe true
+        // Host-only matching (no Origin) is fail-closed too: a listed hostname does not rescue a
+        // port that does not parse (TJC-2354; used to be admitted as "port-less").
+        allowed(Some(badHost), None) shouldBe false
       }
+  }
+
+  test("a multi-valued Host (the \", \"-joined duplicate header) is refused in either order") {
+    // JvmHttpBackend.gateHeader / Bun's Headers.get join repeated headers with ", ". The joined
+    // value is one malformed authority, never matched on its first hostname (TJC-2354).
+    allowed(Some("localhost:8000, evil.example.com"), None) shouldBe false
+    allowed(Some("evil.example.com, localhost:8000"), None) shouldBe false
+    allowed(Some("localhost:8000,evil.example.com"), None) shouldBe false
+    allowed(Some("localhost:8000, localhost:8000"), None) shouldBe false
+    allowed(Some("localhost, evil.example.com"), None) shouldBe false
+    allowed(Some("localhost:8000, evil.example.com"), Some("http://localhost:8000")) shouldBe false
+    // A single well-formed authority still passes, with or without a port.
+    allowed(Some("localhost:8000"), None) shouldBe true
+    allowed(Some("localhost"), None) shouldBe true
+  }
+
+  test("parseAuthority: one host[:port], brackets preserved, everything else fail-closed") {
+    HostGuard.parseAuthority("localhost") shouldBe Some(("localhost", None))
+    HostGuard.parseAuthority("localhost:8000") shouldBe Some(("localhost", Some(8000)))
+    HostGuard.parseAuthority("127.0.0.1:65535") shouldBe Some(("127.0.0.1", Some(65535)))
+    HostGuard.parseAuthority("[::1]") shouldBe Some(("[::1]", None))
+    HostGuard.parseAuthority("[::1]:8080") shouldBe Some(("[::1]", Some(8080)))
+    HostGuard.parseAuthority("[2001:db8::1]:1") shouldBe Some(("[2001:db8::1]", Some(1)))
+    for bad <- List(
+        "",
+        "::1", // unbracketed IPv6: the first ':' reads as the port separator
+        "fe80::1",
+        "2001:db8::1",
+        "[::1",
+        "[]",
+        "[]:8000",
+        "[::1]junk",
+        "localhost:",
+        "localhost:0",
+        "localhost:65536",
+        "localhost:99999",
+        "localhost:abc",
+        "localhost:8000x",
+        "localhost:8000:9000",
+        "localhost:8000, evil.example.com",
+        "evil.example.com, localhost:8000",
+        "localhost:8000,x",
+        "local host:8000",
+        "localhost :8000",
+        "user@localhost:8000",
+        "localhost:8000/x",
+        "localhost:8000?q",
+        "localhost:8000#f",
+        "localhost:8000\\x"
+      )
+    do withClue(bad)(HostGuard.parseAuthority(bad) shouldBe None)
   }
 
   test("scheme is not compared in the same-authority rule (TLS-terminating proxy) — documented") {

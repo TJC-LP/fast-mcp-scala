@@ -17,12 +17,10 @@ import com.tjclp.fastmcp.server.McpServerSettings
   * bracket rule, the `allowedOrigins` normalisation, `postGate` ordering (403 before everything),
   * charset parameters and Accept wildcards.
   *
-  * Two cases are RED on main by construction (TJC-2354 turns them green) — each says so in its
-  * name:
-  *   - a duplicated `Host` header (joined value) is admitted when its FIRST hostname is listed
-  *     (D3.7): `hostnameOf` truncates `"127.0.0.1:8000, evil.example.com"` at the first `:`;
-  *   - a malformed `Host` port with no `Origin` degrades to "port-less" and is admitted although
-  *     the HostGuard scaladoc and the CHANGELOG claim fail-closed on the Host side (D4.6).
+  * Two cases were RED on the pre-TJC-2354 `HostGuard` and now pin the fix: a duplicated `Host`
+  * header (the `", "`-joined value) is refused in either order instead of being matched on its
+  * first hostname (D3.7), and a `Host` whose explicit port does not parse is refused with or
+  * without an `Origin` instead of degrading to "port-less" (D4.6).
   */
 class HostGuardPropertyTest extends AnyFunSuite with Matchers:
 
@@ -148,9 +146,10 @@ class HostGuardPropertyTest extends AnyFunSuite with Matchers:
     })
   }
 
-  test("IPv6 literals: an UNbracketed allowedHosts entry never matches a bracketed Host (current rule; C3 soak D doc drift)") {
-    // Documents today's behaviour (HostGuard.scala:167-174 keeps the brackets): operators must
-    // spell IPv6 entries as "[::1]". If 1.0.1 normalises unbracketed entries, flip this case.
+  test("IPv6 literals: an UNbracketed allowedHosts entry never matches a bracketed Host (list IPv6 entries bracketed)") {
+    // `hostnameOf` keeps the brackets on the Host side, so operators must spell IPv6 entries as
+    // "[::1]" (documented in docs/transports.md). If a later release normalises unbracketed
+    // entries, flip this case.
     check("unbracketed IPv6 entry")(Prop.forAll(genIpv6, genPort) { (h6, p) =>
       val unbracketed = h6.stripPrefix("[").stripSuffix("]")
       !HostGuard.isAllowed(Some(s"$h6:$p"), None, Set(unbracketed), Set.empty)
@@ -190,11 +189,10 @@ class HostGuardPropertyTest extends AnyFunSuite with Matchers:
     })
   }
 
-  test("DRAFT RED (D4.6): a malformed Host port with NO Origin must not degrade to port-less (HostGuard.scala:20-22 claim)") {
-    // On main `hostAllowed` strips everything after the first ':' (HostGuard.scala:163-174), so
-    // `Host: localhost:99999` is admitted (D4 row 23: JVM 200, Bun 400 from its URL parser).
-    // Either fix the code (reject a Host whose explicit port does not parse) or reword the
-    // scaladoc and CHANGELOG.md:68 and delete this case.
+  test("a malformed Host port with NO Origin is refused: it never degrades to port-less (D4.6)") {
+    // `hostAllowed` used to strip everything after the first ':', so `Host: localhost:99999`
+    // was admitted (D4 row 23: JVM 200, Bun 400 from its URL parser). TJC-2354: the Host
+    // authority must parse, with or without an Origin, mirroring the Origin side.
     check("bad host port without origin")(Prop.forAll(genHost, genBadPort.suchThat(_.nonEmpty)) {
       (h, bad) => !HostGuard.isAllowed(Some(s"$h:$bad"), None, Set(h), Set.empty)
     })
@@ -225,10 +223,11 @@ class HostGuardPropertyTest extends AnyFunSuite with Matchers:
     })
   }
 
-  test("DRAFT RED (D3.7): a duplicated Host header (joined value) carrying a foreign hostname is refused in either order") {
-    // JvmHttpBackend.gateHeader / Bun's Headers.get join repeated headers with ", ". Today
-    // `hostnameOf("127.0.0.1:8000, evil.example.com")` yields "127.0.0.1" (truncated at the first
-    // ':') so the listed-first order passes the guard (D3 rows 35; refuted claim CHANGELOG.md:66-68).
+  test("a duplicated Host header (joined value) carrying a foreign hostname is refused in either order (D3.7)") {
+    // JvmHttpBackend.gateHeader / Bun's Headers.get join repeated headers with ", ".
+    // `hostnameOf("127.0.0.1:8000, evil.example.com")` used to yield "127.0.0.1" (truncated at the
+    // first ':') so the listed-first order passed the guard (D3 row 35). TJC-2354: a comma in the
+    // Host authority is refused outright.
     check("duplicated Host refused")(Prop.forAll(genHostPair, genPort) { case ((h, f), p) =>
       val settings = guardedOn(h)
       val listedFirst = headers("host" -> s"$h:$p, $f")
