@@ -147,6 +147,25 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   harness-running jobs restore the shared Mill/coursier cache read-only. `ci.yml` no longer exports
   `GITHUB_TOKEN` workflow-wide: it is scoped to the Mill steps that need it (as `native.yml`
   already did), so the third-party setup actions never see it.
+- **Netty pinned to 4.2.17.Final** (TJC-2327): zio-http 3.4.0 declares netty 4.2.3.Final, whose
+  16 modules carried 27 OSV advisories (12 HIGH / 13 MODERATE / 2 LOW), 7 of them reachable from
+  the default JVM HTTP path — CVE-2026-33870 (HIGH, request smuggling), CVE-2026-42577 (HIGH,
+  epoll DoS on every Linux JVM), CVE-2026-42585, CVE-2026-42580, CVE-2026-42581, CVE-2026-50020
+  and CVE-2025-58056 — plus 20 in code paths this library never installs (TLS, compression,
+  WebSocket, proxy, IP filtering): CVE-2025-58057, CVE-2025-67735, CVE-2026-41417,
+  CVE-2026-42578, CVE-2026-42583, CVE-2026-42584, CVE-2026-42587, CVE-2026-44249,
+  CVE-2026-45416, CVE-2026-45536, CVE-2026-50010, CVE-2026-55831, CVE-2026-55833,
+  CVE-2026-56745, CVE-2026-56746, CVE-2026-59898, CVE-2026-59899, CVE-2026-59901,
+  CVE-2026-59903, CVE-2026-59921. `build.mill` now pins `Versions.netty`, and the JVM module
+  declares all 16 `io.netty` modules zio-http brings as direct dependencies and imports
+  `io.netty:netty-bom` into the published POM's `<dependencyManagement>`, so the resolved
+  classpath and every consumer's resolution (coursier, Maven, Gradle) see a single netty version;
+  the OSV audit of the resolved 1.0.0 classpath reports 0 advisories. zio-http itself stays at
+  3.4.0 (netty 4.2.x is binary-compatible within the line; the pairing is gated by the JVM test
+  suite, the official conformance suite and the GraalVM HTTP smoke). **Consequence for
+  stdio-only GraalVM builds**: netty is now a direct `<dependency>` of `fast-mcp-scala_3`, so
+  the netty-free recipe must exclude both `dev.zio:zio-http_3` and `io.netty:*` — excluding
+  zio-http alone no longer sheds netty (see [docs/native-image.md](docs/native-image.md)).
 
 ### Added
 
@@ -170,6 +189,24 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   single customization point that supplies both the zio-json decoder used
   inside typed request case classes and the JSON Schema advertised for a
   custom wire type.
+- **Root-import surface** (TJC-2336): `import com.tjclp.fastmcp.{*, given}` now also exports the
+  settings sub-records `TaskSettings` and `LimitSettings`, the per-tool task policy `TaskSupport`
+  and `TaskOwnerKey`, and the `resources/read` payload ADT `ResourceContents` /
+  `TextResourceContents` / `BlobResourceContents`, so every documented fence compiles with the root
+  import alone (`RootImportExportsTest` type-checks the `docs/tasks.md` and `docs/transports.md`
+  fences in a root-import-only scope). It also exports every shape a handler must name to call
+  the public `McpContext` / `McpServer` surface: the server→client request params and results
+  (`CreateMessageRequestParams` / `CreateMessageResult` with `SamplingMessage`,
+  `ModelPreferences`, `ModelHint`, `ToolChoice`; `ElicitRequestParams` /
+  `ElicitRequestUrlParams` / `ElicitResult`; `ListRootsResult` / `Root`), the client identity
+  snapshots `Implementation` / `ClientCapabilities`, the notification arguments `LoggingLevel` /
+  `ProgressToken`, and the `completion/complete` provider types (`CompleteRequestParams`,
+  `CompletionReference` with `PromptReference` / `ResourceTemplateReference`,
+  `CompletionArgument`, `CompletionContext`, `Completion`). `core.wire.Tool` (the sampling
+  `tools` element) is deliberately not exported — it would collide with the `@Tool` annotation —
+  so a sampling request that passes tools still needs `import com.tjclp.fastmcp.core.wire.Tool`.
+  Additive: an export alias and its `server.*` / `core.*` / `core.wire.*` target resolve as one
+  reference, so files that already import both are unaffected.
 
 ### Changed
 
@@ -236,6 +273,12 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   - `@Tool(description = Some(...))` / `@Prompt(description = Some(...))` without `name` now
     registers under the method name with that description (previously the description text became
     the registered name).
+- **No more `-experimental`** (TJC-2335): fast-mcp-scala is no longer compiled with
+  `-experimental`; consumers may drop the flag (annotation and typed-contract paths, all three
+  platforms). The annotation macros use only stable reflect API: the five `Symbol.info` uses
+  (the only `@experimental` reflect member the macros touched) became
+  `Symbol.termRef.widenTermRefByName`. The Scaladoc-as-description fallback (`Symbol.docstring`,
+  stable) is unchanged.
 - **Scala 3.9.0 LTS** (TJC-2273): all three platforms now build with Scala 3.9.0
   (LTS, released 2026-09-03), up from 3.8.3. Companion bumps: WartRemover
   3.5.6 → 3.6.1 (first release for the 3.9.0 compiler) and the Scala.js
@@ -271,6 +314,13 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 - JSON Schema derivation is now a native Scala 3 macro that emits `zio-json`
   AST values directly on JVM and Scala.js. Typed contracts no longer require
   `sttp.tapir.generic.auto.*` at call sites.
+- **Never-read `McpServerSettings` fields removed** (TJC-2336): `debug`, `logLevel`,
+  `warnOnDuplicateResources`, `warnOnDuplicateTools`, `warnOnDuplicatePrompts` and `dependencies`
+  were accepted and silently ignored (nothing read them; duplicate registrations always warn on
+  stderr), as was the `McpServer.dependencies` copy. Construct settings by name — every shipped
+  example and test already does; a positional construction that passed these fields no longer
+  compiles. Removed rather than deprecated while still pre-1.0: a knob that does nothing must not
+  be frozen into the 1.x line.
 
 ### Deprecated
 
@@ -278,6 +328,12 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   `HostGuard.isAllowed(host, origin, settings: McpServerSettings)` overload, which matches `Origin`
   as a full origin and honours `allowedOrigins`; the 3-arg form still works but never consults
   `allowedOrigins`. Slated for removal in 1.0.0.
+- The six inert `@Tool` parameters `examples`, `version`, `deprecated`, `deprecationMessage`,
+  `tags` and `timeoutMillis`, the matching `ToolDefinition` fields and `ToolExample` (TJC-2336):
+  `@deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")`.
+  `scanAnnotations` never read them and no wire shape carries them; they stay accepted through 1.x
+  and are removed in 2.0.0. `@Param(examples = ...)` is unaffected (it populates the schema's
+  `examples` array). The dead `MacroUtils.parseToolParams` helper is gone.
 
 ### Fixed
 
@@ -288,6 +344,26 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   got that reply (the dogfooding stress lost one reply per 200 calls; 90-183 of 201 under `println`
   spam). Frame and newline now go out in one call, so a foreign line can only ever land *between*
   frames. Bun already wrote `line + "\n"` in one `process.stdout.write`.
+- **Scala default arguments are applied on the annotation path** (TJC-2334): a `tools/call` or
+  `prompts/get` that omits a parameter declared with a default (`operation: String = "add"`,
+  `title: String = ""`) now invokes the method with that default — exactly what a direct Scala
+  call does — instead of failing with `Key not found in map: <param>` (`isError: true` on tools,
+  `-32603` on prompts). The generated handler resolves the compiler's `<method>$default$N` getter
+  for every parameter flagged `HasDefault` on the annotated method itself, so the flagship
+  `AnnotatedServer.calculator` / `greeting_prompt` and the README `search` / `greeting` examples
+  work as documented on JVM, Scala.js/Bun and Scala Native. An omitted `Option` parameter with a
+  non-`None` default now also takes that default (previously `None`). An omitted parameter without
+  a default fails with `Missing required argument '<param>'`, naming the argument, in the same
+  place as before (an `isError` tool result; `-32602` on prompts and resources).
+- **`@Param` no longer re-requires `Option` parameters** (TJC-2334): a description-only
+  `@Param("Maximum results") limit: Option[Int]` used to land in the advertised `required` array
+  (the bare parameter was optional, the annotated one was not). `required` now defaults to
+  `!isOption` for `@Tool` parameters, typed-request case-class fields and `@Prompt` arguments
+  (whose `Option` parameters were advertised `required: true` even without `@Param`); only an
+  explicit `@Param(required = true)` re-requires an `Option`. Existing `required = false` spellings
+  keep working.
+- **Prompt failures carry their cause** (TJC-2334): the `-32603` for a failing `@Prompt` handler
+  reads `Error rendering prompt '<name>': <cause message>` instead of swallowing the cause.
 - **Annotation macros bind to the annotated overload** (F4 / CWE-706, TJC-2298): `scanAnnotations`
   used to re-resolve `@Tool` / `@Resource` / `@Prompt` targets by method name and could register,
   schema-describe and invoke a different same-named overload (for example an un-annotated raw
@@ -314,6 +390,23 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   search finds nothing), never exported givens that could shadow
   companions. Parameterized-case enums intentionally keep wrapper-object
   codecs; provide an `McpInputCodec` for a custom shape.
+- **Bun SSE keepalive no longer drops a reply that lands on a heartbeat tick** (TJC-2337): with
+  `keepAliveInterval` set, the Scala.js/Bun HTTP backend implemented the heartbeat as a timed `take`
+  on the per-request stream queue; a tool reply arriving in the same tick as the timeout was
+  discarded by the interrupted take and the stream then ended as `: ping` frames only — HTTP 200,
+  nothing logged (deterministic when the handler ran for exactly one interval, intermittent at
+  multiples; legacy per-request streams from the first frame, modern 2026-07-28 streams from the
+  second). The heartbeat is now a fiber that offers a ping marker into the queue — the Bun twin of
+  the JVM's stream merge — so the pull is a plain `take` and every reply frame is delivered.
+- **Bun's `idleTimeout` no longer cuts a slow tool's reply** (TJC-2337): the Scala.js/Bun HTTP
+  backend passed no `idleTimeout` to `Bun.serve`, whose 10 s default closes any connection with no
+  bytes in either direction — a per-request SSE response awaiting a slow tool included. With the
+  documented default `keepAliveInterval = None` a `tools/call` slower than that lost its reply: the
+  socket was cut mid-stream (measured 9–12 s) and the client saw only its own request timeout
+  (`-32001`). The listener now runs with `idleTimeout: 0`, disabling Bun's runtime idle close —
+  parity with the JVM listener, which has none; legacy session lifetime is still governed by
+  `sessionIdleTimeout` — so a quiet stream stays open until the reply. `keepAliveInterval` remains
+  the knob for intermediaries with idle timers of their own.
 
 ### Removed
 
