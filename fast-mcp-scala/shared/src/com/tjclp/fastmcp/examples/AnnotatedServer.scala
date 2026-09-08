@@ -69,7 +69,6 @@ object AnnotatedServer extends McpServerApp[Stdio, AnnotatedServer.type]:
   @Tool(
     name = Some("calculator"),
     description = Some("Perform a calculation with two numbers"),
-    tags = List("math", "calculation"),
     readOnlyHint = Some(true),
     idempotentHint = Some(true)
   )

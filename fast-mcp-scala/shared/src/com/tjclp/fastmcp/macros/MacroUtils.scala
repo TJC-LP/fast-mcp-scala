@@ -108,30 +108,6 @@ private[macros] object MacroUtils:
 
     loop(argTerm)
 
-  // Helper to parse @Tool annotation arguments
-  def parseToolParams(using quotes: Quotes)(
-      term: quotes.reflect.Term
-  ): (Option[String], Option[String], List[String]) =
-    import quotes.reflect.*
-
-    var toolName: Option[String] = None
-    var toolDesc: Option[String] = None
-    var toolTags: List[String] = Nil
-
-    term match {
-      case Apply(Select(New(_), _), argTerms) =>
-        argTerms.foreach {
-          case NamedArg("name", valueTerm) =>
-            toolName = parseOptionStringLiteral(valueTerm, "@Tool(name)")
-          case NamedArg("description", valueTerm) =>
-            toolDesc = parseOptionStringLiteral(valueTerm, "@Tool(description)")
-          case NamedArg("tags", valueTerm) => toolTags = parseListString(valueTerm)
-          case _ => () // Ignore other args
-        }
-      case _ => () // Ignore if not the expected Apply structure
-    }
-    (toolName, toolDesc, toolTags)
-
   // Helper to parse @Prompt annotation arguments
   def parsePromptParams(using quotes: Quotes)(
       term: quotes.reflect.Term

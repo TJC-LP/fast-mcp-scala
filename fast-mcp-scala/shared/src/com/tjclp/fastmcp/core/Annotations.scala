@@ -14,8 +14,11 @@ import scala.annotation.StaticAnnotation
   * The `Option` arguments the macro reads (`name`, `description`, `title`, `taskSupport` and the
   * boolean hints) must be literals — `Some("...")`, `Option("...")`, `None`, or a `final val`
   * constant; a non-literal argument is a compile-time error rather than being silently dropped.
-  * (`version`, `deprecationMessage` and `timeoutMillis` are metadata only and are not read by
-  * `scanAnnotations`.)
+  *
+  * `examples`, `version`, `deprecated`, `deprecationMessage`, `tags` and `timeoutMillis` are
+  * metadata only: `scanAnnotations` never reads them and no wire shape carries them. They are
+  * deprecated since 1.0.0 (as are the matching [[ToolDefinition]] fields) and are removed in 2.0.0.
+  * `@Param(examples = ...)` is unrelated and stays: it feeds the schema's `examples` array.
   *
   * @param name
   *   Optional name for the tool. Must be unique per scanned object (a duplicate is a compile-time
@@ -24,17 +27,17 @@ import scala.annotation.StaticAnnotation
   * @param description
   *   Optional description for the tool. If None, Scaladoc will be used.
   * @param examples
-  *   Optional examples of how to use the tool
+  *   Deprecated since 1.0.0 — metadata only, never read or emitted; removed in 2.0.0.
   * @param version
-  *   Optional version of the tool
+  *   Deprecated since 1.0.0 — metadata only, never read or emitted; removed in 2.0.0.
   * @param deprecated
-  *   If true, the tool is marked as deprecated
+  *   Deprecated since 1.0.0 — metadata only, never read or emitted; removed in 2.0.0.
   * @param deprecationMessage
-  *   Optional message explaining deprecation reason
+  *   Deprecated since 1.0.0 — metadata only, never read or emitted; removed in 2.0.0.
   * @param tags
-  *   Optional list of tags to categorize the tool
+  *   Deprecated since 1.0.0 — metadata only, never read or emitted; removed in 2.0.0.
   * @param timeoutMillis
-  *   Optional timeout for tool execution in milliseconds
+  *   Deprecated since 1.0.0 — metadata only, never read or emitted; removed in 2.0.0.
   * @param title
   *   Optional human-readable title for the tool
   * @param readOnlyHint
@@ -55,11 +58,17 @@ import scala.annotation.StaticAnnotation
 class Tool(
     val name: Option[String] = None,
     val description: Option[String] = None,
+    @deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")
     val examples: List[String] = List.empty,
+    @deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")
     val version: Option[String] = None,
+    @deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")
     val deprecated: Boolean = false,
+    @deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")
     val deprecationMessage: Option[String] = None,
+    @deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")
     val tags: List[String] = List.empty,
+    @deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")
     val timeoutMillis: Option[Long] = None,
     // MCP Tool Annotations (behavioral hints for clients)
     val title: Option[String] = None,
