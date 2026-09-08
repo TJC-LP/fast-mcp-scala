@@ -189,6 +189,21 @@ class HttpRequestGuardsTest extends AnyFunSuite with Matchers:
     HttpRequestGuards.pickEvictable(List(("only", 5L, false))) shouldBe Some("only")
   }
 
+  test("pickEvictable with idle fallback: GET-less first; else the longest-idle GET holder past the timeout; None keeps GET holders exempt") {
+    val now = 10_000L
+    val allHeld = List(("a", 1_000L, true), ("b", 500L, true), ("c", 9_900L, true))
+    // Every session holds a GET: the longest-idle one past a 5 s timeout is the victim.
+    HttpRequestGuards.pickEvictable(allHeld, now, Some(5_000L)) shouldBe Some("b")
+    // Nobody has been idle long enough → still nothing evictable (503).
+    HttpRequestGuards.pickEvictable(allHeld, now, Some(9_600L)) shouldBe None
+    // sessionIdleTimeout = None: GET holders stay exempt regardless of age.
+    HttpRequestGuards.pickEvictable(allHeld, now, None) shouldBe None
+    // A GET-less session is preferred even when it is younger than an over-idle GET holder.
+    val mixed = List(("held", 100L, true), ("plain", 9_000L, false))
+    HttpRequestGuards.pickEvictable(mixed, now, Some(5_000L)) shouldBe Some("plain")
+    HttpRequestGuards.pickEvictable(Nil, now, Some(1L)) shouldBe None
+  }
+
   test("validateSettings: accepts defaults and parseable origins") {
     HttpRequestGuards.validateSettings(McpServerSettings()) shouldBe Right(())
     HttpRequestGuards.validateSettings(

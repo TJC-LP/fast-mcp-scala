@@ -65,7 +65,8 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
       allowedHosts: Option[Set[String]] = None,
       allowedOrigins: Option[Set[String]] = None,
       maxRequestBodyBytes: Int = 1024 * 1024,
-      maxSessions: Option[Int] = Some(1000)
+      maxSessions: Option[Int] = Some(1000),
+      sessionIdleTimeout: Option[java.time.Duration] = Some(java.time.Duration.ofMinutes(30))
   ): Routes[Any, Response] =
     val server = McpServer.typed[Any](
       "T",
@@ -76,7 +77,8 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
         allowedHosts = allowedHosts,
         allowedOrigins = allowedOrigins,
         maxRequestBodyBytes = maxRequestBodyBytes,
-        maxSessions = maxSessions
+        maxSessions = maxSessions,
+        sessionIdleTimeout = sessionIdleTimeout
       )
     )
     val _ = server.scanAnnotations[TestServer.type]
@@ -147,6 +149,14 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val resp = post(routes, initFrame, None)
     val _ = bodyOf(resp)
     resp.rawHeader(SessionIdHeader).getOrElse(fail("no session id"))
+
+  /** Open — and never drain — the session's standalone GET SSE channel, so the session holds a live
+    * GET for the rest of the test (in-memory, the SSE body is never run, so `releaseGet` never
+    * fires: exactly the shape of a peer that vanished without closing its stream).
+    */
+  private def openGet(routes: Routes[Any, Response], sid: String): Unit =
+    run(routes, Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid)))
+      .status shouldBe Status.Ok
 
   test("streamable: initialize mints a session id, reused for tools/call, then deleted") {
     val routes = buildRoutes(stateless = false)
@@ -639,6 +649,62 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     body should include("Session limit reached")
     refused.rawHeader(SessionIdHeader) shouldBe None
     // Neither stored session was touched.
+    post(routes, listFrame, Some(sid1)).status shouldBe Status.Ok
+    post(routes, listFrame, Some(sid2)).status shouldBe Status.Ok
+  }
+
+  test("maxSessions: when every stored session holds a live GET, the longest-idle one past sessionIdleTimeout is evicted instead of refusing 503") {
+    val idle = java.time.Duration.ofMillis(300)
+    val routes =
+      buildRoutes(stateless = false, maxSessions = Some(2), sessionIdleTimeout = Some(idle))
+    val sid1 = initSid(routes)
+    openGet(routes, sid1)
+    Thread.sleep(5) // sid1 is unambiguously the longest-idle session
+    val sid2 = initSid(routes)
+    openGet(routes, sid2)
+    // Both clients now go silent: their GET streams stay open and neither ever POSTs again.
+    Thread.sleep(idle.toMillis + 150)
+
+    val third = post(routes, initFrame, None)
+    val thirdBody = bodyOf(third)
+    withClue(s"third initialize at the cap: ${third.status} $thirdBody ") {
+      third.status shouldBe Status.Ok
+    }
+    val sid3 = third.rawHeader(SessionIdHeader).getOrElse(fail("third initialize minted nothing"))
+    // The longest-idle GET holder was terminated (its stream closed); the other one survives.
+    post(routes, listFrame, Some(sid1)).status shouldBe Status.NotFound
+    post(routes, listFrame, Some(sid2)).status shouldBe Status.Ok
+    post(routes, listFrame, Some(sid3)).status shouldBe Status.Ok
+  }
+
+  test("maxSessions: an idle GET-less session is still evicted before an idle GET holder") {
+    val idle = java.time.Duration.ofMillis(300)
+    val routes =
+      buildRoutes(stateless = false, maxSessions = Some(2), sessionIdleTimeout = Some(idle))
+    val holder = initSid(routes)
+    openGet(routes, holder)
+    Thread.sleep(5)
+    val plain = initSid(routes) // younger, but holds no GET
+    Thread.sleep(idle.toMillis + 150) // both are now idle past the timeout
+
+    val third = post(routes, initFrame, None)
+    val _ = bodyOf(third)
+    third.status shouldBe Status.Ok
+    post(routes, listFrame, Some(plain)).status shouldBe Status.NotFound // GET-less goes first
+    post(routes, listFrame, Some(holder)).status shouldBe Status.Ok
+  }
+
+  test("maxSessions: with sessionIdleTimeout = None, GET holders stay exempt from cap eviction (503)") {
+    val routes = buildRoutes(stateless = false, maxSessions = Some(2), sessionIdleTimeout = None)
+    val sid1 = initSid(routes)
+    openGet(routes, sid1)
+    val sid2 = initSid(routes)
+    openGet(routes, sid2)
+    Thread.sleep(50) // any amount of idleness: there is no timeout to exceed
+
+    val refused = post(routes, initFrame, None)
+    refused.status.code shouldBe 503
+    bodyOf(refused) should include("Session limit reached")
     post(routes, listFrame, Some(sid1)).status shouldBe Status.Ok
     post(routes, listFrame, Some(sid2)).status shouldBe Status.Ok
   }

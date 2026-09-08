@@ -51,9 +51,10 @@ Hardening knobs worth knowing when you deploy over HTTP
   depth 64, object width 1024 (`-32700` before dispatch), resource URI length 8192 and
   subscriptions per session 1024 (`-32602`). The limits cannot be disabled, only moved.
 - `maxSessions` (`Some(1000)`) caps the legacy session store; at the cap the longest-idle session
-  without a live GET is evicted, so an unauthenticated flood of `initialize` requests can evict
-  idle legitimate sessions. Front non-loopback deployments with `allowedHosts`/`allowedOrigins`
-  and an authenticating proxy.
+  without a live GET is evicted — or, when every stored session holds a GET stream, the
+  longest-idle one that has been idle longer than `sessionIdleTimeout` — so an unauthenticated
+  flood of `initialize` requests can evict idle legitimate sessions. Front non-loopback deployments
+  with `allowedHosts`/`allowedOrigins` and an authenticating proxy.
 - Transport failures and defects answer a fixed JSON-RPC error (400/413/500) with no exception
   text, stack trace, or path, on the JVM and on Bun regardless of `NODE_ENV`.
 - Modern Tasks IDs are bearer handles: possession grants access to that task
