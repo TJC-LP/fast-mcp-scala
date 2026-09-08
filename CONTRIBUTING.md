@@ -130,7 +130,6 @@ declare the ZIO libraries the build pins (`Versions` in `build.mill`) alongside 
 //> using dep dev.zio::zio:2.1.20
 //> using dep dev.zio::zio-json:0.7.44
 //> using dep dev.zio::zio-http:3.4.0
-//> using options "-experimental"
 ```
 
 ## Making changes

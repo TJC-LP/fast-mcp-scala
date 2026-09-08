@@ -66,7 +66,6 @@ What the Scala.js target gives you:
 //> using jsVersion 1.22.0
 //> using jsModuleKind es
 //> using dep com.tjclp::fast-mcp-scala::1.0.0
-//> using options "-experimental"
 
 import com.tjclp.fastmcp.{*, given}
 
@@ -77,8 +76,7 @@ object HelloBun extends McpServerApp[Stdio, HelloBun.type]:
 
 Same shape as the JVM: the `McpServerApp` trait picks up the shared `McpServerCoreFactory` given
 and builds the one shared `McpServer` over the Bun `TransportBackend`. Note the double `::` before
-the version, which selects the platform artifact (`fast-mcp-scala_sjs1_3`), and `-experimental`,
-which the annotation macros require.
+the version, which selects the platform artifact (`fast-mcp-scala_sjs1_3`).
 
 Package it to an ES module and run it on Bun:
 
@@ -119,7 +117,6 @@ published with 1.0.0.
 //> using platform native
 //> using nativeVersion 0.5.12
 //> using dep com.tjclp::fast-mcp-scala::1.0.0
-//> using options "-experimental"
 
 import com.tjclp.fastmcp.{*, given}
 

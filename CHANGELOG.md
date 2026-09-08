@@ -44,6 +44,11 @@ sections below for the cumulative RC changes rolled into this release.
   Scala.js 1.22+ linker — Mill: mill-bun 0.3.1 with an explicit `scalaJSVersion` (Mill 1.1.x's
   bundled linker stops at IR 1.20); scala-cli: `//> using jsVersion 1.22.0` plus
   `--js-version 1.22.0` on `package --js`. Scala Native consumers use 0.5.12.
+- **`-experimental` is no longer required.** The release candidates were compiled with
+  `-experimental`, which stamped every public definition `@experimental` and forced the flag onto
+  every consumer on both registration paths and all three platforms; 1.0.0 is not (TJC-2335), so
+  remove `-experimental` from your build. The annotation macros use only stable reflect API
+  (details under *Changed*).
 - **`import com.tjclp.fastmcp.{*, given}` — the `given` selector is mandatory.** The platform
   `TransportBackend` and the `McpServerCoreFactory` are `given` instances re-exported from the
   package object; a plain `import com.tjclp.fastmcp.*` no longer compiles for `McpServerApp`
@@ -258,6 +263,10 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Changed
 
+<!-- PENDING MERGE (delete in R3): the "No more -experimental" (TJC-2335) bullet below is
+     copied verbatim from PR #98 so that `git merge origin/main` dedupes it; if it appears twice
+     after the merge, keep one copy. -->
+
 - **Behaviour changes from the security wave (pre-1.0)** (TJC-2294):
   - Resource template literal text is matched verbatim — a `.` in `file://{name}.txt` is a dot, not
     a regex wildcard. Placeholders in one path segment must be separated by literal text (`{a}{b}`
@@ -312,6 +321,12 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
   - `@Tool(description = Some(...))` / `@Prompt(description = Some(...))` without `name` now
     registers under the method name with that description (previously the description text became
     the registered name).
+- **No more `-experimental`** (TJC-2335): fast-mcp-scala is no longer compiled with
+  `-experimental`; consumers may drop the flag (annotation and typed-contract paths, all three
+  platforms). The annotation macros use only stable reflect API: the five `Symbol.info` uses
+  (the only `@experimental` reflect member the macros touched) became
+  `Symbol.termRef.widenTermRefByName`. The Scaladoc-as-description fallback (`Symbol.docstring`,
+  stable) is unchanged.
 - **Scala 3.9.0 LTS** (TJC-2273): all three platforms now build with Scala 3.9.0
   (LTS, released 2026-09-03), up from 3.8.3. Companion bumps: WartRemover
   3.5.6 → 3.6.1 (first release for the 3.9.0 compiler) and the Scala.js
