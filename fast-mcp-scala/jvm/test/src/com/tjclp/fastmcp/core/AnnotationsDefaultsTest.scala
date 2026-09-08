@@ -6,8 +6,10 @@ import org.scalatest.matchers.should.Matchers
 /** These simple sanity checks assert that the compile‑time annotations expose sensible default
   * values at runtime. While the annotations are primarily consumed by macros, exercising them in
   * regular unit tests bumps coverage and protects against accidental changes to their parameter
-  * lists / defaults.
+  * lists / defaults. The six metadata-only `@Tool` parameters are deprecated since 1.0.0 but must
+  * keep their defaults until they are removed in 2.0.0, so this file reads them on purpose.
   */
+@annotation.nowarn("cat=deprecation")
 class AnnotationsDefaultsTest extends AnyFlatSpec with Matchers {
 
   "@Tool" should "provide expected defaults" in {

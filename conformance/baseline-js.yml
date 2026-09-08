@@ -2,6 +2,6 @@
 #
 # The Bun streamable transport streams every server->client message (progress, sampling,
 # elicitation, logging) on each request's own POST SSE response — identical semantics to the JVM
-# transport, reusing the shared Session/router logic. JS passes the entire active suite. No expected
-# failures.
+# transport, reusing the shared Session/router logic. JS passes the entire active suite across both
+# protocol eras (2026-07-28 and the 2025-11-25-and-earlier legacy adapter). No expected failures.
 server: []

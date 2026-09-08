@@ -71,11 +71,17 @@ private[fastmcp] object StdioLoop:
 
   /** Blocking line write to `System.out`. Identical on the JVM and Scala Native (SN's javalib
     * provides the same `System.out` surface).
+    *
+    * Frame and newline go out in ONE `PrintStream` call. `PrintStream` serialises each call on its
+    * own lock, so a foreign `System.out` writer — a stray `println` in user code — can land between
+    * frames but never inside one. Three separate calls (`print(line)`, `print('\n')`, `flush()`)
+    * left a window in which such a line spliced into the reply (`{...}noise` + an empty line) and
+    * the client never saw that reply (TJC-2338). The single-writer semaphore in [[serve]] orders
+    * OUR writes; this guards against writes we don't control.
     */
-  private def writeLine(line: String): Task[Unit] =
+  private[fastmcp] def writeLine(line: String): Task[Unit] =
     ZIO.attempt {
       val out = java.lang.System.out
-      out.print(line)
-      out.print('\n')
+      out.print(line + "\n")
       out.flush()
     }
