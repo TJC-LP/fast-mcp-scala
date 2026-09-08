@@ -219,6 +219,13 @@ Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Um
 
 ### Changed
 
+- **Misplaced annotations are a compile error** (TJC-2331, C2.8): the scan still registers only
+  members declared directly on the scanned object (inherited members would break default-argument
+  getter lookup and exact-overload binding), but an annotated member it skips — inherited from a
+  trait or class, on a `val`, or in a nested object — is now reported by name with the rule and the
+  remedy instead of silently producing an empty `tools/list` (`McpServerApp`'s quiet scan included).
+  A nested annotated object next to declared members is a warning, since it may be scanned
+  separately; `private` / `protected` declared members are registered as before.
 - **Annotated method shapes are checked at expansion** (TJC-2331, C2.7; rejects shapes that were
   silently broken or crashed): a `@Tool` / `@Prompt` / `@Resource` method with no parameter list
   (`def m: String`), more than one parameter list (curried, or a `using` / implicit clause), type

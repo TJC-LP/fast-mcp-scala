@@ -109,6 +109,8 @@ def search(
 
 Overloading is fine: only the annotated overload is registered, and its schema and handler come from that exact declaration; two annotated overloads must register distinct `name`s — duplicate names or resource URI patterns within one object are a compile-time error. Annotation arguments such as `name`, `description` and the hints must be literals (`Some("...")`, `Option("...")`, `None`, or a `final val` constant); anything else is a compile-time error.
 
+An annotated method has exactly one parameter list (no currying, no `using` clauses), no type parameters, and at most 22 parameters, and only members declared directly on the scanned object are registered (`private`/`protected` included) — an annotated inherited member, `val`, or nested-object method, like any other unsupported shape, is a compile-time error naming it and the fix.
+
 Enums, nested case classes, `Option`, collections, and `java.time` values derive with no user-supplied givens; custom wire shapes go through `McpInputCodec`. See [docs/custom-types.md](docs/custom-types.md).
 
 ## Tool hints
