@@ -1002,6 +1002,74 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     done.andThen { case _ => taskBunServer.stop() }
   }
 
+  // TJC-2353 twin of TaskHttpTransportTest: a legacy tasks/result for a cancelled task must be
+  // answered with an error frame on Bun too (the stream used to be closed with nothing in it).
+  it should "answer tasks/result for a cancelled task with -32602 instead of closing the stream" in {
+    val cancelPort = 38937
+    val server = com.tjclp.fastmcp.server.McpServer(
+      "JsHttpCancelledResultServer",
+      "0.1.0",
+      McpServerSettings(
+        host = "127.0.0.1",
+        port = cancelPort,
+        httpEndpoint = "/mcp",
+        stateless = false,
+        tasks = TaskSettings(enabled = true, pollIntervalMs = 50)
+      )
+    )
+    val slowTaskTool = McpTool
+      .withSchema[PingArgs, PingResult](
+        name = "slow-task",
+        inputSchema = pingSchema,
+        description = Some("Sleeps long enough to be cancelled")
+      )
+      .contextual((args, _) => ZIO.sleep(30.seconds).as(PingResult(args.msg)))
+      .withTaskSupport(TaskSupport.Optional)
+    val taskIdPattern = """"taskId":"([^"]+)"""".r
+
+    def post(body: String, sid: Option[String]): Future[js.Dynamic] =
+      fetchAt(
+        cancelPort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders(sid.toList.map("mcp-session-id" -> _)*),
+          body = body
+        )
+      )
+
+    runZio(server.tool(slowTaskTool).unit).flatMap { _ =>
+      val bun = server.startStatefulHttp()
+      val checked = for
+        initResp <- post(legacyInitBody, None)
+        _ <- text(initResp)
+        sid = header(initResp, "mcp-session-id").getOrElse(fail("no session id"))
+        created <- post(
+          """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow-task","arguments":{"msg":"hi"},"task":{"ttl":60000}}}""",
+          Some(sid)
+        ).flatMap(text)
+        taskId = taskIdPattern
+          .findFirstMatchIn(created)
+          .map(_.group(1))
+          .getOrElse(fail(s"no taskId in: $created"))
+        cancelled <- post(
+          s"""{"jsonrpc":"2.0","id":3,"method":"tasks/cancel","params":{"taskId":"$taskId"}}""",
+          Some(sid)
+        ).flatMap(text)
+        result <- post(
+          s"""{"jsonrpc":"2.0","id":4,"method":"tasks/result","params":{"taskId":"$taskId"}}""",
+          Some(sid)
+        ).flatMap(text)
+      yield
+        cancelled should include(""""status":"cancelled"""")
+        withClue(s"tasks/result body after cancel: <$result> ") {
+          result should include(""""id":4""")
+          result should include(""""code":-32602""")
+          result should include(s"Task $taskId was cancelled")
+        }
+      checked.andThen { case _ => bun.stop() }
+    }
+  }
+
   "runHttp (stateless keepalive)" should "emit pings on a quiet modern POST SSE stream" in {
     val kaPort = 38923
     val server = com.tjclp.fastmcp.server.McpServer(
