@@ -416,7 +416,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     }
   }
 
-  "Bun.serve options" should "run with development=false, an error callback and the body cap (NODE_ENV-independent)" in {
+  "Bun.serve options" should "run with development=false, an error callback, the body cap and idleTimeout 0 (NODE_ENV-independent)" in {
     val settings = McpServerSettings(
       host = "127.0.0.1",
       port = 1, // never bound: serveOptions does not call Bun.serve
@@ -431,6 +431,8 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       opts.maxRequestBodySize.getOrElse(0) shouldBe 4096
       opts.port.getOrElse(0) shouldBe 1
       opts.error.isDefined shouldBe true
+      // 0 disables Bun's runtime idle close (its 10 s default cut quiet SSE streams, D6 8.15).
+      opts.idleTimeout.getOrElse(-1) shouldBe 0
       // Bun calls fetch(request, server): the closure must take both.
       opts.fetch.asInstanceOf[js.Dynamic].length.asInstanceOf[Int] shouldBe 2
 

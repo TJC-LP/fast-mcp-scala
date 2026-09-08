@@ -185,7 +185,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     (_: js.Dynamic) => jsonRpcErrorResponse(500, HttpRequestGuards.InternalErrorMessage)
 
   /** The options handed to `Bun.serve` — a seam so tests can assert `development == false`, the
-    * `error` callback and `maxRequestBodySize` without depending on `NODE_ENV`.
+    * `error` callback, `maxRequestBodySize` and `idleTimeout == 0` without depending on `NODE_ENV`.
     */
   private[fastmcp] def serveOptions[R](
       router: McpRouter[R],
@@ -203,7 +203,10 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       ),
       maxRequestBodySize = settings.maxRequestBodyBytes,
       development = false,
-      error = bunErrorHandler
+      error = bunErrorHandler,
+      // Bun's 10 s default would cut a quiet SSE response before a slow tool replies (D6 8.15);
+      // 0 disables the runtime idle close, as on the JVM listener. See `BunServeOptions`.
+      idleTimeout = 0
     )
 
   /** First-party error boundary, independent of `NODE_ENV`. The by-name `effect` is evaluated
