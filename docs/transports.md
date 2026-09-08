@@ -17,14 +17,38 @@ object MyServer extends McpServerApp[Stdio, MyServer.type]:
 
 Newline-delimited JSON-RPC over stdin/stdout, the transport Claude Desktop and the MCP Inspector
 use. One durable session per process; shutdown is EOF-driven (the client closing stdin ends the
-loop). Each inbound frame is dispatched in its own fiber, so a handler awaiting a server→client
-round trip (roots, sampling, elicitation) cannot deadlock the loop; replies may therefore be written
-in a different order from the requests — correlate by `id`, and wait for the `initialize` result
-before pipelining further requests. The stdio lifecycle (`StdioLoop`: session, single-writer stdout, outbound drainer, EOF
+loop). On the JVM and in GraalVM images SIGTERM/SIGINT take effect only after that EOF — the main
+fiber is parked in a blocking `System.in.read` that interruption cannot unblock — so a host must
+close the child's stdin before signalling it (the TypeScript SDK does; `Ctrl-C`, `timeout` and
+`docker stop` stall until stdin closes); Scala Native and Bun/Node exit on the signal at once. An
+interruptible reader is tracked for 1.0.1. Each inbound frame is dispatched in its own fiber, so a
+handler awaiting a server→client round trip (roots, sampling, elicitation) cannot deadlock the
+loop; replies may therefore be written in a different order from the requests — correlate by `id`,
+and wait for the `initialize` result before pipelining further requests. A frame is a
+newline-terminated line: do not rely on trailing bytes without a `\n` being dispatched (the JVM
+and Bun drop them), and until the 1.0.1 fix the JVM may drop the replies to frames still in flight
+when stdin closes — wait for every reply before closing the pipe (Scala Native and Bun answer
+them). The stdio lifecycle (`StdioLoop`: session, single-writer stdout, outbound drainer, EOF
 teardown) is shared by the JVM and Scala Native backends; the Scala.js backend drives Node's
 callback IO directly. Because `runStdio()` has no reachable call path into the HTTP stack,
 stdio-only programs never link zio-http or netty. That is what makes small GraalVM images possible
 (see [native-image.md](./native-image.md)).
+
+**stdout is the wire; log to stderr.** ZIO's default logger prints to stdout, so a handler that
+calls `ZIO.logInfo` (or anything else that writes `System.out`) puts a non-JSON line on the protocol
+channel — and under concurrent calls can splice it into a reply frame, which the client then never
+parses. Until 1.0.0's stdio runner installs it by default (TJC-2338), route the logger to stderr in
+your app (`val`, not `def`: `bootstrap` must be a stable value):
+
+```scala 3 raw
+import zio.*
+
+object MyServer extends McpServerApp[Stdio, MyServer.type]:
+  override val bootstrap =
+    Runtime.removeDefaultLoggers ++ Runtime.addLogger(ZLogger.default.map(java.lang.System.err.println))
+
+  @Tool(...) def hello(name: String): String = s"Hello, $name!"
+```
 
 ## HTTP
 
@@ -98,7 +122,11 @@ sessions are evicted after `sessionIdleTimeout`, and the store is capped by `max
 (`Some(1000)` by default): at the cap the longest-idle session without a live GET stream is evicted
 to make room, and the `initialize` is refused with 503 only when every stored session holds a live
 GET. DELETE, idle eviction, and cap eviction all go through `Session.terminate`: a request still in
-flight on that session is interrupted (no reply) and its running legacy tasks are released.
+flight on that session is interrupted (no reply) and its running legacy tasks are released. An
+empty `mcp-session-id` header counts as an unknown session on the JVM (404) and as a missing header
+on Bun (400). On Bun a legacy session has no GET channel, so a server→client message emitted outside
+a request (a future `notifications/resources/updated`) has no delivery path; nothing publishes such
+messages today.
 
 `stateless` controls **only** this adapter. Modern requests are stateless regardless of the flag.
 Leaving it `false` (the default) lets older clients fall back to the initialize/session/GET/DELETE
@@ -205,4 +233,5 @@ provide the layer at the boundary with `.provide(...)` on `runStdio()` / `runHtt
 | Legacy GET push stream | ✅ | 405 | n/a |
 
 Node and Deno parity for the HTTP listener is a follow-up; only the `Bun.serve(...)` entry point is
-Bun-specific today.
+Bun-specific today. `httpEndpoint` is matched as an exact path on Bun; the JVM additionally accepts
+a trailing slash (`/mcp/`). Both ignore the query string.
