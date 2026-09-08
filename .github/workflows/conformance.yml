@@ -1,8 +1,14 @@
 name: Conformance
 
-# Runs the official MCP conformance "active" server suite (via the pinned harness in
-# conformance/package.json + bun.lock, installed with bun install --frozen-lockfile) against the
-# fast-mcp-scala ConformanceServer over streamable HTTP, on both platforms.
+# Runs the official MCP conformance server harness (pinned in conformance/package.json + bun.lock,
+# installed with bun install --frozen-lockfile) against the fast-mcp-scala ConformanceServer over
+# streamable HTTP, on both platforms and in both scripts/conformance.sh modes:
+#   * active — the harness's active suite: 31 scenarios / 73 checks, every one at the 2025-11-25
+#     wire, checked against conformance/baseline-<platform>.yml (both baselines are empty);
+#   * 2026   — `--requirements 2026-07-28`: the scenarios that revision requires (37 scored, 118
+#     checks; extension/pending scenarios are reported but never scored), the only lane that sends
+#     2026-07-28 requests. No baseline file: the harness's own verdict is the gate.
+# native.yml runs the same two modes against the GraalVM HTTP image.
 on:
   pull_request:
   push:
@@ -13,11 +19,13 @@ permissions:
 
 jobs:
   conformance:
-    name: MCP active suite (${{ matrix.platform }})
+    # "MCP active suite (jvm|js)" is the pre-existing check name — keep the active lane's name stable.
+    name: MCP ${{ matrix.mode }} suite (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
         platform: [jvm, js]
+        mode: [active, "2026"]
     runs-on: ubuntu-latest
 
     steps:
@@ -31,7 +39,10 @@ jobs:
           bun: "true"
           cache-write: "false" # this job executes the npm harness: restore the shared cache read-only
 
-      # Boots the server, drives it with the pinned conformance harness, and checks the result against
-      # conformance/baseline-${platform}.yml (both baselines are empty — full active-suite green).
-      - name: Run MCP conformance active suite (${{ matrix.platform }})
-        run: ./scripts/conformance.sh ${{ matrix.platform }}
+      # Boots the server, drives it with the pinned harness in the matrix mode, and exits with the
+      # harness verdict (active: against the empty per-platform baseline; 2026: the scored scenarios).
+      - name: Run MCP conformance ${{ matrix.mode }} (${{ matrix.platform }})
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          MODE: ${{ matrix.mode }}
+        run: ./scripts/conformance.sh "$PLATFORM" 8077 "$MODE"

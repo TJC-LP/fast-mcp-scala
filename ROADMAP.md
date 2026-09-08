@@ -12,7 +12,8 @@ Concrete work items, roughly in order. Issues are tracked on
 - Three platforms from one `shared/` tree: JVM (stdio + HTTP), Scala.js on Bun (stdio + HTTP),
   Scala Native (stdio, experimental).
 - GraalVM native images for stdio and HTTP servers with zero hand-written reachability metadata.
-- Official MCP conformance suite gating every PR on JVM, Bun, and the GraalVM binary.
+- Official MCP conformance suite gating every PR on JVM, Bun, and the GraalVM binary (active suite
+  and the 2026-07-28 requirements run).
 
 ## 1.1.0
 
