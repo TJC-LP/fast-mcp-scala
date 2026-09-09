@@ -4,7 +4,7 @@ Concrete work items, roughly in order. Issues are tracked on
 [GitHub](https://github.com/TJC-LP/fast-mcp-scala/issues); release history is in
 [CHANGELOG.md](CHANGELOG.md).
 
-## 1.0.0 — first stable release
+## 1.0.0 (shipped 2026-09-09)
 
 - Native Scala 3 MCP core (no vendored SDK): JSON-RPC, wire types, router, transports.
 - **MCP 2026-07-28** as the primary protocol, with an initialization-based compatibility adapter
