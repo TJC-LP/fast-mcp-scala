@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Skills extension (`io.modelcontextprotocol/skills`, SEP-2640)** as a native part of the shared
+  core on JVM, Scala.js/Bun and Scala Native, over stdio and (where available) HTTP, in both the
+  2026-07-28 stateless path and the initialize/session adapter. Implements the stable extension page
+  (`ext-skills` commit `d866efdb`, blob `e65b881c`) including the optional
+  `resources/directory/read`: `skills/list` (paginated, `resultType: "complete"`, `ttlMs`,
+  `cacheScope` on 2026-07-28), `skills/get` (`{skill}`, unlisted skills resolve, unknown → `-32602`),
+  `resources/directory/read` (direct children, `inode/directory`, unknown/file → `-32602`), skill
+  files served through ordinary `resources/read` / `resources/list`, and the capability declared
+  inline (`{"directoryRead": true}` or `{}`) alongside `resources`.
+  - Authoring: `McpSkill.fromMarkdown` / `parse` (+ byte forms), `SkillFile.text` / `binary`, empty
+    directories, `unlisted`, `nestedSkill`; `McpServerApp.skills` / `skillProviders`;
+    `McpServerCore.skill` / `skills` / `removeSkills` / `skillProvider` (atomic publish/replace/remove,
+    conflicts with static resources and templates refused both ways).
+  - `SkillProvider[R]` for generated / remote / authorization-scoped catalogs (`resources: "dynamic"`
+    supported); `SkillSettings` (`enabled`, `directoryRead`, page sizes, `ttlMs`/`cacheScope`,
+    per-skill limits defaulting to the spec's 512 entries / 16 MiB).
+  - `SkillUri`: one literal URI policy (no percent-decoding, segment-aware containment,
+    filesystem-style relative resolution, lowercase authority); strict-UTF-8 `SKILL.md` reader with
+    YAML → verbatim JSON frontmatter (duplicate keys, anchors, aliases, tags and bombs rejected).
+  - Host-side helpers `SkillVerifier`, `HeldEntry`, `SkillIdentity`, `VerificationOutcome`.
+  - JVM-only `SkillDirectoryLoader` (regular files only, symlinks/special files refused, bounded
+    reads, explicit selection policy).
+  - `TransportBackend.sha256` (default: portable FIPS 180-4 `core.skills.Sha256`, pinned to the NIST
+    vectors on every platform; the JVM overrides with `MessageDigest`).
+  - Examples `SkillsServer` (shared), `SkillsHttpServer` and `SkillDirectoryServer` (JVM); docs
+    `docs/skills.md` and `docs/skills-conformance.md`.
+- New production dependency `org.virtuslab::scala-yaml:0.3.3` (JVM, Scala.js, Scala Native) for
+  `SKILL.md` frontmatter, driven at the event level (see `DEPENDENCY_POLICY.md` rationale in
+  `docs/skills-conformance.md`).
+
+### Changed
+
+- `ResourceManager` gains mounted `ResourceSource`s (resolved after static resources and before
+  templates) and `readResourceWithMime`; registering a static resource or a template that collides
+  with a URI a mounted source serves now fails instead of overwriting.
+- `McpServerCore` declares the four skills registration methods (abstract; implemented by
+  `McpServer`). Third-party implementations of the trait must add them.
+- `McpRouter.deriveCapabilities` declares the skills extension when its methods are registered;
+  `RouterBuilder.build` and `Builtins` take an optional `SkillRegistry`.
+
 ## [1.0.0] - 2026-09-09
 
 Highlights since 0.4.0, the last published stable release (the `[0.5.0]` section

@@ -91,6 +91,55 @@ case class TaskSettings(
   require(minResultRetentionMs >= 0L, "TaskSettings.minResultRetentionMs must be >= 0")
   require(sweepIntervalMs >= 1L, "TaskSettings.sweepIntervalMs must be >= 1")
 
+/** Settings for the **Skills extension** (`io.modelcontextprotocol/skills`, SEP-2640). Full
+  * reference: `docs/skills.md`.
+  *
+  * The extension is advertised when `enabled` is true OR when at least one skill / skill provider
+  * is registered (honest capabilities: registering a skill means serving it; `enabled = true`
+  * serves an empty catalog, which is legitimate and distinct from not declaring the extension).
+  *
+  * @param enabled
+  *   Declare the extension even with an empty catalog. Default false: with nothing registered the
+  *   extension is not declared and `skills/list`, `skills/get` answer `-32601`.
+  * @param directoryRead
+  *   Advertise `directoryRead: true` and wire `resources/directory/read`. The flag is emitted only
+  *   when every registered provider supports directory reads; the in-memory catalog always does.
+  * @param listPageSize
+  *   Skills per `skills/list` page; an entry is never split across pages.
+  * @param directoryPageSize
+  *   Children per `resources/directory/read` page.
+  * @param ttlMs
+  *   `ttlMs` on `skills/list` and `skills/get` results (2026-07-28 CacheableResult). Default 0:
+  *   immediately stale, the conservative base-protocol default.
+  * @param cacheScope
+  *   `cacheScope` on the same results. Default `private`: a catalog may be authorization-scoped, so
+  *   it must never be shared through a public cache unless the operator says so.
+  * @param maxResourcesPerSkill
+  *   Registration limit on `SKILL.md` + supporting files. Default = the spec's 512-entry
+  *   interoperability threshold; raise only for hosts known to accept more.
+  * @param maxTotalBytesPerSkill
+  *   Registration limit on the summed raw byte size of a skill's files. Default = the spec's 16 MiB
+  *   threshold. Raw bytes, not wire bytes: a binary file costs ~4/3 of its size as base64 in one
+  *   `resources/read` frame, and `limits.maxFrameChars` (4 MiB by default) bounds the frame on
+  *   every transport — a single file larger than roughly 3 MiB needs `limits` raised too.
+  */
+case class SkillSettings(
+    enabled: Boolean = false,
+    directoryRead: Boolean = true,
+    listPageSize: Int = 50,
+    directoryPageSize: Int = 200,
+    ttlMs: Long = com.tjclp.fastmcp.core.wire.CacheHints.TtlMs,
+    cacheScope: com.tjclp.fastmcp.core.wire.CacheScope =
+      com.tjclp.fastmcp.core.wire.CacheHints.Scope,
+    maxResourcesPerSkill: Int = com.tjclp.fastmcp.core.wire.Skills.MaxResourcesPerSkill,
+    maxTotalBytesPerSkill: Long = com.tjclp.fastmcp.core.wire.Skills.MaxTotalBytesPerSkill
+):
+  require(listPageSize >= 1, "SkillSettings.listPageSize must be >= 1")
+  require(directoryPageSize >= 1, "SkillSettings.directoryPageSize must be >= 1")
+  require(ttlMs >= 0L, "SkillSettings.ttlMs must be >= 0")
+  require(maxResourcesPerSkill >= 1, "SkillSettings.maxResourcesPerSkill must be >= 1")
+  require(maxTotalBytesPerSkill >= 1L, "SkillSettings.maxTotalBytesPerSkill must be >= 1")
+
 /** Settings for an MCP server. HTTP-specific fields (`host`, `port`, `httpEndpoint`, `stateless`,
   * `keepAliveInterval`, `sessionIdleTimeout`, `disallowDelete`, `allowedHosts`, `allowedOrigins`,
   * `maxRequestBodyBytes`, `maxSessions`) are ignored under stdio transports. `limits` and `tasks`
@@ -159,7 +208,10 @@ case class McpServerSettings(
     tasks: TaskSettings = TaskSettings(),
     // Inbound input limits (frame size, JSON depth, object width, URI length, subscriptions).
     // Enforced on every transport before any dispatch work; see [[LimitSettings]].
-    limits: LimitSettings = LimitSettings()
+    limits: LimitSettings = LimitSettings(),
+    // Optional io.modelcontextprotocol/skills extension (SEP-2640). Declared when enabled or when a
+    // skill / provider is registered; see [[SkillSettings]] and docs/skills.md.
+    skills: SkillSettings = SkillSettings()
 )
 
 /** Input limits applied to every inbound JSON-RPC frame on every transport (stdio and HTTP; JVM,

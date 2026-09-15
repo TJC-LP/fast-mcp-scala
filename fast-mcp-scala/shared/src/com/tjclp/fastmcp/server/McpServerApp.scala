@@ -4,7 +4,9 @@ package server
 import zio.*
 
 import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.core.skills.McpSkill
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
+import com.tjclp.fastmcp.server.skills.SkillProvider
 
 /** Runtime-scan capture of annotated methods on a specific singleton type. The `inline given` in
   * the companion expands at the subclass's *instantiation* site — where `Self` is concrete — so the
@@ -69,6 +71,14 @@ trait McpServerApp[T <: Transport, Self <: Singleton](using
   def staticResources: List[McpStaticResource] = Nil
   def templateResources: List[McpTemplateResource[?]] = Nil
 
+  /** Skills to publish (Skills extension). Published as one atomic batch after the resources, so a
+    * skill file colliding with a static resource fails startup instead of shadowing it.
+    */
+  def skills: List[McpSkill] = Nil
+
+  /** Generated / remote / authorization-scoped skill catalogs (Skills extension). */
+  def skillProviders: List[SkillProvider[Any]] = Nil
+
   /** Transport-provided runtime layer (stdio: ZIO logs to stderr, see [[transport.StdioLogging]]).
     * Override with your own `val` to install a different logger.
     */
@@ -82,6 +92,8 @@ trait McpServerApp[T <: Transport, Self <: Singleton](using
       _ <- ZIO.foreachDiscard(prompts)(core.prompt(_))
       _ <- ZIO.foreachDiscard(staticResources)(core.resource(_))
       _ <- ZIO.foreachDiscard(templateResources)(core.resource(_))
+      _ <- ZIO.when(skills.nonEmpty)(core.skills(skills))
+      _ <- ZIO.foreachDiscard(skillProviders)(core.skillProvider(_))
     yield core
 
   override final def run: ZIO[Any, Throwable, Unit] =

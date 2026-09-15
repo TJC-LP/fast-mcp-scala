@@ -6,8 +6,10 @@ import zio.*
 import com.tjclp.fastmcp.codec.DefaultDecodeContext
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.wire.{CompleteRequestParams, Completion, Implementation}
+import com.tjclp.fastmcp.core.skills.{McpSkill, SkillError}
 import com.tjclp.fastmcp.server.manager.*
 import com.tjclp.fastmcp.server.router.{McpRouter, RouterBuilder}
+import com.tjclp.fastmcp.server.skills.{SkillProvider, SkillRegistry}
 import com.tjclp.fastmcp.server.transport.{HttpTransportBackend, StdioLogging, TransportBackend}
 
 /** A completion provider for `completion/complete` (argument autocompletion): given the request
@@ -45,6 +47,15 @@ final class McpServer[R](
   val toolManager: ToolManager[R] = new ToolManager[R]()
   val resourceManager: ResourceManager[R] = new ResourceManager[R]()
   val promptManager: PromptManager[R] = new PromptManager[R]()
+
+  /** The Skills extension catalog. Mounted into the resource manager so skill files are ordinary
+    * resources; consulted by the router for `skills/list`, `skills/get` and
+    * `resources/directory/read`. Digests come from the platform backend (`MessageDigest` on the
+    * JVM, the portable SHA-256 elsewhere).
+    */
+  val skillRegistry: SkillRegistry[R] =
+    SkillRegistry.make[R](settings.skills, backend.sha256, resourceManager.describeConflict)
+  resourceManager.addSource(skillRegistry)
 
   // Optional argument-completion provider; when set, `completion/complete` is wired and the
   // `completions` capability is advertised. (Single handler, so a plain atomic holder, not a manager.)
@@ -111,6 +122,22 @@ final class McpServer[R](
       this
     }
 
+  // --- Skills (io.modelcontextprotocol/skills) ---
+
+  override def skills(skills: List[McpSkill]): ZIO[Any, Throwable, McpServerCore[R]] =
+    skillRegistry.publish(skills).mapError(e => new SkillError.Exception(e)).as(this)
+
+  override def removeSkills(rootUris: List[String]): ZIO[Any, Throwable, McpServerCore[R]] =
+    skillRegistry.remove(rootUris).as(this)
+
+  override def skillProvider[R1 >: R](
+      provider: SkillProvider[R1]
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    skillRegistry
+      .addProvider(provider.asInstanceOf[SkillProvider[R]])
+      .mapError(e => new SkillError.Exception(e))
+      .as(this)
+
   // --- Lifecycle ---
 
   /** Build the immutable router from the (now-populated) managers + settings. Allocates a
@@ -137,7 +164,8 @@ final class McpServer[R](
         resourceManager = resourceManager,
         settings = settings,
         taskManager = tm,
-        completionHandler = completionRef.get()
+        completionHandler = completionRef.get(),
+        skillRegistry = Some(skillRegistry)
       )
       (router, tm)
     }

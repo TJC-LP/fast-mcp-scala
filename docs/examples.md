@@ -16,6 +16,7 @@ compiles and runs on all three platforms (JVM, Scala.js/Bun, Scala Native):
 | `AnnotatedServer.scala` | Flagship annotation path: tools, hints, `@Param` features, resources, prompts |
 | `ContractServer.scala` | Typed contracts as first-class values |
 | `ContextEchoServer.scala` | `McpContext` introspection inside a tool handler |
+| `SkillsServer.scala` | Skills extension: an in-memory skill (text reference, binary asset, nested directory, empty directory), a nested skill entry, an unlisted skill, a dynamic `SkillProvider`, next to a `@Tool` |
 | `conformance/ConformanceServer.scala` | The server the official conformance suite runs against, with the SEP-2575 / SEP-2322 diagnostic fixtures |
 
 ## JVM-only
@@ -26,6 +27,8 @@ compiles and runs on all three platforms (JVM, Scala.js/Bun, Scala Native):
 |---|---|
 | `HttpServer.scala` | HTTP transport: modern stateless POST + request-scoped SSE, with the legacy session adapter enabled by default |
 | `TaskManagerServer.scala` | Realistic domain server: custom decoders, hints across a CRUD-style surface |
+| `SkillsHttpServer.scala` | The `SkillsServer` catalog over streamable HTTP on `127.0.0.1:8091` — the fixture for the upstream `sep-2640-skills-*` conformance scenarios ([docs/skills-conformance.md](./skills-conformance.md)) |
+| `SkillDirectoryServer.scala` | `SkillDirectoryLoader`: publish an on-disk skill directory (`FAST_MCP_SKILL_DIR` or first argument) over stdio |
 | `conformance/ConformanceServerJvm.scala` | JVM entry point for the conformance server (`scripts/conformance.sh jvm`) |
 
 ## Scala.js / Bun

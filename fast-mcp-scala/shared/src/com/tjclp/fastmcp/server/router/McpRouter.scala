@@ -28,6 +28,10 @@ object Methods:
   val CompletionComplete = "completion/complete"
   val LoggingSetLevel = "logging/setLevel"
   val SubscriptionsListen = "subscriptions/listen"
+  // Skills extension (io.modelcontextprotocol/skills, SEP-2640)
+  val SkillsList = Skills.MethodSkillsList
+  val SkillsGet = Skills.MethodSkillsGet
+  val ResourcesDirectoryRead = Skills.MethodResourcesDirectoryRead
 
 /** The MCP dispatcher — the native-Scala replacement for the Java SDK's `McpAsyncServer` and the TS
   * SDK's `Server`.
@@ -331,8 +335,18 @@ object McpRouter:
         else capabilities.extensions
     )
 
+  /** The `io.modelcontextprotocol/skills` extension settings object: `{}` declares the extension
+    * with no optional features; `{"directoryRead": true}` additionally commits the server to
+    * `resources/directory/read`. Settings sit inline under the identifier (SEP-2133), never in an
+    * envelope.
+    */
+  def skillsExtension(directoryRead: Boolean): Json =
+    if directoryRead then Json.Obj("directoryRead" -> Json.Bool(true)) else Json.Obj()
+
   /** Derive the compatibility capability superset from registered methods plus settings. Modern
-    * discovery transforms removed fields into their extension-era representation.
+    * discovery transforms removed fields into their extension-era representation. The Skills
+    * extension is declared (in BOTH eras — an older base revision does not disable it) exactly when
+    * its methods are registered, with `directoryRead` mirroring `resources/directory/read`.
     */
   def deriveCapabilities(
       methods: Set[String],
@@ -341,7 +355,14 @@ object McpRouter:
       listChanged: Boolean
   ): ServerCapabilities =
     val lc = Option.when(listChanged)(true)
+    val skills: Option[Map[String, Json]] =
+      Option.when(methods.contains(Methods.SkillsList) && methods.contains(Methods.SkillsGet))(
+        Map(
+          Skills.ExtensionId -> skillsExtension(methods.contains(Methods.ResourcesDirectoryRead))
+        )
+      )
     ServerCapabilities(
+      extensions = skills,
       tools = Option.when(methods.contains(Methods.ToolsList))(ToolsCapability(listChanged = lc)),
       resources = Option.when(methods.contains(Methods.ResourcesList))(
         ResourcesCapability(subscribe = Option.when(resourcesSubscribe)(true), listChanged = lc)

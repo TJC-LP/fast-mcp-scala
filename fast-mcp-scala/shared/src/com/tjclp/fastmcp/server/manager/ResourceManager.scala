@@ -43,6 +43,30 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
       (ResourceTemplatePattern, ResourceDefinition, ResourceTemplateHandler[R])
     ]()
 
+  // Mounted read-only trees (the Skills registry). Resolved after the static map and before the
+  // templates; see [[ResourceSource]].
+  private val sources =
+    new java.util.concurrent.atomic.AtomicReference[Vector[ResourceSource[R]]](Vector.empty)
+
+  /** Mount a [[ResourceSource]]. Its URIs become ordinary resources for listing and reading, and
+    * later static/template registrations that would collide with them are refused.
+    */
+  def addSource(source: ResourceSource[R]): Unit =
+    val _ = sources.updateAndGet(_ :+ source)
+
+  /** Why `uri` is already taken by this manager (a static resource, or a template that matches it),
+    * if it is — consulted by the Skills registry before it publishes a skill.
+    */
+  def describeConflict(uri: String): Option[String] =
+    if staticResources.containsKey(uri) then Some("already registered as a static resource")
+    else
+      findMatchingTemplate(uri).map { case (pattern, _, _, _) =>
+        s"matched by the resource template '${pattern.pattern}'"
+      }
+
+  private def sourceOwning(uri: String): Option[ResourceSource[R]] =
+    sources.get().find(_.owns(uri))
+
   def addStaticResource(
       uri: String,
       handler: ResourceHandler[R],
@@ -51,6 +75,10 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
     ZIO
       .attempt {
         val staticDefinition = definition.copy(isTemplate = false, arguments = None)
+        if sourceOwning(uri).isDefined then
+          throw new IllegalArgumentException(
+            s"URI '$uri' is served by a mounted resource source (a published skill); it cannot be re-registered as a static resource"
+          )
         if staticResources.containsKey(uri) then
           java.lang.System.err.println(
             s"[ResourceManager] Warning: Static resource with URI '$uri' already exists. Overwriting."
@@ -85,6 +113,16 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
             s"Template URI pattern '$uriPattern' contains placeholders [${missingArgs.mkString(", ")}] " +
               s"that don't have corresponding arguments in the definition"
           )
+
+        // A template that matches a URI a mounted source serves would look like a second owner of
+        // that URI. Sources win at read time regardless; refusing here keeps the registration
+        // honest instead of silently dead for those URIs.
+        sources.get().iterator.flatMap(_.ownedUris).find(pattern.matches(_).isDefined).foreach {
+          owned =>
+            throw new IllegalArgumentException(
+              s"Template URI pattern '$uriPattern' matches '$owned', which is served by a mounted resource source (a published skill)"
+            )
+        }
 
         val templateDefinition = definition.copy(isTemplate = true)
         if templateResources.containsKey(uriPattern) then
@@ -125,6 +163,7 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
 
   override def listDefinitions(): List[ResourceDefinition] =
     (staticResources.values().asScala.map(_._1) ++
+      sources.get().flatMap(_.listDefinitions()) ++
       templateResources.values().asScala.map(_._2)).toList
 
   def listStaticResources(): List[ResourceDefinition] =
@@ -143,7 +182,9 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
     Option(templateResources.get(uriPattern)).map(_._3)
 
   def getResourceDefinition(uri: String): Option[ResourceDefinition] =
-    Option(staticResources.get(uri)).map(_._1)
+    Option(staticResources.get(uri))
+      .map(_._1)
+      .orElse(sources.get().iterator.flatMap(_.definition(uri)).nextOption())
 
   def listTemplateDefinitions(): List[ResourceDefinition] = listTemplateResources()
 
@@ -169,29 +210,59 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
       }
       .collectFirst { case Some(result) => result }
 
-  @scala.annotation.nowarn("msg=unused explicit parameter")
   def readResource(
       uri: String,
       context: Option[McpContext]
   ): ZIO[R, Throwable, String | Array[Byte]] =
+    readResourceWithMime(uri, context).map(_._2)
+
+  /** [[readResource]] plus the served body's mime type — the registered definition's for static and
+    * templated resources, the source's own for mounted trees (whose files may have no definition
+    * until they are read). Resolution order: static → sources → templates.
+    */
+  def readResourceWithMime(
+      uri: String,
+      context: Option[McpContext]
+  ): ZIO[R, Throwable, (Option[String], String | Array[Byte])] =
     Option(staticResources.get(uri)) match
-      case Some((_, handler)) =>
+      case Some((definition, handler)) =>
         handler()
-          .mapError(e =>
-            new ResourceAccessError(s"Error accessing static resource '$uri'", Some(e))
+          .mapBoth(
+            e => new ResourceAccessError(s"Error accessing static resource '$uri'", Some(e)),
+            body => (definition.mimeType, body)
           )
       case None =>
-        findMatchingTemplate(uri) match
-          case Some((_, _, handler, params)) =>
-            handler(params)
-              .mapError(e =>
-                new ResourceAccessError(
-                  s"Error accessing templated resource '$uri' with params $params",
-                  Some(e)
-                )
-              )
+        val fromSources: ZIO[R, Throwable, Option[(Option[String], String | Array[Byte])]] =
+          ZIO
+            .foldLeft(sources.get())(Option.empty[(Option[String], String | Array[Byte])]) {
+              case (found @ Some(_), _) => ZIO.succeed(found)
+              case (None, source) if source.owns(uri) =>
+                source
+                  .read(uri, context)
+                  .mapError(e =>
+                    new ResourceAccessError(s"Error accessing resource '$uri'", Some(e))
+                  )
+              case (None, _) => ZIO.none
+            }
+        fromSources.flatMap {
+          case Some(result) => ZIO.succeed(result)
           case None =>
-            ZIO.fail(new ResourceNotFoundError(uri))
+            findMatchingTemplate(uri) match
+              case Some((_, _, handler, params)) =>
+                // Templated reads carry no declared mime type on the wire (pre-existing behaviour:
+                // `getResourceDefinition` never matched a templated URI), kept unchanged here.
+                handler(params)
+                  .mapBoth(
+                    e =>
+                      new ResourceAccessError(
+                        s"Error accessing templated resource '$uri' with params $params",
+                        Some(e)
+                      ),
+                    body => (None, body)
+                  )
+              case None =>
+                ZIO.fail(new ResourceNotFoundError(uri))
+        }
 
 end ResourceManager
 

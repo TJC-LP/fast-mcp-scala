@@ -33,6 +33,7 @@ of them, newest first.
 | Deprecated Roots, Sampling, Logging legacy surfaces | ✅ (compatibility only) |
 | Cancellation (`notifications/cancelled`) | ✅ |
 | Tasks extension | ✅ (opt-in; no task `input_required` production yet). Known SEP-2663 deviations, all 1.0.1 items: `tasks/get`/`update`/`cancel` are served without the `io.modelcontextprotocol/tasks` client capability; `Mcp-Name: <taskId>` is not validated on the tasks-namespace methods; a legacy `params.task` on a 2026-07-28 request is rejected `-32602` rather than ignored; `tasks/cancel` on a terminal task answers `-32602` rather than an idempotent empty ack; the 2025-11-25 `tasks` capability advertises only `requests.tools.call`. Details in the [1.0.0 gate ledger](./2026-07-28-upgrade.md#100-gate-ledger). |
+| Skills extension (`io.modelcontextprotocol/skills`, SEP-2640: `skills/list`, `skills/get`, `resources/directory/read`, skill files as resources) | ✅ (declared when a skill/provider is registered or `SkillSettings.enabled`); stable page `ext-skills@d866efdb`; both protocol eras; pinned sources and requirement-to-test matrix in [skills-conformance.md](./skills-conformance.md) |
 | DNS-rebinding / browser-origin protection (`allowedHosts`, `allowedOrigins`) | ✅ (opt-in) |
 | Input limits (`limits: LimitSettings`) + HTTP body / session caps (`maxRequestBodyBytes`, `maxSessions`) | ✅ (on by default) |
 | Legacy session idle eviction + SSE keepalives | ✅ |

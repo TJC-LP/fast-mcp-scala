@@ -19,6 +19,9 @@ Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **
 
 ### Common Commands
 
+If the native Mill launcher cannot reach Maven Central through a TLS-intercepting proxy, run with
+`MILL_VERSION=1.1.8-jvm` (the JVM launcher honours `JAVA_TOOL_OPTIONS`/the system truststore).
+
 ```bash
 # Aggregates (JVM + Scala.js + Scala Native)
 ./mill fast-mcp-scala.compile                       # Compile all platforms
@@ -79,7 +82,9 @@ fast-mcp-scala/
 │   │   ├── src/               # JVM-specific code
 │   │   │   └── com/tjclp/fastmcp/
 │   │   │       ├── server/transport/        # JvmTransportBackend (stdio) + JvmHttpBackend (netty)
-│   │   │       └── examples/                # JVM-only: HttpServer, TaskManagerServer
+│   │   │       ├── server/skills/           # SkillDirectoryLoader (filesystem → McpSkill, JVM only)
+│   │   │       └── examples/                # JVM-only: HttpServer, TaskManagerServer,
+│   │   │                                    #   SkillsHttpServer, SkillDirectoryServer
 │   │   └── test/src/          # JVM test sources
 │   ├── js/                    # Scala.js code (Bun-first runtime)
 │   │   ├── src/               # JsTransportBackend (Bun.serve + Node stdio), facades, examples
@@ -197,6 +202,45 @@ server.tool(addTool) *> server.runStdio()
 - **Stdio** (`runStdio()`) — stdin/stdout, used by MCP clients. stdout is the wire: the stdio runner routes ZIO's default logger to stderr (`McpServerApp[Stdio]` via `TransportRunner.bootstrap`; `runStdio()` swaps ZIO's stock stdout logger when still installed — `shared/.../transport/StdioLogging.scala`), and `StdioLoop.writeLine` emits each frame in ONE `PrintStream` call so a foreign `println` can never split it. Custom logger: `override val bootstrap = ...` (a `val`, not a `def`)
 - **HTTP** (`runHttp()`) — MCP 2026-07-28 is stateless: one JSON-RPC message per `POST /mcp`, answered with JSON or a request-scoped SSE stream; no sessions, GET stream, or DELETE on the modern path. Older protocol versions are routed to the legacy initialize/session/GET/DELETE adapter, which is on by default; `stateless = true` disables only that adapter's session store. Binds `127.0.0.1` by default (set `host = "0.0.0.0"` for containers); idle legacy sessions evict after `sessionIdleTimeout`; `allowedHosts` enables the DNS-rebinding guard (`Origin` is matched as a full origin against the request `Host`; `allowedOrigins` extends the allow-list); all POSTs require `Content-Type: application/json` (415 otherwise); `maxRequestBodyBytes` (1 MiB) and `maxSessions` (`Some(1000)`) bound request size and the legacy session store; `limits: LimitSettings` bounds every inbound frame on every transport (frame size 4 MiB / depth 64 / object width 1024 → `-32700`; URI length 8192 / subscriptions 1024 → `-32602`); on Bun `startStatefulHttp()`/`startStatelessHttp()` return `BunHttpHandle`; `keepAliveInterval` enables SSE heartbeats. Full reference: `docs/transports.md`
 
+### Skills (`io.modelcontextprotocol/skills`, SEP-2640)
+
+Serves [Agent Skills](https://agentskills.io/specification) over MCP: `skills/list`, `skills/get`,
+the optional `resources/directory/read`, and every skill file as an ordinary resource. Implemented in
+`shared/` (stable extension page `ext-skills` commit `d866efdb`); full reference `docs/skills.md`,
+pinned revisions + requirement-to-test matrix `docs/skills-conformance.md`.
+
+```scala
+import com.tjclp.fastmcp.{*, given}
+
+object ExampleServer extends McpServerApp[Stdio, ExampleServer.type]:
+  override val skills = List(
+    McpSkill.fromMarkdown(              // validates up front; throws SkillError.Exception
+      skillPath = "acme/reconcile-positions",  // final segment MUST equal frontmatter.name
+      markdown = skillMarkdown,         // exact SKILL.md text — digests describe these bytes
+      files = Map("references/rules.md" -> SkillFile.text(rules), "assets/x.bin" -> SkillFile.binary(bytes)),
+      emptyDirectories = Set("templates/drafts")
+    )
+  )
+```
+
+Effectful: `server.skills(list)` (one atomic batch) / `server.skill(s)` / `server.removeSkills(roots)` /
+`server.skillProvider(p)` — ZIOs that register on evaluation, sequence them. `McpSkill.parse` is the
+`Either` form; `.unlisted` hides a skill from `skills/list`/`resources/list` while `skills/get` and
+`resources/read` still resolve it; `parent.nestedSkill("dir")` derives a nested skill's own entry.
+
+Rules the implementation enforces: registering a skill/provider declares the extension
+(`SkillSettings(enabled = true)` declares an empty catalog); `directoryRead: true` only when every
+provider supports it; a declaring server always declares `resources`; URIs are literal (`SkillUri`:
+no percent-decoding, segment-aware containment, lowercase scheme/authority); digests are SHA-256 of
+raw bytes (`TransportBackend.sha256`: `MessageDigest` on JVM, portable FIPS 180-4 elsewhere);
+per-skill limits default to the spec's 512 entries / 16 MiB (`SkillSettings`); publication is atomic
+and conflicts (same URI different bytes, file vs directory, nested mismatch, provider overlap, static
+resource / template collision) fail the whole batch; `skills/get`/directory misses are `-32602`,
+undeclared methods `-32601`; 2026-07-28 results carry `resultType`/`ttlMs`/`cacheScope`, legacy
+sessions don't. `SkillDirectoryLoader` (JVM) refuses symlinks and special files. Host-side helpers:
+`SkillVerifier`, `HeldEntry` (identity = host label + uri). The server never executes, installs or
+approves anything — see "Host responsibilities" in `docs/skills.md`.
+
 ### Tasks (experimental, off by default)
 
 MCP Tasks are the official **`io.modelcontextprotocol/tasks` extension** (MCP 2026-07-28). A client declares the extension in its per-request capabilities; the server may return a flat `resultType: "task"` bearer handle, and the client polls `tasks/get`, cancels with `tasks/cancel`, and uses `tasks/update` only when a task waits for input. `params.task`, `tasks/list`, and `tasks/result` belong to the 2025-11-25 compatibility adapter and are rejected on modern requests. Full reference: `docs/tasks.md`.
@@ -311,6 +355,7 @@ Key test classes:
 - `TaskManagerSpec` / `TaskTransportGuardTest` / `LifecycleSoakTest` - task store bounds, sweeper hygiene, `Session.terminate`, interruption atomicity, per-client buckets
 - `OverloadBindingTest` / `OverloadNegativeTest` (JVM) and `OverloadBindingJsTest` (JS) - exact-overload binding, duplicate-registration and non-literal diagnostics
 - `JsServerLimitsTest` / `FromJsonAstDecodeTest` (JS), `JsonLimitsNativeTest` (Native) - limits and decode path on the other platforms
+- Skills extension: `SkillUriTest` / `Sha256AndUtf8Test` / `SkillFrontmatterReaderTest` / `SkillsWireCodecTest` / `McpSkillSnapshotTest` / `SkillVerifierTest` (core), `SkillRegistryTest` / `SkillsRouterTest` / `SkillDirectoryLoaderTest` (server), `SkillsStdioTranscriptTest` / `SkillsHttpTransportTest` (transports), `SkillsRootImportTest`, `SkillsServerExampleTest`; `SkillsConformanceTest` + `SkillsJsTest` (JS: TS SDK client over stdio, Bun stdio callbacks, Bun HTTP), `SkillsNativeTest` (Native stdio transcript)
 
 ## CI/CD
 
@@ -356,6 +401,7 @@ Key dependencies (versions in `build.mill`):
 - Scala 3.9.0 LTS
 - ZIO 2.1.26 - Effect system
 - ZIO JSON 0.10.0 - JSON codecs (shared)
+- scala-yaml 0.3.3 (`org.virtuslab`) - `SKILL.md` frontmatter for the Skills extension (JVM, Scala.js, Scala Native; event-level use, no transitive deps)
 - ZIO HTTP 3.11.4 - HTTP transport (brings netty 4.2.17.Final transitively; the JVM module imports `io.netty:netty-bom` at `Versions.netty` but declares no `io.netty` dependency)
 - Native Scala 3 macros - Compile-time JSON Schema derivation
 - mill-bun-plugin 0.3.1 - Scala.js + Bun build integration (Scala.js 1.22.0 pinned via `Versions.scalaJs`)

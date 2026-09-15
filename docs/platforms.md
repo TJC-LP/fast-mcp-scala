@@ -23,6 +23,9 @@ contracts compile and mount unchanged on all three.
 | Streamable HTTP, MCP 2026-07-28 (stateless POST + request-scoped SSE) | ✅ (ZIO HTTP) | ✅ (`Bun.serve`) | ✗ by design¹ |
 | Legacy HTTP adapter (initialize, `Mcp-Session-Id`, GET stream, DELETE) | ✅ | ✅ (GET answers 405; per-request SSE covers server→client) | ✗ by design¹ |
 | Tasks extension (bearer handles) | ✅ | ✅ | ✅ (over stdio) |
+| Skills extension (`skills/list`, `skills/get`, `resources/directory/read`, skill files as resources) | ✅ | ✅ | ✅ (over stdio) |
+| `SkillDirectoryLoader` (publish an on-disk skill directory) | ✅ | — (in-memory skills and providers) | — (in-memory skills and providers) |
+| SHA-256 for skill digests | `MessageDigest` | portable FIPS 180-4 (`core.skills.Sha256`) | portable FIPS 180-4 |
 | Custom decoders (`given JsonDecoder[T] → McpDecoder[T]`) | ✅ | ✅ (same shared zio-json path) | ✅ same |
 | Standalone binary | GraalVM native image (stdio + HTTP) | — | LLVM binary via Scala Native |
 

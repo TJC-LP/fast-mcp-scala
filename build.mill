@@ -42,6 +42,13 @@ object Versions {
   val scalaJs = "1.22.0"
   val scalaNative = "0.5.12" // publishes scala3lib for Scala 3.9.0 (3.9.0+0.5.12)
   val scalaCheck = "1.18.1"
+  // YAML parser for `SKILL.md` frontmatter (Skills extension, SEP-2640). The one YAML library
+  // cross-published for Scala 3 on all three targets (JVM, Scala.js 1, Scala Native 0.5) with no
+  // transitive dependencies of its own. The frontmatter reader drives its event stream directly
+  // (`core/skills/SkillFrontmatter.scala`), so duplicate keys, anchors, aliases and tags are
+  // rejected before any node is built. Added under DEPENDENCY_POLICY "a new dependency feature is
+  // needed"; bump only for a security advisory or a parser bug that reaches frontmatter.
+  val scalaYaml = "0.3.3"
 }
 
 /** Shared build configuration constants */

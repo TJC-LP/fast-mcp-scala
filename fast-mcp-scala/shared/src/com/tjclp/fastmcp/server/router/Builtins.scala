@@ -7,7 +7,7 @@ import zio.json.ast.Json
 import com.tjclp.fastmcp.core.{Protocol, SetLevelRequestParams}
 import com.tjclp.fastmcp.core.wire.*
 import com.tjclp.fastmcp.jsonrpc.McpError
-import com.tjclp.fastmcp.server.{CompletionHandler, LimitSettings, McpContext}
+import com.tjclp.fastmcp.server.{CompletionHandler, LimitSettings, McpContext, SkillSettings}
 import com.tjclp.fastmcp.server.manager.{
   PromptManager,
   ResourceManager,
@@ -15,6 +15,7 @@ import com.tjclp.fastmcp.server.manager.{
   ToolManager,
   ToolNotFoundError
 }
+import com.tjclp.fastmcp.server.skills.SkillRegistry
 
 /** The built-in MCP request/notification handlers, parameterized on the server environment `R`.
   *
@@ -38,7 +39,9 @@ final class Builtins[R](
     exposeTemplates: Boolean,
     completionHandler: Option[CompletionHandler[R]] = None,
     hooks: ServerHooks[R] = ServerHooks.noop[R],
-    limits: LimitSettings = LimitSettings()
+    limits: LimitSettings = LimitSettings(),
+    skills: Option[SkillRegistry[R]] = None,
+    skillSettings: SkillSettings = SkillSettings()
 ):
 
   /** Bound a client-supplied resource URI BEFORE it reaches the template matcher, the resource
@@ -178,18 +181,87 @@ final class Builtins[R](
       _ <- checkUriLength("resources/read", req.uri)
       ctx <- contextFor(session)
       modern <- session.currentRequestContext.map(_.isDefined)
-      body <- resourceManager
-        .readResource(req.uri, Some(ctx))
+      read <- resourceManager
+        .readResourceWithMime(req.uri, Some(ctx))
         .mapError {
           // 2026-07-28 folded resource misses into -32602; legacy sessions keep the reserved
           // -32002 their spec revisions promise. The manager is era-blind, so re-code here.
           case e: ResourceNotFoundError if !modern => McpError.legacyResourceNotFound(e.uri)
           case other => McpError.fromThrowable(other)
         }
-      mime = resourceManager.getResourceDefinition(req.uri).flatMap(_.mimeType)
+      (mime, body) = read
       contents = WireMapping.resourceContentsToWire(req.uri, mime, body)
       json <- ok(ReadResourceResult(contents = List(contents)))
     yield json
+
+  // ---- skills (io.modelcontextprotocol/skills) ----
+
+  /** `skills/list` — one page of the catalog. Metadata only: no supporting file is read. */
+  val skillsList: RequestHandler[R] = (session, params) =>
+    skills match
+      case None => ZIO.fail(McpError.methodNotFound(Methods.SkillsList))
+      case Some(registry) =>
+        for
+          cursor <- params match
+            case Json.Null => ZIO.succeed(Option.empty[com.tjclp.fastmcp.core.Cursor])
+            case other => decodeParams[PaginatedRequestParams](other, "skills/list").map(_.cursor)
+          ctx <- contextFor(session)
+          page <- registry.listPage(cursor, ctx)
+          json <- ok(
+            ListSkillsResult(
+              skills = page._1,
+              nextCursor = page._2,
+              ttlMs = skillSettings.ttlMs,
+              cacheScope = skillSettings.cacheScope
+            )
+          )
+        yield json
+
+  /** `skills/get` — the entry for one skill by its `SKILL.md` URI, listed or not. An unknown or
+    * malformed URI is `-32602`, the code `resources/read` uses for unknown resources.
+    */
+  val skillsGet: RequestHandler[R] = (session, params) =>
+    skills match
+      case None => ZIO.fail(McpError.methodNotFound(Methods.SkillsGet))
+      case Some(registry) =>
+        for
+          req <- decodeParams[GetSkillRequestParams](params, "skills/get")
+          _ <- checkUriLength("skills/get", req.uri)
+          ctx <- contextFor(session)
+          entry <- registry.get(req.uri, ctx)
+          skill <- ZIO
+            .fromOption(entry)
+            .orElseFail(McpError.invalidParams(s"No skill is served at ${req.uri}"))
+          json <- ok(
+            GetSkillResult(
+              skill = skill,
+              ttlMs = skillSettings.ttlMs,
+              cacheScope = skillSettings.cacheScope
+            )
+          )
+        yield json
+
+  /** `resources/directory/read` — the direct children of a directory resource, paginated.
+    * Registered only when `directoryRead: true` is advertised. A URI that is not a served directory
+    * (unknown, or a file) is `-32602`.
+    */
+  val resourcesDirectoryRead: RequestHandler[R] = (session, params) =>
+    skills match
+      case None => ZIO.fail(McpError.methodNotFound(Methods.ResourcesDirectoryRead))
+      case Some(registry) =>
+        for
+          req <- decodeParams[ReadResourceDirectoryRequestParams](
+            params,
+            "resources/directory/read"
+          )
+          _ <- checkUriLength("resources/directory/read", req.uri)
+          ctx <- contextFor(session)
+          page <- registry.readDirectoryPage(req.uri, req.cursor, ctx)
+          result <- ZIO
+            .fromOption(page)
+            .orElseFail(McpError.invalidParams(s"${req.uri} is not a directory resource"))
+          json <- ok(ReadResourceDirectoryResult(resources = result._1, nextCursor = result._2))
+        yield json
 
   /** `resources/subscribe` — record the client's interest in a URI (returns an empty result).
     * Registered only when `settings.resourcesSubscribe` is on, so the `resources.subscribe`

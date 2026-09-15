@@ -65,7 +65,9 @@ object `package` extends Module {
       // transitive dependency again and a stdio-only consumer sheds it by excluding
       // `dev.zio:zio-http_3` alone (docs/native-image.md). The TJC-2327 direct pins that overrode
       // zio-http 3.4.0's 4.2.3.Final are gone with the bump.
-      mvn"dev.zio::zio-http:${Versions.zioHttp}"
+      mvn"dev.zio::zio-http:${Versions.zioHttp}",
+      // SKILL.md frontmatter parsing for the Skills extension (see Versions.scalaYaml).
+      mvn"org.virtuslab::scala-yaml:${Versions.scalaYaml}"
     )
 
     // The netty BOM lands in the published POM as an `import`-scoped `pom` entry — the one place
@@ -105,7 +107,8 @@ object `package` extends Module {
     // Shared deps needed by shared/ sources and the JS macro/schema derivation path.
     override def mvnDeps = Seq(
       mvn"dev.zio::zio::${Versions.zio}",
-      mvn"dev.zio::zio-json::${Versions.zioJson}"
+      mvn"dev.zio::zio-json::${Versions.zioJson}",
+      mvn"org.virtuslab::scala-yaml::${Versions.scalaYaml}"
     )
 
     // WartRemover is a JVM-only compiler plugin, so this platform takes the cross-platform flags
@@ -183,7 +186,8 @@ object `package` extends Module {
     // defaults in the shared McpServerSettings.
     override def mvnDeps = Seq(
       mvn"dev.zio::zio::${Versions.zio}",
-      mvn"dev.zio::zio-json::${Versions.zioJson}"
+      mvn"dev.zio::zio-json::${Versions.zioJson}",
+      mvn"org.virtuslab::scala-yaml::${Versions.scalaYaml}"
     )
 
     // Deterministic main for `nativeLink`: shared/ carries several example mains, and this is the
