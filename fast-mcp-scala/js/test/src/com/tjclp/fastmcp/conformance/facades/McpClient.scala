@@ -68,6 +68,16 @@ class Client(info: ClientInfo, options: ClientOptions) extends js.Object:
   def getServerVersion(): js.UndefOr[ServerInfo] = js.native
   def getServerCapabilities(): js.UndefOr[ServerCapabilities] = js.native
 
+  /** Raw request for methods the SDK has no typed helper for (the Skills extension), validated
+    * against a caller-supplied zod schema such as [[ResultSchema]].
+    */
+  def request(request: js.Object, resultSchema: js.Object): js.Promise[js.Dynamic] = js.native
+
+/** The SDK's base `Result` zod schema (`z.looseObject`): accepts any result and keeps every key. */
+@JSImport("@modelcontextprotocol/sdk/types.js", "ResultSchema")
+@js.native
+object ResultSchema extends js.Object
+
 // --- Server info / capabilities ---
 
 @js.native

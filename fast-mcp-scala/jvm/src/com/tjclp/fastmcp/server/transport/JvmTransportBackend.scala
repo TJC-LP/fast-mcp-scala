@@ -24,6 +24,12 @@ object JvmTransportBackend extends TransportBackend:
   /** UUID v4 via `java.util.UUID` (SecureRandom-backed). */
   override def randomId(): UIO[String] = ZIO.succeed(UUID.randomUUID().toString)
 
+  /** Platform SHA-256 (`java.security.MessageDigest`) for skill digests; a fresh instance per call,
+    * so it is thread-safe without locking.
+    */
+  override def sha256(bytes: Array[Byte]): Array[Byte] =
+    java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+
   override def serveStdio[R](
       router: McpRouter[R],
       settings: McpServerSettings

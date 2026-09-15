@@ -70,6 +70,22 @@ export core.wire.{
   SamplingMessage,
   ToolChoice
 }
+// Skills extension (io.modelcontextprotocol/skills): the authoring types, the URI policy, the
+// verification helpers and the wire entry shapes a server author or a host-side verifier names.
+export core.skills.{
+  HeldEntry,
+  McpSkill,
+  SkillError,
+  SkillFile,
+  SkillIdentity,
+  SkillSnapshot,
+  SkillUri,
+  SkillVerifier,
+  VerificationFailure,
+  VerificationOutcome
+}
+export core.wire.{Skill, SkillFrontmatter, SkillResource, SkillResources, Skills}
+export server.skills.{SkillFileContent, SkillProvider}
 export core.McpEncoder.given
 export core.ToHandlerEffect.given
 // Native-core shared codec + schema derivation (one copy for both platforms).
@@ -85,6 +101,7 @@ export server.{
   McpServerCore,
   McpServerCoreFactory,
   McpServerSettings,
+  SkillSettings,
   Stdio,
   TaskSettings,
   Transport,

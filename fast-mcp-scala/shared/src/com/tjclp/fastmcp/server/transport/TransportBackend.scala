@@ -32,5 +32,13 @@ trait TransportBackend:
     */
   def randomId(): UIO[String]
 
+  /** SHA-256 of `bytes` — the digest published for every skill file (Skills extension). The default
+    * is the portable FIPS 180-4 transcription in [[com.tjclp.fastmcp.core.skills.Sha256]], which is
+    * what Scala.js and Scala Native use (neither ships `java.security.MessageDigest`); the JVM
+    * backend overrides it with `MessageDigest`. Both are pinned to the NIST example vectors on
+    * every platform.
+    */
+  def sha256(bytes: Array[Byte]): Array[Byte] = com.tjclp.fastmcp.core.skills.Sha256.digest(bytes)
+
 object TransportBackend:
   def apply(using backend: TransportBackend): TransportBackend = backend

@@ -52,7 +52,9 @@ fast-mcp-scala/
 │   │   ├── Types.scala                   # ToolDefinition, Content, Message, ...
 │   │   ├── Protocol.scala                # protocol versions + JSON-RPC error codes
 │   │   ├── Tasks.scala                   # 2026 Tasks extension + legacy wire types
-│   │   └── wire/                         # 2026-07-28 and compatibility wire shapes
+│   │   ├── skills/                       # Skills extension core (SkillUri, frontmatter reader,
+│   │   │                                 #   McpSkill, SkillSnapshot, SkillVerifier, Sha256)
+│   │   └── wire/                         # 2026-07-28 and compatibility wire shapes (+ Skills.scala)
 │   ├── jsonrpc/                          # JSON-RPC 2.0 envelope + McpError
 │   ├── codec/                            # DefaultDecodeContext + McpDecoders (zio-json)
 │   ├── macros/                           # scanAnnotations, @Tool/@Resource/@Prompt processors,
@@ -62,7 +64,8 @@ fast-mcp-scala/
 │       ├── McpServer.scala               # THE server class (both platforms)
 │       ├── McpContext.scala              # request context incl. server→client requests
 │       ├── McpServerSettings.scala
-│       ├── manager/                      # Tool/Prompt/Resource/Task managers
+│       ├── manager/                      # Tool/Prompt/Resource/Task managers (+ ResourceSource seam)
+│       ├── skills/                       # SkillRegistry, SkillProvider, SkillCursor
 │       ├── router/                       # McpRouter, Builtins, Session, middleware
 │       └── transport/                    # TransportBackend + HttpTransportBackend seam,
 │                                         #   StdioLoop, MessageLoop, HostGuard
@@ -70,7 +73,9 @@ fast-mcp-scala/
 ├── jvm/src/com/tjclp/fastmcp/           # JVM-specific
 │   ├── server/transport/JvmTransportBackend.scala   # System.in/out (stdio; netty-free)
 │   ├── server/transport/JvmHttpBackend.scala          # ZIO HTTP (streamable + stateless)
-│   └── examples/                         # JVM-only examples (HttpServer, TaskManagerServer)
+│   ├── server/skills/SkillDirectoryLoader.scala       # filesystem → McpSkill (JVM only)
+│   └── examples/                         # JVM-only examples (HttpServer, TaskManagerServer,
+│                                         #   SkillsHttpServer, SkillDirectoryServer)
 │
 ├── js/src/com/tjclp/fastmcp/            # Scala.js (Bun-first)
 │   ├── facades/{node,runtime}/           # Node process + Bun/Web-platform facades
