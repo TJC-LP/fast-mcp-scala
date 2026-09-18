@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `McpServerSettings.instructions`: server-level usage guidance returned as `instructions` in the
+  `initialize` result and in `server/discover`. The field was plumbed through `RouterBuilder` and
+  `Builtins` but `McpServer` hard-coded `None`, so no server built on the library could set it.
+
 ## [1.0.0] - 2026-09-09
 
 Highlights since 0.4.0, the last published stable release (the `[0.5.0]` section

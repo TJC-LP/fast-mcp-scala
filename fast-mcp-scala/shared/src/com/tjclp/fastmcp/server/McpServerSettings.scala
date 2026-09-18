@@ -159,7 +159,12 @@ case class McpServerSettings(
     tasks: TaskSettings = TaskSettings(),
     // Inbound input limits (frame size, JSON depth, object width, URI length, subscriptions).
     // Enforced on every transport before any dispatch work; see [[LimitSettings]].
-    limits: LimitSettings = LimitSettings()
+    limits: LimitSettings = LimitSettings(),
+    // Server-level usage guidance returned as `instructions` in the `initialize` result (and in
+    // `server/discover` for 2026-07-28 clients) — the one place a server can tell an agent how its
+    // tools fit together ("search first, then fetch by id; pass drive to narrow…"). The spec leaves
+    // the content free-form; clients typically add it to the model's system prompt. `None` omits it.
+    instructions: Option[String] = None
 )
 
 /** Input limits applied to every inbound JSON-RPC frame on every transport (stdio and HTTP; JVM,
