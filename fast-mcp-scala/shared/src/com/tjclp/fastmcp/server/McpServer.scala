@@ -131,7 +131,7 @@ final class McpServer[R](
     taskMgr.map { tm =>
       val router = RouterBuilder.build[R](
         serverInfo = Implementation(name = name, version = version),
-        instructions = None,
+        instructions = settings.instructions,
         toolManager = toolManager,
         promptManager = promptManager,
         resourceManager = resourceManager,
