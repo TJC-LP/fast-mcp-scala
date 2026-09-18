@@ -1,5 +1,5 @@
 //> using scala 3.9.0
-//> using dep com.tjclp::fast-mcp-scala:1.0.0
+//> using dep com.tjclp::fast-mcp-scala:1.0.1
 //> using options "-Wconf:id=E230:s"
 
 import com.tjclp.fastmcp.{*, given}

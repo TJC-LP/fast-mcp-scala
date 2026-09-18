@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-18
+
 ### Added
 
 - `McpServerSettings.instructions`: server-level usage guidance returned as `instructions` in the
