@@ -22,13 +22,13 @@ Two registration paths, `@Tool`-style annotations and typed `McpTool` contracts,
 
 ```scala 3 ignore
 // sbt — JVM
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "1.0.0"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "1.0.1"
 
 // sbt — Scala.js (Bun-first) or Scala Native (stdio only, experimental); %%% picks the platform artifact
-libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "1.0.0"
+libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "1.0.1"
 
-//> using dep com.tjclp::fast-mcp-scala:1.0.0    // scala-cli, JVM
-//> using dep com.tjclp::fast-mcp-scala::1.0.0   // scala-cli, Scala.js or Native (with `//> using platform ...`)
+//> using dep com.tjclp::fast-mcp-scala:1.0.1    // scala-cli, JVM
+//> using dep com.tjclp::fast-mcp-scala::1.0.1   // scala-cli, Scala.js or Native (with `//> using platform ...`)
 ```
 
 Built against Scala 3.9.0 LTS: **consuming 1.0.0 requires Scala 3.9.0 or newer** (it emits TASTy 28.9, which 3.8 and older compilers cannot read; the RC3 prerelease, built with Scala 3.8.3, is the last release a Scala 3.8 project can use). 1.0.0 is not compiled with `-experimental`, so consumers no longer need the flag (the release candidates required it on every registration path; TJC-2335). JVM: JDK 17+ (CI tests the LTS releases 17, 21, and 25). Scala.js: `sjs1_3`, runs on Bun (first-class) and, for stdio, on Node 18+ (verified with Node 18 and 26 in the 1.0.0 dogfood, not yet in CI; the HTTP listener is `Bun.serve`-only, and bearer task ids come from `globalThis.crypto`, which Node 18 exposes only behind `--experimental-global-webcrypto`); Scala 3.9 output needs a Scala.js 1.22+ linker (Mill: mill-bun 0.3.x with an explicit `scalaJSVersion`; scala-cli: `--js-version 1.22.0`). Scala Native: `native0.5_3`, stdio only, experimental. Platform details and quickstarts: [docs/platforms.md](docs/platforms.md).
@@ -39,7 +39,7 @@ A single-file server with one tool; the same code lives in [`HelloWorld.scala`](
 
 ```scala 3 raw
 //> using scala 3.9.0
-//> using dep com.tjclp::fast-mcp-scala:1.0.0
+//> using dep com.tjclp::fast-mcp-scala:1.0.1
 
 import com.tjclp.fastmcp.{*, given}
 
@@ -294,7 +294,7 @@ Add to `claude_desktop_config.json`:
         "-e",
         "//> using scala 3.9.0",
         "-e",
-        "//> using dep com.tjclp::fast-mcp-scala:1.0.0",
+        "//> using dep com.tjclp::fast-mcp-scala:1.0.1",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]
