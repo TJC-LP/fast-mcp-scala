@@ -35,6 +35,13 @@ object Versions {
   // ahead; after any change re-run the OSV audit (DEPENDENCY_POLICY.md) and the native-image HTTP
   // smoke. It is the JVM artifact's largest CVE surface, so it stays visible here.
   val netty = "4.2.17.Final"
+  // Bouncy Castle reaches the JVM artifact only through io.netty:netty-pkitesting (a certificate
+  // test utility zio-http 3.11.4 declares at compile scope). netty 4.2.17/4.2.18 both request 1.84,
+  // which carries GHSA-9pwp-9qqc-pr26 (critical) and GHSA-qp49-qgx5-5m26 (high), fixed in 1.85 —
+  // the jvm module's `depManagement` moves the three org.bouncycastle modules there (a managed
+  // version, not a direct dependency: excluding zio-http still sheds them). Drop the override once
+  // the netty zio-http declares requests >= this version.
+  val bouncyCastle = "1.85"
   val scalaTest = "3.2.19"
   // Scala 3.9.0 emits Scala.js 1.22 IR, so the linker must be at least 1.22. mill-bun 0.3.x
   // delegates to Mill's standard ScalaJSModule and makes this pin explicit (Mill 1.1.x's own

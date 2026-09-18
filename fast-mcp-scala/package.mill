@@ -77,6 +77,14 @@ object `package` extends Module {
     // artifact of its own, so excluding zio-http still removes netty from the classpath.
     override def bomMvnDeps = Seq(mvn"io.netty:netty-bom:${Versions.netty}")
 
+    // Managed (not direct) versions for the org.bouncycastle modules netty-pkitesting drags in —
+    // see Versions.bouncyCastle for the advisories. Lands in the POM as dependencyManagement.
+    override def depManagement = Seq(
+      mvn"org.bouncycastle:bcprov-jdk18on:${Versions.bouncyCastle}",
+      mvn"org.bouncycastle:bcpkix-jdk18on:${Versions.bouncyCastle}",
+      mvn"org.bouncycastle:bcutil-jdk18on:${Versions.bouncyCastle}"
+    )
+
     object test extends ScalaTests with FastMCPTestModule {
       override def mvnDeps = Seq(
         mvn"org.scalatest::scalatest:${Versions.scalaTest}",
