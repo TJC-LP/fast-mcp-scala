@@ -12,12 +12,12 @@ limitations found. It is the evidence behind the ✅ in [spec-coverage.md](./spe
 | Source | Revision used | Notes |
 |---|---|---|
 | Target repository starting point | `TJC-LP/fast-mcp-scala` commit `60e02e2` (merge of #122, `1.0.1-SNAPSHOT`) | the `main` this branch was cut from |
-| **Current normative extension spec** — `modelcontextprotocol/ext-skills`, `specification/stable/skills.mdx` | repository commit **`d866efdba298b55b8156c7b7aa1bdebc1b625f4c`** (2026-09-10, "skills.mdx: CacheableResult on list/get, state 2026-07-28 baseline, record decisions (#139)"); Git blob SHA of the file **`e65b881c7440a7720acedbac000113d4946be08f`** | retrieved 2026-09-15 from `raw.githubusercontent.com`; the blob SHA equals the one recorded when the task was prepared, so the implemented text is the observed text |
-| Historical SEP (design rationale) — `modelcontextprotocol/modelcontextprotocol`, `docs/seps/2640-skills-extension.mdx` | `main` as of 2026-09-15 | consulted for rationale only; where it differs from the stable page the stable page wins (see [Differences](#differences-between-sources)) |
-| Agent Skills specification — `agentskills.io/specification` | `agentskills/agentskills` `docs/specification.mdx`, `main` as of 2026-09-15 (`agentskills.io` itself was not reachable through this session's egress proxy; the same page was fetched from the source repository) | `name` 1–64 `[a-z0-9-]`, no leading/trailing/consecutive hyphen, matches parent directory; `description` 1–1024; `compatibility` ≤ 500; `metadata` string → string; `allowed-tools` string (experimental) |
+| **Current normative extension spec** — `modelcontextprotocol/ext-skills`, `specification/stable/skills.mdx` | repository commit **`167da6c0d42c247a8f8470228a10ca711e3f6c45`** (2026-09-29, `main` head on 2026-10-10); Git blob SHA of the file **`824c66badb3c07635eb34d7619e75d7c2a26c6b0`** | re-read in full on 2026-10-10 from a clone of the repository. First implemented against commit `d866efdb` / blob `e65b881c` (2026-09-10, retrieved 2026-09-15); every edit to the page between the two revisions is listed under [Spec changes since the first pin](#spec-changes-since-the-first-pin) with what was done about it |
+| Historical SEP (design rationale) — `modelcontextprotocol/modelcontextprotocol`, `docs/seps/2640-skills-extension.mdx` | `main` as of 2026-10-10 (`c518f7a9`); the only change since 2026-09-15 repairs links after the ext-skills archive move (#3366) | consulted for rationale only; where it differs from the stable page the stable page wins (see [Differences](#differences-between-sources)) |
+| Agent Skills specification — `agentskills.io/specification` | `agentskills/agentskills` `docs/specification.mdx` at `69ef37e9` (2026-08-09, still `main` head on 2026-10-10; `agentskills.io` itself was not reachable through the development session's egress proxy, so the page was read from the source repository) | `name` 1–64 `[a-z0-9-]`, no leading/trailing/consecutive hyphen, matches parent directory; `description` 1–1024; `compatibility` ≤ 500; `metadata` string → string; `allowed-tools` string (experimental) |
 | Base protocol — MCP 2026-07-28 | as already implemented by this repository (`core/wire`, `WireMapping.completeResult`) | `Result.resultType`, `CacheableResult.ttlMs/cacheScope`, `PaginatedResult.nextCursor`, `Resource`, `Cursor` |
-| Upstream conformance — `modelcontextprotocol/conformance` | `main` commit **`7169291ec0b68eb370fddcd9947313ab0d5e4156`** (2026-09-11, "feat(sep-2640): skills server conformance against the Accepted SEP, enumeration + manifest + directory (#330)"); scenarios `src/scenarios/server/skills/{enumeration,manifest,directory,helpers}.ts`, requirements `src/seps/sep-2640.yaml` | PR #330 is merged; the published npm `0.2.0-alpha.11` this repository pins in `conformance/package.json` (released 2026-08-07) predates it and has **no** skills scenarios, so the scenarios were run from the source checkout (see below) |
-| Threat model — `ext-skills/docs/threat-model.md` | same repository commit `d866efdb` | host-side; informs the "host responsibilities" section of `docs/skills.md` and the security tests |
+| Upstream conformance — `modelcontextprotocol/conformance` | `main` commit **`c37eec888e1c6ff140af79987a40008548b7cc5f`** (2026-10-01, "chore: bump version to 0.2.0-alpha.12 (#503)"); the skills scenarios `src/scenarios/server/skills/{enumeration,manifest,directory,helpers}.ts` and `src/seps/sep-2640.yaml` are byte-identical to the revision first run (`7169291e`, 2026-09-11, PR #330) | the published npm **`0.2.0-alpha.12`** (2026-10-01) is the first release that bundles the skills scenarios; `0.2.0-alpha.11`, which `conformance/package.json` pins for the base-protocol gate, has none. Both the published alpha.12 and the source head were run (see below) |
+| Threat model — `ext-skills/docs/archive/threat-model.md` (moved from `docs/threat-model.md` in #146) | same repository commit `167da6c` (content unchanged apart from the move) | host-side; informs the "host responsibilities" section of `docs/skills.md` and the security tests |
 | scala-yaml | `org.virtuslab::scala-yaml:0.3.3` (JVM `_3`, `_sjs1_3`, `_native0.5_3`) | new production dependency, see [Dependencies](#dependencies) |
 
 ## Differences between sources
@@ -32,6 +32,26 @@ limitations found. It is the evidence behind the ✅ in [spec-coverage.md](./spe
 
 The threat model still describes archive delivery (deferred in the SEP) and the `dangerous-skills-mcp`
 fixture corpus; neither is part of the stable page and neither is implemented.
+
+## Spec changes since the first pin
+
+`git diff d866efdb..167da6c -- specification/stable/skills.mdx` (blob `e65b881c` → `824c66ba`) is
+the complete list of normative edits between the revision the implementation was written against
+and the revision re-checked on 2026-10-10. No wire shape, method, error code or server MUST changed.
+
+| Change | Effect on this implementation |
+|---|---|
+| §Protocol Revision: "request examples omit `_meta`. Every request **MUST** include the required request metadata" | base-protocol rule (2026-07-28 `_meta.protocolVersion`), already applied uniformly by the router to every method; the skills handlers add nothing method-specific |
+| §Capability Negotiation: declaration is stated to happen "in `server/discover`", and the example now shows `"resources": {}` next to `extensions` | already the behaviour: `server/discover` (and the legacy `initialize`) declare the extension inline, and a declaring server always declares `resources` (matrix rows 1 and 4) |
+| §Skill Format: clients **MUST** honour Agent Skills backwards-compatibility mechanisms and **SHOULD** keep supporting the prior Agent Skills revision after an incompatible change | host/client obligation; recorded under "Host responsibilities" in `docs/skills.md`. The server-side rules this SDK enforces (`SkillNames`) are those of the Agent Skills revision pinned above, which has not changed |
+| §Example Message Flow / §Listing / §Getting: the examples' placeholder digests (`sha256:a1b2c3d4...`) were replaced by real sizes and SHA-256 digests, and the exact UTF-8 bytes of `SKILL.md`, `invoice.md`, `purchase-order.md` and `credit-note.md` are printed | turned into a fixed oracle: `McpSkillSnapshotTest` "the stable page's worked example (pdf-processing) reproduces the published sizes and digests exactly" builds the example with the public authoring API and asserts the manifest, the directory read and the host-side verification outcomes of the whole flow (unlisted `credit-note.md` fails, the refreshed entry revokes the approval); `SkillsJsTest` and `SkillsNativeTest` pin two of the digests on the other runtimes (matrix row 34) |
+
+Non-normative repository changes in the same range (documentation moved to `docs/archive/`, a
+VitePress site, the decision log's three "Proposed" entries ratified to "Accepted", two
+experimental-findings entries on VS Code) introduce no requirement. One finding (#136, transport of
+an `io.modelcontextprotocol/` frontmatter `metadata` key) notes that "ignore unrecognized reserved
+keys" must mean *do not act on them*, not *do not compare them*: `SkillVerifier` compares every
+frontmatter field, reserved or not, which is the behaviour the finding asks for.
 
 ## Requirement → test matrix
 
@@ -73,6 +93,7 @@ Host-only obligations are listed at the end for completeness and are documented,
 | 31 | Filesystem loading: symlinks/special files refused, containment, bounded reads, explicit selection (threat model T5/T6) | SDK (JVM) | `SkillDirectoryLoaderTest` |
 | 32 | Host verification helpers: size/digest/frontmatter verification, unlisted → failure, dynamic → unverifiable, identity = (label, uri), content-bound approval key | SDK helpers | `SkillVerifierTest` |
 | 33 | Root import exposes every documented name | SDK | `SkillsRootImportTest` |
+| 34 | The stable page's worked example (`pdf-processing`: 151 / 29 / 35 / 39 bytes and their SHA-256 digests, §Example Message Flow) is reproduced byte-for-byte by the authoring API, the directory read and the verifier | SDK oracle | `McpSkillSnapshotTest` "the stable page's worked example…", `SkillsJsTest`, `SkillsNativeTest` |
 
 Host-only obligations (documented in `docs/skills.md` § Host responsibilities, not enforceable by a
 server): lazy retrieval, verification on read and frontmatter comparison before load, acting
@@ -93,7 +114,7 @@ approve anything.
 | Scala.js / Bun | production Node stdin callbacks (`JsTransportBackend.wireStdin`) | 2025-11-25 | `SkillsJsTest` |
 | Scala.js / Bun | `Bun.serve` stateless HTTP | 2026-07-28 | `SkillsJsTest` |
 | Scala Native | real `StdioLoop` on the Native runtime | 2025-11-25 | `SkillsNativeTest` |
-| JVM HTTP fixture ⇐ **upstream conformance scenarios** `sep-2640-skills-*` (conformance `main` 7169291, run from source) | HTTP | as negotiated by the harness | see next section |
+| JVM HTTP fixture ⇐ **upstream conformance scenarios** `sep-2640-skills-*` (published `0.2.0-alpha.12` and conformance `main` c37eec8 from source) | HTTP | as negotiated by the harness (2026-07-28) | see next section |
 
 Commands (this checkout, Mill 1.1.8; the JVM launcher was used because the native Mill launcher
 cannot trust the session's egress proxy CA):
@@ -114,27 +135,40 @@ this feature.
 
 The pinned harness (`conformance/package.json`, `0.2.0-alpha.11`) contains no skills scenarios, so
 the existing `scripts/conformance.sh` gate is untouched (73/73 active, 37/37 2026 — the skills
-extension does not change any of those scenarios' inputs). The merged `#330` scenarios were run
-from a source checkout of `modelcontextprotocol/conformance` at `7169291` against
-`com.tjclp.fastmcp.examples.SkillsHttpServer` (`127.0.0.1:8091`):
+extension does not change any of those scenarios' inputs). The `#330` scenarios were run against
+`com.tjclp.fastmcp.examples.SkillsHttpServer` (`127.0.0.1:8091`) from two harnesses: the
+**published `@modelcontextprotocol/conformance@0.2.0-alpha.12`** (2026-10-01, the first release
+that bundles them) and a source checkout of `modelcontextprotocol/conformance` `main` at `c37eec8`
+(the first run, on 2026-09-15, used the source checkout at `7169291`; the scenario files are
+identical between the two commits):
 
 ```bash
 ./mill fast-mcp-scala.jvm.runMain com.tjclp.fastmcp.examples.SkillsHttpServer &
-# in the conformance checkout (git clone, `bun install`), one scenario per run:
-bun run src/index.ts server --scenario sep-2640-skills-enumeration --url http://127.0.0.1:8091/mcp
-bun run src/index.ts server --scenario sep-2640-skills-manifest    --url http://127.0.0.1:8091/mcp
-bun run src/index.ts server --scenario sep-2640-skills-directory   --url http://127.0.0.1:8091/mcp
+# published harness: a scratch directory with {"dependencies":{"@modelcontextprotocol/conformance":"0.2.0-alpha.12"}}
+# and `bun install`; one scenario per run (the harness accepts names, not globs):
+bun node_modules/.bin/conformance server --scenario sep-2640-skills-enumeration --url http://127.0.0.1:8091/mcp
+bun node_modules/.bin/conformance server --scenario sep-2640-skills-manifest    --url http://127.0.0.1:8091/mcp
+bun node_modules/.bin/conformance server --scenario sep-2640-skills-directory   --url http://127.0.0.1:8091/mcp
+# source checkout (git clone, `bun install`): the same three with `bun run src/index.ts server …`
 ```
 
-Scenarios and their checks, with the outcome observed on 2026-09-15 (the harness negotiated
-2026-07-28, so the cache-attribute checks were scored, not skipped; raw logs are quoted in the pull
-request description):
+Scenarios and their checks, with the outcome observed on 2026-10-10 on **both** harnesses
+(identical to the 2026-09-15 run; the harness negotiated 2026-07-28, so the cache-attribute checks
+were scored, not skipped, and the `wire-schema-valid` check validated every message against the
+2026-07-28 JSON schema):
 
 | Scenario | Checks | Outcome |
 |---|---|---|
-| `sep-2640-skills-enumeration` | capability inline / empty-object / requires-resources / commits-to-methods; `skills/list` implemented, pagination, entry atomic, cache attributes; entry `uri`/`frontmatter`/`resources` required, uri = name, `skill://` scheme (SHOULD), completeness, containment, digest format, size, limits, reserved metadata prefix, naming rules, authority reg-name, unique names (SHOULD); `skills/get` implemented, entry shape, cache attributes, no cursor, unknown → `-32602`; read-back: `SKILL.md` present, frontmatter parses, entry frontmatter identical | **32/32 passed, 0 failed, 0 warnings** |
-| `sep-2640-skills-manifest` | `SKILL.md` mimeType, resource name/description = frontmatter, final segment = name, `_meta` prefix | **6/6 passed, 0 failed, 0 warnings** |
-| `sep-2640-skills-directory` | `directoryRead` flag, method registered, result shape, subdirectory mimeType, non-directory → `-32602`, pagination | **7/7 passed, 0 failed, 0 warnings** |
+| `sep-2640-skills-enumeration` | capability inline / empty-object / requires-resources / commits-to-methods; `skills/list` implemented, pagination, entry atomic, cache attributes; entry `uri`/`frontmatter`/`resources` required, uri = name, `skill://` scheme (SHOULD), completeness, containment, digest format, size, limits, reserved metadata prefix, naming rules, authority reg-name, unique names (SHOULD); `skills/get` implemented, entry shape, cache attributes, no cursor, unknown → `-32602`; read-back: `SKILL.md` present, frontmatter parses, entry frontmatter identical; wire schema valid | **32/32 passed, 0 failed, 0 warnings** (alpha.12 and source) |
+| `sep-2640-skills-manifest` | `SKILL.md` mimeType, resource name/description = frontmatter, final segment = name, `_meta` prefix, wire schema valid | **6/6 passed, 0 failed, 0 warnings** (alpha.12 and source) |
+| `sep-2640-skills-directory` | `directoryRead` flag, method registered, result shape, subdirectory mimeType, non-directory → `-32602`, pagination, wire schema valid | **7/7 passed, 0 failed, 0 warnings** (alpha.12 and source) |
+
+Bumping `conformance/package.json` to `0.2.0-alpha.12` would let the repository's own gate carry
+these scenarios, but `scripts/conformance.sh` scores only the base-protocol suites (`active` and
+`--requirements 2026-07-28`, where extension scenarios are reported, never scored), and the bump
+touches 25 upstream commits of unrelated scenario changes (`tools.ts` grew by ~200 lines) whose
+effect on the 73/73 baseline has not been measured. It is left as a deliberate, separate
+maintainer step, as the file's own comment asks.
 
 The harness accepts scenario names, not globs (`--scenario sep-2640-skills-enumeration`, one run
 per scenario).
@@ -171,9 +205,13 @@ stable page; no check had to be weakened and no fixture assumption contradicted 
 - **Not implemented.** `notifications/resources/list_changed` for skill changes (the server has no
   list-changed publisher yet, see spec-coverage); the pre-stable `skill://index.json`; archives
   (deferred by the SEP); any client/host runtime.
-- **Environment.** The conformance run and the Bun IPv6 failure are recorded in the PR; the
+- **Environment.** The conformance runs and the Bun IPv6 failure are recorded in the PR; the
   `agentskills.io` host was not reachable from the development session's egress proxy, so the
   Agent Skills page was read from its source repository.
+- **Re-check cadence.** The stable page moved once between 2026-09-15 and 2026-10-10 without any
+  normative change (see [Spec changes since the first pin](#spec-changes-since-the-first-pin)). The
+  procedure that produced that table — clone `ext-skills`, `git diff <pinned> HEAD --
+  specification/stable/skills.mdx`, re-run the three scenarios — is what to repeat before a release.
 
 ## Dependencies
 

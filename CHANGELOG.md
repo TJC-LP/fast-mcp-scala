@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Skills extension (`io.modelcontextprotocol/skills`, SEP-2640)** as a native part of the shared
   core on JVM, Scala.js/Bun and Scala Native, over stdio and (where available) HTTP, in both the
   2026-07-28 stateless path and the initialize/session adapter. Implements the stable extension page
-  (`ext-skills` commit `d866efdb`, blob `e65b881c`) including the optional
+  (`ext-skills` commit `167da6c0`, blob `824c66ba`, re-verified 2026-10-10) including the optional
   `resources/directory/read`: `skills/list` (paginated, `resultType: "complete"`, `ttlMs`,
   `cacheScope` on 2026-07-28), `skills/get` (`{skill}`, unlisted skills resolve, unknown → `-32602`),
   `resources/directory/read` (direct children, `inode/directory`, unknown/file → `-32602`), skill

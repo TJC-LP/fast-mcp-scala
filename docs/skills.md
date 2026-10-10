@@ -417,6 +417,15 @@ claims otherwise:
 - **Lazy retrieval and cache isolation.** Fetch `SKILL.md` at load and supporting files at read, keep
   any disk cache outside filesystem-skill discovery paths and either host-private or re-hashed on
   every access, and never install MCP-served skills into local auto-discovery directories.
+- **Agent Skills revisions apply automatically.** The extension delegates the skill format to the
+  Agent Skills specification; if that specification changes incompatibly, hosts must honour its
+  compatibility mechanisms and should keep supporting the prior revision. The server-side naming
+  rules this SDK enforces are those of the revision pinned in
+  [skills-conformance.md](./skills-conformance.md).
+- **Reserved `metadata` keys are compared, not acted on.** "Ignore unrecognized
+  `io.modelcontextprotocol/` keys" means give them no semantics; the field-by-field frontmatter
+  check still covers them (`SkillVerifier` compares every field), so a key whose value differs
+  between the entry and the fetched `SKILL.md` is a verification failure.
 
 ## Platform support
 

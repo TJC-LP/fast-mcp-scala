@@ -7,8 +7,9 @@ import zio.json.ast.Json
 import com.tjclp.fastmcp.core.Cursor
 
 /** Wire shapes of the **Skills extension** (`io.modelcontextprotocol/skills`, SEP-2640), pinned to
-  * the stable specification page `ext-skills/specification/stable/skills.mdx` (blob `e65b881c…`,
-  * repository commit `d866efdb…`, 2026-09-10) against base protocol 2026-07-28.
+  * the stable specification page `ext-skills/specification/stable/skills.mdx` (blob `824c66ba…`,
+  * repository commit `167da6c0…`, 2026-09-29; first implemented against blob `e65b881c…` of
+  * 2026-09-10 — the shapes are identical) against base protocol 2026-07-28.
   *
   * The extension adds three methods — `skills/list`, `skills/get` and the optional
   * `resources/directory/read` — and one entry shape, [[Skill]]. Every shape here is validated at

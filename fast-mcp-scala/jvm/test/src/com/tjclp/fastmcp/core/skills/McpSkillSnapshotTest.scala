@@ -41,6 +41,59 @@ class McpSkillSnapshotTest extends AnyFunSuite with Matchers:
     snap.entry.frontmatter.get("license").map(_.toString) shouldBe Some("\"Apache-2.0\"")
   }
 
+  test("the stable page's worked example (pdf-processing) reproduces the published sizes and digests exactly") {
+    // specification/stable/skills.mdx §Example Message Flow (blob 824c66ba, 2026-09-16+): the page now
+    // prints the exact bytes of every file, so the manifest it shows is a fixed oracle for an SDK.
+    val skillMd =
+      "---\nname: pdf-processing\ndescription: Extract, fill, and assemble PDF documents\n---\n\n" +
+        "# PDF processing\n\nChoose the matching template from `templates/`.\n"
+    val invoice = "# Invoice\n\nCustomer:\nAmount:\n"
+    val purchaseOrder = "# Purchase order\n\nSupplier:\nItems:\n"
+    val creditNote = "# Credit note\n\nInvoice:\nCredit amount:\n"
+    val listed = McpSkill.fromMarkdown(
+      "pdf-processing",
+      skillMd,
+      Map("templates/invoice.md" -> SkillFile.text(invoice), "templates/purchase-order.md" -> SkillFile.text(purchaseOrder))
+    )
+    val snap = SkillSnapshot.build(listed)
+    snap.entry.uri shouldBe "skill://pdf-processing/SKILL.md"
+    snap.entry.frontmatter.toJson shouldBe parseJson(
+      """{"name":"pdf-processing","description":"Extract, fill, and assemble PDF documents"}"""
+    )
+    snap.entry.resources.staticEntries.map(r => (r.uri, r.size, r.digest)) shouldBe List(
+      ("skill://pdf-processing/SKILL.md", 151L, "sha256:99b737495721155ece826d57521e2d66141ebdc1344a400487481ea2642ab19e"),
+      ("skill://pdf-processing/templates/invoice.md", 29L, "sha256:61f4ea6d2c75fde1b4977219e7e3107d491c3c26aefb6686e84d6281c088d9ee"),
+      ("skill://pdf-processing/templates/purchase-order.md", 35L, "sha256:f2ff774b1737ff3dec81c47946f9976f18a1a9f69dda0a81f22eabd95173c158")
+    )
+    snap.file("skill://pdf-processing/SKILL.md").get.body shouldBe skillMd // the exact `text` the page shows
+
+    // The server then adds credit-note.md: the directory read sees it, the held entry does not.
+    val refreshed = SkillSnapshot.build(
+      McpSkill.fromMarkdown(
+        "pdf-processing",
+        skillMd,
+        Map(
+          "templates/invoice.md" -> SkillFile.text(invoice),
+          "templates/purchase-order.md" -> SkillFile.text(purchaseOrder),
+          "templates/credit-note.md" -> SkillFile.text(creditNote)
+        )
+      )
+    )
+    refreshed.entry.resources.staticEntries.find(_.uri.endsWith("/credit-note.md")).map(r => (r.size, r.digest)) shouldBe
+      Some((39L, "sha256:766bffa8d4908ce897e1727ca22e4bf0fa796620b35218ce2132a124545626f1"))
+    refreshed.directory("skill://pdf-processing/templates").get.children.map(c => (c.uri, c.name, c.mimeType)).toSet shouldBe Set(
+      ("skill://pdf-processing/templates/invoice.md", "invoice.md", Some("text/markdown")),
+      ("skill://pdf-processing/templates/purchase-order.md", "purchase-order.md", Some("text/markdown")),
+      ("skill://pdf-processing/templates/credit-note.md", "credit-note.md", Some("text/markdown"))
+    )
+    val held = HeldEntry("docs-server", snap.entry)
+    SkillVerifier.verifyFile(held, "skill://pdf-processing/templates/invoice.md", utf8(invoice)).isVerified shouldBe true
+    SkillVerifier.verifyFile(held, "skill://pdf-processing/templates/credit-note.md", utf8(creditNote)) shouldBe
+      VerificationOutcome.Failed(VerificationFailure.UnlistedFile("skill://pdf-processing/templates/credit-note.md"))
+    held.sameContentSet(refreshed.entry) shouldBe false // the prior approval is revoked
+    SkillVerifier.verifySkillMd(HeldEntry("docs-server", refreshed.entry), utf8(skillMd)).isVerified shouldBe true
+  }
+
   test("the directory index covers the root, every ancestor and explicit empty directories, direct children only") {
     val snap = SkillSnapshot.build(refunds)
     snap.directories.keySet shouldBe Set(

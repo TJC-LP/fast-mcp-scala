@@ -206,7 +206,7 @@ server.tool(addTool) *> server.runStdio()
 
 Serves [Agent Skills](https://agentskills.io/specification) over MCP: `skills/list`, `skills/get`,
 the optional `resources/directory/read`, and every skill file as an ordinary resource. Implemented in
-`shared/` (stable extension page `ext-skills` commit `d866efdb`); full reference `docs/skills.md`,
+`shared/` (stable extension page `ext-skills` commit `167da6c0`, blob `824c66ba`); full reference `docs/skills.md`,
 pinned revisions + requirement-to-test matrix `docs/skills-conformance.md`.
 
 ```scala

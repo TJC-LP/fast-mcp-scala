@@ -76,6 +76,11 @@ class SkillsJsTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAll:
       "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
     Sha256.hex(JsTransportBackend.sha256("abc".getBytes(StandardCharsets.US_ASCII))) shouldBe
       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    // The stable page's worked example (§Example Message Flow) publishes exact bytes and digests.
+    Sha256.formatted("# Invoice\n\nCustomer:\nAmount:\n".getBytes(StandardCharsets.UTF_8)) shouldBe
+      "sha256:61f4ea6d2c75fde1b4977219e7e3107d491c3c26aefb6686e84d6281c088d9ee"
+    Sha256.formatted("# Credit note\n\nInvoice:\nCredit amount:\n".getBytes(StandardCharsets.UTF_8)) shouldBe
+      "sha256:766bffa8d4908ce897e1727ca22e4bf0fa796620b35218ce2132a124545626f1"
   }
 
   "the frontmatter reader" should "parse on Bun and reject duplicate keys, tags and aliases" in {
