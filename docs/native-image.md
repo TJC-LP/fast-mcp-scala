@@ -31,7 +31,7 @@ object server extends ScalaModule with mill.javalib.NativeImageModule {
   def mvnDeps = Seq(
     // stdio-only: exclude the HTTP stack. netty arrives only through zio-http, so this single
     // exclusion sheds both — see "The stdio/HTTP split" below
-    mvn"com.tjclp::fast-mcp-scala:1.0.0"
+    mvn"com.tjclp::fast-mcp-scala:1.0.1"
       .exclude("dev.zio" -> "zio-http_3")
   )
 
@@ -61,7 +61,7 @@ therefore drops zio-http and netty from stdio-only binaries entirely.
 
 **Stdio-only builds must also exclude the HTTP stack from the dependency: `dev.zio:zio-http_3`**
 (as in the recipe above; sbt:
-`("com.tjclp" %% "fast-mcp-scala" % "1.0.0").exclude("dev.zio", "zio-http_3")`). netty reaches
+`("com.tjclp" %% "fast-mcp-scala" % "1.0.1").exclude("dev.zio", "zio-http_3")`). netty reaches
 `fast-mcp-scala_3` only through zio-http — 3.11.4 declares netty 4.2.17.Final, and the JVM
 artifact declares no `io.netty` dependency of its own, only an `import`-scoped
 `io.netty:netty-bom` entry, which adds no dependency — so excluding zio-http removes every netty
@@ -146,7 +146,7 @@ build override and three extra flags (same `build.mill` preamble as above):
 object server extends ScalaModule with mill.javalib.NativeImageModule {
   def scalaVersion = "3.9.0"
   def mainClass = Some("com.example.MyHttpServer")
-  def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:1.0.0")   // zio-http stays
+  def mvnDeps = Seq(mvn"com.tjclp::fast-mcp-scala:1.0.1")   // zio-http stays
 
   override def jvmVersion = Task { "graalvm-community:25.0.2" }
 

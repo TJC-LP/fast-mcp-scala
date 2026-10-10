@@ -49,6 +49,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `McpRouter.deriveCapabilities` declares the skills extension when its methods are registered;
   `RouterBuilder.build` and `Builtins` take an optional `SkillRegistry`.
 
+## [1.0.1] - 2026-09-18
+
+### Security
+
+- Bouncy Castle 1.85 (managed version on the JVM artifact): `bcprov-jdk18on` 1.84, which reaches the
+  classpath through `io.netty:netty-pkitesting` via zio-http, carries GHSA-9pwp-9qqc-pr26 (critical,
+  CVE-2026-8763) and GHSA-qp49-qgx5-5m26 (high, CVE-2026-13506). Pinned through `depManagement`, so it
+  stays transitive and excluding zio-http still removes it.
+
+### Added
+
+- `McpServerSettings.instructions`: server-level usage guidance returned as `instructions` in the
+  `initialize` result and in `server/discover`. The field was plumbed through `RouterBuilder` and
+  `Builtins` but `McpServer` hard-coded `None`, so no server built on the library could set it.
+
 ## [1.0.0] - 2026-09-09
 
 Highlights since 0.4.0, the last published stable release (the `[0.5.0]` section

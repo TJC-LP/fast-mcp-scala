@@ -209,6 +209,11 @@ case class McpServerSettings(
     // Inbound input limits (frame size, JSON depth, object width, URI length, subscriptions).
     // Enforced on every transport before any dispatch work; see [[LimitSettings]].
     limits: LimitSettings = LimitSettings(),
+    // Server-level usage guidance returned as `instructions` in the `initialize` result (and in
+    // `server/discover` for 2026-07-28 clients) — the one place a server can tell an agent how its
+    // tools fit together ("search first, then fetch by id; pass drive to narrow…"). The spec leaves
+    // the content free-form; clients typically add it to the model's system prompt. `None` omits it.
+    instructions: Option[String] = None,
     // Optional io.modelcontextprotocol/skills extension (SEP-2640). Declared when enabled or when a
     // skill / provider is registered; see [[SkillSettings]] and docs/skills.md.
     skills: SkillSettings = SkillSettings()
