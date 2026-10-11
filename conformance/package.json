@@ -4,6 +4,6 @@
   "description": "Pinned @modelcontextprotocol/conformance harness driven by scripts/conformance.sh. Bump deliberately; regenerate bun.lock with the Mill-managed Bun (see scripts/conformance.sh header). Review the bun.lock diff, not this file: --frozen-lockfile treats the lock as authoritative.",
   "type": "module",
   "dependencies": {
-    "@modelcontextprotocol/conformance": "0.2.0-alpha.11"
+    "@modelcontextprotocol/conformance": "0.2.0-alpha.12"
   }
 }
