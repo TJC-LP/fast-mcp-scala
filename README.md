@@ -170,6 +170,40 @@ override def settings = McpServerSettings(exposeTemplatesEndpoint = true)
 
 A placeholder matches a non-empty run of characters within one path segment (never `/`); literal text is matched verbatim (not as a regex); placeholders in the same segment must be separated by literal text (a template such as `x://{a}{b}` is rejected at registration, so the server fails to start). Client URIs longer than `limits.maxUriChars` (8192) are rejected with `-32602`.
 
+## Skills (`io.modelcontextprotocol/skills`)
+
+Publish [Agent Skills](https://agentskills.io/specification) alongside tools, resources and prompts.
+A skill is a `SKILL.md` (YAML frontmatter + Markdown) plus supporting files; the server serves every
+file as an ordinary resource, answers `skills/list` / `skills/get` with a complete manifest (verbatim
+frontmatter, `sha256:` digest and byte size per file) and browses directories with
+`resources/directory/read`. Cross-platform, every transport:
+
+```scala 3 raw
+object SkillsServer extends McpServerApp[Stdio, SkillsServer.type]:
+  override val skills: List[McpSkill] = List(
+    McpSkill.fromMarkdown(
+      skillPath = "acme/reconcile-positions",
+      markdown = """---
+                   |name: reconcile-positions
+                   |description: Reconcile broker positions against the ledger and flag breaks.
+                   |---
+                   |Read `references/rules.md` first.
+                   |""".stripMargin,
+      files = Map(
+        "references/rules.md" -> SkillFile.text("# Rules\n"),
+        "assets/example.bin" -> SkillFile.binary(Array[Byte](0, 1, 2))
+      )
+    )
+  )
+```
+
+Registering a skill declares the extension (`{"directoryRead": true}`) and the `resources`
+capability; `SkillSettings(enabled = true)` serves an empty catalog. Dynamic catalogs implement
+`SkillProvider`; on the JVM, `SkillDirectoryLoader` publishes an on-disk skill directory (regular
+files only, symlinks refused). Digests prove consistency, not trust — the host still verifies,
+approves and decides what to activate. Full guide: [docs/skills.md](docs/skills.md); pinned spec
+revisions and the requirement-to-test matrix: [docs/skills-conformance.md](docs/skills-conformance.md).
+
 ## Prompts
 
 Return a `List[Message]`; fast-mcp-scala handles the MCP framing:
@@ -270,6 +304,8 @@ The official MCP conformance suite runs in CI against the JVM and Bun servers an
 
 - [docs/transports.md](docs/transports.md) — stdio, modern Streamable HTTP, the legacy adapter, every `McpServerSettings` field
 - [docs/tasks.md](docs/tasks.md) — the experimental MCP Tasks extension
+- [docs/skills.md](docs/skills.md) — the Skills extension (`io.modelcontextprotocol/skills`, SEP-2640): authoring, URIs, digests, providers, directory reads, host responsibilities
+- [docs/skills-conformance.md](docs/skills-conformance.md) — pinned spec revisions, requirement-to-test matrix, upstream conformance run
 - [docs/custom-types.md](docs/custom-types.md) — `McpInputCodec`, `McpSchema`, `@Param(schema = ...)`, `McpTool.withSchema`
 - [docs/platforms.md](docs/platforms.md) — parity matrix, running on Bun and Scala Native
 - [docs/native-image.md](docs/native-image.md) — GraalVM recipes for stdio and HTTP servers

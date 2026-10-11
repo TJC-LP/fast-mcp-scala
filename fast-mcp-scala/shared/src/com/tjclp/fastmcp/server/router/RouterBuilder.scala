@@ -4,6 +4,7 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.wire.Implementation
 import com.tjclp.fastmcp.server.{CompletionHandler, McpServerSettings}
 import com.tjclp.fastmcp.server.manager.{PromptManager, ResourceManager, TaskManager, ToolManager}
+import com.tjclp.fastmcp.server.skills.SkillRegistry
 
 /** Assembles an [[McpRouter]] from the populated managers + settings.
   *
@@ -27,15 +28,23 @@ object RouterBuilder:
       completionHandler: Option[CompletionHandler[R]] = None,
       validator: SchemaValidator = SchemaValidator.permissive,
       extraMiddlewares: List[Middleware[R]] = Nil,
-      hooks: ServerHooks[R] = ServerHooks.noop[R]
+      hooks: ServerHooks[R] = ServerHooks.noop[R],
+      skillRegistry: Option[SkillRegistry[R]] = None
   ): McpRouter[R] =
     val tasksOn = settings.tasks.enabled && taskManager.isDefined
+
+    // Skills extension: declared when explicitly enabled or when a skill / provider is registered.
+    // A declaring server MUST also declare `resources` (skill files are read via resources/read),
+    // so an enabled catalog counts as "has resources" even when it is empty.
+    val skillsOn = skillRegistry.exists(r => settings.skills.enabled || r.nonEmpty)
+    val directoryReadOn =
+      skillsOn && settings.skills.directoryRead && skillRegistry.exists(_.directoryReadSupported)
 
     val resourceDefs = resourceManager.listDefinitions()
     val hasTools = toolManager.listDefinitions().nonEmpty
     val hasStatic = resourceDefs.exists(!_.isTemplate)
     val hasTemplates = resourceDefs.exists(_.isTemplate)
-    val hasResources = hasStatic || hasTemplates
+    val hasResources = hasStatic || hasTemplates || skillsOn
     val hasPrompts = promptManager.listDefinitions().nonEmpty
     val hasCompletion = completionHandler.isDefined
     val exposeTemplates = hasTemplates && settings.exposeTemplatesEndpoint
@@ -63,7 +72,9 @@ object RouterBuilder:
       Option.when(loggingEnabled)(Set(Methods.LoggingSetLevel)).getOrElse(Set.empty) ++
       Option
         .when(resourcesSubscribe)(Set(Methods.ResourcesSubscribe, Methods.ResourcesUnsubscribe))
-        .getOrElse(Set.empty)
+        .getOrElse(Set.empty) ++
+      Option.when(skillsOn)(Set(Methods.SkillsList, Methods.SkillsGet)).getOrElse(Set.empty) ++
+      Option.when(directoryReadOn)(Set(Methods.ResourcesDirectoryRead)).getOrElse(Set.empty)
 
     val listChanged = false // dynamic list-change notifications not implemented yet
 
@@ -83,7 +94,9 @@ object RouterBuilder:
       exposeTemplates = exposeTemplates,
       completionHandler = completionHandler,
       hooks = hooks,
-      limits = settings.limits
+      limits = settings.limits,
+      skills = skillRegistry.filter(_ => skillsOn),
+      skillSettings = settings.skills
     )
 
     val taskHandlers = taskManager.map(tm => new TaskHandlers[R](tm))
@@ -122,6 +135,12 @@ object RouterBuilder:
         (if loggingEnabled then Map(Methods.LoggingSetLevel -> builtins.loggingSetLevel)
          else Map.empty) ++
         (if hasCompletion then Map(Methods.CompletionComplete -> builtins.complete)
+         else Map.empty) ++
+        (if skillsOn then
+           Map(Methods.SkillsList -> builtins.skillsList, Methods.SkillsGet -> builtins.skillsGet)
+         else Map.empty) ++
+        (if directoryReadOn then
+           Map(Methods.ResourcesDirectoryRead -> builtins.resourcesDirectoryRead)
          else Map.empty) ++
         (taskHandlers match
           case Some(th) if tasksOn =>

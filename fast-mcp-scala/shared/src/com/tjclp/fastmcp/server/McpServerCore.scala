@@ -4,6 +4,8 @@ package server
 import zio.*
 
 import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.core.skills.McpSkill
+import com.tjclp.fastmcp.server.skills.SkillProvider
 import com.tjclp.fastmcp.server.manager.ContextualPromptHandler
 import com.tjclp.fastmcp.server.manager.ContextualToolHandler
 import com.tjclp.fastmcp.server.manager.PromptHandler
@@ -262,6 +264,29 @@ trait McpServerCore[R]:
           .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
           .flatMap(in => contract.handler(in, ctx))
     )
+
+  // --- Skills registration (io.modelcontextprotocol/skills) ---
+
+  /** Publish skills atomically: every skill is validated, hashed and checked for conflicts with the
+    * catalog and the resource registrations, and only then does the whole batch become visible
+    * (`skills/list`, `skills/get`, `resources/read`, `resources/directory/read`). A skill whose
+    * root is already published is replaced. Registering a skill declares the extension. Fails with
+    * [[com.tjclp.fastmcp.core.skills.SkillError.Exception]] and publishes nothing on any problem.
+    */
+  def skills(skills: List[McpSkill]): ZIO[Any, Throwable, McpServerCore[R]]
+
+  /** Publish one skill (see [[skills]]). */
+  def skill(skill: McpSkill): ZIO[Any, Throwable, McpServerCore[R]] = skills(List(skill))
+
+  /** Atomically withdraw the skills rooted at the given URIs (`skill://acme/refunds`). Clients
+    * holding an older entry see verification failures on read and refresh via `skills/get`.
+    */
+  def removeSkills(rootUris: List[String]): ZIO[Any, Throwable, McpServerCore[R]]
+
+  /** Mount a [[SkillProvider]] — a generated, remote or authorization-scoped catalog. Its
+    * namespaces must not overlap published skills or other providers.
+    */
+  def skillProvider[R1 >: R](provider: SkillProvider[R1]): ZIO[Any, Throwable, McpServerCore[R]]
 
   // --- Server lifecycle ---
 

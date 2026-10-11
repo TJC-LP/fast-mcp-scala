@@ -39,6 +39,16 @@ class McpTestClient private (val underlying: Client):
     val jsArgs = js.Dictionary(arguments.toSeq*)
     McpTestClient.fromJsPromise(underlying.getPrompt(GetPromptParams(name, jsArgs)))
 
+  /** Send an arbitrary request (Skills extension methods) and get the raw result object. */
+  def rawRequest(method: String, params: js.Object): Future[js.Dynamic] =
+    McpTestClient.fromJsPromise(
+      underlying.request(js.Dynamic.literal(method = method, params = params), ResultSchema)
+    )
+
+  /** The raw server capabilities object (for `extensions`). */
+  def rawServerCapabilities: Option[js.Dynamic] =
+    underlying.getServerCapabilities().toOption.map(_.asInstanceOf[js.Dynamic])
+
   def serverName: Option[String] =
     underlying.getServerVersion().toOption.map(_.name)
 
