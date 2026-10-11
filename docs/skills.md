@@ -233,6 +233,11 @@ files). Conflicts detected before commit:
   (`ResourceManager` refuses the reverse registrations too, instead of silently overwriting).
 
 Re-publishing a skill root replaces it; `removeSkills(roots)` withdraws every URI of those skills.
+Publishing is incremental in cost: the pairwise nesting check and the static-resource/template
+lookups run only for the roots a call adds or replaces (everything already installed passed them
+when it was installed), so loading a large catalog one `server.skill(s)` at a time costs linear
+work per call rather than re-validating every pair of skills. One `server.skills(list)` batch is
+still the cheapest and the only atomic way to publish several skills together.
 Readers never observe a half-published generation: a concurrent `skills/list` sees either the old
 or the new catalog (tested with concurrent republishing). A new publication legitimately
 invalidates a client's held entry: its next `resources/read` fails verification (size/digest) and
@@ -358,8 +363,10 @@ caller-selected directory into an `McpSkill` that then goes through the same pub
 
 - **selection policy**: regular files only; dot-files/dot-directories and the default exclusions
   (`.git`, `.hg`, `.svn`, `node_modules`, `__pycache__`, `.DS_Store`, `Thumbs.db`) skipped
-  (`Options.includeHidden`, `Options.exclude`); the manifest is computed from exactly the files
-  that were read, so it never claims a tree different from the one served;
+  (`Options.includeHidden`, `Options.exclude`), and `.env*` entries skipped unconditionally —
+  `includeHidden = true` publishes `.well-known/` but never a secrets file; the manifest is
+  computed from exactly the files that were read, so it never claims a tree different from the one
+  served;
 - **text vs binary**: files with a known text extension whose bytes are strict UTF-8 are served as
   `text`; everything else is a `blob` (a `.txt` that is not UTF-8 is a blob, never repaired);
 - **safety**: the root is resolved once with `toRealPath`; every entry is inspected with

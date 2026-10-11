@@ -120,6 +120,22 @@ class SkillRegistryTest extends AnyFunSuite with Matchers:
     val childOk = parent.nestedSkill("child").fold(e => fail(e.message), identity)
     publish(r, parent, childOk) // legitimate shared membership
     runUnsafe(r.get("skill://acme/parent/child/SKILL.md", ctx)).map(_.resources.staticEntries.size) shouldBe Some(2)
+    // The shared nested SKILL.md is listed with the same metadata it is read with: the nested
+    // skill's frontmatter name, not the parent's file-name view.
+    val sharedMd = "skill://acme/parent/child/SKILL.md"
+    r.listDefinitions().find(_.uri == sharedMd).flatMap(_.name) shouldBe Some("child")
+    r.listDefinitions().find(_.uri == sharedMd).flatMap(_.description) shouldBe Some("c")
+    r.listDefinitions().find(_.uri == sharedMd).map(_.name) shouldBe r.definition(sharedMd).map(_.name)
+    r.listDefinitions().map(_.uri).distinct.size shouldBe r.listDefinitions().size
+    // Incremental publishes validate nesting in both directions: a nested skill published first,
+    // then an enclosing skill that does not list its files; and a parent replaced under a child.
+    publish(r, simpleSkill("acme/p2/kid"))
+    val incompleteParent = McpSkill.fromMarkdown("acme/p2", "---\nname: p2\ndescription: d\n---\n")
+    publishErr(r, incompleteParent).message should include("missing from the enclosing skill")
+    val parentV2 = McpSkill.fromMarkdown("acme/parent", "---\nname: parent\ndescription: d\n---\n",
+      Map("child/SKILL.md" -> SkillFile.text("---\nname: child\ndescription: c\n---\n"), "child/ref.md" -> SkillFile.text("changed")))
+    publishErr(r, parentV2) should matchPattern { case SkillError.ConflictingResource(_, "skill://acme/parent/child/ref.md", _) => }
+    runUnsafe(r.readFile("skill://acme/parent/child/ref.md", ctx)).map(_.body) shouldBe Some("same") // nothing changed
     val childDiff = McpSkill.fromMarkdown("acme/parent/child", "---\nname: child\ndescription: c\n---\n", Map("ref.md" -> SkillFile.text("DIFFERENT")))
     publishErr(r, childDiff) should matchPattern { case SkillError.ConflictingResource(_, "skill://acme/parent/child/ref.md", _) => }
     // A nested skill with a file the parent does not list contradicts the parent's completeness.

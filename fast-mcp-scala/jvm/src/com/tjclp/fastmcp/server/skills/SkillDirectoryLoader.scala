@@ -17,11 +17,13 @@ import com.tjclp.fastmcp.core.wire.Skills
   * (`server.skill(...)`). Nothing here is reachable from Scala.js or Scala Native; the shared core
   * has no filesystem dependency.
   *
-  * '''Selection policy''' ([[SkillDirectoryLoader.Options]]): regular files only, hidden entries
-  * (dot-files) and the default exclusion set (`.git`, `node_modules`, `__pycache__`, `.DS_Store`,
-  * `Thumbs.db`, `.env*`) skipped, everything else published. The manifest is computed from exactly
-  * the files that were selected and read, so it can never claim a tree different from the one
-  * served. Nothing is executed, no executable bit is honoured, no archive is extracted.
+  * '''Selection policy''' ([[SkillDirectoryLoader.Options]]): regular files only; hidden entries
+  * (dot-files, unless `includeHidden`), the exclusion set (`.git`, `.hg`, `.svn`, `node_modules`,
+  * `__pycache__`, `.DS_Store`, `Thumbs.db` by default, `Options.exclude`) and — regardless of
+  * either option — every `.env*` entry are skipped; everything else is published. The manifest is
+  * computed from exactly the files that were selected and read, so it can never claim a tree
+  * different from the one served. Nothing is executed, no executable bit is honoured, no archive is
+  * extracted.
   *
   * '''Filesystem assumptions and safety.''' The caller chooses the root; it is resolved once with
   * `toRealPath`. Every entry is inspected with `NOFOLLOW_LINKS`: a symbolic link, device, socket or
@@ -54,7 +56,7 @@ object SkillDirectoryLoader:
     * @param maxFileBytes
     *   maximum size of any one file
     * @param includeHidden
-    *   include dot-files and dot-directories
+    *   include dot-files and dot-directories (`.env*` entries stay excluded regardless)
     * @param exclude
     *   entry names (not paths) excluded at every level
     * @param skipSpecialFiles
@@ -128,9 +130,10 @@ object SkillDirectoryLoader:
               case (Right(()), entry) =>
                 val name = entry.getFileName.toString
                 val relPath = if rel.isEmpty then name else s"$rel/$name"
-                if options.exclude
-                    .contains(name) || (!options.includeHidden && name.startsWith(".")) ||
-                  (!options.includeHidden && name.startsWith(".env"))
+                // `.env*` is excluded unconditionally: `includeHidden` opts dot-entries in, but a
+                // secrets file must never ride along with a `.well-known/`-style directory.
+                if options.exclude.contains(name) || name.startsWith(".env") ||
+                  (!options.includeHidden && name.startsWith("."))
                 then
                   skipped += relPath
                   Right(())

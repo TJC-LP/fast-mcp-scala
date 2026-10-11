@@ -54,6 +54,19 @@ class SkillDirectoryLoaderTest extends AnyFunSuite with Matchers:
     snap.directory("skill://refunds/templates/drafts").get.children shouldBe Vector.empty
   }
 
+  test("includeHidden publishes dot-entries but never a .env* file") {
+    val dir = skillDir()
+    write(dir, ".env.local", utf8("SECRET=y"))
+    write(dir, ".well-known/config.json", utf8("{}"))
+    val loaded = runUnsafe(SkillDirectoryLoader.loadDetailed(dir, SkillDirectoryLoader.Options(includeHidden = true)))
+    loaded.skill.files.keySet should contain allOf (".hidden/secret.txt", ".well-known/config.json")
+    loaded.skill.files.keySet.filter(_.contains(".env")) shouldBe Set.empty
+    loaded.skipped.toSet shouldBe Set(".env", ".env.local", "node_modules")
+    val uris = SkillSnapshot.build(loaded.skill).entry.resources.staticEntries.map(_.uri)
+    uris should contain("skill://refunds/.well-known/config.json")
+    uris.exists(_.contains(".env")) shouldBe false
+  }
+
   test("namespace and explicit skillPath; directory name must match the frontmatter name unless skillPath is given") {
     val dir = skillDir()
     runUnsafe(SkillDirectoryLoader.load(dir, SkillDirectoryLoader.Options(namespace = List("acme", "billing")))).uri.render shouldBe

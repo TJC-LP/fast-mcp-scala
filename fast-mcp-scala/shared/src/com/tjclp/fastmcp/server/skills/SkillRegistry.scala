@@ -57,9 +57,10 @@ final class SkillRegistry[R] private (
         }
         _ <- duplicateRoots(skills)
         snapshots = skills.map(s => SkillSnapshot.build(s, sha256))
+        changed = snapshots.map(_.rootUri).toSet
         _ <- swap { current =>
           val next = current.snapshots ++ snapshots.map(s => s.rootUri -> s)
-          validate(Generation(current.generation + 1, next, current.providers))
+          validate(Generation(current.generation + 1, next, current.providers), changed)
         }
       yield ()
     )
@@ -83,7 +84,8 @@ final class SkillRegistry[R] private (
       else
         swap { current =>
           validate(
-            Generation(current.generation + 1, current.snapshots, current.providers :+ provider)
+            Generation(current.generation + 1, current.snapshots, current.providers :+ provider),
+            changed = Set.empty // no snapshot changes: only the provider checks can fail
           )
         }
     )
@@ -284,8 +286,9 @@ final class SkillRegistry[R] private (
 
   override def listDefinitions(): List[ResourceDefinition] =
     val g = state.get()
-    val static =
-      g.snapshots.values.filter(_.listed).flatMap(_.files.values).map(f => toDefinition(f.resource))
+    // Same per-URI index as `definition` / `read`, so a file shared by a parent and a nested skill
+    // is listed with the metadata it is read with (the nested skill's), never the other view.
+    val static = g.listedFilesByUri.valuesIterator.map(f => toDefinition(f.resource))
     val dynamic = g.providers.flatMap(_.listedResources).map(toDefinition)
     (static ++ dynamic).toList.distinctBy(_.uri)
 
@@ -325,15 +328,25 @@ final class SkillRegistry[R] private (
         )
       case None => Right(())
 
-  private def validate(g: Generation[R]): Either[SkillError, Generation[R]] =
+  /** Validate a candidate generation. `changed` names the snapshot roots this generation adds or
+    * replaces: the pairwise nesting check and the external-conflict lookups run only for those
+    * (every other snapshot passed them when it was installed, and removals cannot invalidate them),
+    * so publishing one skill into a catalog of n costs O(n) pair checks, not O(n²). The
+    * content-consistency pass stays a single linear walk over every published file.
+    */
+  private def validate(
+      g: Generation[R],
+      changed: Set[String]
+  ): Either[SkillError, Generation[R]] =
     val snaps = g.snapshots.values.toList
+    val changedSnaps = snaps.filter(s => changed.contains(s.rootUri))
     // Nesting first: an incomplete parent manifest is reported as such, not as a directory shape
     // difference.
     for
-      _ <- checkNesting(snaps)
+      _ <- checkNesting(snaps, changedSnaps)
       _ <- checkFileAndDirectoryConsistency(snaps)
       _ <- checkProviders(snaps, g.providers)
-      _ <- checkExternal(snaps)
+      _ <- checkExternal(changedSnaps)
     yield g
 
   private def conflict(snap: SkillSnapshot, uri: String, reason: String): SkillError =
@@ -395,13 +408,19 @@ final class SkillRegistry[R] private (
   private def shape(d: PublishedDirectory): Set[(String, Option[String])] =
     d.children.map(c => (c.uri, c.mimeType)).toSet
 
-  /** A skill nested inside another must publish exactly the parent's files below its root. */
-  private def checkNesting(snaps: List[SkillSnapshot]): Either[SkillError, Unit] =
-    val pairs = for
-      parent <- snaps
-      child <- snaps
-      if child.root.isWithin(parent.root)
-    yield (parent, child)
+  /** A skill nested inside another must publish exactly the parent's files below its root. Only the
+    * (parent, child) pairs that involve a changed snapshot are examined, in both directions.
+    */
+  private def checkNesting(
+      snaps: List[SkillSnapshot],
+      changed: List[SkillSnapshot]
+  ): Either[SkillError, Unit] =
+    val pairs = (for
+      c <- changed
+      other <- snaps
+      pair <- List((c, other), (other, c))
+      if pair._2.root.isWithin(pair._1.root)
+    yield pair).distinctBy(p => (p._1.rootUri, p._2.rootUri))
     pairs.foldLeft[Either[SkillError, Unit]](Right(())) {
       case (Left(e), _) => Left(e)
       case (Right(()), (parent, child)) =>
@@ -481,13 +500,22 @@ object SkillRegistry:
 
     // Union indexes over identical-content duplicates (validated before the generation is
     // installed), so lookups are one hash probe. Snapshots are visited in root order, so for a
-    // directory shared by a parent and a nested skill the nested skill's view (its SKILL.md named by
-    // frontmatter) is the one served.
+    // file or directory shared by a parent and a nested skill the nested skill's view (its SKILL.md
+    // named and described by frontmatter) is the one served — by reads, definitions and listings
+    // alike, which all derive from these indexes.
     lazy val filesByUri: Map[String, PublishedFile] =
       snapshots.values.iterator.flatMap(_.files.iterator).toMap
 
     lazy val directoriesByUri: Map[String, PublishedDirectory] =
       snapshots.values.iterator.flatMap(_.directories.iterator).toMap
+
+    /** The files `resources/list` shows: those of listed skills, with the metadata `filesByUri`
+      * serves, in URI order.
+      */
+    lazy val listedFilesByUri: SortedMap[String, PublishedFile] =
+      val listedUris =
+        snapshots.values.iterator.filter(_.listed).flatMap(_.files.keysIterator).toSet
+      SortedMap.from(filesByUri.view.filterKeys(listedUris))
 
   /** @param externalConflict
     *   consulted for every file and directory URI at publication; returns the reason the URI is
