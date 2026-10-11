@@ -42,7 +42,7 @@ runs:
   using: composite
   steps:
     - name: Set up JDK ${{ inputs.java-version }}
-      uses: coursier/setup-action@9b7939bf01fd1185ce2babe16135168361bf2c62 # v3.0.2
+      uses: coursier/setup-action@648df969f41ef15fda2baba8b37f9fa3d16390a3 # v3.0.4
       with:
         jvm: temurin:${{ inputs.java-version }}
 
