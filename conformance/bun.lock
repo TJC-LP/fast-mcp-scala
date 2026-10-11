@@ -5,14 +5,14 @@
     "": {
       "name": "fast-mcp-scala-conformance-harness",
       "dependencies": {
-        "@modelcontextprotocol/conformance": "0.2.0-alpha.11",
+        "@modelcontextprotocol/conformance": "0.2.0-alpha.12",
       },
     },
   },
   "packages": {
     "@hono/node-server": ["@hono/node-server@2.1.1", "", { "peerDependencies": { "hono": "^4" } }, "sha512-ELuehkj5VCBdgEw9zs+ivkKwyzzUCSQuE96YmiPvn1ECBoZCczbFXJLeEGMTYjphP6gydh4pHMqEYPVMYUVgQg=="],
 
-    "@modelcontextprotocol/conformance": ["@modelcontextprotocol/conformance@0.2.0-alpha.11", "", { "dependencies": { "@modelcontextprotocol/sdk": "^1.29.0", "@octokit/rest": "^22.0.0", "ajv": "^8.20.0", "ajv-formats": "^3.0.1", "commander": "^14.0.2", "eventsource-parser": "^3.0.8", "express": "^5.1.0", "jose": "^6.1.2", "undici": "^7.25.0", "yaml": "^2.8.2", "zod": "^4.3.6" }, "bin": { "conformance": "dist/index.js" } }, "sha512-imPK9tx5gQsL6ZKQq4MrsyDYfSaIwpRmX6+ogjbeAXs9LGvxkBxWcY7KcS7TvwaBk/ZiVWl6b/naF4q83UwDRA=="],
+    "@modelcontextprotocol/conformance": ["@modelcontextprotocol/conformance@0.2.0-alpha.12", "", { "dependencies": { "@modelcontextprotocol/sdk": "^1.29.0", "@octokit/rest": "^22.0.0", "ajv": "^8.20.0", "ajv-formats": "^3.0.1", "commander": "^14.0.2", "eventsource-parser": "^3.0.8", "express": "^5.1.0", "jose": "^6.1.2", "undici": "^7.25.0", "yaml": "^2.8.2", "zod": "^4.3.6" }, "bin": { "conformance": "dist/index.js" } }, "sha512-eXtZFgmtZiU5SsvXty+RGXGnyIqEVm3GLU/HZmg1wMjtKOocPZZgD9HQKd30oJhio5UB0wFJmsc6r8u48Q+EYA=="],
 
     "@modelcontextprotocol/sdk": ["@modelcontextprotocol/sdk@1.30.0", "", { "dependencies": { "@hono/node-server": "^1.19.9 || ^2.0.5", "ajv": "^8.17.1", "ajv-formats": "^3.0.1", "content-type": "^1.0.5", "cors": "^2.8.5", "cross-spawn": "^7.0.5", "eventsource": "^3.0.2", "eventsource-parser": "^3.0.0", "express": "^5.2.1", "express-rate-limit": "^8.2.1", "hono": "^4.11.4", "jose": "^6.1.3", "json-schema-typed": "^8.0.2", "pkce-challenge": "^5.0.0", "raw-body": "^3.0.0", "zod": "^3.25 || ^4.0", "zod-to-json-schema": "^3.25.1" }, "peerDependencies": { "@cfworker/json-schema": "^4.1.1" }, "optionalPeers": ["@cfworker/json-schema"] }, "sha512-xKd8OIzlqNzcqcNumGAa6g+PW2kjD5vrpcKOnfldAUPP3j7lnqMPwlTXQm8gF+UwH72z0lqaRbjr9hqGz0eITA=="],
 
