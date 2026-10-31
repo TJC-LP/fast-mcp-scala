@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Clarified that the Go SDK 1.7.0 interoperability examples send `Mcp-Name` only
+  for named MCP methods; `Mcp-Method` remains required on every modern HTTP POST.
 - `ResourceManager` gains mounted `ResourceSource`s (resolved after static resources and before
   templates) and `readResourceWithMime`; registering a static resource or a template that collides
   with a URI a mounted source serves now fails instead of overwriting.
