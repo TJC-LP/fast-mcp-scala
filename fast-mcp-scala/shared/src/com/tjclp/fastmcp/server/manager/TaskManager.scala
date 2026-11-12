@@ -387,13 +387,20 @@ class TaskManager[R] private[manager] (
         // `forkDaemon` inherits the current runtime — in production this is the server's
         // `executionRuntime` captured at `runHttp[R]()` entry, so any `R` the run effect requires
         // is already discharged by the inherited environment.
+        //
+        // Only the body is interruptible. The fiber is forked inside this mask, so it STARTS
+        // uninterruptible, and an interrupt that reaches it before it has run a single step
+        // (tasks/cancel, a session release or the TTL sweep right after the create) waits until
+        // the release is registered. Making the whole fiber interruptible instead let such an
+        // interrupt end it before `acquireReleaseExitWith` began: no terminal status was ever
+        // recorded, the entry stayed `working` and counted as running until its TTL, and
+        // `tasks/result` never completed. Without `.interruptible` on the body, cancel and expiry
+        // would never land at all.
         wrapped =
           ZIO.acquireReleaseExitWith(ZIO.unit)((_, exit: Exit[Throwable, Any]) =>
             recordTerminal(taskId, exit, promise, onStatusChange)
-          )(_ => start.await.flatMap(go => if go then run else ZIO.interrupt))
-        // A child forked inside the mask inherits the mask's uninterruptibility; `.interruptible`
-        // is mandatory or tasks/cancel and TTL expiry would never land.
-        fiber <- wrapped.interruptible.forkDaemon
+          )(_ => start.await.flatMap(go => if go then run else ZIO.interrupt).interruptible)
+        fiber <- wrapped.forkDaemon
         result <- registerOrRollback(
           taskId,
           scope,

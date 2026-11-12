@@ -433,16 +433,6 @@ private[fastmcp] object SocketHttpServer:
   ): UIO[(Scope.Closeable, ZIO[Any, Option[Nothing], Chunk[SseFrame]])] =
     Scope.make.flatMap(scope => scope.extend[Any](frames.toPull).map(pull => (scope, pull)))
 
-  /** Run an SSE reply's finalizers without emitting it: the stream is started already halted. Its
-    * `ensuring` hooks are the only thing that interrupts the request's dispatch fiber, shuts its
-    * queue and releases the session's GET slot, so a reply that cannot be delivered must still be
-    * run this way — dropping it would leave every later GET on the session answering 409.
-    */
-  private def abandon(frames: ZStream[Any, Nothing, SseFrame]): UIO[Unit] =
-    Promise.make[Nothing, Unit].flatMap { halted =>
-      halted.succeed(()) *> frames.interruptWhen(halted).runDrain
-    }
-
   /** One accepted socket: the request loop, framing, and response writing, all on one thread. */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private final class Connection[R](socket: Socket, owner: Listener[R]) extends Runnable:
@@ -597,11 +587,14 @@ private[fastmcp] object SocketHttpServer:
       exit match
         case Exit.Success(reply) if !peerGone => writeReply(reply, head.version, close)
         case Exit.Success(reply) =>
-          // The peer vanished while the handler ran, but it still produced a reply: run an SSE
-          // reply's finalizers before dropping it.
+          // The peer vanished while the handler ran, but it still produced a reply: release what
+          // an SSE reply holds (the request's dispatch and queue, a session's GET slot) before
+          // dropping it. `abandon` does that at once. Running the stream already halted does not:
+          // a stream halted before its first pull may never register its finalizers, and the
+          // release then waits for the handler's unstarted-reply grace.
           reply match
             case sse: HttpReply.Sse =>
-              val _ = owner.runSync(abandon(sse.frames))
+              val _ = owner.runSync(sse.abandon)
             case _ => ()
           false
         case Exit.Failure(cause) =>
@@ -760,6 +753,7 @@ private[fastmcp] object SocketHttpServer:
       owner.runSync(openPull(sse.frames)) match
         case Exit.Failure(cause) =>
           debugLog(s"could not open the reply stream: ${cause.prettyPrint}")
+          val _ = owner.runSync(sse.abandon)
           val _ = writeReply(internalError, version, close = true)
           false
         case Exit.Success((scope, pull)) =>
@@ -800,8 +794,10 @@ private[fastmcp] object SocketHttpServer:
               broken = true
           finally
             // Runs the stream's finalizers (dispatch interrupt, queue shutdown, GET-slot release)
-            // on every path: normal end, client disconnect, write failure, shutdown.
-            val _ = owner.runSync(scope.close(Exit.unit))
+            // on every path: normal end, client disconnect, write failure, shutdown. `abandon`
+            // covers a stream that was never pulled far enough to register them; it does nothing
+            // for one that was.
+            val _ = owner.runSync(scope.close(Exit.unit) *> sse.abandon)
           finished && !broken && !closeAfter
 
     private def appendHead(status: Int, headers: List[(String, String)], close: Boolean): Unit =

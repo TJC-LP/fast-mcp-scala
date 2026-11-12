@@ -452,6 +452,17 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Fixed
 
+- **A task interrupted before its fiber had started stayed `working` for ever** (TJC-5087). A
+  `tasks/cancel`, a session release or the TTL sweep that reached a task right after its creation
+  could end the task's fiber before the step that records the terminal status was in place. The
+  client was told the task was cancelled, but the store kept it `working`: it counted against the
+  running caps until its TTL, `tasks/get` kept answering `working`, and `tasks/result` never
+  completed. On the JVM about 2 in 100 creates followed at once by a cancel hit it under load; on
+  Bun, where one thread runs everything, a cancel issued by the same fiber as the create hit it
+  every time. Present since tasks were introduced, 1.0.1 included. The task fiber
+  now becomes interruptible only once that step is in place. The same ordering is applied to the
+  dispatch fiber of a streamed HTTP reply on the JVM backends.
+
 - **2026-07-28 request replies no longer allocate a 32 KiB array each** (TJC-2223): the reply
   stream carried its first message through `ZStream.fromIterable`, which sizes a builder for a full
   4096-element chunk; it is now a single-element stream. Affects every HTTP backend built on the
