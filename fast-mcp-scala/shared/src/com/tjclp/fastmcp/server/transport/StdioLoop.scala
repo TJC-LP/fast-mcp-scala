@@ -25,7 +25,7 @@ private[fastmcp] object StdioLoop:
       inLines: ZStream[Any, Throwable, String]
   ): ZIO[R, Throwable, Unit] =
     for
-      session <- Session.make("stdio")
+      session <- Session.makeDrained("stdio", router.limits.maxOutboundMessages)
       // One writer owns stdout; both replies and server-pushed outbound go through it so lines
       // never interleave.
       outLock <- Semaphore.make(1)
@@ -36,12 +36,13 @@ private[fastmcp] object StdioLoop:
   /** The stdio dispatch loop, separate from [[serve]] so it can be driven over in-memory streams in
     * tests (no real `System.in`/`System.out`).
     *
-    * Spawns the outbound drainer (server→client pushes) and consumes each inbound line, dispatching
-    * **each frame in its own fiber** so the read loop keeps consuming while a handler is blocked —
-    * e.g. a tool awaiting a server→client roots/list or sampling response, whose reply is itself a
-    * *later* inbound frame. Sequential dispatch deadlocks such handlers (and a `notifications/
-    * cancelled` arriving mid-request). `emit` serializes writes, so forked replies never
-    * interleave.
+    * Spawns the outbound drainer (server→client pushes; the channel is bounded and, on the session
+    * [[serve]] builds, back-pressured — an emitter waits for this writer rather than lose a
+    * message) and consumes each inbound line, dispatching **each frame in its own fiber** so the
+    * read loop keeps consuming while a handler is blocked — e.g. a tool awaiting a server→client
+    * roots/list or sampling response, whose reply is itself a *later* inbound frame. Sequential
+    * dispatch deadlocks such handlers (and a `notifications/ cancelled` arriving mid-request).
+    * `emit` serializes writes, so forked replies never interleave.
     */
   def run[R](
       router: McpRouter[R],
@@ -65,8 +66,10 @@ private[fastmcp] object StdioLoop:
             .forkDaemon
             .unit
         }
-        // stdin EOF (or scope interruption) ends the loop; take the drainer down with it.
-        .ensuring(drainer.interrupt)
+        // stdin EOF (or scope interruption) ends the loop; take the drainer down with it. Nothing
+        // writes server-pushed messages from here on, so the session stops buffering them and
+        // releases any emitter still waiting for the writer.
+        .ensuring(drainer.interrupt *> session.closeOutbound)
     yield ()
 
   /** Blocking line write to `System.out`. Identical on the JVM and Scala Native (SN's javalib

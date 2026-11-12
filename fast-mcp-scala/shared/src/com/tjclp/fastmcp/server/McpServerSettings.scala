@@ -262,13 +262,25 @@ case class McpServerSettings(
   * @param maxSubscriptionsPerSession
   *   Max distinct URIs one legacy session may hold via `resources/subscribe`; further distinct
   *   subscriptions are refused with `-32602`.
+  * @param maxOutboundMessages
+  *   Max server-to-client messages one session buffers outside a request's own response stream
+  *   (`Session.outbound`): task status notifications, and the log, progress and server-initiated
+  *   request messages a task or a stdio handler emits. It applies to the stdio session and to each
+  *   legacy streamable-HTTP session on the JVM, whose standalone GET stream drains the buffer. At
+  *   the bound a legacy HTTP session drops the OLDEST buffered message to admit the new one (the
+  *   emitter is never blocked or interrupted by a client that does not read), while the stdio
+  *   session applies back-pressure (the emitter waits for the stdout writer; nothing is lost).
+  *   Sessions with no reader for this channel (every 2026-07-28 HTTP request, the legacy stateless
+  *   adapter, every Bun HTTP session) buffer nothing. The buffer is allocated up front, per
+  *   session. Default 256.
   */
 case class LimitSettings(
     maxFrameChars: Int = 4 * 1024 * 1024,
     maxDepth: Int = 64, // = codec.JsonLimits.DefaultMaxDepth (pinned by JsonLimitsTest)
     maxObjectFields: Int = 1024, // = codec.JsonLimits.DefaultMaxObjectFields
     maxUriChars: Int = 8192,
-    maxSubscriptionsPerSession: Int = 1024
+    maxSubscriptionsPerSession: Int = 1024,
+    maxOutboundMessages: Int = 256
 ):
   require(maxFrameChars >= 1, "limits.maxFrameChars must be >= 1")
   require(
@@ -278,6 +290,7 @@ case class LimitSettings(
   require(maxObjectFields >= 1, "limits.maxObjectFields must be >= 1")
   require(maxUriChars >= 1, "limits.maxUriChars must be >= 1")
   require(maxSubscriptionsPerSession >= 1, "limits.maxSubscriptionsPerSession must be >= 1")
+  require(maxOutboundMessages >= 1, "limits.maxOutboundMessages must be >= 1")
 
 object LimitSettings:
   /** Hard ceiling for `maxDepth`: the stack safety of every later recursive walk over client JSON

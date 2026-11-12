@@ -183,7 +183,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
 
   private def legacyStatelessDispatch(message: JsonRpcMessage): URIO[R, HttpReply] =
     for
-      session <- Session.make("stateless", supportsTasks = false)
+      session <- Session.makeRequestScoped("stateless", supportsTasks = false)
       // Legacy stateless compatibility mode starts ready without a handshake.
       _ <- session.markInitialized
       reply <- router.dispatch(session, message)
@@ -236,7 +236,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
   ): URIO[R, HttpReply] =
     for
       id <- randomId
-      session <- Session.makeProtocolSession(id)
+      session <- Session.makeProtocolSession(id, settings.limits.maxOutboundMessages)
       outcome <- sessions.modifyZIO { m =>
         if !HttpRequestGuards.capReached(m.size, settings) then
           ZIO.succeed((Right(None), m + (id -> session)))
@@ -424,7 +424,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
             // Peer address of the request — the default owner key for bearer-task buckets
             // (`TaskOwnerKey.Transport`); behind a reverse proxy use `TaskOwnerKey.Custom`.
             Session
-              .make(s"request-${rpc.id.toString}", clientKey = req.clientKey)
+              .makeRequestScoped(s"request-${rpc.id.toString}", clientKey = req.clientKey)
               .flatMap(session => streamRequest(session, rpc, isNew = false, Some(context)))
       case _: JsonRpcMessage.Invalid =>
         val failure: JsonRpcMessage = JsonRpcMessage.Failure(
@@ -439,7 +439,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
             ZIO.succeed(HttpReply.Json(status, failure.toJson))
           case Right(_) =>
             Session
-              .make("notification")
+              .makeRequestScoped("notification")
               .flatMap(session => router.dispatch(session, notification))
               .as(HttpReply.Empty(202))
       case _ =>

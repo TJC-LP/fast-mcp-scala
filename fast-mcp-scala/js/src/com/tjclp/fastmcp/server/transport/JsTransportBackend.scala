@@ -51,18 +51,20 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   ): ZIO[R, Throwable, Unit] =
     for
       rt <- ZIO.runtime[R]
-      session <- Session.make("stdio")
-      // Drain server-initiated messages (log/progress notifications) to stdout.
+      session <- Session.makeDrained("stdio", router.limits.maxOutboundMessages)
+      // Drain server-initiated messages (log/progress notifications) to stdout. The channel is
+      // bounded and back-pressured: an emitter waits for this writer rather than lose a message.
       drainer <- session.outbound.take
         .flatMap(msg => writeLine(MessageLoop.encodeOutbound(msg)))
         .forever
         .forkDaemon
-      // stdin EOF completes the async; take the drainer down with it.
+      // stdin EOF completes the async; take the drainer down with it, and stop buffering for a
+      // writer that is gone.
       _ <- ZIO
         .async[R, Throwable, Unit](cb =>
           wireStdin(router, session, rt, cb, NodeProcess.stdin, writeLine)
         )
-        .ensuring(drainer.interrupt)
+        .ensuring(drainer.interrupt *> session.closeOutbound)
     yield ()
 
   /** Input/output seams let tests drive the real chunk callbacks without replacing process IO. */
@@ -353,7 +355,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                   modernPost(router, req, message, settings, clientKey)
                 else
                   for
-                    session <- Session.make("stateless", supportsTasks = false)
+                    session <- Session.makeRequestScoped("stateless", supportsTasks = false)
                     // Legacy stateless compatibility mode starts ready without a handshake.
                     _ <- session.markInitialized
                     reply <- router.dispatch(session, message)
@@ -457,7 +459,9 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   ): ZIO[R, Throwable, js.Dynamic] =
     for
       sid <- randomId()
-      session <- Session.makeProtocolSession(sid)
+      // Bun has no standalone GET stream (405), so nothing would ever read this session's
+      // out-of-request channel: it buffers nothing (see `Session.outboundCapacity`).
+      session <- Session.makeProtocolSession(sid, outboundCapacity = 0)
       outcome <- ZIO.succeed {
         if !HttpRequestGuards.capReached(store.size, settings) then
           store(sid) = session
@@ -723,7 +727,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             ZIO.succeed(jsonResponse(failure.toJson, Map.empty, status))
           case Right(context) =>
             Session
-              .make(s"request-${rpc.id.toString}", clientKey = clientKey)
+              .makeRequestScoped(s"request-${rpc.id.toString}", clientKey = clientKey)
               .flatMap(session =>
                 requestResponse(router, session, rpc, isNew = false, settings, Some(context), req)
               )
@@ -738,7 +742,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             ZIO.succeed(jsonResponse(failure.toJson, Map.empty, status))
           case Right(_) =>
             Session
-              .make("notification")
+              .makeRequestScoped("notification")
               .flatMap(session => router.dispatch(session, notification))
               .as(webResponse(202, ""))
       case _ =>
