@@ -706,6 +706,24 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     Future.successful(succeed)
   }
 
+  it should "refuse to start on a contextHeaders entry that is not a header name" in {
+    // On Bun, `Headers.get` throws for such a name, so without this check every POST would
+    // answer 500 on a server that started normally.
+    val server = com.tjclp.fastmcp.server.McpServer(
+      "JsHttpBadContextHeaderServer",
+      "0.1.0",
+      McpServerSettings(
+        host = "127.0.0.1",
+        port = 38940,
+        stateless = true,
+        contextHeaders = Set("x-forwarded-email:")
+      )
+    )
+    val thrown = intercept[IllegalArgumentException](server.startStatelessHttp())
+    thrown.getMessage should include("contextHeaders")
+    Future.successful(succeed)
+  }
+
   it should "reject a foreign Origin with 403 when allowedHosts is set" in {
     val guardPort = 38920
     val guardServer = com.tjclp.fastmcp.server.McpServer(

@@ -25,6 +25,8 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     client sent and a proxy appended to is never mistaken for the proxy's.
   - Identical on the JVM (zio-http and the socket backend), Bun and Scala Native; always empty on
     stdio. The library never logs the values.
+  - An entry that is not an HTTP header name (a typo such as a trailing colon) fails `runHttp()`
+    at startup on every backend.
   - Listing a name is the server author's statement that the proxy sets or strips it — a client
     that reaches the server directly can send any header. See SECURITY.md.
 - **`McpContext.protocolSessionId: Option[String]`** (#130): `Some` only for a durable legacy
