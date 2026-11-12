@@ -447,6 +447,10 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     * session WITHOUT a live GET is evicted — terminated (`Session.terminate`: in-flight requests
     * interrupted, its tasks released, queue shut down; WARN logged) — and the newcomer admitted;
     * only when every stored session holds a live GET is the request refused with 503.
+    *
+    * The store update and the termination it calls for are one uninterruptible step, as on the JVM:
+    * a session that has left the store cannot be reached by id any more, so nothing else would ever
+    * terminate it.
     */
   private def mintSession[R](
       router: McpRouter[R],
@@ -458,35 +462,37 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     for
       sid <- randomId()
       session <- Session.makeProtocolSession(sid)
-      outcome <- ZIO.succeed {
-        if !HttpRequestGuards.capReached(store.size, settings) then
-          store(sid) = session
-          Right(None)
-        else
-          val snapshot = Unsafe.unsafe { implicit u =>
-            store.toList.map { case (id, s) =>
-              val (seen, live) = s.idleStateUnsafe
-              (id, seen, live)
+      admitted <- ZIO
+        .succeed {
+          if !HttpRequestGuards.capReached(store.size, settings) then
+            store(sid) = session
+            Right(None)
+          else
+            val snapshot = Unsafe.unsafe { implicit u =>
+              store.toList.map { case (id, s) =>
+                val (seen, live) = s.idleStateUnsafe
+                (id, seen, live)
+              }
             }
-          }
-          HttpRequestGuards.pickEvictable(snapshot).flatMap(store.get) match
-            case Some(victim) =>
-              store -= victim.sessionId
-              store(sid) = session
-              Right(Some(victim))
-            case None => Left(())
-      }
-      resp <- outcome match
-        case Right(None) =>
-          respondStreamable(router, session, message, isNew = true, settings, http)
-        case Right(Some(victim)) =>
-          ZIO.logWarning(
-            s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted idle session ${victim.sessionId}"
-          ) *> victim.terminate *>
-            respondStreamable(router, session, message, isNew = true, settings, http)
-        case Left(()) =>
-          session.terminate
-            .as(jsonRpcErrorResponse(503, HttpRequestGuards.SessionLimitMessage))
+            HttpRequestGuards.pickEvictable(snapshot).flatMap(store.get) match
+              case Some(victim) =>
+                store -= victim.sessionId
+                store(sid) = session
+                Right(Some(victim))
+              case None => Left(())
+        }
+        .flatMap {
+          case Right(None) => ZIO.succeed(true)
+          case Right(Some(victim)) =>
+            ZIO.logWarning(
+              s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted idle session ${victim.sessionId}"
+            ) *> victim.terminate.as(true)
+          case Left(()) => session.terminate.as(false)
+        }
+        .uninterruptible
+      resp <-
+        if admitted then respondStreamable(router, session, message, isNew = true, settings, http)
+        else ZIO.succeed(jsonRpcErrorResponse(503, HttpRequestGuards.SessionLimitMessage))
     yield resp
 
   /** Dispatch one streamable POST frame. A *request* gets a `text/event-stream` response that
@@ -590,13 +596,20 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   /** Run `cleanup` if the client goes away (Bun aborts `request.signal` when the connection
     * closes). Registered once per request; firing after the reply was sent is harmless, since by
     * then the fiber is finished and the queue is shut.
+    *
+    * This — not the reply stream's `cancel` hook — is what answers for a request's dispatch and
+    * queue on Bun: it does not depend on the stream ever being pulled. A signal that aborted before
+    * this point (the client left while its body was being read) never fires the event again, so
+    * that case runs `cleanup` directly.
     */
   private def onClientAbort(http: js.Dynamic)(cleanup: UIO[Any]): Unit =
     val signal = http.signal
     if !js.isUndefined(signal) && signal != null then
-      val listener: js.Function0[Unit] = () =>
+      val run: js.Function0[Unit] = () =>
         val _ = Unsafe.unsafe(implicit u => Runtime.default.unsafe.fork(cleanup))
-      val _ = signal.addEventListener("abort", listener, js.Dynamic.literal(once = true))
+      if js.typeOf(signal.aborted) == "boolean" && signal.aborted.asInstanceOf[Boolean] then run()
+      else
+        val _ = signal.addEventListener("abort", run, js.Dynamic.literal(once = true))
 
   private def sseHeaders(session: Session, isNew: Boolean, modern: Boolean): Map[String, String] =
     Map("content-type" -> "text/event-stream", "cache-control" -> "no-cache") ++
