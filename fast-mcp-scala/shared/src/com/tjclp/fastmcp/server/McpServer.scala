@@ -44,7 +44,7 @@ final class McpServer[R](
   protected val decodeContext: McpDecodeContext =
     new DefaultDecodeContext(settings.limits.maxDepth, settings.limits.maxObjectFields)
 
-  val toolManager: ToolManager[R] = new ToolManager[R]()
+  val toolManager: ToolManager[R] = new ToolManager[R](settings.validateToolInput)
   val resourceManager: ResourceManager[R] = new ResourceManager[R]()
   val promptManager: PromptManager[R] = new PromptManager[R]()
 
@@ -121,6 +121,9 @@ final class McpServer[R](
       completionRef.set(Some(handler.asInstanceOf[CompletionHandler[R]]))
       this
     }
+
+  override def toolInputValidation: Map[String, ToolInputValidation] =
+    toolManager.inputValidationReport
 
   // --- Skills (io.modelcontextprotocol/skills) ---
 
