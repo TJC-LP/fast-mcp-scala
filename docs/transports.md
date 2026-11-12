@@ -212,9 +212,7 @@ running legacy tasks are released. Activity is stamped when a request arrives, n
 so a call that outlasts `sessionIdleTimeout` on an otherwise quiet session can be evicted
 mid-flight and never answered (a `-32001` reply is tracked for 1.0.1) — keep the timeout above
 your longest call, or poll through Tasks. An empty `mcp-session-id` header counts as an unknown
-session on the JVM (404) and as a missing header on Bun (400). On Bun a legacy session has no GET
-channel, so a server→client message emitted outside a request (a future
-`notifications/resources/updated`) has no delivery path; nothing publishes such messages today.
+session on the JVM (404) and as a missing header on Bun (400).
 
 A GET peer that disappears without closing its connection (NAT expiry, a suspended machine) leaves
 the stream "live" from the server's point of view: the OS only notices such a peer once the server
@@ -227,6 +225,28 @@ Leaving it `false` (the default) lets older clients fall back to the initialize/
 flow; setting it `true` disables that legacy session store. On the stateless legacy adapter all
 clients share one session identity, which is why legacy task requests there are refused
 (see [tasks.md](./tasks.md)).
+
+#### Messages outside a request
+
+Most server→client messages ride the response stream of the request that caused them. A message
+emitted when no such stream exists goes to the session's out-of-request channel instead. Today
+that is what a **legacy task** emits once its creating POST has been answered — the
+`notifications/tasks/status` of every terminal transition, and any log, progress or
+server→client request message of the task body — and, on stdio, every server-pushed message. The
+channel holds at most `limits.maxOutboundMessages` messages (default 256) per session, whether or
+not anything reads it:
+
+| Session | Reader | At the bound |
+|---|---|---|
+| stdio (every platform) | the stdout writer | back-pressure: the emitter waits for the writer, nothing is lost; after stdin EOF nothing is buffered |
+| legacy session, JVM | the standalone GET stream, when the client opens one | the oldest buffered message is dropped; the emitter is never blocked or interrupted. A GET opened later receives the newest messages still buffered |
+| legacy session, Bun | none (GET answers 405) | nothing is buffered: the message is discarded |
+| 2026-07-28 HTTP request, legacy stateless adapter | none | nothing is buffered: the message is discarded |
+
+So on Bun, and for a JVM client that never opens its GET stream, task status must be polled with
+`tasks/get`, and a server→client request issued by a task body after its POST was answered gets
+no reply (it fails with its timeout). A JVM client whose GET stream falls more than
+`maxOutboundMessages` behind loses the oldest messages, not the newest.
 
 ### `McpServerSettings` reference
 
@@ -248,7 +268,7 @@ clients share one session identity, which is why legacy task requests there are 
 | `exposeTemplatesEndpoint` | `false` | List registered resource templates through `resources/templates/list`. `resources/list` never lists templates; with the default the templates endpoint answers an empty page (clients derive templates from `{}` URIs) and `resources/read` on a matching URI works either way. Applies on every transport. |
 | `contextHeaders` | `Set.empty` | HTTP request headers a handler may read through `McpContext.header` / `McpContext.headers`; nothing is exposed unless listed. See "Request headers in handlers". |
 | `tasks` | `TaskSettings()` | The Tasks extension, off by default (see [tasks.md](./tasks.md)). |
-| `limits` | `LimitSettings()` | Input bounds on every transport: `maxFrameChars` 4 MiB, `maxDepth` 64, `maxObjectFields` 1024 (`-32700` / HTTP 400 before dispatch), `maxUriChars` 8192 and `maxSubscriptionsPerSession` 1024 (`-32602`). See [Input limits](#input-limits). |
+| `limits` | `LimitSettings()` | Input bounds on every transport: `maxFrameChars` 4 MiB, `maxDepth` 64, `maxObjectFields` 1024 (`-32700` / HTTP 400 before dispatch), `maxUriChars` 8192 and `maxSubscriptionsPerSession` 1024 (`-32602`); plus `maxOutboundMessages` 256, the per-session buffer for messages emitted outside a request. See [Input limits](#input-limits). |
 
 HTTP-specific fields are ignored under stdio; `limits`, `tasks` and `exposeTemplatesEndpoint` apply on every transport.
 
@@ -265,6 +285,7 @@ cannot be disabled, only moved; the constructor rejects out-of-range values at c
 | `maxObjectFields` | `1024` | Members of any single JSON object anywhere in the frame. |
 | `maxUriChars` | `8192` | A client-supplied resource URI (`resources/read`, `resources/subscribe`, `resources/unsubscribe`, `subscriptions/listen` entries). |
 | `maxSubscriptionsPerSession` | `1024` | Distinct URIs one legacy session may hold via `resources/subscribe`. |
+| `maxOutboundMessages` | `256` | Server→client messages one session buffers outside a request's own response stream — see [Messages outside a request](#messages-outside-a-request). Applies to the stdio session (back-pressure at the bound) and to each legacy JVM HTTP session (oldest dropped at the bound); sessions with no reader buffer nothing. |
 
 A frame that violates `maxFrameChars`, `maxDepth`, or `maxObjectFields` is answered with JSON-RPC
 `-32700` (HTTP 400) by a linear pre-scan of the raw text, and never mints a session; `maxUriChars`

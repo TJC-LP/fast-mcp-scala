@@ -64,6 +64,13 @@ Hardening knobs worth knowing when you deploy over HTTP
   `limits: LimitSettings` bounds every inbound frame on every transport — frame size 4 MiB, JSON
   depth 64, object width 1024 (`-32700` before dispatch), resource URI length 8192 and
   subscriptions per session 1024 (`-32602`). The limits cannot be disabled, only moved.
+- `limits.maxOutboundMessages` (256) bounds what one session buffers for messages emitted outside
+  a request's own response stream (legacy task status notifications, a task body's log and
+  progress messages). A legacy JVM HTTP session drops the oldest at the bound, so a client that
+  never opens its GET stream holds at most that many messages; sessions with no reader for the
+  channel (Bun HTTP, 2026-07-28 HTTP requests, the legacy stateless adapter) buffer none; stdio
+  applies back-pressure. The bound counts messages, not bytes: a tool that emits very large log
+  or progress messages from a task should keep them small.
 - `maxSessions` (`Some(1000)`) caps the legacy session store; at the cap the longest-idle session
   without a live GET is evicted — or, when every stored session holds a GET stream, the
   longest-idle one that has been idle longer than `sessionIdleTimeout` — so an unauthenticated
@@ -76,6 +83,15 @@ Hardening knobs worth knowing when you deploy over HTTP
   transport supplies (`TaskOwnerKey.Transport`); behind a reverse proxy every client collapses to
   one address, so use `TaskOwnerKey.Custom` with an authenticated principal. `_meta` and
   `clientInfo` are client-controlled and are never used as a key.
+- The task store is bounded in entries and in bytes. Besides the running and stored caps,
+  `TaskSettings.maxRequestBytes` (2 MiB) caps what a running task keeps of its request,
+  `maxResultBytes` (8 MiB) caps one stored result, and `maxBytesPerOwner` (16 MiB) /
+  `maxBytesTotal` (128 MiB per pool, two pools) cap what the store retains per client and in
+  total, so retained memory does not depend on what clients send or tools return. The figures are
+  estimated heap bytes; a finished task keeps its result only, never its request
+  ([docs/tasks.md](docs/tasks.md#memory-bounds)). The per-client budget follows the same owner key
+  as the caps above: behind a reverse proxy, without `TaskOwnerKey.Custom`, all clients share one
+  owner budget, and a client with many peer addresses is held by the pool budget only.
 - `scanAnnotations` binds each `@Tool` / `@Resource` / `@Prompt` to the exact annotated overload,
   and duplicate registrations within one object are compile-time errors, so the advertised schema
   and the invoked handler always come from the same declaration.

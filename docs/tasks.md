@@ -40,6 +40,46 @@ val server = McpServer(
 | `minResultRetentionMs` | `30 000` | A terminal result younger than this is never evicted by a cap (only by its own TTL), so a client always gets at least 30 s to collect it. |
 | `sweepIntervalMs` | `1 000` | Upper bound on the single TTL sweeper's sleep; TTLs are honoured within this slack, measured on the monotonic clock. |
 | `ownerKey` | `TaskOwnerKey.Transport` | How modern bearer tasks are bucketed per client: `Transport` uses the transport-supplied peer address; `TaskOwnerKey.Custom(f)` derives a key (an authenticated principal) behind a reverse proxy. |
+| `maxRequestBytes` | 2 MiB | What one running task may keep of the request that created it (estimated bytes, see [Memory bounds](#memory-bounds)). A larger request is refused with `-32602` before anything is started. |
+| `maxResultBytes` | 8 MiB | One stored result or failure (estimated bytes). A task whose result is larger ends `failed` and the result is not kept. |
+| `maxBytesPerOwner` | 16 MiB | Everything the store holds for one owner: the request of each running task plus each stored result. Must be ≥ `maxRequestBytes` and ≥ `maxResultBytes`. |
+| `maxBytesTotal` | 128 MiB | The same budget per pool (legacy-session tasks and modern bearer tasks are separate pools, so the store as a whole holds at most twice this). Must be ≥ `maxBytesPerOwner`. |
+
+### Memory bounds
+
+Counting entries does not bound memory, so the store also counts bytes. Every entry is charged an
+estimate of the data it keeps reachable:
+
+- **While a task runs** it keeps the request that created it, because a handler running as a task
+  can read all of it through `McpContext`: the `tools/call` params (arguments, `_meta`,
+  `inputResponses`, `requestState`), the decoded client capabilities and client info, the request
+  id, and any allow-listed HTTP headers (`contextHeaders`). That is measured when the task is
+  created. Above `maxRequestBytes` the request is refused with `-32602`; a tool whose task support
+  is optional still accepts it as an ordinary synchronous call (do not ask for a task).
+- **Once a task is terminal** its entry keeps the result only — not the task's fiber, and nothing
+  of the request. The request's charge is swapped for the result's. A result or failure above
+  `maxResultBytes` is not kept: the task ends `failed` with a message naming the setting.
+- **Budgets.** The charges of one owner stay within `maxBytesPerOwner` and those of one pool within
+  `maxBytesTotal` at all times. A create that does not fit evicts stored results older than
+  `minResultRetentionMs` — the owner's own oldest first; for the pool budget then those of the
+  owner holding the most stale results — and is refused with `-32003` when that is not enough. A
+  finishing task whose result does not fit evicts the same way; if nothing may be evicted yet, it
+  is this result that is discarded (the task ends `failed`, `tasks/result` answers `-32003`), never
+  a result still inside its retention grace.
+
+The figures are **estimated heap bytes**, not wire bytes: two per string character, a fixed
+overhead per JSON value, object member and array slot, and the magnitude of each number. A
+document that is one long string is charged about twice its length; a document of many small
+values is charged several times its wire size, which is what it costs on the heap. The estimate
+covers data — JSON, text, bytes, failure messages and JSON error data. What every entry costs
+regardless of content (ids, timestamps, a failure's stack trace) is bounded by the entry caps, and
+a failed task's `statusMessage` keeps at most the first 1024 characters of the failure message.
+A result of another type, which only code calling `TaskManager.create` directly can produce, is
+charged a flat 256 bytes.
+
+Size the budgets to the heap: at the defaults the store retains at most 2 × 128 MiB of charged
+data. Tools that return large results should raise `maxResultBytes` (and the two budgets with it)
+or return a resource link instead.
 
 ## Opting in per tool
 
@@ -97,8 +137,12 @@ still fill a pool, so pair the peer-address key with edge rate limiting.
 - Task IDs come from the platform CSPRNG (`/dev/urandom` on Scala Native).
 - A task that outlives its TTL is interrupted, not orphaned; terminal results stay pollable until
   the TTL sweeps the entry or, after the 30 s `minResultRetentionMs` grace, the owner/pool
-  stored-entry cap (`maxStoredPerOwner` 256 / `maxStoredTotal` 4096) evicts the oldest completed
-  task. A create with nothing evictable is refused with `-32003`.
+  stored-entry cap (`maxStoredPerOwner` 256 / `maxStoredTotal` 4096) or a byte budget
+  (`maxBytesPerOwner` / `maxBytesTotal`) evicts the oldest completed task. A create with nothing
+  evictable is refused with `-32003`.
+- A stored (terminal) entry holds the result and nothing else of the task: neither its fiber nor
+  the request. A running task keeps its request, within `maxRequestBytes` — see
+  [Memory bounds](#memory-bounds).
 - One lazily started sweeper fiber per server enforces TTLs and the retention grace on the
   monotonic clock; `TaskManager.create` is atomic under interruption (a client abort mid-create
   leaves no entry and no parked fiber behind).
@@ -119,6 +163,14 @@ still fill a pool, so pair the peer-address key with edge rate limiting.
   transition, as that revision's Tasks surface specifies; modern bearer tasks do not emit it —
   the 2026-07-28 extension moved status to polling (`tasks/get`). These boundaries are listed in
   the [upgrade guide](./2026-07-28-upgrade.md#deliberate-boundaries).
+- A task outlives the request that created it, so what it emits afterwards — that status
+  notification, and any log, progress or server-to-client request message of its body — travels
+  on the session's out-of-request channel, which is bounded by `limits.maxOutboundMessages`
+  (default 256). Over stdio it is always delivered (a full buffer makes the task wait for the
+  stdout writer). On a legacy JVM HTTP session it is delivered on the standalone GET stream; a
+  client that does not read that stream keeps only the newest 256 messages. On a Bun HTTP session
+  and on any 2026-07-28 HTTP request there is no such stream and the message is discarded — poll
+  `tasks/get`. See [transports](./transports.md#messages-outside-a-request).
 
 ## Legacy (2025-11-25) task surface
 

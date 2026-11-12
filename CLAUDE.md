@@ -300,6 +300,16 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   in-flight requests and releases the session's tasks. Bearer tasks are bucketed per client by
   `TaskSettings.ownerKey` (`TaskOwnerKey.Transport` = peer address on both HTTP backends; keyless
   requests share one anonymous bucket; `TaskOwnerKey.Custom` behind an authenticating proxy).
+- Byte bounds (estimated heap bytes, `manager/RetainedBytes.scala`): a running task is charged the
+  request it keeps (`maxRequestBytes` 2 MiB, `-32602` beyond), a terminal entry its result
+  (`maxResultBytes` 8 MiB, else the task ends `failed`) and holds neither its fiber nor the
+  request; `maxBytesPerOwner` 16 MiB / `maxBytesTotal` 128 MiB per pool evict stale results in the
+  stored-cap order, else `-32003` (create) or a discarded result (finish). The sweeper fiber runs
+  with the manager's own `FiberRefs`, never a request's.
+- Out-of-request messages (`Session.outbound`: legacy task status, a task body's log/progress) are
+  bounded by `limits.maxOutboundMessages` (256): stdio back-pressures (`Session.makeDrained`),
+  legacy JVM HTTP sessions drop the oldest (`makeProtocolSession`), sessions with no reader — Bun
+  HTTP, 2026-07-28 HTTP requests, legacy stateless (`makeRequestScoped`) — buffer nothing.
 - Not yet implemented: `input_required` suspension. `notifications/tasks/status` is emitted on
   legacy (2025-11-25) sessions only — never for modern bearer tasks, which are polled via `tasks/get`.
 
@@ -360,6 +370,7 @@ Key test classes:
 - `RequestContextHandlerTest` (JVM + Native, `jvm-native/test`) and the `contextHeaders (Bun)` block of `JsServerHttpTest` - allow-listed request headers, `protocolSessionId`, the modern reply opening on the first heartbeat
 - `HostGuardTest` / `HttpRequestGuardsTest` / `HttpHeaderValidationTest` - full-origin guard truth table, POST gate order + settings invariants, header sentinel handling
 - `TaskManagerSpec` / `TaskTransportGuardTest` / `LifecycleSoakTest` - task store bounds, sweeper hygiene, `Session.terminate`, interruption atomicity, per-client buckets
+- `TaskMemoryBoundsTest` / `RetainedBytesTest` / `SessionOutboundBoundTest` (JVM), `JsSessionOutboundTest` (JS) - task store byte budgets and what a terminal entry keeps reachable, the size estimator, the bounded out-of-request channel per transport
 - `OverloadBindingTest` / `OverloadNegativeTest` (JVM) and `OverloadBindingJsTest` (JS) - exact-overload binding, duplicate-registration and non-literal diagnostics
 - `JsServerLimitsTest` / `FromJsonAstDecodeTest` (JS), `JsonLimitsNativeTest` (Native) - limits and decode path on the other platforms
 - Skills extension: `SkillUriTest` / `Sha256AndUtf8Test` / `SkillFrontmatterReaderTest` / `SkillsWireCodecTest` / `McpSkillSnapshotTest` / `SkillVerifierTest` (core), `SkillRegistryTest` / `SkillsRouterTest` / `SkillDirectoryLoaderTest` (server), `SkillsStdioTranscriptTest` / `SkillsHttpTransportTest` (transports), `SkillsRootImportTest`, `SkillsServerExampleTest`; `SkillsConformanceTest` + `SkillsJsTest` (JS: TS SDK client over stdio, Bun stdio callbacks, Bun HTTP), `SkillsNativeTest` (Native stdio transcript)
