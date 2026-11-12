@@ -20,11 +20,13 @@ import com.tjclp.fastmcp.server.router.McpRouter
   * Hardening contract every implementation must honour (the decisions live in the shared, pure
   * [[HttpRequestGuards]] / [[HostGuard]]; backends only render the verdicts):
   *   - run `HttpRequestGuards.validateSettings(settings)` before binding and fail startup on
-  *     `Left`;
+  *     `Left`, then log each `HttpRequestGuards.startupWarnings(settings)` entry at WARN (a
+  *     non-loopback bind address with no Host/Origin allow-list);
   *   - bound the request body at `settings.maxRequestBodyBytes` in the platform server AND apply
   *     `postGate` (403 → 415 → 413 → 406) before reading the body or touching session state, then
   *     `bodyTooLarge` before `MessageLoop.parseFrame`;
-  *   - `hostGate` on GET/DELETE;
+  *   - `hostGate` on GET/DELETE — the guard is on by default for a loopback bind address (see
+  *     [[HostGuard]]), so a backend must never skip it because no allow-list was configured;
   *   - admit legacy `initialize` through `capReached` / `pickEvictable` (evict the longest-idle
   *     session without a live GET; failing that, the longest-idle GET holder idle past
   *     `sessionIdleTimeout`; else 503 `SessionLimitMessage`);

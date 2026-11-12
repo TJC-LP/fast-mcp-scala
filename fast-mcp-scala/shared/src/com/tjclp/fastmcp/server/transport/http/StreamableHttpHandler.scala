@@ -525,8 +525,6 @@ private[fastmcp] object StreamableHttpHandler:
   private val MethodNotAllowed: HttpReply =
     HttpReply.Empty(405, List("allow" -> "POST, GET, DELETE"))
 
-  /** Startup validation every backend runs before binding (`HttpRequestGuards.validateSettings`).
-    */
   /** The longest a legacy (pre-2026-07-28) POST reply waits for its first frame before the SSE
     * response is opened anyway. Long enough that a call which answers promptly gets the
     * fixed-length reply; short enough that no client's response-header timeout can tell a quiet
@@ -541,10 +539,15 @@ private[fastmcp] object StreamableHttpHandler:
   /** Sent with every 2026-07-28 SSE reply: tells a buffering proxy (nginx) to pass events on. */
   private val ModernSseHeaders: List[(String, String)] = List("X-Accel-Buffering" -> "no")
 
+  /** Startup validation every backend runs before binding (`HttpRequestGuards.validateSettings`),
+    * followed by its startup diagnostics at WARN (`HttpRequestGuards.startupWarnings`: a
+    * non-loopback bind address with no Host/Origin allow-list).
+    */
   def validateSettings(settings: McpServerSettings): IO[IllegalArgumentException, Unit] =
     ZIO
       .fromEither(HttpRequestGuards.validateSettings(settings))
-      .mapError(msg => new IllegalArgumentException(s"Invalid HTTP settings: $msg"))
+      .mapError(msg => new IllegalArgumentException(s"Invalid HTTP settings: $msg")) *>
+      ZIO.foreachDiscard(HttpRequestGuards.startupWarnings(settings))(ZIO.logWarning(_))
 
   /** Build a handler, allocating the durable session store unless `settings.stateless`. `randomId`
     * is the platform CSPRNG (`TransportBackend.randomId()`): session ids are bearer handles and

@@ -142,13 +142,15 @@ case class SkillSettings(
 
 /** Settings for an MCP server. HTTP-specific fields (`host`, `port`, `httpEndpoint`, `stateless`,
   * `keepAliveInterval`, `sessionIdleTimeout`, `disallowDelete`, `allowedHosts`, `allowedOrigins`,
-  * `maxRequestBodyBytes`, `maxSessions`, `contextHeaders`) are ignored under stdio transports.
-  * `limits` and `tasks` apply on every transport.
+  * `maxRequestBodyBytes`, `maxSessions`, `contextHeaders`, `dnsRebindingProtection`) are ignored
+  * under stdio transports. `limits` and `tasks` apply on every transport.
   */
 case class McpServerSettings(
     // Spec: HTTP servers SHOULD bind to localhost by default (DNS-rebinding surface). Deployments
     // that need external exposure (e.g. containers) must set this explicitly — 0.5.0 BREAKING
-    // change from the old "0.0.0.0" default.
+    // change from the old "0.0.0.0" default. Binding loopback is NOT by itself a defence against a
+    // web page in a local browser: that is what the Host/Origin guard below is for, and it is on
+    // automatically for a loopback bind (see `allowedHosts`).
     host: String = "127.0.0.1",
     port: Int = 8000,
     httpEndpoint: String = "/mcp",
@@ -176,18 +178,33 @@ case class McpServerSettings(
     // Legacy adapter only: advertise and wire resources/subscribe + resources/unsubscribe.
     // Modern subscriptions use subscriptions/listen. Off by default.
     resourcesSubscribe: Boolean = false,
-    // DNS-rebinding / CSRF guard for the HTTP transports. When `Some`, a request whose `Host`
+    // DNS-rebinding / CSRF guard for the HTTP transports: the `Host` names a request may carry.
+    //
+    // `None` (default) = AUTOMATIC. When `host` is a loopback bind address (`127.0.0.0/8`, `::1`,
+    // `localhost`) the guard is ON with the loopback names `localhost`, `127.0.0.1`, `[::1]` and
+    // the bound address itself, on any port. On any other bind address (`0.0.0.0`, a LAN address,
+    // a host name) nothing can be inferred, so the guard is off and `runHttp()` logs a WARN at
+    // startup until an allow-list is set here or in `allowedOrigins`.
+    //
+    // `Some(names)` = exactly these names, whatever the bind address: a request whose `Host`
     // hostname (port ignored; a verbatim `host:port` entry also matches) is not listed is refused
-    // with 403. A present `Origin` header is matched as a FULL origin (scheme://host:port, default
-    // port per scheme): it must appear in `allowedOrigins`, or its hostname must be listed here AND
-    // its host:port must equal the request's `Host` authority. `null`, empty, malformed, cross-port
-    // and cross-scheme-default-port origins are refused; an absent `Host`/`Origin` passes (not the
-    // browser threat this guards). `None` here and in `allowedOrigins` disables the guard.
+    // with 403. List the public name when a reverse proxy forwards its own `Host` to a loopback
+    // listener. `Some(Set.empty)` is read as `None`.
+    //
+    // In both forms a present `Origin` header is matched as a FULL origin (scheme://host:port,
+    // default port per scheme): it must appear in `allowedOrigins`, or its hostname must be an
+    // allowed `Host` name AND its host:port must equal the request's `Host` authority. `null`,
+    // empty, malformed, cross-port and cross-scheme-default-port origins are refused; an absent
+    // `Host`/`Origin` passes (not the browser threat this guards). To turn the guard off, see
+    // `dnsRebindingProtection`.
     allowedHosts: Option[Set[String]] = None,
     // Explicit browser origins (`https://app.example.com`, `http://localhost:5173`) admitted in
     // addition to the request's own authority. Needed for front-ends served from another origin or
     // behind a TLS-terminating proxy whose Origin differs from the listener's Host. Entries that do
     // not parse as `scheme://host[:port]` fail `runHttp()` at startup. `None` (default) = none.
+    // Listed WITHOUT `allowedHosts`, only these origins pass (the request's own authority is then
+    // refused too); `Host` is still held to the automatic loopback names on a loopback bind, and is
+    // not checked on any other bind address.
     allowedOrigins: Option[Set[String]] = None,
     // Maximum HTTP request body accepted on the MCP endpoint, in bytes, on every backend. Enforced
     // by the platform server (zio-http request aggregator / Bun.serve maxRequestBodySize) AND by a
@@ -223,8 +240,22 @@ case class McpServerSettings(
     // is the server author's statement that the proxy sets or strips it: a client that reaches the
     // server directly can send any header it likes. Values are read per request, are never logged
     // by the library, and a header sent more than once is seen as its ", "-joined value.
-    contextHeaders: Set[String] = Set.empty
-)
+    contextHeaders: Set[String] = Set.empty,
+    // The explicit opt-out of the Host/Origin guard. `true` (default) keeps it: automatic on a
+    // loopback bind, or as listed in `allowedHosts` / `allowedOrigins`. `false` turns it OFF — every
+    // `Host` and `Origin` is accepted — and silences the non-loopback startup warning; it is only
+    // valid with both allow-lists unset (`runHttp()` refuses the contradictory combination at
+    // startup). Meant for a loopback listener behind a reverse proxy that forwards a `Host` you
+    // cannot enumerate; when you can, list it in `allowedHosts` instead and keep the guard. With it
+    // off, a web page open in a browser on the same machine can reach the server (DNS rebinding).
+    dnsRebindingProtection: Boolean = true
+):
+
+  /** The Host/Origin guard these settings resolve to (`transport.HostGuard`), computed once per
+    * settings value so that no request re-derives it.
+    */
+  private[fastmcp] lazy val hostGuardPolicy: transport.HostGuard.Policy =
+    transport.HostGuard.policy(this)
 
 /** Input limits applied to every inbound JSON-RPC frame on every transport (stdio and HTTP; JVM,
   * Scala.js, Scala Native), plus the resource-URI and per-session subscription bounds.

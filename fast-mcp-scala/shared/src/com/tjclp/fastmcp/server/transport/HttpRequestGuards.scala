@@ -26,18 +26,27 @@ private[fastmcp] object HttpRequestGuards:
   val SessionLimitMessage: String = "Session limit reached; retry later"
   val HostRefusedMessage: String = "Host/Origin not allowed (DNS-rebinding protection)"
 
+  val OptOutWithAllowListMessage: String =
+    "dnsRebindingProtection = false contradicts allowedHosts / allowedOrigins: remove the " +
+      "allow-lists to turn Host/Origin validation off, or drop dnsRebindingProtection = false to " +
+      "keep them enforced"
+
   /** Startup validation, run by every `serveHttp` before binding: each `allowedOrigins` entry must
-    * parse as `scheme://host[:port]`, `maxRequestBodyBytes` must be positive and not exceed
-    * `limits.maxFrameChars`, `maxSessions`, when set, must be positive (use `None` to disable the
-    * cap), and every `contextHeaders` entry must be an HTTP field name.
+    * parse as `scheme://host[:port]`, `dnsRebindingProtection = false` must not be combined with an
+    * allow-list (which of the two was meant?), `maxRequestBodyBytes` must be positive and not
+    * exceed `limits.maxFrameChars`, `maxSessions`, when set, must be positive (use `None` to
+    * disable the cap), and every `contextHeaders` entry must be an HTTP field name.
     */
   def validateSettings(settings: McpServerSettings): Either[String, Unit] =
     val bad = HostGuard.invalidOrigins(settings.allowedOrigins.getOrElse(Set.empty))
     val badHeaders = RequestHeaders.invalidNames(settings.contextHeaders)
+    val listed =
+      settings.allowedHosts.exists(_.nonEmpty) || settings.allowedOrigins.exists(_.nonEmpty)
     if bad.nonEmpty then
       Left(
         s"allowedOrigins entries are not `scheme://host[:port]`: ${bad.toList.sorted.mkString(", ")}"
       )
+    else if !settings.dnsRebindingProtection && listed then Left(OptOutWithAllowListMessage)
     // A name that is not a token can never match a header, and on Bun looking it up throws for
     // every request (`Headers.get` rejects it): refuse it once, at startup, on every backend.
     else if badHeaders.nonEmpty then
@@ -52,6 +61,24 @@ private[fastmcp] object HttpRequestGuards:
     else if settings.maxRequestBodyBytes > settings.limits.maxFrameChars then
       Left("maxRequestBodyBytes must not exceed limits.maxFrameChars")
     else Right(())
+
+  /** What every backend logs at WARN once, before binding. Today: a non-loopback bind address with
+    * no allow-list, where the Host/Origin guard has nothing to go on and is therefore off. Startup
+    * is NOT refused — a container behind an authenticating proxy binds `0.0.0.0` legitimately — but
+    * the operator is told, and told how to make the warning go away either way.
+    */
+  def startupWarnings(settings: McpServerSettings): List[String] =
+    settings.hostGuardPolicy.mode match
+      case HostGuard.Mode.Unprotected => List(unprotectedBindWarning(settings.host))
+      case _ => Nil
+
+  private def unprotectedBindWarning(host: String): String =
+    s"HTTP transport is bound to the non-loopback address '$host' with no Host/Origin validation: " +
+      "allowedHosts and allowedOrigins are both unset, so a request with ANY Host or Origin is " +
+      "served. Set allowedHosts to the host names clients use to reach this server (and " +
+      "allowedOrigins for browser front-ends on another origin), and put an authenticating proxy " +
+      "in front of it. To run without the check knowingly, set dnsRebindingProtection = false, " +
+      "which also silences this warning."
 
   /** 403 when the Host/Origin guard refuses. Used for GET/DELETE and as step 1 of [[postGate]]. */
   def hostGate(header: String => Option[String], settings: McpServerSettings): Option[Rejection] =
