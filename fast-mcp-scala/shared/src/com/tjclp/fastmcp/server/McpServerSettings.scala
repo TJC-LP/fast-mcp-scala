@@ -229,10 +229,24 @@ case class McpServerSettings(
 /** Input limits applied to every inbound JSON-RPC frame on every transport (stdio and HTTP; JVM,
   * Scala.js, Scala Native), plus the resource-URI and per-session subscription bounds.
   *
-  * Frame-limit violations (`maxFrameChars`, `maxDepth`, `maxObjectFields`) answer JSON-RPC `-32700`
-  * (HTTP 400) before any dispatch work and never mint a session; the URI and subscription bounds
-  * answer `-32602`. Limits cannot be disabled, only moved inside the documented bounds — the
-  * constructor `require`s make a misconfiguration fail fast at construction.
+  * Frame-limit violations (`maxFrameChars`, `maxDepth`, `maxObjectFields`, `maxArrayElements`,
+  * `maxValues`, `maxNumberDigits`, `maxNumberExponent`) answer JSON-RPC `-32700` (HTTP 400) before
+  * any dispatch work and never mint a session; the URI and subscription bounds answer `-32602`. The
+  * same JSON bounds apply to JSON embedded in string arguments and, for numbers, in front of every
+  * argument decoder (`-32602` there). Limits cannot be disabled, only moved inside the documented
+  * bounds — the constructor `require`s make a misconfiguration fail fast at construction.
+  *
+  * The frame check is one linear pass over the raw text before the parser allocates anything (about
+  * a nanosecond per character on the JVM, less for long strings, with two small scratch arrays per
+  * frame and no allocation per token) and one iterative walk over the parsed tree.
+  *
+  * Together `maxValues`, `maxObjectFields` and `maxArrayElements` bound what a frame can cost after
+  * it is accepted, independently of its size in bytes: the parsed tree has at most `maxValues`
+  * nodes, and building hash maps / sets from attacker-chosen colliding members costs at most
+  * `maxValues × max(maxObjectFields, maxArrayElements) / 2` string comparisons per frame — about
+  * 1.3 × 10^8 at the defaults, half a second to a second on the JVM and several times that on
+  * single-threaded Bun, and only for a handler that builds a `Set` from a client array; without one
+  * the object bound governs (`maxValues × maxObjectFields / 2`, about 3.4 × 10^7).
   *
   * @param maxFrameChars
   *   Max length of ONE decoded frame (one stdio line / one HTTP body) in UTF-16 chars. On HTTP the
@@ -250,25 +264,60 @@ case class McpServerSettings(
   *   Max members of any single JSON object anywhere in a frame. Bounds the worst case of building a
   *   Scala `Map` from attacker-chosen hash-colliding keys: every `Map` sink after the frame check
   *   (zio-json `Map` decoders, `_meta` lookups, tool-argument maps) costs up to `maxObjectFields² /
-  *   2` string comparisons per colliding object, so a frame can cost roughly `maxFrameChars / 20 /
-  *   maxObjectFields` objects × `maxObjectFields² / 2` comparisons — linear in the frame but with a
-  *   constant that grows quadratically in this knob (at the defaults about 0.4 s per 4 MiB frame on
-  *   the JVM, several times that on single-threaded Bun). Operators exposing a Bun server to
-  *   untrusted networks should lower it (e.g. 256); the 2025-11-25 wire shapes never need more than
-  *   a few dozen members per object.
+  *   2` string comparisons per colliding object (about 5 × 10^5 at the default), and `maxValues`
+  *   caps the members of all objects in a frame together. Operators exposing a Bun server to
+  *   untrusted networks should lower it (e.g. 256); the wire shapes never need more than a few
+  *   dozen members per object.
   * @param maxUriChars
   *   Max length (chars) of a client-supplied resource URI: `resources/read`, `resources/subscribe`,
   *   `resources/unsubscribe`, and `subscriptions/listen` entries.
   * @param maxSubscriptionsPerSession
   *   Max distinct URIs one legacy session may hold via `resources/subscribe`; further distinct
   *   subscriptions are refused with `-32602`.
+  * @param maxArrayElements
+  *   Max elements of any single JSON array anywhere in a frame. The array counterpart of
+  *   `maxObjectFields`: a handler parameter that builds a hash set from a client array (`Set[T]`,
+  *   or any type containing one) costs up to `maxArrayElements² / 2` string comparisons per
+  *   colliding array. The default is 4096, not 1024, so that an embedding vector of 1536 or 3072
+  *   numbers passes without configuration; the price is a per-array worst case of about 8.4 × 10^6
+  *   comparisons, 16 times the per-object figure (a few tens of milliseconds per array on the JVM).
+  *   A server with no tool that takes long arrays should lower it together with `maxObjectFields`
+  *   (e.g. 256 on Bun); raise it for tools that take longer arrays by design.
+  * @param maxValues
+  *   Max JSON values in one frame: every object, array, string, number, boolean and `null` counts
+  *   once (member names do not). Bounds the size of the parsed tree by a figure far below the frame
+  *   size — a megabyte of two-character elements is refused instead of becoming a tree tens of
+  *   times its size — and caps the summed length of all arrays and objects for the collision budget
+  *   above. The default, 65536, holds sixteen 3072-number vectors or a table of 4096 rows by 14
+  *   columns in one frame; the protocol's own messages use a few dozen values. Raise it for tools
+  *   that take bulk tabular data in a single call.
+  * @param maxNumberDigits
+  *   Max digits in the significand of a JSON number as written (integer and fraction part, leading
+  *   and trailing zeros included). The default, 512, is far beyond what a `Long` (19 digits), a
+  *   `Double` (17 significant digits) or the parser itself (which refuses a significand over 256
+  *   bits, about 77 significant digits) can hold. Hard ceiling
+  *   [[LimitSettings.MaxSupportedNumberDigits]].
+  * @param maxNumberExponent
+  *   Max absolute value of a JSON number's exponent (the part after `e` / `E`). The default, 512,
+  *   admits every finite `Double` (shortest form: exponents 308 down to -324) and the full `Long`
+  *   range. With `maxNumberDigits` it bounds what a client number can expand to: an integer of at
+  *   most `maxNumberDigits + maxNumberExponent` decimal digits (1024 by default — at most 3402
+  *   bits, 426 bytes) and a `BigDecimal` scale within ±(`maxNumberDigits + maxNumberExponent`), so
+  *   decoding into `BigInt` / `BigInteger` / `BigDecimal` and any arithmetic a handler then does
+  *   costs a small constant per number. A number outside the bounds is refused from its text,
+  *   without work proportional to its magnitude. Hard ceiling
+  *   [[LimitSettings.MaxSupportedNumberExponent]].
   */
 case class LimitSettings(
     maxFrameChars: Int = 4 * 1024 * 1024,
     maxDepth: Int = 64, // = codec.JsonLimits.DefaultMaxDepth (pinned by JsonLimitsTest)
     maxObjectFields: Int = 1024, // = codec.JsonLimits.DefaultMaxObjectFields
     maxUriChars: Int = 8192,
-    maxSubscriptionsPerSession: Int = 1024
+    maxSubscriptionsPerSession: Int = 1024,
+    maxArrayElements: Int = 4096, // = codec.JsonLimits.DefaultMaxArrayElements
+    maxValues: Int = 65536, // = codec.JsonLimits.DefaultMaxValues
+    maxNumberDigits: Int = 512, // = codec.JsonLimits.DefaultMaxNumberDigits
+    maxNumberExponent: Int = 512 // = codec.JsonLimits.DefaultMaxNumberExponent
 ):
   require(maxFrameChars >= 1, "limits.maxFrameChars must be >= 1")
   require(
@@ -278,6 +327,29 @@ case class LimitSettings(
   require(maxObjectFields >= 1, "limits.maxObjectFields must be >= 1")
   require(maxUriChars >= 1, "limits.maxUriChars must be >= 1")
   require(maxSubscriptionsPerSession >= 1, "limits.maxSubscriptionsPerSession must be >= 1")
+  require(maxArrayElements >= 1, "limits.maxArrayElements must be >= 1")
+  require(maxValues >= 1, "limits.maxValues must be >= 1")
+  require(
+    maxNumberDigits >= 1 && maxNumberDigits <= LimitSettings.MaxSupportedNumberDigits,
+    s"limits.maxNumberDigits must be in 1..${LimitSettings.MaxSupportedNumberDigits}"
+  )
+  require(
+    maxNumberExponent >= 1 && maxNumberExponent <= LimitSettings.MaxSupportedNumberExponent,
+    s"limits.maxNumberExponent must be in 1..${LimitSettings.MaxSupportedNumberExponent}"
+  )
+
+  /** The JSON bounds in the shape the codec layer consumes — built once per settings value, so the
+    * per-frame path allocates nothing for it.
+    */
+  private[fastmcp] val jsonBounds: com.tjclp.fastmcp.codec.JsonLimits.Bounds =
+    com.tjclp.fastmcp.codec.JsonLimits.Bounds(
+      maxDepth,
+      maxObjectFields,
+      maxArrayElements,
+      maxValues,
+      maxNumberDigits,
+      maxNumberExponent
+    )
 
 object LimitSettings:
   /** Hard ceiling for `maxDepth`: the stack safety of every later recursive walk over client JSON
@@ -286,3 +358,14 @@ object LimitSettings:
     * here.
     */
   val MaxSupportedDepth: Int = com.tjclp.fastmcp.codec.JsonLimits.MaxSupportedDepth
+
+  /** Hard ceiling (4096) for `maxNumberDigits`. With [[MaxSupportedNumberExponent]] it keeps the
+    * integer a client number can expand to at 8192 decimal digits or fewer (about 3.4 KiB) on any
+    * configuration, so no setting can re-open unbounded `BigInteger` / `BigDecimal` work. Defined
+    * in `codec.JsonLimits` and re-exported here.
+    */
+  val MaxSupportedNumberDigits: Int = com.tjclp.fastmcp.codec.JsonLimits.MaxSupportedNumberDigits
+
+  /** Hard ceiling (4096) for `maxNumberExponent`; see [[MaxSupportedNumberDigits]]. */
+  val MaxSupportedNumberExponent: Int =
+    com.tjclp.fastmcp.codec.JsonLimits.MaxSupportedNumberExponent
