@@ -41,8 +41,7 @@ services:
     init: true
     build:
       context: ../sut
-      # SUT_BUN_DOCKERFILE=Dockerfile.bun-instrumented builds the instrumentation experiment.
-      dockerfile: ${SUT_BUN_DOCKERFILE:-Dockerfile.bun}
+      dockerfile: Dockerfile.bun
     image: fast-mcp-scala-sut-bun:latest
     stop_grace_period: 15s
     environment:

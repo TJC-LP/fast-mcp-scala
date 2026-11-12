@@ -16,10 +16,13 @@ Compose, `jq`, and a JDK for the Mill build. Use Podman on a workstation: the sc
 three HTTP backends, each in its own container: `mcp-netty` (ZIO HTTP), `mcp-socket`
 (`JvmSocketHttpBackend`) and `mcp-bun` (Scala.js on `Bun.serve`, which is separate HTTP code from
 the JVM backends and what production deployments on Bun run). The tools are shared source
-(`mcp/sut/shared`); only the launcher differs. On the JVM the project's own jars are instrumented
-by Antithesis and third-party jars are not. The Bun bundle is **not instrumented**: Antithesis's
-JavaScript instrumentation assumes Node and `require`, so faults and every driver property apply
-to Bun, but coverage does not guide exploration there (ask Antithesis about Bun and ES modules).
+(`mcp/sut/shared`); only the launcher differs. Antithesis instruments the project's own code on
+all three nodes, so coverage guides its search on each: the project's jars on the JVM (third-party
+jars are not instrumented), and the Scala.js bundle on Bun. Antithesis documents its JavaScript
+instrumentation for Node only; it works on Bun when the image holds a CommonJS bundle, its source
+map, a `package.json` and a `node_modules` directory (`mcp/sut/Dockerfile.bun` lists why each is
+needed). Check "Software was instrumented" in a run's report: it must list the module
+`fast-mcp-scala-sut-bun` next to the Java one.
 Scala Native is not in this workload yet.
 
 **What the driver does.** `mcp/driver` is a Rust program built on hegel, as the skill prescribes.
@@ -60,10 +63,22 @@ JSON-lines format on Bun) cover what no reply shows: a tool
 handler only sees arguments that satisfy its declared input schema, and the branch where a handler
 is interrupted before it finishes is reached.
 
-**Regression probes for security findings.** `mcp/known-failing.tsv` lists the properties that
-state a hardened behaviour the code does not have yet, each with the Claude Security finding it
-tests. They fail until the finding is fixed and must pass afterwards; any other failing property
-is a new result to triage. Remove a line when its fix lands.
+**Regression probes for security findings.** The `probe` rule and two in-server assertions state
+hardened behaviour that Claude Security findings showed was missing. They failed on the code
+before the fixes (TJC-5087) and pass since; a failure now is a regression.
+
+| Property | What it guards |
+|---|---|
+| `a request head with bare LF line endings is refused` | The socket backend's request-head parser accepted bare LF terminators |
+| `a chunked body with bare LF framing is refused` | The socket backend's chunked-body parser accepted bare LF |
+| `a request with conflicting duplicate routing headers is refused` | A repeated `Mcp-Method` / `Mcp-Name` was resolved first-wins |
+| `a tools/call argument outside the declared input schema is rejected` | Declared input-schema constraints were not enforced |
+| `a tool handler only sees arguments that satisfy its declared input schema` (and the Bun twin) | The same, seen from inside the handler |
+| `a dropped GET stream frees its slot` | A GET slot was released only by the response stream's finalizer |
+
+`mcp/known-failing.tsv` lists properties that are expected to fail because their fix has not
+landed. It is empty. When a probe is written before its fix, add a line there and remove it with
+the fix; any other failing property is a new result to triage.
 
 **Faults.** The `resilient` profile, with the driver excluded. Each node is a single server with
 in-memory sessions and tasks, so it is not meant to survive being killed.
@@ -78,14 +93,16 @@ antithesis/mcp/scripts/launch.sh 12        # 12 compute hours on Antithesis
 
 - `build.sh` runs `./mill fast-mcp-scala.antithesisSut.stage` and
   `fast-mcp-scala.antithesisSutJs.stage` on the host and copies the jars and the Bun bundle
-  into `mcp/sut/stage/` (ignored by git) for the images. The Bun image installs Bun's baseline
-  x86-64 build from the checksum-pinned release archive; the local loop builds it for the host's
-  own architecture instead, because the x86-64 binary aborts under emulation on an ARM machine. JVM bytecode is the same on every
-  platform, so nothing is compiled under emulation. The driver is cross-compiled in its image
-  build.
+  into `mcp/sut/stage/` (ignored by git) for the images. JVM bytecode and the bundle are the same
+  on every platform, so nothing is compiled under emulation. The driver is cross-compiled in its
+  image build.
+- The Bun image installs Bun's baseline x86-64 build from the checksum-pinned release archive.
+  That binary aborts under emulation on an ARM machine, so the local loop builds the image for the
+  host's own architecture, and `launch.sh` needs `SKIP_VALIDATE=1` there (`snouty validate` runs
+  the x86-64 images locally). Run `local.sh` first in that case.
 - `local.sh` writes its evidence (the SDK output of every container, the logs, and `unmet.tsv`)
   to `mcp/out/<timestamp>/`. Sometimes-assertions that need a fault are expected in `unmet.tsv`,
-  and so are the lines in `known-failing.tsv`.
+  and so are any lines in `known-failing.tsv`.
 - `launch.sh` needs `ANTITHESIS_API_KEY` and `ANTITHESIS_REPOSITORY` in the environment (or a
   `snouty login`) and a registry login for that repository. Check the compute budget before each
   launch; the script only passes the number on.
@@ -99,3 +116,5 @@ seconds of workload instead of behind its rare draw. `MCP_NODES` (`name=url,...`
 |---|---|---|
 | `5bb1479871fd547f383eb44e46e222b5-66-21` (2026-11-12, first run, `resilient`) | 12 h | No new library bug. Every correctness property held with no counterexample (never a 500, replies never crossed, header isolation, stream ordering, tasks, recovery). The five `known-failing.tsv` properties failed as listed, including the GET slot (20 counterexamples on 100 checks). One workload bug: `a live session is lost only when...` failed 40 times because the driver did not count a session opened during a flood as evictable by it; fixed in the driver. |
 | `2e8900e97819792ab22050657c310b47-66-21` (2026-11-12, Bun node added, `resilient`) | 12 h | No new library bug: 69 properties passed, 7 failed, and all 7 are `known-failing.tsv` entries. The Bun server started on Antithesis's x86-64 hosts (baseline build) and its handlers were exercised (17k interruptions). Reply matching, per-request header isolation and "never a 500" held with no counterexample across the three nodes; the driver picks the node uniformly, so about a third of those checks ran against Bun. The duplicate-routing-header property passes on Bun and fails on the JVM backends (3.0k each way). The earlier driver false failure did not recur. |
+| `b940de89b2a74b88a3c5a081503bf872-66-21` (2026-11-12, Bun bundle instrumented, `resilient`) | 12 h | The Bun bundle was instrumented: "Software was instrumented" lists `fast-mcp-scala-sut-bun` (37,810 locations, symbols present) next to the Java module, and thread pausing was enabled for the Bun container. 69 properties passed, 7 failed, the same `known-failing.tsv` entries. An earlier attempt (`4ea61d2d86656b0595d50cb1ab8960e8-66-21`) ran healthy but uninstrumented: without a `node_modules` directory the instrumentor skips the bundle and only logs it. |
+| `67cab1fe220ec0417fa92b622a92f974-66-21` (2026-11-12, with the TJC-5087 fixes, `resilient`) | 12 h | 76 properties passed, none failed. The seven former `known-failing.tsv` properties pass with no counterexample (bare-LF head 2.2k checks, bare-LF chunked body 2.0k, duplicate routing headers 2.3k, schema rejection 2.3k, schema inside the handler 3.8k on the JVM and 13k on Bun, GET slot 125). This run used the uninstrumented Bun image. |

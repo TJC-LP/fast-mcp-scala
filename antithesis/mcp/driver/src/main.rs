@@ -781,8 +781,8 @@ impl Driver {
         );
     }
 
-    /// Regression probes for Claude Security findings. Each expects the hardened behaviour, so
-    /// each fails until its finding is fixed (see known-failing.tsv).
+    /// Regression probes for Claude Security findings. Each expects the hardened behaviour: it
+    /// failed before its finding was fixed (TJC-5087) and a failure now is a regression.
     #[rule]
     fn probe(&self, tc: TestCase) {
         let node = tc.draw(gs::integers::<usize>().max_value(self.nodes.len() - 1));

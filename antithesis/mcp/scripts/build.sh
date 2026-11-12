@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds the workload's images: stages the server's jars with Mill, then builds every image in
-# the compose file.
+# Builds the workload's images: stages the server's jars and links its Bun bundle with Mill, then
+# builds every image in the compose file.
 #
 #   antithesis/mcp/scripts/build.sh [extra compose files...]
 #
@@ -20,18 +20,11 @@ mkdir -p "${here}/sut/stage"
 cp -R "${staged}/bin" "${staged}/lib" "${here}/sut/stage/"
 
 echo "build.sh: linking the Bun bundle (./mill fast-mcp-scala.antithesisSutJs.stage)" >&2
-bundle="$(cd "${root}" && ./mill --no-server show fast-mcp-scala.antithesisSutJs.stage 2>/dev/null |
+js="$(cd "${root}" && ./mill --no-server show fast-mcp-scala.antithesisSutJs.stage 2>/dev/null |
   python3 -c "import sys,json,re; print(re.sub(r'^q?ref:v\\d+:[0-9a-f]+:','',json.load(sys.stdin)),end='')")"
-[ -f "${bundle}/main.js" ] || { echo "build.sh: the Bun stage task produced nothing at '${bundle}'" >&2; exit 1; }
+[ -f "${js}/main.js.map" ] || { echo "build.sh: the Bun stage task produced nothing at '${js}'" >&2; exit 1; }
 mkdir -p "${here}/sut/stage/js"
-cp "${bundle}/main.js" "${here}/sut/stage/js/main.js"
-
-echo "build.sh: linking the CommonJS Bun bundle (./mill fast-mcp-scala.antithesisSutCjs.stage)" >&2
-cjs="$(cd "${root}" && ./mill --no-server show fast-mcp-scala.antithesisSutCjs.stage 2>/dev/null |
-  python3 -c "import sys,json,re; print(re.sub(r'^q?ref:v\\d+:[0-9a-f]+:','',json.load(sys.stdin)),end='')")"
-[ -f "${cjs}/main.js" ] || { echo "build.sh: the CommonJS stage task produced nothing at '${cjs}'" >&2; exit 1; }
-mkdir -p "${here}/sut/stage/cjs"
-cp "${cjs}/main.js" "${cjs}/main.js.map" "${here}/sut/stage/cjs/"
+cp "${js}/main.js" "${js}/main.js.map" "${here}/sut/stage/js/"
 
 files=(-f "${here}/config/docker-compose.yaml")
 for extra in "$@"; do files+=(-f "${extra}"); done
