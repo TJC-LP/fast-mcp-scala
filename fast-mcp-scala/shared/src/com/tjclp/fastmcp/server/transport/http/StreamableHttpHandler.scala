@@ -307,10 +307,10 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
                   .as(HttpReply.Json(status, first.toJson))
               case None =>
                 ZIO.succeed(
-                  requestSse(reqQueue, reqId, session, isNew, dispatchFiber, modern, List(first))
+                  requestSse(reqQueue, reqId, session, isNew, dispatchFiber, modern, Some(first))
                 )
           }
-        else ZIO.succeed(requestSse(reqQueue, reqId, session, isNew, dispatchFiber, modern, Nil))
+        else ZIO.succeed(requestSse(reqQueue, reqId, session, isNew, dispatchFiber, modern, None))
     yield response
 
   private def requestSse(
@@ -320,9 +320,14 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       isNew: Boolean,
       dispatchFiber: Fiber.Runtime[?, ?],
       modern: Boolean,
-      initial: List[JsonRpcMessage]
+      first: Option[JsonRpcMessage]
   ): HttpReply =
-    val messages = ZStream.fromIterable(initial) ++ ZStream.fromQueue(reqQueue)
+    // `ZStream.succeed`, not `ZStream.fromIterable(List(first))`: the iterable form sizes its chunk
+    // builder for a full default chunk (4096 slots, a 32 KiB array) to carry this one message — on
+    // every 2026-07-28 request. Besides the waste, an allocation that size takes Scala Native's
+    // large-object path, which is not safe under concurrent allocation in 0.5.12.
+    val queued = ZStream.fromQueue(reqQueue)
+    val messages = first.fold(queued)(message => ZStream.succeed(message) ++ queued)
     val frames: ZStream[Any, Nothing, SseFrame] =
       messages
         .takeUntil(msg => isFinalReply(msg, reqId) || MessageLoop.isCloseSentinel(msg))

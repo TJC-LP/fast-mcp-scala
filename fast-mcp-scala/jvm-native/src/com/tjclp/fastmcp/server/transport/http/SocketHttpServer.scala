@@ -6,6 +6,7 @@ import java.net.{InetSocketAddress, ServerSocket, Socket, SocketException, Socke
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.{ConcurrentHashMap, Semaphore, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.LockSupport
 
 import scala.util.control.NonFatal
 
@@ -223,25 +224,42 @@ private[fastmcp] object SocketHttpServer:
     def runOrFork[A](effect: URIO[R, A]): Either[Fiber.Runtime[Nothing, A], Exit[Nothing, A]] =
       Unsafe.unsafe(implicit u => runtime.unsafe.runOrFork(effect))
 
-  /** One-shot hand-off from a fiber observer to the connection thread. `poke` wakes the waiter
-    * without a value (shutdown).
+  /** One-shot hand-off from a fiber observer to the connection thread that created it. `poke` wakes
+    * the waiter without a value (shutdown).
+    *
+    * Built on `LockSupport.park` / `unpark`, deliberately not on `synchronized` / `wait` /
+    * `notify`: with an object monitor the woken thread must re-acquire the monitor before it can
+    * run, and on JDK 25 notified connection threads were observed parked in that re-acquire for
+    * tens to hundreds of milliseconds on monitors no thread held, which collapsed throughput under
+    * sustained load. `unpark` has no monitor to re-enter, and its permit makes a wake-up that
+    * arrives before the park a no-op park instead of a lost signal.
     */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private final class Signal[A]:
-    private var value: Option[A] = None
+    private val waiter: Thread = Thread.currentThread()
+    @volatile private var value: Option[A] = None
+    @volatile private var poked = false
 
-    def set(a: A): Unit = synchronized {
+    def set(a: A): Unit =
       value = Some(a)
-      notifyAll()
-    }
+      LockSupport.unpark(waiter)
 
-    def poke(): Unit = synchronized(notifyAll())
+    def poke(): Unit =
+      poked = true
+      LockSupport.unpark(waiter)
 
-    /** The value, waiting up to `millis` for it (a spurious or poked wake-up returns `None`). */
-    def await(millis: Long): Option[A] = synchronized {
-      if value.isEmpty then wait(math.max(1L, millis))
+    /** The value, waiting up to `millis` for it; `None` on timeout or when poked. Spurious wake-ups
+      * (and a stale permit left by an earlier signal) just park again.
+      */
+    def await(millis: Long): Option[A] =
+      val deadline = java.lang.System.nanoTime() + math.max(1L, millis) * 1_000_000L
+      var remaining = deadline - java.lang.System.nanoTime()
+      while value.isEmpty && !poked && remaining > 0 do
+        LockSupport.parkNanos(this, remaining)
+        remaining = deadline - java.lang.System.nanoTime()
+      // A poke is consumed by the wait it interrupts, so the caller's next wait parks normally.
+      poked = false
       value
-    }
 
   /** Growable response buffer, reused for every reply on a connection. */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
@@ -596,7 +614,12 @@ private[fastmcp] object SocketHttpServer:
     */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private final class ConnectionInput(in: InputStream):
-    private val InitialBufferBytes = 8 * 1024
+    // Deliberately below 8 KiB: Scala Native allocates objects of 8 KiB and up through its
+    // large-object allocator, whose slow path can hand a racing thread a null pointer (0.5.12:
+    // `LargeAllocator_Alloc` retries once after growing the heap by exactly one object). A burst of
+    // new connections must not put one such allocation per connection on that path. The buffer
+    // still grows on demand for larger heads and bodies.
+    private val InitialBufferBytes = 4 * 1024
     private var buf: Array[Byte] = new Array[Byte](InitialBufferBytes)
     private var start = 0
     private var end = 0
