@@ -336,6 +336,46 @@ class MacroUtilsTest extends AnyFunSuite { // Ensure this matches the import
     assert(required == Set("name", "age"))
   }
 
+  test("injectParamMetadata writes `required` in the order of `properties`, not alphabetically") {
+    val inputJson = unsafeParse("""{
+      "type": "object",
+      "properties": {
+        "p": { "type": "integer" },
+        "p2": { "type": "integer" },
+        "p10": { "type": "integer" },
+        "p11": { "type": "integer" },
+        "b": { "type": "integer" },
+        "a": { "type": "integer" }
+      },
+      "required": ["p", "p2", "p10", "b"]
+    }""")
+    val metadata = Map(
+      "a" -> ParamMetadata(required = true),
+      "p11" -> ParamMetadata(required = true),
+      "b" -> ParamMetadata(required = false)
+    )
+
+    val required =
+      MacroUtils.injectParamMetadata(inputJson, metadata).hcursor.downField("required").as[List[String]]
+    assert(required == Right(List("p", "p2", "p10", "p11", "a")))
+  }
+
+  test("injectParamMetadata puts required names that have no property last, sorted") {
+    val inputJson = unsafeParse("""{
+      "type": "object",
+      "properties": {
+        "b": { "type": "integer" },
+        "a": { "type": "integer" }
+      },
+      "required": ["zeta", "a", "b", "alpha"]
+    }""")
+    val metadata = Map("a" -> ParamMetadata(description = Some("A")))
+
+    val required =
+      MacroUtils.injectParamMetadata(inputJson, metadata).hcursor.downField("required").as[List[String]]
+    assert(required == Right(List("b", "a", "alpha", "zeta")))
+  }
+
   test("injectParamMetadata should replace property with custom schema") {
     val inputJsonString = """{
       "type": "object",

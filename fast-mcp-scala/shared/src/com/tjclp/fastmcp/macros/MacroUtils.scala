@@ -132,19 +132,21 @@ private[macros] object MacroUtils:
 
   /** Parse the `@Param` annotation of a `@Prompt` method parameter into `(description, required)`.
     *
-    * `required` defaults to `!isOptionType`: an `Option[T]` parameter is optional whether or not it
-    * carries a `@Param`, and only an explicit `required = true` re-requires it (TJC-2334).
+    * `required` defaults to `!optionalUnlessStated`. The caller passes `true` for an `Option[T]`
+    * parameter and for a parameter whose Scala default the generated handler applies
+    * ([[appliedDefaultGetters]]): such a parameter is optional whether or not it carries a
+    * `@Param`, and only an explicit `required = true` re-requires it (TJC-2334, TJC-5117).
     */
   def parsePromptParamArgs(using quotes: Quotes)(
       paramAnnotOpt: Option[quotes.reflect.Term],
-      isOptionType: Boolean
+      optionalUnlessStated: Boolean
   ): (Option[String], Boolean) =
     import quotes.reflect.*
 
     paramAnnotOpt match {
       case Some(annotTerm) =>
         var paramDesc: Option[String] = None
-        var paramRequired: Boolean = !isOptionType // Option parameters are optional by default
+        var paramRequired: Boolean = !optionalUnlessStated
         var descriptionSetPositionally = false
         var requiredSetByName = false
 
@@ -180,7 +182,7 @@ private[macros] object MacroUtils:
           case _ => () // Ignore if annotation term is not an Apply
         }
         (paramDesc, paramRequired)
-      case None => (None, !isOptionType) // Defaults if no @Param
+      case None => (None, !optionalUnlessStated) // Defaults if no @Param
     }
 
   /** Extract the `@Param` annotation from a method parameter symbol, if present. */
@@ -192,13 +194,15 @@ private[macros] object MacroUtils:
   /** Parse the `@Param` annotation of a `@Tool` method parameter or a typed-request case-class
     * field into `(description, examples, required, schema)`.
     *
-    * `required` defaults to `!isOptionType`, matching the derived schema (`JsonSchemaMacro` lists
-    * every non-`Option` parameter in `required`): a description-only `@Param` on an `Option[T]`
-    * parameter no longer re-requires it, and only an explicit `required = true` does (TJC-2334).
+    * `required` defaults to `!optionalUnlessStated`. The caller passes `true` for an `Option[T]`
+    * and for a parameter or input field whose Scala default is applied when the argument is omitted
+    * ([[appliedDefaultGetters]] for a method parameter, [[decodedDefaultFields]] for a case-class
+    * field). A description-only `@Param` therefore never re-requires such a parameter; only an
+    * explicit `required = true` does (TJC-2334, TJC-5117).
     */
   def parseToolParam(using quotes: Quotes)(
       paramAnnotOpt: Option[quotes.reflect.Term],
-      isOptionType: Boolean
+      optionalUnlessStated: Boolean
   ): (Option[String], List[String], Boolean, Option[String]) =
     import quotes.reflect.*
 
@@ -206,7 +210,7 @@ private[macros] object MacroUtils:
       case Some(annotTerm) =>
         var paramDesc: Option[String] = None
         var paramExamples: List[String] = Nil
-        var paramRequired: Boolean = !isOptionType // Option parameters are optional by default
+        var paramRequired: Boolean = !optionalUnlessStated
         var paramSchema: Option[String] = None
         var examplesSetByName = false
         var requiredSetByName = false
@@ -264,15 +268,84 @@ private[macros] object MacroUtils:
           case _ => () // Ignore if annotation term is not an Apply
         }
         (paramDesc, paramExamples, paramRequired, paramSchema)
-      case None => (None, Nil, !isOptionType, None) // Defaults if no @Param
+      case None => (None, Nil, !optionalUnlessStated, None) // Defaults if no @Param
     }
 
-  def schemaMetadataForType[T: Type](using Quotes): Expr[SchemaMetadataNode] =
+  /** The parameters of `methodSym`'s first parameter list whose Scala default the generated handler
+    * applies when the argument is omitted, by name, with the compiler-generated
+    * `<method>$default$N` getter (`N` is the 1-based parameter position; the getter is declared
+    * next to the method, in the same class).
+    *
+    * This is the ONE definition of "has an applied default" for annotated methods:
+    * `MapToFunctionMacro` reads the getters from it to build the handler, and the `@Tool` /
+    * `@Prompt` processors read its keys to decide what the advertised schema may call optional, so
+    * the two cannot disagree. A parameter qualifies only when
+    *   - the method is a member of an object — the sole shape `scanAnnotations` registers, and the
+    *     one that gives the getter a stable qualifier (`Ref(module)`, `Outer.this.module` for a
+    *     class-nested object);
+    *   - the parameter is flagged `HasDefault` on the method's OWN symbol (pickled, so it survives
+    *     separate compilation), never a same-named sibling overload's getter;
+    *   - the getter is nullary — a default in a FIRST parameter list cannot depend on other
+    *     parameters, so a getter with parameters means the method is polymorphic and is left to the
+    *     runtime "missing argument" failure.
+    */
+  def appliedDefaultGetters(using quotes: Quotes)(
+      methodSym: quotes.reflect.Symbol
+  ): Map[String, quotes.reflect.Symbol] =
     import quotes.reflect.*
-    schemaMetadataForTypeRepr(TypeRepr.of[T]).getOrElse('{ SchemaMetadataNode() })
+    val owner = methodSym.owner
+    if !(owner.isClassDef && owner.flags.is(Flags.Module)) then Map.empty
+    else
+      methodSym.paramSymss.headOption
+        .getOrElse(Nil)
+        .zipWithIndex
+        .flatMap {
+          case (pSym, idx) if pSym.flags.is(Flags.HasDefault) =>
+            owner.declaredMethod(s"${methodSym.name}$$default$$${idx + 1}") match
+              case getter :: Nil if getter.paramSymss.isEmpty => Some(pSym.name -> getter)
+              case _ => None
+          case _ => None
+        }
+        .toMap
+
+  /** The fields of the case class `classSym` that a derived zio-json decoder fills with the Scala
+    * default when the key is absent.
+    *
+    * Mirrors the lookup zio-json's derivation performs (magnolia `Macro.defaultValue`): the
+    * primary-constructor value parameters, numbered from 1 across all parameter lists, each with a
+    * `<init>$default$N` getter declared on the companion class. `HasDefault` on the constructor
+    * parameter itself is required as well (pickled), so a hand-written companion `apply` overload
+    * with defaults cannot stand in for a field that has none.
+    */
+  def decodedDefaultFields(using quotes: Quotes)(classSym: quotes.reflect.Symbol): Set[String] =
+    import quotes.reflect.*
+    val companion = classSym.companionClass
+    classSym.primaryConstructor.paramSymss.flatten
+      .filter(_.isValDef)
+      .zipWithIndex
+      .collect {
+        case (param, idx)
+            if param.flags.is(Flags.HasDefault) && !companion.isNoSymbol &&
+              companion.declaredMethod(s"$$lessinit$$greater$$default$$${idx + 1}").nonEmpty =>
+          param.name
+      }
+      .toSet
+
+  /** `@Param` metadata of the case-class fields reachable from `T`, as a tree that
+    * [[injectSchemaMetadata]] overlays on the derived schema.
+    *
+    * `input` selects the rule for an annotated field with a Scala default. For a type a client
+    * SENDS (`input = true`) the decoder fills an absent defaulted field, so the field is optional
+    * unless `@Param(required = true)` is written. For a type the server WRITES (`input = false`, an
+    * `outputSchema`) the encoder always emits the field, so a default changes nothing.
+    */
+  def schemaMetadataForType[T: Type](input: Boolean)(using Quotes): Expr[SchemaMetadataNode] =
+    import quotes.reflect.*
+    schemaMetadataForTypeRepr(TypeRepr.of[T], input).getOrElse('{ SchemaMetadataNode() })
 
   private def schemaMetadataForTypeRepr(using Quotes)(
-      rawTpe: quotes.reflect.TypeRepr
+      rawTpe: quotes.reflect.TypeRepr,
+      input: Boolean
   ): Option[Expr[SchemaMetadataNode]] =
     import quotes.reflect.*
 
@@ -287,17 +360,17 @@ private[macros] object MacroUtils:
 
     tpe.asType match
       case '[Option[a]] =>
-        schemaMetadataForTypeRepr(TypeRepr.of[a])
+        schemaMetadataForTypeRepr(TypeRepr.of[a], input)
       case '[List[a]] =>
-        schemaMetadataForTypeRepr(TypeRepr.of[a]).map { item =>
+        schemaMetadataForTypeRepr(TypeRepr.of[a], input).map { item =>
           '{ SchemaMetadataNode(items = Some($item)) }
         }
       case '[Seq[a]] =>
-        schemaMetadataForTypeRepr(TypeRepr.of[a]).map { item =>
+        schemaMetadataForTypeRepr(TypeRepr.of[a], input).map { item =>
           '{ SchemaMetadataNode(items = Some($item)) }
         }
       case '[Array[a]] =>
-        schemaMetadataForTypeRepr(TypeRepr.of[a]).map { item =>
+        schemaMetadataForTypeRepr(TypeRepr.of[a], input).map { item =>
           '{ SchemaMetadataNode(items = Some($item)) }
         }
       case _ =>
@@ -307,13 +380,15 @@ private[macros] object MacroUtils:
         if !isProduct then None
         else
           val ctorParams = tpeSym.primaryConstructor.paramSymss.flatten
+          val defaultedFields = if input then decodedDefaultFields(tpeSym) else Set.empty[String]
 
           val entries = tpeSym.caseFields.flatMap { fieldSym =>
             val fieldTpe = tpe.memberType(fieldSym)
-            val nested = schemaMetadataForTypeRepr(fieldTpe)
+            val nested = schemaMetadataForTypeRepr(fieldTpe, input)
             val parsedMeta = fieldAnnotation(fieldSym, ctorParams).map { annot =>
               val isOption = fieldTpe <:< TypeRepr.of[Option[?]]
-              val (desc, examples, required, schema) = parseToolParam(Some(annot), isOption)
+              val (desc, examples, required, schema) =
+                parseToolParam(Some(annot), isOption || defaultedFields.contains(fieldSym.name))
               if !required then
                 // `HasDefault` lives on the primary-constructor parameter itself (pickled), so a
                 // hand-written companion `apply` overload with defaults can no longer satisfy the
@@ -785,6 +860,10 @@ private[macros] object MacroUtils:
       .flatMap(_.asArray)
       .fold(List.empty[String])(_.flatMap(_.asString).toList)
 
+  /** Writes `properties` and `required` back. `required` follows the order of `properties`
+    * (declaration order); a name that has no property — only possible with a hand-written
+    * `required` — goes last, sorted, so the output is deterministic.
+    */
   private def withPropertiesAndRequired(
       schemaObject: Json.Obj,
       properties: Option[Json.Obj],
@@ -792,10 +871,16 @@ private[macros] object MacroUtils:
   ): Json.Obj =
     val withProperties = properties.fold(schemaObject)(replaceField(schemaObject, "properties", _))
     if required.nonEmpty then
+      val propertyOrder = withProperties
+        .get("properties")
+        .flatMap(_.asObject)
+        .fold(List.empty[String])(_.fields.map(_._1).toList)
+      val declared = propertyOrder.filter(required.contains).distinct
+      val undeclared = (required -- declared).toList.sorted
       replaceField(
         withProperties,
         "required",
-        Json.Arr(required.toList.sorted.map(Json.Str(_))*)
+        Json.Arr((declared ++ undeclared).map(Json.Str(_))*)
       )
     else withProperties.remove("required")
 

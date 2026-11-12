@@ -14,10 +14,35 @@ import com.tjclp.fastmcp.macros.schema.FunctionAnalyzer
   * supports primitives, options, collections, maps, Scala 3 enums, products, and tagged sums. A
   * user-provided [[com.tjclp.fastmcp.core.McpInputCodec]] is the escape hatch for domain types
   * whose wire representation cannot be inferred from their Scala shape.
+  *
+  * ==`required` and Scala defaults==
+  * A schema is derived for one of two directions, and the two treat a case-class field with a Scala
+  * default differently (TJC-5117):
+  *   - Input (a value the client sends: tool arguments): the field is NOT in `required`. The
+  *     derived zio-json decoder fills an absent field with the default, so the schema must not
+  *     refuse the call. `@Param(required = true)` puts it back.
+  *   - Output (a value the server writes: `outputSchema`): the field IS in `required`, because the
+  *     encoder always writes it.
+  *
+  * An `Option` field is optional in both directions. The rule applies at every depth: a case class
+  * nested in a field, a collection, a map value, an `Either` or a sealed hierarchy follows the
+  * direction of the root.
+  *
+  * The input rule assumes the decoder is the derived one, or any `DeriveJsonDecoder.gen` / `derives
+  * JsonDecoder` instance, which applies defaults the same way. A hand-written `JsonDecoder` that
+  * does not apply the default needs `@Param(required = true)` on the field, or a `McpSchema` /
+  * `McpInputCodec` for the type.
   */
 object JsonSchemaMacro:
 
-  /** Produces a JSON schema describing the parameters of the given function. */
+  /** Produces a JSON schema describing the parameters of the given function.
+    *
+    * Case classes among the parameter types use the input rule (see the object documentation). A
+    * top-level PARAMETER with a Scala default is still listed in `required` here: this macro sees
+    * the function's type, which does not carry defaults, and whether a default is applied depends
+    * on the handler built next to it. The `@Tool` processor knows both and removes such a parameter
+    * from `required` itself.
+    */
   inline def schemaForFunctionArgs[F](inline fn: F): Json =
     ${ schemaForFunctionArgsImpl('fn, '{ Nil }) }
 
@@ -27,9 +52,16 @@ object JsonSchemaMacro:
   inline def schemaForFunctionArgs[F](inline fn: F, inline exclude: List[String]): Json =
     ${ schemaForFunctionArgsImpl('fn, 'exclude) }
 
-  /** Produces a JSON schema describing a single request or result type `T`. */
+  /** Produces a JSON schema describing a single type `T`, with the INPUT rule: a case-class field
+    * with a Scala default is not listed in `required` (see the object documentation).
+    *
+    * Input is the choice because that is how a free-standing schema is used in this library: as a
+    * fragment of a hand-assembled `inputSchema`, validated against what a client sends and then
+    * decoded. For a schema that describes what the server writes, use [[schemaForToolOutput]],
+    * which keeps defaulted fields in `required`.
+    */
   inline def schemaForType[T]: Json =
-    ${ schemaForTypeImpl[T] }
+    ${ schemaForTypeImpl[T](input = true) }
 
   /** [[schemaForType]] for a typed tool's `In`, guarded: MCP `arguments` is always a JSON object,
     * so a type whose schema root is not an object (`String`, `Int`, a collection, `Option`,
@@ -39,8 +71,10 @@ object JsonSchemaMacro:
   inline def schemaForToolInput[T]: Json =
     ${ objectRootSchemaImpl[T](input = true) }
 
-  /** [[schemaForType]] for a typed tool's `Out` under `.withOutputSchema`, guarded the same way:
-    * `structuredContent` is always a JSON object, so a non-object root could never conform.
+  /** The schema of a typed tool's `Out` under `.withOutputSchema`, with the OUTPUT rule: a field
+    * with a Scala default stays in `required`, because the encoder always writes it. Guarded like
+    * [[schemaForToolInput]]: `structuredContent` is always a JSON object, so a non-object root
+    * could never conform.
     */
   inline def schemaForToolOutput[T]: Json =
     ${ objectRootSchemaImpl[T](input = false) }
@@ -56,23 +90,25 @@ object JsonSchemaMacro:
       .extractParams(fn.asTerm.tpe, paramNamesOpt)
       .filterNot(param => excluded.contains(param._1))
 
-    val fields = params.map { case (name, tpe) => name -> schemaFor(tpe, Nil) }
+    // Function arguments are always input. Top-level parameters are required unless `Option`:
+    // their Scala defaults are not visible here (see the Scaladoc of `schemaForFunctionArgs`).
+    val fields = params.map { case (name, tpe) => name -> schemaFor(tpe, Nil, input = true) }
     val required = params.collect { case (name, tpe) if !isOption(tpe) => name }
     val rawSchema = objectSchema(fields, required)
 
     val metadataEntries = params.map { case (name, tpe) =>
       tpe.asType match
         case '[t] =>
-          val metadata = MacroUtils.schemaMetadataForType[t]
+          val metadata = MacroUtils.schemaMetadataForType[t](input = true)
           '{ ${ Expr(name) } -> $metadata }
     }
     val metadata = '{ SchemaMetadataNode(properties = Map(${ Varargs(metadataEntries) }*)) }
 
     '{ MacroUtils.injectSchemaMetadata($rawSchema, $metadata) }
 
-  private def schemaForTypeImpl[T: Type](using Quotes): Expr[Json] =
-    val rawSchema = schemaFor(quotes.reflect.TypeRepr.of[T], Nil)
-    val metadata = MacroUtils.schemaMetadataForType[T]
+  private def schemaForTypeImpl[T: Type](input: Boolean)(using Quotes): Expr[Json] =
+    val rawSchema = schemaFor(quotes.reflect.TypeRepr.of[T], Nil, input)
+    val metadata = MacroUtils.schemaMetadataForType[T](input)
     '{ MacroUtils.injectSchemaMetadata($rawSchema, $metadata) }
 
   private def objectRootSchemaImpl[T: Type](input: Boolean)(using Quotes): Expr[Json] =
@@ -95,7 +131,7 @@ object JsonSchemaMacro:
             s"Result(value: $shown)`) or drop .withOutputSchema."
         )
     }
-    schemaForTypeImpl[T]
+    schemaForTypeImpl[T](input)
 
   /** `None` when [[schemaFor]] renders `tpe` as a JSON object; otherwise a description of the root
     * it renders. Mirrors the dispatch order of [[schemaFor]] / [[schemaForNonContainer]]. A
@@ -123,9 +159,13 @@ object JsonSchemaMacro:
             Some("a oneOf over the sealed hierarchy")
           else Some("a scalar")
 
+  /** The schema of `rawTpe`. `input` is the direction (see the object documentation); it only
+    * changes `required` in [[productSchema]] and is passed down unchanged.
+    */
   private def schemaFor(using Quotes)(
       rawTpe: quotes.reflect.TypeRepr,
-      seenProducts: List[quotes.reflect.TypeRepr]
+      seenProducts: List[quotes.reflect.TypeRepr],
+      input: Boolean
   ): Expr[Json] =
     import quotes.reflect.*
 
@@ -135,11 +175,11 @@ object JsonSchemaMacro:
       tpe.asType match
         // Option first, and nullable: the decoder accepts an explicit JSON null, so the
         // advertised schema must too (parity with the old markOptionsAsNullable behavior).
-        case '[Option[a]] => nullableSchema(schemaFor(TypeRepr.of[a], seenProducts))
+        case '[Option[a]] => nullableSchema(schemaFor(TypeRepr.of[a], seenProducts, input))
         // Map MUST precede Iterable: quoted type patterns match by conformance and
         // Map[String, V] <: Iterable[(String, V)] — the Iterable case would otherwise
         // advertise an array-of-tuples schema the zio-json object decoder rejects.
-        case '[Map[String, value]] => mapSchema(schemaFor(TypeRepr.of[value], seenProducts))
+        case '[Map[String, value]] => mapSchema(schemaFor(TypeRepr.of[value], seenProducts, input))
         case '[Map[k, v]] =>
           report.errorAndAbort(
             s"Cannot derive an MCP JSON Schema for non-string-keyed map ${tpe.show}. " +
@@ -152,27 +192,28 @@ object JsonSchemaMacro:
           oneOfSchema(
             List(
               objectSchema(
-                List("Left" -> schemaFor(TypeRepr.of[left], seenProducts)),
+                List("Left" -> schemaFor(TypeRepr.of[left], seenProducts, input)),
                 List("Left")
               ),
               objectSchema(
-                List("Right" -> schemaFor(TypeRepr.of[right], seenProducts)),
+                List("Right" -> schemaFor(TypeRepr.of[right], seenProducts, input)),
                 List("Right")
               )
             )
           )
-        case '[List[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
-        case '[Seq[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
-        case '[Vector[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
-        case '[Set[a]] => uniqueArraySchema(schemaFor(TypeRepr.of[a], seenProducts))
-        case '[Array[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
-        case '[Iterable[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts))
-        case _ => schemaForNonContainer(tpe, seenProducts)
+        case '[List[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts, input))
+        case '[Seq[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts, input))
+        case '[Vector[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts, input))
+        case '[Set[a]] => uniqueArraySchema(schemaFor(TypeRepr.of[a], seenProducts, input))
+        case '[Array[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts, input))
+        case '[Iterable[a]] => arraySchema(schemaFor(TypeRepr.of[a], seenProducts, input))
+        case _ => schemaForNonContainer(tpe, seenProducts, input)
     }
 
   private def schemaForNonContainer(using Quotes)(
       tpe: quotes.reflect.TypeRepr,
-      seenProducts: List[quotes.reflect.TypeRepr]
+      seenProducts: List[quotes.reflect.TypeRepr],
+      input: Boolean
   ): Expr[Json] =
     import quotes.reflect.*
 
@@ -222,9 +263,9 @@ object JsonSchemaMacro:
     then scalarSchema("string")
     else if fullName == "zio.json.ast.Json" || tpe =:= TypeRepr.of[Any] then '{ Json.Obj() }
     else if symbol.flags.is(Flags.Enum) then enumSchema(tpe)
-    else if symbol.flags.is(Flags.Case) then productSchema(tpe, seenProducts)
+    else if symbol.flags.is(Flags.Case) then productSchema(tpe, seenProducts, input)
     else if symbol.flags.is(Flags.Sealed) && symbol.children.nonEmpty then
-      sumSchema(tpe, seenProducts)
+      sumSchema(tpe, seenProducts, input)
     else if symbol.isTypeParam then
       report.errorAndAbort(
         s"Cannot derive an MCP JSON Schema for unresolved type parameter ${tpe.show} — a " +
@@ -240,9 +281,16 @@ object JsonSchemaMacro:
           s"McpSchema[${tpe.show}] (schema only), or construct the tool with McpTool.withSchema."
       )
 
+  /** The object schema of a case class. A field is in `required` unless it is an `Option` or, for
+    * an input schema only, has a Scala default the derived decoder applies when the key is absent
+    * ([[MacroUtils.decodedDefaultFields]]). An output schema keeps a defaulted field in `required`:
+    * the encoder always writes it. `@Param(required = ...)` is applied on top by
+    * [[MacroUtils.injectSchemaMetadata]].
+    */
   private def productSchema(using Quotes)(
       tpe: quotes.reflect.TypeRepr,
-      seenProducts: List[quotes.reflect.TypeRepr]
+      seenProducts: List[quotes.reflect.TypeRepr],
+      input: Boolean
   ): Expr[Json] =
     import quotes.reflect.*
 
@@ -256,10 +304,12 @@ object JsonSchemaMacro:
       )
 
     val fields = symbol.caseFields.map { field =>
-      field.name -> schemaFor(tpe.memberType(field), tpe :: seenProducts)
+      field.name -> schemaFor(tpe.memberType(field), tpe :: seenProducts, input)
     }
+    val defaulted = if input then MacroUtils.decodedDefaultFields(symbol) else Set.empty[String]
     val required = symbol.caseFields.collect {
-      case field if !isOption(tpe.memberType(field)) => field.name
+      case field if !isOption(tpe.memberType(field)) && !defaulted.contains(field.name) =>
+        field.name
     }
     objectSchema(fields, required)
 
@@ -284,7 +334,8 @@ object JsonSchemaMacro:
 
   private def sumSchema(using Quotes)(
       tpe: quotes.reflect.TypeRepr,
-      seenProducts: List[quotes.reflect.TypeRepr]
+      seenProducts: List[quotes.reflect.TypeRepr],
+      input: Boolean
   ): Expr[Json] =
     import quotes.reflect.*
 
@@ -292,7 +343,7 @@ object JsonSchemaMacro:
       val caseName = enumCaseName(child)
       val payload =
         if child.flags.is(Flags.Module) then objectSchema(Nil, Nil)
-        else schemaFor(child.typeRef, tpe :: seenProducts)
+        else schemaFor(child.typeRef, tpe :: seenProducts, input)
       objectSchema(List(caseName -> payload), List(caseName))
     }
     oneOfSchema(variants)
