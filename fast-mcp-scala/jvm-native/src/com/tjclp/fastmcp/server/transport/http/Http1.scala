@@ -162,7 +162,7 @@ private[fastmcp] object Http1:
     }
 
   private val StatusLines: Map[Int, String] =
-    List(100, 200, 202, 400, 403, 404, 405, 406, 409, 413, 415, 431, 500, 501, 503, 505)
+    List(100, 200, 202, 400, 403, 404, 405, 406, 408, 409, 413, 415, 431, 500, 501, 503, 505)
       .map(status => status -> s"HTTP/1.1 $status ${reason(status)}\r\n")
       .toMap
 
@@ -183,6 +183,7 @@ private[fastmcp] object Http1:
       case 404 => "Not Found"
       case 405 => "Method Not Allowed"
       case 406 => "Not Acceptable"
+      case 408 => "Request Timeout"
       case 409 => "Conflict"
       case 413 => "Content Too Large"
       case 415 => "Unsupported Media Type"

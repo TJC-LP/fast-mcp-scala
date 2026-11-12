@@ -53,6 +53,15 @@ import com.tjclp.fastmcp.server.transport.http.Http1.{Framing, Head, Rejection, 
   * layer's finalizers (`session.releaseGet`, the request queue shutdown) run. Bytes the probe reads
   * stay buffered as a pipelined request. A request that completes within one poll interval never
   * pays for a probe. SSE keepalive pings are written from the same wait loop.
+  *
+  * Slot exhaustion: every connection holds one of `maxConnections` slots, so no client may hold one
+  * indefinitely without making progress. Three clocks enforce that — `idleTimeoutMs` between
+  * requests, `requestReadTimeoutMs` for a whole request head + body (a client dribbling bytes
+  * cannot keep resetting a per-read timeout), and `writeStallTimeoutMs` for a single blocked write
+  * (a client that stops reading a large reply or an event stream). Blocking sockets have no write
+  * timeout, so the last is enforced from outside: the accept thread sweeps the live connections
+  * once a second and closes any socket whose write has been blocked that long, which fails the
+  * write and frees the slot.
   */
 private[fastmcp] object SocketHttpServer:
 
@@ -66,8 +75,29 @@ private[fastmcp] object SocketHttpServer:
 
   val Backlog: Int = 128
 
-  /** A connection with no request activity is closed after this long. */
-  val IdleReadTimeoutMs: Int = 60_000
+  /** Per-listener settings. The timeouts are parameters (not constants) so tests can shorten them.
+    *
+    * @param maxBodyBytes
+    *   request body cap on the wire, declared or chunked (413)
+    * @param maxConnections
+    *   concurrent connection cap; further connections wait in the kernel backlog
+    * @param trackFiberRoots
+    *   whether request fibers are registered in ZIO's `Fiber.roots` (see `SocketHttpBackend`)
+    * @param idleTimeoutMs
+    *   a connection with no request activity is closed after this long
+    * @param requestReadTimeoutMs
+    *   the whole request (head + body) must arrive within this long of its first byte (408)
+    * @param writeStallTimeoutMs
+    *   a single write blocked this long (the peer stopped reading) closes the connection
+    */
+  final case class Config(
+      maxBodyBytes: Int,
+      maxConnections: Int = DefaultMaxConnections,
+      trackFiberRoots: Boolean = true,
+      idleTimeoutMs: Int = 60_000,
+      requestReadTimeoutMs: Int = 60_000,
+      writeStallTimeoutMs: Int = 30_000
+  )
 
   /** `accept` wakes this often so a shutdown request is honoured promptly even on platforms where
     * closing the listener does not unblock a pending `accept`.
@@ -82,6 +112,9 @@ private[fastmcp] object SocketHttpServer:
 
   /** Pending response bytes above this are flushed even when more frames are ready. */
   private val FlushThresholdBytes = 32 * 1024
+
+  /** How often the accept thread looks for connections stuck in a blocked write. */
+  private val StallSweepIntervalNanos = 1_000_000_000L
 
   /** On shutdown, how long to wait for connection threads to notice their closed sockets. */
   private val DrainTimeoutMs = 5_000L
@@ -118,20 +151,16 @@ private[fastmcp] object SocketHttpServer:
     * connection, which ends their threads and interrupts whatever handler fiber each was waiting
     * on.
     */
-  def start[R](
-      host: String,
-      port: Int,
-      maxBodyBytes: Int,
-      maxConnections: Int,
-      trackFiberRoots: Boolean
-  )(app: App[R]): ZIO[R & Scope, Throwable, Started] =
+  def start[R](host: String, port: Int, config: Config)(
+      app: App[R]
+  ): ZIO[R & Scope, Throwable, Started] =
     for
       ambient <- ZIO.runtime[R]
       // Every request runs on this runtime. With `trackFiberRoots = false` its fibers — and the
       // daemon fibers they fork, which inherit the flag — are not registered in ZIO's global
       // `Fiber.roots` bag, which costs one `WeakReference` per fiber. See `SocketHttpBackend`.
       runtime =
-        if trackFiberRoots then ambient
+        if config.trackFiberRoots then ambient
         else
           Runtime(
             ambient.environment,
@@ -145,7 +174,7 @@ private[fastmcp] object SocketHttpServer:
           server.setReuseAddress(true)
           server.bind(new InetSocketAddress(host, port), Backlog)
           server.setSoTimeout(AcceptPollMs)
-          new Listener[R](server, runtime, executor, app, maxBodyBytes, maxConnections)
+          new Listener[R](server, runtime, executor, app, config)
         }
       )(l => ZIO.attemptBlocking(l.shutdown()).ignore)
       loop <- ZIO
@@ -162,11 +191,17 @@ private[fastmcp] object SocketHttpServer:
       runtime: Runtime[R],
       executor: Executor,
       val app: App[R],
-      val maxBodyBytes: Int,
-      maxConnections: Int
+      val config: Config
   ):
     private val closed = new AtomicBoolean(false)
-    private val gate = new Semaphore(maxConnections)
+    private val gate = new Semaphore(config.maxConnections)
+    private val writeStallNanos = config.writeStallTimeoutMs.toLong * 1_000_000L
+
+    /** Accept-thread state: when the stalled-write sweep last ran. */
+    @SuppressWarnings(Array("org.wartremover.warts.Var"))
+    private var lastStallSweep = java.lang.System.nanoTime()
+
+    def maxBodyBytes: Int = config.maxBodyBytes
     private val live = new ConcurrentHashMap[Connection[R], java.lang.Boolean]()
 
     def port: Int = server.getLocalPort
@@ -177,6 +212,9 @@ private[fastmcp] object SocketHttpServer:
     @SuppressWarnings(Array("org.wartremover.warts.Var"))
     def acceptLoop(): Nothing =
       while !closed.get do
+        // The loop comes round at least every `AcceptPollMs` (gate wait + accept timeout), which
+        // makes it the natural place to enforce the write-stall timeout without another thread.
+        reapStalledWrites()
         if gate.tryAcquire(AcceptPollMs.toLong, TimeUnit.MILLISECONDS) then
           var handedOff = false
           try
@@ -196,6 +234,22 @@ private[fastmcp] object SocketHttpServer:
           catch case _: SocketTimeoutException => ()
           finally if !handedOff then gate.release()
       throw new SocketException("listener closed")
+
+    /** Close every connection whose current write has been blocked past `writeStallTimeoutMs`: the
+      * peer stopped reading, and a blocking socket write would otherwise hold the connection's slot
+      * until shutdown. Closing the socket fails the write; the thread then exits and releases the
+      * slot. Runs on the accept thread, at most once per [[StallSweepIntervalNanos]].
+      */
+    private def reapStalledWrites(): Unit =
+      val now = java.lang.System.nanoTime()
+      if now - lastStallSweep >= StallSweepIntervalNanos then
+        lastStallSweep = now
+        val connections = live.keySet().iterator()
+        while connections.hasNext do
+          val connection = connections.next()
+          if connection.writeBlockedNanos(now) > writeStallNanos then
+            debugLog("closing a connection whose write stalled (peer stopped reading)")
+            connection.closeSocket()
 
     /** Called by a connection thread as it exits. */
     def release(connection: Connection[R]): Unit =
@@ -318,8 +372,30 @@ private[fastmcp] object SocketHttpServer:
   /** One accepted socket: the request loop, framing, and response writing, all on one thread. */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private final class Connection[R](socket: Socket, owner: Listener[R]) extends Runnable:
-    private val input = new ConnectionInput(socket.getInputStream)
+
+    private val input =
+      new ConnectionInput(socket.getInputStream, owner.config.requestReadTimeoutMs)
     private val out: OutputStream = socket.getOutputStream
+    private val idleTimeoutMs = owner.config.idleTimeoutMs
+
+    /** `nanoTime` at which the write in progress began, or 0 when this thread is not writing — read
+      * by the accept thread's stalled-write sweep.
+      */
+    @volatile private var writeStarted = 0L
+
+    /** How long the write in progress has been blocked, or 0 when there is none. */
+    def writeBlockedNanos(now: Long): Long =
+      val started = writeStarted
+      if started == 0L then 0L else now - started
+
+    /** Write everything pending. Every socket write goes through here so a blocked one is visible
+      * to the stalled-write sweep.
+      */
+    private def flush(): Unit =
+      if buf.size > 0 then
+        writeStarted = math.max(1L, java.lang.System.nanoTime())
+        try buf.flushTo(out)
+        finally writeStarted = 0L
     private val buf = new OutBuffer(4 * 1024)
 
     /** The TCP peer address — the default owner key for bearer-task buckets. */
@@ -341,7 +417,7 @@ private[fastmcp] object SocketHttpServer:
     override def run(): Unit =
       try
         socket.setTcpNoDelay(true)
-        socket.setSoTimeout(IdleReadTimeoutMs)
+        socket.setSoTimeout(idleTimeoutMs)
         var keepAlive = true
         while keepAlive do keepAlive = serveOne()
       catch
@@ -357,13 +433,15 @@ private[fastmcp] object SocketHttpServer:
       * connection.
       */
     private def serveOne(): Boolean =
-      input.readHead(MaxHeadBytes) match
-        case Left(rejection) => reject(rejection)
-        case Right(None) => false // clean EOF between requests
-        case Right(Some(headBytes)) =>
-          Http1.parseHead(headBytes) match
-            case Left(rejection) => reject(rejection)
-            case Right(head) => dispatch(head)
+      try
+        input.readHead(MaxHeadBytes) match
+          case Left(rejection) => reject(rejection)
+          case Right(None) => false // clean EOF between requests
+          case Right(Some(headBytes)) =>
+            Http1.parseHead(headBytes) match
+              case Left(rejection) => reject(rejection)
+              case Right(head) => dispatch(head)
+      finally input.endRequest()
 
     private def dispatch(head: Head): Boolean =
       // Structural framing errors first (contradictory or unsupported headers); the size cap is
@@ -444,7 +522,7 @@ private[fastmcp] object SocketHttpServer:
                   if (java.lang.System.nanoTime() - lastWrite) / 1_000_000L >= interval then
                     try
                       appendFrame(SseFrame.Ping, pingChunked)
-                      buf.flushTo(out)
+                      flush()
                       lastWrite = java.lang.System.nanoTime()
                     catch case _: IOException => peerGone = true
                 }
@@ -476,7 +554,7 @@ private[fastmcp] object SocketHttpServer:
         catch
           case _: SocketTimeoutException => true
           case _: IOException => false
-        finally socket.setSoTimeout(IdleReadTimeoutMs)
+        finally socket.setSoTimeout(idleTimeoutMs)
       catch case _: IOException => false
 
     private def readBody(head: Head, framing: Framing): Either[Rejection, String] =
@@ -487,10 +565,15 @@ private[fastmcp] object SocketHttpServer:
           Left(Rejection(413, s"Request body exceeds $max bytes"))
         case Framing.Length(n) =>
           sendContinue(head)
-          input.readString(n).toRight(Rejection(400, "Request body ended prematurely"))
+          input.readString(n).toRight(bodyCutShort)
         case Framing.Chunked =>
           sendContinue(head)
           input.readChunked(max).map(bytes => new String(bytes, StandardCharsets.UTF_8))
+
+    /** A body that stopped arriving: the peer closed, or the whole-request read deadline passed. */
+    private def bodyCutShort: Rejection =
+      if input.timedOut then Rejection(408, "Request was not received in time")
+      else Rejection(400, "Request body ended prematurely")
 
     /** `100 Continue`, which solicits the body, is sent only once the request has been admitted;
       * RFC 9110 lets a server answer on the head alone without ever asking for the body.
@@ -498,7 +581,7 @@ private[fastmcp] object SocketHttpServer:
     private def sendContinue(head: Head): Unit =
       if head.expectsContinue then
         buf.ascii("HTTP/1.1 100 Continue\r\n\r\n")
-        buf.flushTo(out)
+        flush()
 
     /** Transport-level rejection: the same JSON-RPC error body the MCP layer uses, then close. */
     private def reject(rejection: Rejection): Boolean =
@@ -513,7 +596,7 @@ private[fastmcp] object SocketHttpServer:
         case HttpReply.Empty(status, headers) =>
           appendHead(status, headers, close)
           buf.ascii("content-length: 0\r\n\r\n")
-          buf.flushTo(out)
+          flush()
           !close
         case json: HttpReply.Json => writeJson(json, close)
         case sse: HttpReply.Sse => streamSse(sse, version, close)
@@ -525,7 +608,7 @@ private[fastmcp] object SocketHttpServer:
       buf.ascii(Integer.toString(body.length))
       buf.ascii("\r\n\r\n")
       buf.append(body)
-      buf.flushTo(out)
+      flush()
       !close
 
     /** Stream an SSE reply. HTTP/1.1 clients get chunked transfer-encoding and keep the connection;
@@ -557,7 +640,7 @@ private[fastmcp] object SocketHttpServer:
               val started = owner.runOrFork(pull.either)
               // About to wait: everything gathered so far (at least the head) goes out now.
               if started.isLeft then
-                try buf.flushTo(out)
+                try flush()
                 catch
                   case e: IOException =>
                     // The pull is already running: stop it before the scope closes under it.
@@ -571,12 +654,12 @@ private[fastmcp] object SocketHttpServer:
                 exit match
                   case Exit.Success(Right(frames)) =>
                     frames.foreach(frame => appendFrame(frame, chunked))
-                    if buf.size >= FlushThresholdBytes then buf.flushTo(out)
+                    if buf.size >= FlushThresholdBytes then flush()
                   case Exit.Success(Left(_)) => finished = true // end of stream
                   case Exit.Failure(_) => broken = true
             if finished then
               if chunked then buf.ascii("0\r\n\r\n")
-              buf.flushTo(out)
+              flush()
           catch
             case e: IOException =>
               // The peer went away mid-write; the finalizers below still run.
@@ -613,7 +696,7 @@ private[fastmcp] object SocketHttpServer:
     * lengths, and chunked bodies. Every method blocks; only the connection's own thread calls in.
     */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private final class ConnectionInput(in: InputStream):
+  private final class ConnectionInput(in: InputStream, requestReadTimeoutMs: Int):
     // Deliberately below 8 KiB: Scala Native allocates objects of 8 KiB and up through its
     // large-object allocator, whose slow path can hand a racing thread a null pointer (0.5.12:
     // `LargeAllocator_Alloc` retries once after growing the heap by exactly one object). A burst of
@@ -624,8 +707,23 @@ private[fastmcp] object SocketHttpServer:
     private var start = 0
     private var end = 0
 
+    /** `nanoTime` by which the request being read must be complete; armed by its first byte. */
+    private var deadline = Long.MaxValue
+
     /** Bytes read from the socket but not yet consumed. */
     def available: Int = end - start
+
+    /** `true` once the request being read has overrun its deadline. The socket's own read timeout
+      * only bounds one read, so a peer sending a byte at a time would otherwise never time out.
+      */
+    def timedOut: Boolean = java.lang.System.nanoTime() > deadline
+
+    /** The request has been read (or abandoned): the next one gets a fresh deadline. */
+    def endRequest(): Unit = deadline = Long.MaxValue
+
+    private def armDeadline(): Unit =
+      if deadline == Long.MaxValue then
+        deadline = java.lang.System.nanoTime() + requestReadTimeoutMs.toLong * 1_000_000L
 
     /** One blocking read appended to the buffer; the count read, or -1 at EOF. Compacts or grows
       * the buffer first, so byte offsets *relative to `start`* stay valid across calls.
@@ -659,6 +757,9 @@ private[fastmcp] object SocketHttpServer:
         while start < end && (buf(start) == '\r' || buf(start) == '\n') do
           start += 1
           scanned = math.max(0, scanned - 1)
+        // The first byte of a request starts its clock (bytes a liveness probe buffered count
+        // from the moment the request loop gets to them).
+        if available > 0 then armDeadline()
         headEnd(start + scanned) match
           case Some((headEnd, _)) if headEnd - start > max =>
             result = Some(Left(Rejection(431, s"Request head exceeds $max bytes")))
@@ -669,6 +770,8 @@ private[fastmcp] object SocketHttpServer:
           case None =>
             if available > max then
               result = Some(Left(Rejection(431, s"Request head exceeds $max bytes")))
+            else if timedOut then
+              result = Some(Left(Rejection(408, "Request was not received in time")))
             else
               // Re-scan the last 3 bytes next time: a terminator may straddle two reads.
               scanned = math.max(0, available - 3)
@@ -697,7 +800,7 @@ private[fastmcp] object SocketHttpServer:
     /** Wait until `n` bytes are buffered; `false` if the peer closed first. */
     private def require(n: Int): Boolean =
       var eof = false
-      while available < n && !eof do if fill() < 0 then eof = true
+      while available < n && !eof do if timedOut || fill() < 0 then eof = true
       available >= n
 
     /** Exactly `n` bytes, or `None` if the peer closed first. */
@@ -735,6 +838,8 @@ private[fastmcp] object SocketHttpServer:
           result = Some(Right(Some(line)))
         else if available > max then
           result = Some(Left(Rejection(400, "Chunk header line too long")))
+        else if timedOut then
+          result = Some(Left(Rejection(408, "Request was not received in time")))
         else
           scanned = available
           if fill() < 0 then result = Some(Right(None))
@@ -760,7 +865,13 @@ private[fastmcp] object SocketHttpServer:
                   result = Some(Left(Rejection(413, s"Request body exceeds $max bytes")))
                 else
                   readExactly(size) match
-                    case None => result = Some(Left(Rejection(400, "Truncated chunk")))
+                    case None =>
+                      result = Some(
+                        Left(
+                          if timedOut then Rejection(408, "Request was not received in time")
+                          else Rejection(400, "Truncated chunk")
+                        )
+                      )
                     case Some(bytes) =>
                       body.write(bytes)
                       readLine(8) match

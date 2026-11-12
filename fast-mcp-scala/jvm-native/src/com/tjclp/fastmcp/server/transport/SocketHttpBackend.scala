@@ -30,12 +30,25 @@ import com.tjclp.fastmcp.server.transport.http.{
   * @param trackFiberRoots
   *   whether request fibers are registered in ZIO's `Fiber.roots` (fiber dumps). `false` on Scala
   *   Native, where that registration's `WeakReference` per fiber is not reclaimed fast enough
+  * @param idleTimeout
+  *   a connection with no request activity is closed after this long
+  * @param requestReadTimeout
+  *   a whole request (head + body) must arrive within this long of its first byte (408)
+  * @param writeStallTimeout
+  *   a write blocked this long — the peer stopped reading a reply or an event stream — closes the
+  *   connection, so a stalled client cannot hold one of the `maxConnections` slots indefinitely
   */
 class SocketHttpBackend(
     entropy: TransportBackend,
     maxConnections: Int = SocketHttpServer.DefaultMaxConnections,
-    trackFiberRoots: Boolean = true
+    trackFiberRoots: Boolean = true,
+    idleTimeout: Duration = 60.seconds,
+    requestReadTimeout: Duration = 60.seconds,
+    writeStallTimeout: Duration = 30.seconds
 ) extends HttpTransportBackend:
+
+  private def millis(duration: Duration): Int =
+    math.max(1L, math.min(duration.toMillis, Int.MaxValue.toLong)).toInt
 
   override def serveHttp[R](
       router: McpRouter[R],
@@ -64,11 +77,13 @@ class SocketHttpBackend(
       app = new SocketHttpServer.App[R]:
         def admit(req: HttpRequest): Option[HttpReply] = handler.admit(req)
         def handle(req: HttpRequest): URIO[R, HttpReply] = handler.handle(req)
-      started <- SocketHttpServer.start(
-        settings.host,
-        settings.port,
-        settings.maxRequestBodyBytes,
-        maxConnections,
-        trackFiberRoots
-      )(app)
+      config = SocketHttpServer.Config(
+        maxBodyBytes = settings.maxRequestBodyBytes,
+        maxConnections = maxConnections,
+        trackFiberRoots = trackFiberRoots,
+        idleTimeoutMs = millis(idleTimeout),
+        requestReadTimeoutMs = millis(requestReadTimeout),
+        writeStallTimeoutMs = millis(writeStallTimeout)
+      )
+      started <- SocketHttpServer.start(settings.host, settings.port, config)(app)
     yield started

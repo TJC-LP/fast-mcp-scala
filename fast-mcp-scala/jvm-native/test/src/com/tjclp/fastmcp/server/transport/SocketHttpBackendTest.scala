@@ -54,6 +54,16 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     }
     .withTaskSupport(TaskSupport.Optional)
 
+  case class BigArgs(megabytes: Int)
+
+  /** A reply far larger than any socket buffer, so a client that does not read it blocks the
+    * server's write.
+    */
+  private val bigTool =
+    McpTool[BigArgs, String](name = "big", description = Some("Returns a large string")) { args =>
+      "x" * (args.megabytes * 1024 * 1024)
+    }
+
   private def baseSettings: McpServerSettings =
     McpServerSettings(
       host = "127.0.0.1",
@@ -66,15 +76,18 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(effect).getOrThrowFiberFailure())
 
   /** Start the socket backend on a free port for the duration of `body`, then tear it down. */
-  private def withServer[A](settings: McpServerSettings = baseSettings)(body: Int => A): A =
+  private def withServer[A](
+      settings: McpServerSettings = baseSettings,
+      backend: SocketHttpBackend = new SocketHttpBackend(summon[TransportBackend])
+  )(body: Int => A): A =
     val server = McpServer.typed[Any]("SocketT", "0.1.0", settings)
-    runUnsafe(server.tool(addTool) *> server.tool(chattyTool))
+    runUnsafe(server.tool(addTool) *> server.tool(chattyTool) *> server.tool(bigTool))
     runUnsafe(
       ZIO
         .scoped {
           for
             router <- server.buildRouter
-            started <- new SocketHttpBackend(summon[TransportBackend]).start(router, settings)
+            started <- backend.start(router, settings)
             // Blocking client reads cannot be interrupted, so race the body against the accept
             // loop: a loop that dies (a platform surprise in `accept`) fails the test at once
             // instead of leaving the client waiting on a listener that never answers.
@@ -576,6 +589,53 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       next.status shouldBe 200
       next.header("mcp-session-id").isDefined shouldBe true
       stream.close()
+    }
+  }
+
+  test("a client that stops reading a reply is disconnected, which frees its connection slot") {
+    // One slot only: while the stalled client holds it, nobody else can be served.
+    val backend = new SocketHttpBackend(
+      summon[TransportBackend],
+      maxConnections = 1,
+      writeStallTimeout = 500.millis
+    )
+    withServer(baseSettings.copy(stateless = true), backend) { port =>
+      val stalled = new RawClient(port, readTimeoutMs = 30_000)
+      val bigFrame =
+        """{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"big","arguments":{"megabytes":8}}}"""
+      // Ask for 8 MiB and never read a byte of it: the server's write blocks once the socket
+      // buffers fill, and only the write-stall sweep can end it.
+      stalled.send(post(bigFrame, accept = "application/json"))
+
+      // Queued in the backlog behind the stalled connection; served once the sweep closes it.
+      val next = new RawClient(port, readTimeoutMs = 20_000)
+      next.send(post(addFrame, accept = "application/json"))
+      val reply = next.readReply()
+      reply.status shouldBe 200
+      reply.body should include(""""id":3""")
+      reply.body should include("sum")
+      next.close()
+      stalled.close()
+    }
+  }
+
+  test("a request dribbled in past the request-read deadline is answered 408") {
+    val backend =
+      new SocketHttpBackend(summon[TransportBackend], requestReadTimeout = 400.millis)
+    withServer(backend = backend) { port =>
+      val client = new RawClient(port)
+      // Each fragment arrives well inside the 60 s per-read timeout; only the whole-request
+      // deadline can stop a client that never finishes its head.
+      client.send("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+      Thread.sleep(250)
+      client.send("X-Slow-A: 1\r\n")
+      Thread.sleep(250)
+      client.send("X-Slow-B: 2\r\n")
+      val reply = client.readReply()
+      reply.status shouldBe 408
+      reply.header("connection") shouldBe Some("close")
+      client.atEof() shouldBe true
+      client.close()
     }
   }
 

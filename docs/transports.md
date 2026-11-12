@@ -298,7 +298,10 @@ ready is written as a single packet (head, SSE frames and the chunked terminator
 | Protocol | HTTP/1.1 keep-alive, requests served one at a time per connection; HTTP/1.0 and `Connection: close` get close-delimited replies. No HTTP/2, no TLS (terminate both at a proxy) |
 | Request bodies | `Content-Length` and `Transfer-Encoding: chunked`, bounded on the wire by `maxRequestBodyBytes` (413); `Expect: 100-continue` is answered only after the header gates pass |
 | Request head | at most 8 KiB (431) |
-| Connections | 256 concurrent by default (`new SocketHttpBackend(backend, maxConnections = n)`); more wait in the kernel backlog. An idle keep-alive connection is closed after 60 s |
+| Connections | 256 concurrent by default (`new SocketHttpBackend(backend, maxConnections = n)`); more wait in the kernel backlog. The cap is a hard limit, so three timeouts keep a client from holding a slot without making progress (all constructor parameters) |
+| `idleTimeout` (60 s) | a keep-alive connection with no request activity is closed |
+| `requestReadTimeout` (60 s) | a whole request, head and body, must arrive within this long of its first byte (408); a client sending a byte at a time cannot keep resetting the per-read timeout |
+| `writeStallTimeout` (30 s) | a write blocked this long — the client stopped reading a large reply or an event stream — closes the connection. Blocking sockets have no write timeout, so the accept thread sweeps for stalled writes once a second |
 | SSE | chunked transfer-encoding; `keepAliveInterval` pings are written by the connection thread when the stream has been quiet that long |
 | Vanished clients | while a reply or a GET stream is quiet, the read side is probed once a second; a closed peer interrupts the request and releases the session's GET slot. A request that finishes within a second is never probed |
 | Shutdown | closing the server's scope closes the listener and every connection. ZIO signal handlers are no-ops on Scala Native, so SIGTERM there ends the process by the OS default |
