@@ -297,10 +297,10 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
         method <- send("mcp-method" -> "tools/list")
         version <- send("mcp-protocol-version" -> "2026-07-28")
         legacyVersion <- send("mcp-protocol-version" -> "2025-11-25")
-      yield List(name, sameName, method, version, legacyVersion).foreach { case (code, body) =>
-        code shouldBe 400
-        body should include("-32020")
-      }
+      yield
+        val replies = List(name, sameName, method, version, legacyVersion)
+        replies.map(_._1) shouldBe List.fill(replies.size)(400)
+        all(replies.map(_._2)) should include("-32020")
     }
   }
 
