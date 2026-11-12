@@ -269,8 +269,26 @@ Scala Native has no zio-http, so its `HttpTransportBackend` is a small HTTP/1.1 
 the JVM and Scala Native modules from `fast-mcp-scala/jvm-native/`). It renders the same shared
 `StreamableHttpHandler` as the zio-http backend, so every rule in this document — the gates and
 their order, the body and session caps, the legacy adapter, the 2026-07-28 stateless path — applies
-unchanged. On Scala Native it is the default (`NativeHttpBackend`); on the JVM it is an opt-in
-(`JvmSocketHttpBackend`) for netty-free deployments and GraalVM images.
+unchanged. On Scala Native it is the platform's HTTP backend (`NativeHttpBackend`) and is
+**experimental**; on the JVM it is an opt-in (`JvmSocketHttpBackend`) for netty-free deployments and
+GraalVM images.
+
+**Opting in on Scala Native.** `NativeHttpBackend` is marked `@experimental`, so a program that
+serves HTTP there — `McpServerApp[Http]`, or `runHttp()` — compiles only in experimental mode:
+
+```scala 3 raw
+//> using platform native
+//> using options -experimental
+
+object MyServer extends McpServerApp[Http, MyServer.type]:
+  @Tool() def add(a: Int, b: Int): Int = a + b
+```
+
+(`scalacOptions += "-experimental"` in sbt or Mill; or annotate the app object
+`@scala.annotation.experimental` instead of using the flag.) Without it the compiler refuses with
+a message that points here. Stdio programs on Scala Native never touch this backend and need
+nothing. The gate exists because of the runtime defect described under "Known limitation" below;
+it will be lifted when a Scala Native release contains the fix.
 
 **Opting in on the JVM.** Import the backend's given *by name* next to the root import:
 
@@ -311,15 +329,17 @@ ready is written as a single packet (head, SSE frames and the chunked terminator
 through a separate large-object allocator, and that allocator's slow path is not safe when several
 threads use it at once: it retries a single time after growing the heap by exactly one object, and
 a thread that loses the race receives a null pointer and the process aborts with `Unhandled signal
-11`. The fault is in the runtime (it reproduces with four threads allocating 8 KiB arrays in a
-loop, with no ZIO and no fast-mcp-scala code, under both the Immix and Commix collectors), and it
-has no configuration switch; a larger `GC_INITIAL_HEAP_SIZE` makes it rarer but does not remove
-it. The request path of this server is kept below the threshold — per-connection buffers start at
+11`. This is [scala-native#4916](https://github.com/scala-native/scala-native/issues/4916); it is
+fixed on Scala Native's main branch (#4935) but 0.5.12, the latest release, does not contain the
+fix. It reproduces with four threads allocating 8 KiB arrays in a loop, with no ZIO and no
+fast-mcp-scala code, under both the Immix and Commix collectors, on macOS and Linux, and it has no
+configuration switch; a larger `GC_INITIAL_HEAP_SIZE` makes it rarer but does not remove it. The request path of this server is kept below the threshold — per-connection buffers start at
 4 KiB and a small request allocates nothing that large — so ordinary small tool calls do not reach
 it. Concurrent requests or replies of 8 KiB and up do: in a stress test with 16 KiB request bodies
-on 16 connections the process aborted within seconds in most runs. Until that is fixed upstream,
-treat Scala Native HTTP as suitable for small payloads or low concurrency, and run it under a
-supervisor that restarts it. The JVM socket backend is not affected.
+on 16 connections the process aborted within seconds in most runs. Until a Scala Native release
+carries the fix, treat Scala Native HTTP as suitable for small payloads or low concurrency, and run
+it under a supervisor that restarts it — which is why the backend is `@experimental`. The JVM
+socket backend is not affected.
 
 Two more Scala Native specifics: request fibers are not registered in `Fiber.roots` (each
 registration allocates a `WeakReference`, which Scala Native does not reclaim at request rates —

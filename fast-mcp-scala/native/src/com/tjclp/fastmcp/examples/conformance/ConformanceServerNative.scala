@@ -1,5 +1,7 @@
 package com.tjclp.fastmcp.examples.conformance
 
+import scala.annotation.experimental
+
 import zio.*
 
 import com.tjclp.fastmcp.{*, given}
@@ -16,6 +18,7 @@ import com.tjclp.fastmcp.{*, given}
   * Linked by `./mill fast-mcp-scala.scalaNative.conformanceLink` and driven by
   * `scripts/conformance.sh scala-native`.
   */
+@experimental // HTTP on Scala Native is experimental (NativeHttpBackend)
 object ConformanceServerNative extends ZIOAppDefault:
 
   override def run =

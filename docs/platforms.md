@@ -32,9 +32,13 @@ contracts compile and mount unchanged on all three.
 ¹ zio-http is not published for Scala Native (upstream support is 4.x-milestoned), so the
 platform's `HttpTransportBackend` is `NativeHttpBackend`: a built-in HTTP/1.1 + SSE server over
 `java.net.ServerSocket` that renders the same shared `StreamableHttpHandler` as the JVM. It is on
-`main` (unreleased after 1.0.1), plaintext only, and experimental — read
+`main` (unreleased after 1.0.1), plaintext only, and **experimental**: `NativeHttpBackend` is marked
+`@experimental`, so `McpServerApp[Http]` / `runHttp()` on Scala Native compile only with the
+`-experimental` compiler flag (`//> using options -experimental` in scala-cli,
+`scalacOptions += "-experimental"` in sbt or Mill) or inside a definition that is itself
+`@experimental`. Stdio programs are unaffected. Read
 [the socket backend](./transports.md#the-socket-backend) before deploying it, in particular the
-Scala Native allocator limitation for payloads of 8 KiB and up. The same server is the JVM's
+Scala Native allocator defect for payloads of 8 KiB and up. The same server is the JVM's
 opt-in netty-free backend (`JvmSocketHttpBackend`).
 
 Node and Deno parity for the HTTP listener is a follow-up; only the `Bun.serve(...)` entry point is
@@ -151,10 +155,13 @@ Caveats (experimental):
 
 - HTTP is the built-in socket server (see the matrix footnote): plaintext HTTP/1.1, one thread
   per connection, 256 concurrent connections by default;
-- Scala Native 0.5.12 can abort the process when several threads allocate objects of 8 KiB or more
-  at the same time (its large-object allocator hands a racing thread a null pointer). The HTTP
-  request path itself stays below that size, but concurrent requests or replies of 8 KiB and up
-  do reach it — see [the socket backend](./transports.md#the-socket-backend);
+- HTTP requires the `-experimental` compiler flag (see the matrix footnote), because Scala Native
+  0.5.12 can abort the process when several threads allocate objects of 8 KiB or more at the same
+  time: its large-object allocator hands a racing thread a null pointer
+  ([scala-native#4916](https://github.com/scala-native/scala-native/issues/4916), fixed upstream
+  but not yet in a release). The HTTP request path itself stays below that size, but concurrent
+  requests or replies of 8 KiB and up do reach it — see
+  [the socket backend](./transports.md#the-socket-backend);
 - request fibers are not listed in `Fiber.roots` / fiber dumps on this platform (registering them
   costs a `WeakReference` each, which Scala Native does not reclaim at request rates);
 - session and task ids come from `/dev/urandom` (Unix only);

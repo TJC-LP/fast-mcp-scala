@@ -29,10 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - JVM opt-in: `import com.tjclp.fastmcp.server.transport.JvmSocketHttpBackend.httpInstance` next
     to the root import (a named import; a differently-named top-level given silently loses to the
     root import inside an object), or `server.runHttp()(using JvmSocketHttpBackend)`.
-  - **Experimental on Scala Native.** Scala Native 0.5.12's large-object allocator can abort the
-    process when several threads allocate 8 KiB or more at once. The request path stays below that
-    size, but concurrent requests or replies of 8 KiB and up reach it — see docs/transports.md
-    "The socket backend". Request fibers are not listed in `Fiber.roots` on this platform.
+  - **Experimental on Scala Native, and gated as such.** `NativeHttpBackend` is marked
+    `@experimental`: `McpServerApp[Http]` / `runHttp()` on Scala Native compile only with the
+    `-experimental` compiler flag (or from an `@experimental` definition); stdio programs are
+    unaffected and the library itself is still not compiled with the flag. The reason is a Scala
+    Native 0.5.12 runtime defect — its large-object allocator can abort the process when several
+    threads allocate 8 KiB or more at once (scala-native#4916, fixed upstream, not yet released).
+    The request path stays below that size, but concurrent requests or replies of 8 KiB and up
+    reach it — see docs/transports.md "The socket backend". Request fibers are not listed in
+    `Fiber.roots` on this platform.
 - **Skills extension (`io.modelcontextprotocol/skills`, SEP-2640)** as a native part of the shared
   core on JVM, Scala.js/Bun and Scala Native, over stdio and (where available) HTTP, in both the
   2026-07-28 stateless path and the initialize/session adapter. Implements the stable extension page

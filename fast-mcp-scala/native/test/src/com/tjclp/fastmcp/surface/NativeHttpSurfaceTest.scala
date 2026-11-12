@@ -1,5 +1,7 @@
 package com.tjclp.fastmcp.surface
 
+import scala.annotation.experimental
+
 import org.scalatest.funsuite.AnyFunSuite
 import zio.*
 
@@ -10,7 +12,12 @@ import com.tjclp.fastmcp.server.transport.{HttpTransportBackend, NativeHttpBacke
   * resolves the `java.net.ServerSocket` backend (before #81 it failed at the declaration site by
   * design — zio-http has no Native artifacts). Compile-time resolution is the contract; building
   * the core proves the wiring without binding a port.
+  *
+  * The backend is `@experimental`, so this class is too: that is the opt-in a user program makes
+  * (or `-experimental`). `NativeStdioStaysStableTest` pins the other half — a stdio program on the
+  * same root import compiles without it.
   */
+@experimental
 class NativeHttpSurfaceTest extends AnyFunSuite:
 
   object HttpApp extends McpServerApp[Http, HttpApp.type]:

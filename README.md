@@ -296,7 +296,7 @@ One core, three targets. The protocol layer is shared; each platform contributes
 | Tasks extension | ✅ | ✅ | ✅ |
 | Standalone binary | GraalVM native image | — | LLVM via Scala Native |
 
-¹ zio-http has no Scala Native artifacts, so Scala Native serves HTTP through a built-in HTTP/1.1 + SSE server over `java.net.ServerSocket` (plaintext; terminate TLS at a proxy). It is unreleased (on `main`, after 1.0.1) and experimental: see the [known limitation](docs/transports.md#the-socket-backend) for payloads of 8 KiB and up. The same server is an opt-in, netty-free HTTP backend on the JVM.
+¹ zio-http has no Scala Native artifacts, so Scala Native serves HTTP through a built-in HTTP/1.1 + SSE server over `java.net.ServerSocket` (plaintext; terminate TLS at a proxy). It is unreleased (on `main`, after 1.0.1) and **experimental**: the backend is marked `@experimental`, so an HTTP server on Scala Native compiles only with the `-experimental` compiler flag (stdio servers need nothing). The reason is a Scala Native 0.5.12 runtime defect that can abort the process under concurrent payloads of 8 KiB and up — see [the socket backend](docs/transports.md#the-socket-backend). The same server is an opt-in, netty-free HTTP backend on the JVM.
 
 The official MCP conformance suite runs in CI against the JVM, Bun and Scala Native servers and against the GraalVM native binary, with empty expected-failure baselines. Full parity matrix, Bun and Scala Native quickstarts: [docs/platforms.md](docs/platforms.md); coverage details: [docs/spec-coverage.md](docs/spec-coverage.md).
 
