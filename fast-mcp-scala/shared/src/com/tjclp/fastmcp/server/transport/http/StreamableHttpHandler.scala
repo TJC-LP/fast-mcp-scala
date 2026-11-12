@@ -261,8 +261,8 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     *
     * Nothing here can leave a session that only this request knows of behind:
     *   - the dispatch runs on this request's own fiber, so a client that goes away stops it, and
-    *     the session — stored by then or not — is dropped and terminated (`onInterrupt`): the client
-    *     never learned its id;
+    *     the session — stored by then or not — is dropped and terminated (`onInterrupt`): the
+    *     client never learned its id;
     *   - the store update and the terminations it calls for are one uninterruptible step
     *     ([[answerInitialize]]). Once a victim has left the store nothing can reach it by id — not
     *     DELETE, not the idle sweeper — so an `initialize` whose client goes away right then must
