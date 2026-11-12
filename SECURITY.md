@@ -81,6 +81,13 @@ Hardening knobs worth knowing when you deploy over HTTP
   longest-idle one that has been idle longer than `sessionIdleTimeout` — so an unauthenticated
   flood of `initialize` requests can evict idle legitimate sessions. Front non-loopback deployments
   with `allowedHosts`/`allowedOrigins` and an authenticating proxy.
+- A request holds nothing once nobody can be answered: a client that disconnects — while its
+  request runs, as the response head goes out, or before its event stream is started — stops the
+  request's dispatch and gives a legacy session's GET stream slot back. A reply whose stream is
+  never started is given up after 5 seconds at the latest (at once on the zio-http and socket
+  backends when the connection is seen to close). A legacy session removed from the store (DELETE,
+  idle eviction, eviction at `maxSessions`) is always terminated, so its in-flight requests and
+  tasks are released even when the request that removed it is itself cut short.
 - Transport failures and defects answer a fixed JSON-RPC error (400/413/500) with no exception
   text, stack trace, or path, on the JVM and on Bun regardless of `NODE_ENV`.
 - Modern Tasks IDs are bearer handles: possession grants access to that task

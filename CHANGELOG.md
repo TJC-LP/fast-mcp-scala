@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
+### Security
+
+- **A request's resources are released even when its reply is never streamed** (TJC-5087): on the
+  streamable-HTTP transport a request's dispatch and its message queue — and, for a legacy
+  session, the GET stream slot — were released by the response stream's finalizer alone, which
+  does nothing for a stream that is never started. A client that disconnected as the response
+  head went out, or a request interrupted between the handler and the backend, left the dispatch
+  running with nobody to answer, and left a session's GET slot taken: every later GET on that
+  session was answered `409`, and the idle sweeper skipped it as if it still had a live stream.
+  - A streamed reply now answers for those resources from the moment it exists. They are released
+    when its stream ends or is interrupted, when the backend drops the reply without running it,
+    or — failing both — 5 seconds after the reply was built if its stream has still not been
+    started. A stream first run after that is empty.
+  - On the zio-http backend a streamed reply is tied to the request's scope, so a connection that
+    closes before the stream starts releases them at once. The socket backend already released a
+    reply it could not deliver. Both are built on the shared handler, where the bound lives.
+  - The handler is uninterruptible from the moment it forks a request's dispatch until it hands
+    the reply back, except while it waits for the first frame; leaving that wait without a reply
+    stops the dispatch.
+  - A legacy session that leaves the store is always terminated: cap eviction at `maxSessions`,
+    `DELETE` and the idle sweeper now remove and terminate in one uninterruptible step, so an
+    `initialize` or `DELETE` whose client goes away mid-way cannot strand a session with its
+    in-flight requests and tasks.
+  - Bun: the same one-step eviction at the cap, and a client that had already gone when its
+    request reached the dispatch (it left while the body was being read) now stops that dispatch.
+    Bun has no GET stream, so it has no GET slot to release.
+  - No new setting and no wire change for a reply that is delivered. Replies that are complete at
+    their first frame are unaffected and gain no fiber or timer; a streamed reply carries one
+    sleeping watchdog fiber until its stream's first pull.
+
 ### Added
 
 - **Allow-listed HTTP request headers on `McpContext`** (#130): `McpServerSettings.contextHeaders:

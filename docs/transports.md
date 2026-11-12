@@ -226,6 +226,17 @@ session on the JVM (404) and as a missing header on Bun (400). On Bun a legacy s
 channel, so a server→client message emitted outside a request (a future
 `notifications/resources/updated`) has no delivery path; nothing publishes such messages today.
 
+A GET stream's slot (one stream per session; a second GET is answered 409) is given back when the
+stream ends, when the client disconnects, and when the reply is never streamed at all — a client
+that closes its connection as the response head goes out, before the server has started the
+stream. The same holds for the reply to a POST: a request whose reply stream is never started is
+stopped rather than left running. The zio-http and socket backends do both as soon as they see
+the connection close, and in any case it happens within 5 seconds of the reply being built (the
+shared handler gives up on a streamed reply that nothing has started by then; such a reply, run
+later, is an empty stream).
+Removing a session and terminating it are one step, so a `DELETE` or an at-cap `initialize` whose
+client goes away mid-way cannot leave a session that is gone from the store but still running.
+
 A GET peer that disappears without closing its connection (NAT expiry, a suspended machine) leaves
 the stream "live" from the server's point of view: the OS only notices such a peer once the server
 writes to the socket — that is, with `keepAliveInterval` set — and only after its own TCP
@@ -403,7 +414,7 @@ ready is written as a single packet (head, SSE frames and the chunked terminator
 | Refused requests | a reply that leaves request bytes unread (a body over the cap, a refused `Host`, a malformed head) is followed by a lingering close: the write side is shut down and the rest of the request discarded for up to 5 s, so the client reads the error reply instead of a connection reset |
 | Accept failures | a failed `accept` (out of file descriptors or threads, a connection reset before it was accepted) never stops the listener: it is retried with a pause that grows to 1 s for as long as it lasts, with a warning in the log on the first failure of a run and about once a minute after |
 | SSE | chunked transfer-encoding; `keepAliveInterval` pings are written by the connection thread when the stream has been quiet that long |
-| Vanished clients | while a reply or a GET stream is quiet, the read side is probed once a second; a closed peer interrupts the request and releases the session's GET slot. A request that finishes within a second is never probed |
+| Vanished clients | while a reply or a GET stream is quiet, the read side is probed once a second; a closed peer interrupts the request and releases the session's GET slot. A request that finishes within a second is never probed. A reply that cannot be delivered is released without being streamed; the shared handler's 5-second bound on an unstarted reply covers whatever is left |
 | Shutdown | closing the server's scope closes the listener and every connection. ZIO signal handlers are no-ops on Scala Native, so SIGTERM there ends the process by the OS default |
 | Diagnostics | `FASTMCP_HTTP_DEBUG=1` prints per-connection failures to stderr |
 
