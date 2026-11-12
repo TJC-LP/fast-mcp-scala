@@ -2,9 +2,12 @@ name: Conformance
 
 # Runs the official MCP conformance server harness (pinned in conformance/package.json + bun.lock,
 # installed with bun install --frozen-lockfile) against the fast-mcp-scala ConformanceServer over
-# streamable HTTP, on both platforms and in both scripts/conformance.sh modes:
+# streamable HTTP, on all three platforms — the JVM (ZIO HTTP), Scala.js on Bun (Bun.serve), and
+# Scala Native (the java.net.ServerSocket backend, as a linked LLVM binary) — and in both
+# scripts/conformance.sh modes:
 #   * active — the harness's active suite: 31 scenarios / 73 checks, every one at the 2025-11-25
-#     wire, checked against conformance/baseline-<platform>.yml (both baselines are empty);
+#     wire, checked against conformance/baseline-<platform>.yml (every baseline is empty;
+#     scala-native reuses baseline-jvm.yml);
 #   * 2026   — `--requirements 2026-07-28`: the scenarios that revision requires (37 scored, 118
 #     checks; extension/pending scenarios are reported but never scored), the only lane that sends
 #     2026-07-28 requests. No baseline file: the harness's own verdict is the gate.
@@ -24,9 +27,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [jvm, js]
+        platform: [jvm, js, scala-native]
         mode: [active, "2026"]
-    runs-on: ubuntu-latest
+        include:
+          # Share the ci.yml Scala Native toolchain cache (nativelib/javalib/clib NIR jars) instead
+          # of churning the JDK-matrix cache.
+          - platform: scala-native
+            cache-prefix: scala-native
+    runs-on: ubuntu-latest # scala-native: clang preinstalled; SN 0.5 recommends LLVM >= 17
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -37,10 +45,12 @@ jobs:
         uses: ./.github/actions/setup-build
         with:
           bun: "true"
+          cache-prefix: ${{ matrix.cache-prefix || '' }}
           cache-write: "false" # this job executes the npm harness: restore the shared cache read-only
 
       # Boots the server, drives it with the pinned harness in the matrix mode, and exits with the
-      # harness verdict (active: against the empty per-platform baseline; 2026: the scored scenarios).
+      # harness verdict (active: against the empty per-platform baseline — scala-native reuses
+      # baseline-jvm.yml; 2026: the scored scenarios).
       - name: Run MCP conformance ${{ matrix.mode }} (${{ matrix.platform }})
         env:
           PLATFORM: ${{ matrix.platform }}

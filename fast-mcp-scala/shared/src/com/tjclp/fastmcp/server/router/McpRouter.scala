@@ -257,14 +257,30 @@ final class McpRouter[R](
       case Some(handler) =>
         val pipeline = Middleware.chain(middlewares, method, handler)
         for
-          fiber <- pipeline(session, params).fork
-          _ <- session.trackInflight(id, method, fiber)
-          // Interrupt the handler explicitly when its request-scoped response stream closes. A
-          // long-lived subscriptions/listen handler otherwise outlives the dispatch fiber and
-          // leaves a stale registry entry behind.
-          exit <- fiber.await
-            .onInterrupt(fiber.interrupt.unit)
-            .ensuring(session.clearInflight(id))
+          // `forkDaemon`, not `fork`: the handler's lifetime is managed explicitly here (awaited,
+          // and interrupted when this dispatch is), so it needs no parent scope — and a scoped
+          // `fork` allocates a `WeakReference` to the parent plus a weak child-set entry per
+          // request, which Scala Native's weak-reference registry cannot reclaim at request rates
+          // (the heap grows without bound).
+          //
+          // A daemon fiber has no parent to interrupt it, so the fork, its registration and the
+          // interrupt hook are installed under one `uninterruptibleMask`: an interrupt of this
+          // dispatch (client disconnect, session termination) can only land once the hook exists,
+          // never between the fork and the hook, where it would leave the handler running with
+          // nothing tracking it. The handler itself and the wait for it stay interruptible.
+          //
+          // The hook interrupts the handler explicitly when its request-scoped response stream
+          // closes. A long-lived subscriptions/listen handler otherwise outlives the dispatch
+          // fiber and leaves a stale registry entry behind.
+          exit <- ZIO.uninterruptibleMask { restore =>
+            for
+              fiber <- restore(pipeline(session, params)).forkDaemon
+              _ <- session.trackInflight(id, method, fiber)
+              exit <- restore(fiber.await)
+                .onInterrupt(fiber.interrupt.unit)
+                .ensuring(session.clearInflight(id))
+            yield exit
+          }
           resp <- exit match
             case Exit.Success(result) =>
               ZIO.succeed(Some(Success(id, WireMapping.completeResult(result, serverInfo, modern))))

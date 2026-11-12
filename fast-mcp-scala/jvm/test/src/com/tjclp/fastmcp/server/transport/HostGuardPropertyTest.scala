@@ -224,7 +224,7 @@ class HostGuardPropertyTest extends AnyFunSuite with Matchers:
   }
 
   test("a duplicated Host header (joined value) carrying a foreign hostname is refused in either order (D3.7)") {
-    // JvmHttpBackend.gateHeader / Bun's Headers.get join repeated headers with ", ".
+    // JvmHttpBackend.gateHeader / Http1.Head.headerJoined / Bun's Headers.get join repeated headers with ", ".
     // `hostnameOf("127.0.0.1:8000, evil.example.com")` used to yield "127.0.0.1" (truncated at the
     // first ':') so the listed-first order passed the guard (D3 row 35). TJC-2354: a comma in the
     // Host authority is refused outright.
