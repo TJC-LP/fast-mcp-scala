@@ -86,6 +86,13 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     a live and recently used GET stream included. Only when holdings are level do the previous
     rules decide (longest-idle session without a live GET, else the longest-idle GET holder idle
     past `sessionIdleTimeout`, else 503).
+  - **Idle time is measured on the monotonic clock.** A session's last-activity time and every
+    comparison with it (the idle sweep at `sessionIdleTimeout`, the eviction order at
+    `maxSessions`) used the wall clock. A backward step (NTP, a VM resume) made a session used a
+    moment ago look like the longest idle one, so it was the next to be evicted at the cap; a
+    forward step longer than `sessionIdleTimeout` expired every session without a live GET at
+    the next sweep. Found by Antithesis's clock faults. `Session.lastSeen` now returns
+    monotonic milliseconds, comparable only with each other.
   - `docs/transports.md` ("The legacy session store") states the resulting worst case:
     `maxSessions` × the per-session budget, about 100 MiB of heap at the defaults, plus the
     subscription and task terms when those features are enabled.

@@ -369,7 +369,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
             }
           }
           .map { snapshot =>
-            val now = java.lang.System.currentTimeMillis()
+            val now = Session.monotonicMs()
             val idleMs = settings.sessionIdleTimeout.map(_.toMillis)
             HttpRequestGuards.pickVictim(snapshot, session.clientKey, now, idleMs) match
               case Some(victim) => (Right(Some(m(victim))), (m - victim) + (id -> session))
@@ -816,7 +816,7 @@ private[fastmcp] object StreamableHttpHandler:
         val timeoutMs = timeout.toMillis
         val sweep =
           for
-            now <- ZIO.succeed(java.lang.System.currentTimeMillis())
+            now <- ZIO.succeed(Session.monotonicMs())
             all <- store.get
             expired <- ZIO.filter(all.values.toList) { s =>
               (s.lastSeen zip s.hasActiveGet).map((seen, live) => !live && now - seen > timeoutMs)
