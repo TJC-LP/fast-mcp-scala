@@ -290,6 +290,29 @@ object `package` extends Module {
     def stage: T[PathRef] = Task {
       val linked = fullLinkJS().dest.path
       os.copy(linked / "main.js", Task.dest / "main.js")
+      // The source map lets Antithesis's JavaScript instrumentation attribute coverage to the
+      // Scala sources when the bundle is instrumented.
+      if (os.exists(linked / "main.js.map")) os.copy(linked / "main.js.map", Task.dest / "main.js.map")
+      PathRef(Task.dest)
+    }
+  }
+
+  /** The Bun server under test linked as a CommonJS module. Antithesis's JavaScript
+    * instrumentation supports `require` by default and needs an account setting for `import`, so
+    * this is the form to instrument. Same sources as [[antithesisSutJs]].
+    */
+  object antithesisSutCjs extends BunScalaJSModule {
+    def scalaVersion = scala3Version
+    def scalaJSVersion = Versions.scalaJs
+    override def moduleKind = Task { ModuleKind.CommonJSModule }
+    override def moduleDeps = Seq(js)
+    override def sources = antithesisSutJs.sources
+    override def scalacOptions = BuildConfig.crossScalacOptions
+
+    def stage: T[PathRef] = Task {
+      val linked = fullLinkJS().dest.path
+      os.copy(linked / "main.js", Task.dest / "main.js")
+      if (os.exists(linked / "main.js.map")) os.copy(linked / "main.js.map", Task.dest / "main.js.map")
       PathRef(Task.dest)
     }
   }
