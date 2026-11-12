@@ -147,7 +147,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     }
 
   /** Periodically drop streamable sessions idle past `settings.sessionIdleTimeout` (JVM twin:
-    * `JvmHttpBackend.evictIdleSessions`). Bun is single-threaded, so mutating the dictionary
+    * `StreamableHttpHandler.evictIdleSessions`). Bun is single-threaded, so mutating the dictionary
     * in-place is safe. Runs for the listener's lifetime on EVERY start entry (`serveHttp`,
     * `startStatefulHttp()`, `startStatelessHttp()`); the store is additionally bounded by
     * `settings.maxSessions` at mint time.
@@ -410,14 +410,14 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         )
 
   /** Mint a durable session for a header-less legacy `initialize`, bounded by
-    * `settings.maxSessions` (JVM twin: `JvmHttpBackend.mintSession`). Bun is single-threaded, so
-    * the idle/live snapshot, the admission decision, the eviction and the insert all happen in ONE
-    * synchronous `ZIO.succeed` block (`Session.idleStateUnsafe`, no fiber yield in between): the
-    * store never exceeds the cap with N initializes in flight, and a newcomer is never refused
-    * while an evictable session exists. At the cap the longest-idle session WITHOUT a live GET is
-    * evicted — terminated (`Session.terminate`: in-flight requests interrupted, its tasks released,
-    * queue shut down; WARN logged) — and the newcomer admitted; only when every stored session
-    * holds a live GET is the request refused with 503.
+    * `settings.maxSessions` (JVM twin: `StreamableHttpHandler.mintSession`). Bun is
+    * single-threaded, so the idle/live snapshot, the admission decision, the eviction and the
+    * insert all happen in ONE synchronous `ZIO.succeed` block (`Session.idleStateUnsafe`, no fiber
+    * yield in between): the store never exceeds the cap with N initializes in flight, and a
+    * newcomer is never refused while an evictable session exists. At the cap the longest-idle
+    * session WITHOUT a live GET is evicted — terminated (`Session.terminate`: in-flight requests
+    * interrupted, its tasks released, queue shut down; WARN logged) — and the newcomer admitted;
+    * only when every stored session holds a live GET is the request refused with 503.
     */
   private def mintSession[R](
       router: McpRouter[R],

@@ -42,8 +42,16 @@ Hardening knobs worth knowing when you deploy over HTTP
   request `Host` or the `allowedOrigins` allow-list; cross-port loopback origins, `null`, and
   malformed ports are refused with 403. IPv6 literals are listed in bracket form (`"[::1]"`). It
   guards against browser-driven attacks only; it is not authentication.
-- Both HTTP backends serve plaintext HTTP/1.1 only; there is no TLS setting by design. Terminate
+- Every HTTP backend (zio-http, `Bun.serve`, the socket server) serves plaintext HTTP/1.1 only; there is no TLS setting by design. Terminate
   TLS and authentication at a reverse proxy in front of the MCP endpoint.
+- The socket HTTP backend (the default on Scala Native, opt-in on the JVM) serves each connection
+  on its own thread and admits at most `maxConnections` (256) at once; unlike the event-loop
+  backends, that is a hard ceiling on concurrent clients, including idle keep-alive connections
+  and open event streams. Idle connections (60 s), requests that arrive too slowly
+  (a 60 s allowance extended by one second per 4 KiB received, then 408) and writes blocked on a client that stopped reading (30 s) are closed so a stalled
+  client cannot hold a slot indefinitely, but a client that keeps making progress within those
+  limits can hold one, and 256 such clients exhaust the listener. Put it behind a reverse proxy
+  that limits connections per client when it is reachable by untrusted peers.
 - Every POST must carry `Content-Type: application/json` (415 otherwise), evaluated before the
   body is read or a session is minted.
 - `maxRequestBodyBytes` (1 MiB) caps request bodies on every backend (413 before decoding), and
