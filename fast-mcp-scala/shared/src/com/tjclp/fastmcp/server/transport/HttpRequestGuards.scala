@@ -1,6 +1,7 @@
 package com.tjclp.fastmcp.server.transport
 
 import com.tjclp.fastmcp.server.McpServerSettings
+import com.tjclp.fastmcp.server.router.RequestHeaders
 
 /** Every transport-level admission decision of the HTTP backends, as pure functions over the
   * request headers and [[McpServerSettings]]. Backends (zio-http on the JVM, `Bun.serve` on
@@ -27,14 +28,21 @@ private[fastmcp] object HttpRequestGuards:
 
   /** Startup validation, run by every `serveHttp` before binding: each `allowedOrigins` entry must
     * parse as `scheme://host[:port]`, `maxRequestBodyBytes` must be positive and not exceed
-    * `limits.maxFrameChars`, and `maxSessions`, when set, must be positive (use `None` to disable
-    * the cap).
+    * `limits.maxFrameChars`, `maxSessions`, when set, must be positive (use `None` to disable the
+    * cap), and every `contextHeaders` entry must be an HTTP field name.
     */
   def validateSettings(settings: McpServerSettings): Either[String, Unit] =
     val bad = HostGuard.invalidOrigins(settings.allowedOrigins.getOrElse(Set.empty))
+    val badHeaders = RequestHeaders.invalidNames(settings.contextHeaders)
     if bad.nonEmpty then
       Left(
         s"allowedOrigins entries are not `scheme://host[:port]`: ${bad.toList.sorted.mkString(", ")}"
+      )
+    // A name that is not a token can never match a header, and on Bun looking it up throws for
+    // every request (`Headers.get` rejects it): refuse it once, at startup, on every backend.
+    else if badHeaders.nonEmpty then
+      Left(
+        s"contextHeaders entries are not HTTP header names: ${badHeaders.toList.sorted.map(n => s"'$n'").mkString(", ")}"
       )
     else if settings.maxRequestBodyBytes <= 0 then Left("maxRequestBodyBytes must be positive")
     else if settings.maxSessions.exists(_ <= 0) then
