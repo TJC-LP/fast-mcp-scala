@@ -161,7 +161,8 @@ private[fastmcp] object HttpRequestGuards:
     settings.maxSessions.exists(storeSize >= _)
 
   /** Victim for cap eviction: the longest-idle session WITHOUT a live GET. Tuples are `(sessionId,
-    * lastSeenMillis, hasActiveGet)`. `None` → nothing evictable → 503.
+    * lastSeenMillis, hasActiveGet)`. `None` → nothing evictable → 503. Every `lastSeen` / `now` in
+    * this object is a reading of the monotonic clock (`Session.monotonicMs`).
     */
   def pickEvictable(snapshot: Iterable[(String, Long, Boolean)]): Option[String] =
     snapshot.filterNot(_._3).minByOption(_._2).map(_._1)

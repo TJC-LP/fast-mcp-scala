@@ -171,7 +171,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         val timeoutMs = timeout.toMillis
         val sweep =
           for
-            now <- ZIO.succeed(java.lang.System.currentTimeMillis())
+            now <- ZIO.succeed(Session.monotonicMs())
             expired <- ZIO.filter(store.toList) { case (_, s) =>
               (s.lastSeen zip s.hasActiveGet).map((seen, live) => !live && now - seen > timeoutMs)
             }
@@ -521,7 +521,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                     HttpRequestGuards.StoredSession(id, seen, live, s.clientKey)
                   }
                 }
-                val now = java.lang.System.currentTimeMillis()
+                val now = Session.monotonicMs()
                 val idleMs = settings.sessionIdleTimeout.map(_.toMillis)
                 HttpRequestGuards.pickVictim(snapshot, peer, now, idleMs).flatMap(store.get) match
                   case Some(victim) =>
