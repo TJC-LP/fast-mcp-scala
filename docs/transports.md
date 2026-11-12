@@ -307,6 +307,17 @@ object the root import still wins and the server silently binds netty. For a sin
 `server.runHttp()(using JvmSocketHttpBackend)` passes the backend explicitly. Excluding
 `dev.zio::zio-http` from the dependency then removes netty from the classpath.
 
+To change the connection cap or the timeouts, declare a configured backend in your file under the
+default's exact name (the name is what replaces the imported default everywhere in the file; under
+any other name the given loses to the import inside an object):
+
+```scala 3 raw
+import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.server.transport.{HttpTransportBackend, JvmSocketHttpBackend}
+
+given httpInstance: HttpTransportBackend = JvmSocketHttpBackend.withSettings(maxConnections = 1024)
+```
+
 **How it runs.** One thread per connection, taken from ZIO's blocking executor, owns the socket
 and does plain blocking I/O; it enters ZIO only to run the MCP handler. A reply whose frames are
 ready is written as a single packet (head, SSE frames and the chunked terminator together).

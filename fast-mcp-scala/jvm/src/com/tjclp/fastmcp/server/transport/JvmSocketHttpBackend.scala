@@ -31,11 +31,23 @@ import com.tjclp.fastmcp.server.transport.http.SocketHttpServer
   * one-off, `server.runHttp()(using JvmSocketHttpBackend)` passes the backend explicitly.
   *
   * To change the connection cap or the timeouts, build a configured backend with [[withSettings]]
-  * and either pass it explicitly or shadow the default by declaring it under the same name:
+  * and either pass it explicitly — `server.runHttp()(using backend)` — or declare it in your file
+  * under the default's exact name, `httpInstance`:
   *
   * {{{
+  * import com.tjclp.fastmcp.{*, given}
+  * import com.tjclp.fastmcp.server.transport.{HttpTransportBackend, JvmSocketHttpBackend}
+  *
   * given httpInstance: HttpTransportBackend = JvmSocketHttpBackend.withSettings(maxConnections = 1024)
+  *
+  * object MyServer extends McpServerApp[Http, MyServer.type]: ...
   * }}}
+  *
+  * The name is what makes this work: a definition in the file outranks the root wildcard import for
+  * the name `httpInstance`, so the imported default is no longer a candidate anywhere in that file
+  * — top level, parent clauses and object bodies alike (`JvmSocketHttpConfiguredTest` pins all
+  * three). Under any other name the given is just a second candidate, and inside an object it loses
+  * to the import.
   *
   * Pair it with excluding `dev.zio::zio-http` from your dependencies to drop Netty from the
   * classpath entirely (and from GraalVM native images, where the seam split already keeps it
