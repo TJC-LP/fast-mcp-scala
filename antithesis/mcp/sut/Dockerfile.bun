@@ -16,14 +16,15 @@
 # server's own assertions are written in the SDK's fallback JSON-lines format instead.
 ARG SUT_PLATFORM=linux/amd64
 FROM --platform=${SUT_PLATFORM} debian:trixie-slim
-ARG TARGETARCH
 ARG BUN_VERSION=1.4.1
 # curl and jq are also the debug tools `snouty runs exec` can use in this container.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl jq unzip \
     && rm -rf /var/lib/apt/lists/*
 RUN set -eu; \
-    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+    # The image's own architecture, not TARGETARCH: a build without --platform reports the build
+    # host there, which is the wrong binary when the base image above was pinned to another one.
+    case "$(dpkg --print-architecture)" in \
       amd64) asset=bun-linux-x64-baseline; sum=a8c9c6738202e2fced555dd860a953c56c0cd059f75041e7010ae81a32802646 ;; \
       arm64) asset=bun-linux-aarch64; sum=580ce77533108dc6b10bec1721397e4f5aa44e909726da2451d483dfc5e581d6 ;; \
       *) echo "unsupported architecture" >&2; exit 1 ;; \

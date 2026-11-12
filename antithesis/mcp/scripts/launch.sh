@@ -24,7 +24,15 @@ plugin_version="${ANTITHESIS_PLUGIN_VERSION:-unknown}"
 # `snouty validate` refuses a project with containers left from another run.
 "${engine}" compose -f "${config}/docker-compose.yaml" down -v >/dev/null 2>&1 || true
 "${here}/scripts/build.sh"
-snouty validate "${config}"
+# `snouty validate` runs the x86-64 images on this machine. On an ARM workstation the x86-64 Bun
+# binary aborts under emulation, so validation cannot pass there: SKIP_VALIDATE=1 skips it. Run
+# scripts/local.sh first in that case (it runs the Bun node natively), and expect a broken
+# image to show up as a setup timeout in the run.
+if [[ "${SKIP_VALIDATE:-0}" == "1" ]]; then
+  echo "launch.sh: skipping snouty validate (SKIP_VALIDATE=1)" >&2
+else
+  snouty validate "${config}"
+fi
 snouty launch --launcher basic_test --config "${config}" \
   --test-name fast-mcp-scala-mcp \
   --source fast-mcp-scala-mcp \
