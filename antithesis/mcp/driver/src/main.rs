@@ -76,7 +76,9 @@ struct Driver {
     /// Sessions the driver ended itself (DELETE). Workers share sessions, so one may still be
     /// using a session another has just ended; its 404 is then expected.
     ended: Mutex<Vec<String>>,
-    /// Per node: the sequence number at which the latest flood of its session store began.
+    /// Per node: the sequence number at which the latest flood of its session store ended, or
+    /// `u64::MAX` while one is running. A session opened before that point may have been evicted
+    /// at the cap, including one opened while the flood was still running.
     flooded: Vec<AtomicU64>,
     tasks: Mutex<Vec<TaskRec>>,
     /// Rules hold this shared while they act; the eventually takes it exclusively.
@@ -694,7 +696,7 @@ impl Driver {
         }
         let Some(_g) = self.enter() else { return };
         // Recorded before the first initialize of the flood is sent.
-        self.flooded[node].store(self.next(), Ordering::SeqCst);
+        self.flooded[node].store(u64::MAX, Ordering::SeqCst);
         let mut admitted = 0;
         for _ in 0..FLOOD {
             let (status, opened) = self.open_session(node, Duration::from_secs(3));
@@ -708,6 +710,7 @@ impl Driver {
                 admitted += 1;
             }
         }
+        self.flooded[node].store(self.next(), Ordering::SeqCst);
         assert_sometimes!(admitted == FLOOD, "a flood of sessions is admitted by evicting idle ones", &json!({"admitted": admitted}));
     }
 

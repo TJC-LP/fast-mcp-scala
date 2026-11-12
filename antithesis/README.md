@@ -88,4 +88,4 @@ seconds of workload instead of behind its rare draw. `MCP_NODES` (`name=url,...`
 
 | Run | Budget | Result |
 |---|---|---|
-| (none yet) | | |
+| `5bb1479871fd547f383eb44e46e222b5-66-21` (2026-11-12, first run, `resilient`) | 12 h | No new library bug. Every correctness property held with no counterexample (never a 500, replies never crossed, header isolation, stream ordering, tasks, recovery). The five `known-failing.tsv` properties failed as listed, including the GET slot (20 counterexamples on 100 checks). One workload bug: `a live session is lost only when...` failed 40 times because the driver did not count a session opened during a flood as evictable by it; fixed in the driver. |
