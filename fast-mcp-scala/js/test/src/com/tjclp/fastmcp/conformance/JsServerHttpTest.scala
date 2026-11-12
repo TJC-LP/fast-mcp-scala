@@ -88,6 +88,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     if bunServer != null then bunServer.stop()
     keepAliveHandle.foreach(_.stop())
     contextHandle.foreach(_.stop())
+    abortHandle.foreach(_.stop())
     idleTimeoutHandle.foreach(_.stop())
     super.afterAll()
 
@@ -703,6 +704,24 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     )
     val thrown = intercept[IllegalArgumentException](server.startStatelessHttp())
     thrown.getMessage should include("allowedOrigins")
+    Future.successful(succeed)
+  }
+
+  it should "refuse to start on a contextHeaders entry that is not a header name" in {
+    // On Bun, `Headers.get` throws for such a name, so without this check every POST would
+    // answer 500 on a server that started normally.
+    val server = com.tjclp.fastmcp.server.McpServer(
+      "JsHttpBadContextHeaderServer",
+      "0.1.0",
+      McpServerSettings(
+        host = "127.0.0.1",
+        port = 38940,
+        stateless = true,
+        contextHeaders = Set("x-forwarded-email:")
+      )
+    )
+    val thrown = intercept[IllegalArgumentException](server.startStatelessHttp())
+    thrown.getMessage should include("contextHeaders")
     Future.successful(succeed)
   }
 
@@ -1700,4 +1719,104 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       body should startWith("event: message\ndata: ")
       body should include(""""id":6""")
       body should endWith("\n\n")
+  }
+
+  // --- a client that goes away before the response exists ---------------------------------------
+  // Until the first frame there is no ReadableStream whose cancel hook could report the
+  // disconnect; the request's abort signal has to.
+
+  private val abortPort = 38942
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private var abortHandle: Option[BunHttpHandle] = None
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private var watchedInterrupted = 0
+
+  private val watchedTool = McpTool
+    .withSchema[SleepArgs, String](
+      name = "watched",
+      inputSchema = sleepSchema,
+      description = Some("Sleeps silently and counts how often it is interrupted")
+    )
+    .contextual { (args, _) =>
+      ZIO
+        .sleep(args.millis.millis)
+        .as("watched done")
+        .onInterrupt(ZIO.succeed { watchedInterrupted += 1 })
+    }
+
+  /** No `keepAliveInterval`: nothing but the abort signal can end the wait for a first frame. */
+  private def abortServer(): Future[BunHttpHandle] =
+    abortHandle match
+      case Some(handle) => Future.successful(handle)
+      case None =>
+        val server = com.tjclp.fastmcp.server.McpServer(
+          "JsHttpAbortServer",
+          "0.1.0",
+          McpServerSettings(host = "127.0.0.1", port = abortPort, httpEndpoint = "/mcp")
+        )
+        runZio(server.tool(watchedTool).unit).map { _ =>
+          val handle = server.startStatefulHttp()
+          abortHandle = Some(handle)
+          handle
+        }
+
+  /** POST, then abort the request after `afterMs`, as a client that gives up does. */
+  private def abortedPost(headers: js.Dictionary[String], body: String, afterMs: Int): Future[Unit] =
+    val controller = js.Dynamic.newInstance(js.Dynamic.global.AbortController)()
+    val call = fetchAt(
+      abortPort,
+      js.Dynamic.literal(method = "POST", headers = headers, body = body, signal = controller.signal)
+    )
+    delay(afterMs).flatMap { _ =>
+      val _ = controller.abort()
+      call.map(_ => ()).recover { case _ => () }
+    }
+
+  private def waitFor(what: String, timeoutMs: Int)(done: => Boolean): Future[Unit] =
+    def loop(left: Int): Future[Unit] =
+      if done then Future.unit
+      else if left <= 0 then Future.failed(new RuntimeException(s"$what did not happen in ${timeoutMs}ms"))
+      else delay(50).flatMap(_ => loop(left - 50))
+    loop(timeoutMs)
+
+  "a client that goes away before the response exists (Bun)" should "cancel the handler on both protocol paths" in {
+    for
+      _ <- abortServer()
+      init <- fetchAt(
+        abortPort,
+        js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyInitBody)
+      )
+      _ <- text(init)
+      sid = header(init, "mcp-session-id").getOrElse(fail("initialize did not mint a session"))
+      ack <- fetchAt(
+        abortPort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("mcp-session-id" -> sid),
+          body = """{"jsonrpc":"2.0","method":"notifications/initialized"}"""
+        )
+      )
+      _ <- text(ack)
+      before = watchedInterrupted
+      // Legacy: aborted 200 ms in, inside the 1 s grace, so no response exists yet.
+      _ <- abortedPost(
+        jsonHeaders("mcp-session-id" -> sid),
+        """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"watched","arguments":{"millis":30000}}}""",
+        200
+      )
+      _ <- waitFor("the legacy handler's interruption", 5000)(watchedInterrupted >= before + 1)
+      // 2026-07-28: the wait for a first frame is unbounded without keepAliveInterval.
+      _ <- abortedPost(
+        jsonHeaders(
+          "mcp-protocol-version" -> "2026-07-28",
+          "mcp-method" -> "tools/call",
+          "mcp-name" -> "watched"
+        ),
+        """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"watched","arguments":{"millis":30000},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}""",
+        200
+      )
+      _ <- waitFor("the 2026-07-28 handler's interruption", 5000)(watchedInterrupted >= before + 2)
+    yield watchedInterrupted shouldBe before + 2
   }

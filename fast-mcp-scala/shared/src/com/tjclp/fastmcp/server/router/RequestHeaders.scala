@@ -25,6 +25,19 @@ private[fastmcp] object RequestHeaders:
   def normalise(names: Set[String]): Set[String] =
     names.map(normaliseName).filter(_.nonEmpty)
 
+  /** The entries that are not an HTTP field name (an RFC 9110 `token`) once trimmed — a typo such
+    * as a trailing colon or an inner space. An empty entry is one of them.
+    */
+  def invalidNames(names: Set[String]): Set[String] =
+    names.filterNot { name =>
+      val trimmed = name.trim
+      trimmed.nonEmpty && trimmed.forall(isTokenChar)
+    }
+
+  private def isTokenChar(c: Char): Boolean =
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+      "!#$%&'*+-.^_`|~".indexOf(c.toInt) >= 0
+
   /** HTTP header names are ASCII tokens; lower-case them without consulting a locale. */
   def normaliseName(name: String): String =
     name.trim.map(c => if c >= 'A' && c <= 'Z' then (c + 32).toChar else c)
