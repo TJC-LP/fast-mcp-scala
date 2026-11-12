@@ -8,7 +8,7 @@ import zio.stream.*
 import com.tjclp.fastmcp.core.{ErrorCodes, Protocol}
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError, RequestId}
 import com.tjclp.fastmcp.server.McpServerSettings
-import com.tjclp.fastmcp.server.router.{McpRouter, RequestHeaders, Session}
+import com.tjclp.fastmcp.server.router.{McpRouter, RequestContext, RequestHeaders, Session}
 import com.tjclp.fastmcp.server.transport.{HttpRequestGuards, MessageLoop, ModernHttpValidation}
 
 /** The streamable-HTTP MCP semantics, written once against the platform-neutral [[HttpRequest]] /
@@ -280,7 +280,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
   ): URIO[R, HttpReply] =
     message match
       case rpc: JsonRpcMessage.Request =>
-        streamRequest(session, rpc, isNew, modern = false)
+        streamRequest(session, rpc, isNew, modern = None)
       case other =>
         router.dispatch(session, other).map {
           // Only structurally-Invalid frames produce a reply here (notifications and inbound
@@ -296,18 +296,30 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       session: Session,
       message: JsonRpcMessage.Request,
       isNew: Boolean,
-      modern: Boolean
+      // `Some` for a 2026-07-28 request: its context, decoded once by the header validation and
+      // handed to the router so the dispatch does not decode `_meta` a second time.
+      modern: Option[RequestContext]
   ): URIO[R, HttpReply] =
+    val dispatch = modern match
+      case Some(context) => router.dispatchModern(session, message, context)
+      case None => router.dispatch(session, message)
     for
       reqQueue <- Queue.unbounded[JsonRpcMessage]
       // `ensuring` (uninterruptible) offers the close sentinel after the dispatch delivers its
       // reply — or after it is cancelled / dies replyless — so a streamed reply always ends.
       dispatchFiber <- session
-        .runWithSink(reqQueue)(router.dispatch(session, message))
+        .runWithSink(reqQueue)(dispatch)
         .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
         .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
         .forkDaemon
-      response <- firstFrameReply(reqQueue, message.id, session, isNew, dispatchFiber, modern)
+      response <- firstFrameReply(
+        reqQueue,
+        message.id,
+        session,
+        isNew,
+        dispatchFiber,
+        modern.isDefined
+      )
     yield response
 
   /** Choose the HTTP shape of a request's reply from its FIRST frame:
@@ -395,17 +407,17 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
   private def modernPost(req: HttpRequest, message: JsonRpcMessage): URIO[R, HttpReply] =
     message match
       case rpc: JsonRpcMessage.Request =>
-        ModernHttpValidation.validateRequest(router, rpc, req.header) match
+        ModernHttpValidation.validateRequestContext(router, rpc, req.header) match
           case Left((status, error)) =>
             val failure: JsonRpcMessage =
               JsonRpcMessage.Failure(Some(rpc.id), error.toErrorObject)
             ZIO.succeed(HttpReply.Json(status, failure.toJson))
-          case Right(_) =>
+          case Right(context) =>
             // Peer address of the request — the default owner key for bearer-task buckets
             // (`TaskOwnerKey.Transport`); behind a reverse proxy use `TaskOwnerKey.Custom`.
             Session
               .make(s"request-${rpc.id.toString}", clientKey = req.clientKey)
-              .flatMap(session => streamRequest(session, rpc, isNew = false, modern = true))
+              .flatMap(session => streamRequest(session, rpc, isNew = false, Some(context)))
       case _: JsonRpcMessage.Invalid =>
         val failure: JsonRpcMessage = JsonRpcMessage.Failure(
           None,

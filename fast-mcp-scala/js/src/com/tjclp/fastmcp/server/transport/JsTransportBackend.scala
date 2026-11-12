@@ -19,7 +19,7 @@ import com.tjclp.fastmcp.facades.runtime.{
 }
 import com.tjclp.fastmcp.interop.ZioJsPromise
 import com.tjclp.fastmcp.server.McpServerSettings
-import com.tjclp.fastmcp.server.router.{McpRouter, RequestHeaders, Session}
+import com.tjclp.fastmcp.server.router.{McpRouter, RequestContext, RequestHeaders, Session}
 import com.tjclp.fastmcp.server.transport.http.StreamableHttpHandler
 
 /** Scala.js (Bun-first) [[TransportBackend]].
@@ -492,7 +492,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   ): ZIO[R, Throwable, js.Dynamic] =
     message match
       case req: JsonRpcMessage.Request =>
-        requestResponse(router, session, req, isNew, settings, modern = false)
+        requestResponse(router, session, req, isNew, settings, context = None)
       case other =>
         val extra =
           if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String]
@@ -520,15 +520,21 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       req: JsonRpcMessage.Request,
       isNew: Boolean,
       settings: McpServerSettings,
-      modern: Boolean
+      // `Some` for a 2026-07-28 request: its context, decoded once by the header validation and
+      // handed to the router so the dispatch does not decode `_meta` a second time.
+      context: Option[RequestContext]
   ): ZIO[R, Throwable, js.Dynamic] =
+    val modern = context.isDefined
+    val dispatch = context match
+      case Some(ctx) => router.dispatchModern(session, req, ctx)
+      case None => router.dispatch(session, req)
     for
       reqQueue <- Queue.unbounded[JsonRpcMessage]
       // `ensuring` offers the close sentinel when dispatch ends replyless (cancellation) so a
       // streamed reply terminates; the bound fiber lets the stream's `cancel` hook interrupt the
       // dispatch when the client disconnects mid-request.
       fiber <- session
-        .runWithSink(reqQueue)(router.dispatch(session, req))
+        .runWithSink(reqQueue)(dispatch)
         .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
         .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
         .forkDaemon
@@ -679,11 +685,11 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             val failure: JsonRpcMessage =
               JsonRpcMessage.Failure(Some(rpc.id), error.toErrorObject)
             ZIO.succeed(jsonResponse(failure.toJson, Map.empty, status))
-          case Right(_) =>
+          case Right(context) =>
             Session
               .make(s"request-${rpc.id.toString}", clientKey = clientKey)
               .flatMap(session =>
-                requestResponse(router, session, rpc, isNew = false, settings, modern = true)
+                requestResponse(router, session, rpc, isNew = false, settings, Some(context))
               )
       case _: JsonRpcMessage.Invalid =>
         val failure: JsonRpcMessage =
@@ -725,8 +731,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       router: McpRouter[R],
       req: js.Dynamic,
       rpc: JsonRpcMessage.Request
-  ): Either[(Int, McpError), Unit] =
-    ModernHttpValidation.validateRequest(router, rpc, headerOf(req))
+  ): Either[(Int, McpError), RequestContext] =
+    ModernHttpValidation.validateRequestContext(router, rpc, headerOf(req))
 
   private def isModernRequest(req: js.Dynamic, message: JsonRpcMessage): Boolean =
     ModernHttpValidation.isModern(headerOf(req), message)
