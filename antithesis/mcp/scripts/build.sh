@@ -19,6 +19,13 @@ rm -rf "${here}/sut/stage"
 mkdir -p "${here}/sut/stage"
 cp -R "${staged}/bin" "${staged}/lib" "${here}/sut/stage/"
 
+echo "build.sh: linking the Bun bundle (./mill fast-mcp-scala.antithesisSutJs.stage)" >&2
+bundle="$(cd "${root}" && ./mill --no-server show fast-mcp-scala.antithesisSutJs.stage 2>/dev/null |
+  python3 -c "import sys,json,re; print(re.sub(r'^q?ref:v\\d+:[0-9a-f]+:','',json.load(sys.stdin)),end='')")"
+[ -f "${bundle}/main.js" ] || { echo "build.sh: the Bun stage task produced nothing at '${bundle}'" >&2; exit 1; }
+mkdir -p "${here}/sut/stage/js"
+cp "${bundle}/main.js" "${here}/sut/stage/js/main.js"
+
 files=(-f "${here}/config/docker-compose.yaml")
 for extra in "$@"; do files+=(-f "${extra}"); done
 "${engine}" compose "${files[@]}" build

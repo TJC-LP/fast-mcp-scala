@@ -12,10 +12,15 @@ Compose, `jq`, and a JDK for the Mill build. Use Podman on a workstation: the sc
 
 ## `mcp`: the HTTP transports
 
-**What it tests.** One server application (`mcp/sut`, the library with seven small tools) on the
-two JVM HTTP backends, each in its own container: `mcp-netty` (ZIO HTTP) and `mcp-socket`
-(`JvmSocketHttpBackend`). The server's own jars are instrumented by Antithesis; third-party jars
-are not. Bun and Scala Native are not in this workload yet.
+**What it tests.** One server application (`mcp/sut`, the library with seven small tools) on
+three HTTP backends, each in its own container: `mcp-netty` (ZIO HTTP), `mcp-socket`
+(`JvmSocketHttpBackend`) and `mcp-bun` (Scala.js on `Bun.serve`, which is separate HTTP code from
+the JVM backends and what production deployments on Bun run). The tools are shared source
+(`mcp/sut/shared`); only the launcher differs. On the JVM the project's own jars are instrumented
+by Antithesis and third-party jars are not. The Bun bundle is **not instrumented**: Antithesis's
+JavaScript instrumentation assumes Node and `require`, so faults and every driver property apply
+to Bun, but coverage does not guide exploration there (ask Antithesis about Bun and ES modules).
+Scala Native is not in this workload yet.
 
 **What the driver does.** `mcp/driver` is a Rust program built on hegel, as the skill prescribes.
 It speaks MCP over HTTP on both protocol paths, 2026-07-28 and legacy sessions, from several
@@ -50,7 +55,8 @@ is judged against exactly one request. Its rules:
 - Once faults stop: every node serves again, no handler is still running, a new session can be
   opened, and a dropped GET stream frees its slot.
 
-Assertions inside the server (`mcp/sut`, Antithesis Java SDK) cover what no reply shows: a tool
+Assertions inside the server (`mcp/sut`: the Antithesis Java SDK on the JVM, the SDK's fallback
+JSON-lines format on Bun) cover what no reply shows: a tool
 handler only sees arguments that satisfy its declared input schema, and the branch where a handler
 is interrupted before it finishes is reached.
 
@@ -70,8 +76,11 @@ antithesis/mcp/scripts/local.sh 90         # no faults; the eventually fires aft
 antithesis/mcp/scripts/launch.sh 12        # 12 compute hours on Antithesis
 ```
 
-- `build.sh` runs `./mill fast-mcp-scala.antithesisSut.stage` on the host and copies the jars
-  into `mcp/sut/stage/` (ignored by git) for the image. JVM bytecode is the same on every
+- `build.sh` runs `./mill fast-mcp-scala.antithesisSut.stage` and
+  `fast-mcp-scala.antithesisSutJs.stage` on the host and copies the jars and the Bun bundle
+  into `mcp/sut/stage/` (ignored by git) for the images. The Bun image installs Bun's baseline
+  x86-64 build from the checksum-pinned release archive; the local loop builds it for the host's
+  own architecture instead, because the x86-64 binary aborts under emulation on an ARM machine. JVM bytecode is the same on every
   platform, so nothing is compiled under emulation. The driver is cross-compiled in its image
   build.
 - `local.sh` writes its evidence (the SDK output of every container, the logs, and `unmet.tsv`)

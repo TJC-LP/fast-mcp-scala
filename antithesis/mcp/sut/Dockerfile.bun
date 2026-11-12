@@ -1,0 +1,40 @@
+# The server under test on Bun (Scala.js): the same tools as the JVM image, on the library's
+# Bun.serve transport, which is separate HTTP code from the JVM backends.
+#
+# The bundle is linked on the host by `scripts/build.sh`
+# (`./mill fast-mcp-scala.antithesisSutJs.stage`) and copied in from `sut/stage/js/`. The context
+# is this directory (`antithesis/mcp/sut`).
+#
+# Bun is installed from its release archive, checksum-pinned, rather than taken from the
+# oven/bun image, for two reasons. On x86-64 this picks the BASELINE build, which does not
+# require AVX2, so it does not depend on what the simulated CPU offers. And SUT_PLATFORM lets the
+# local loop build this image for the host's own architecture: the x86-64 binary aborts under
+# emulation on an ARM workstation.
+#
+# Not instrumented: Antithesis's JavaScript instrumentation assumes Node and `require`, and this
+# is an ES module on Bun, so the bundle is deliberately kept out of /opt/antithesis/catalog. The
+# server's own assertions are written in the SDK's fallback JSON-lines format instead.
+ARG SUT_PLATFORM=linux/amd64
+FROM --platform=${SUT_PLATFORM} debian:trixie-slim
+ARG TARGETARCH
+ARG BUN_VERSION=1.4.1
+# curl and jq are also the debug tools `snouty runs exec` can use in this container.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl jq unzip \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      amd64) asset=bun-linux-x64-baseline; sum=a8c9c6738202e2fced555dd860a953c56c0cd059f75041e7010ae81a32802646 ;; \
+      arm64) asset=bun-linux-aarch64; sum=580ce77533108dc6b10bec1721397e4f5aa44e909726da2451d483dfc5e581d6 ;; \
+      *) echo "unsupported architecture" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/bun.zip "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/${asset}.zip"; \
+    echo "${sum}  /tmp/bun.zip" | sha256sum -c -; \
+    unzip -q /tmp/bun.zip -d /tmp; \
+    install -m 755 "/tmp/${asset}/bun" /usr/local/bin/bun; \
+    rm -rf /tmp/bun.zip "/tmp/${asset}"
+COPY stage/js/main.js /opt/app/main.js
+COPY bun-entry.mjs /opt/app/entry.mjs
+ENV SUT_PORT=8000
+# `exec` so Bun is the container's main process and receives its signals.
+CMD ["sh", "-c", "exec bun run /opt/app/entry.mjs \"$SUT_PORT\""]

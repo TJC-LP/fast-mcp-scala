@@ -252,7 +252,8 @@ object `package` extends Module {
     override def scalaVersion: T[String] = scala3Version
     override def moduleDeps = Seq(jvm)
     override def sources = Task.Sources(
-      BuildCtx.workspaceRoot / "antithesis" / "mcp" / "sut" / "src"
+      BuildCtx.workspaceRoot / "antithesis" / "mcp" / "sut" / "shared" / "src",
+      BuildCtx.workspaceRoot / "antithesis" / "mcp" / "sut" / "jvm" / "src"
     )
     override def mvnDeps = Seq(mvn"com.antithesis:sdk:${Versions.antithesisSdk}")
     override def mainClass = Some("com.tjclp.fastmcp.antithesis.AntithesisSut")
@@ -267,6 +268,28 @@ object `package` extends Module {
       resolvedRunMvnDeps().map(_.path).filter(_.ext == "jar").foreach { dep =>
         os.copy.over(dep, lib / dep.last)
       }
+      PathRef(Task.dest)
+    }
+  }
+
+  /** The same server under test for Bun: the shared tools plus a Scala.js launcher that writes its
+    * assertions in the Antithesis fallback format. Not published. `stage` produces the optimized
+    * bundle the Bun image runs.
+    */
+  object antithesisSutJs extends BunScalaJSModule {
+    def scalaVersion = scala3Version
+    def scalaJSVersion = Versions.scalaJs
+    override def moduleKind = Task { ModuleKind.ESModule }
+    override def moduleDeps = Seq(js)
+    override def sources = Task.Sources(
+      BuildCtx.workspaceRoot / "antithesis" / "mcp" / "sut" / "shared" / "src",
+      BuildCtx.workspaceRoot / "antithesis" / "mcp" / "sut" / "js" / "src"
+    )
+    override def scalacOptions = BuildConfig.crossScalacOptions
+
+    def stage: T[PathRef] = Task {
+      val linked = fullLinkJS().dest.path
+      os.copy(linked / "main.js", Task.dest / "main.js")
       PathRef(Task.dest)
     }
   }

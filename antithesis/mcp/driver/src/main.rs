@@ -413,8 +413,9 @@ impl Driver {
                     }
                 }
                 let details = json!({"node": self.nodes[n].name, "first": first, "second": second});
-                assert_always!(first == 200, "a session's GET stream opens once faults stop", &details);
-                assert_always!(second == 200, "a dropped GET stream frees its slot", &details);
+                // 405: this backend has no GET channel (Bun), so there is no slot to free.
+                assert_always!(first == 200 || first == 405, "a session's GET stream opens once faults stop", &details);
+                assert_always!(second == 200 || first == 405, "a dropped GET stream frees its slot", &details);
             }
         }
         println!("driver: eventually: ending the timeline");
@@ -679,8 +680,13 @@ impl Driver {
         let details = json!({"node": self.nodes[node].name, "status": status});
         no_500(status, &details);
         // 409 while the previous stream's disconnect has not been noticed yet; 404 is judged by
-        // the next call on the session.
-        assert_always!(matches!(status, 200 | 404 | 409 | -1), "a GET on a session answers 200, 404 or 409", &details);
+        // the next call on the session; 405 on a backend with no GET channel (Bun, by design:
+        // its per-request streams carry all server-to-client traffic).
+        assert_always!(
+            matches!(status, 200 | 404 | 405 | 409 | -1),
+            "a GET on a session answers 200, 404, 405 or 409",
+            &details
+        );
         assert_sometimes!(status == 200, "a session's GET stream opens", &details);
         assert_sometimes!(status == 409, "a second GET finds the first still attached", &details);
     }
@@ -877,7 +883,8 @@ fn wait_until(what: &str, mut step: impl FnMut() -> Result<(), String>) {
 
 fn startup() -> Driver {
     antithesis_init();
-    let spec = std::env::var("MCP_NODES").unwrap_or_else(|_| "netty=http://mcp-netty:8000,socket=http://mcp-socket:8000".to_owned());
+    let spec = std::env::var("MCP_NODES")
+        .unwrap_or_else(|_| "netty=http://mcp-netty:8000,socket=http://mcp-socket:8000,bun=http://mcp-bun:8000".to_owned());
     let nodes: Vec<Node> = spec
         .split(',')
         .filter_map(|entry| entry.split_once('='))

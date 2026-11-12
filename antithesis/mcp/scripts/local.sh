@@ -11,6 +11,11 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 engine="${CONTAINER_ENGINE:-podman}"
 export DRIVER_EVENTUALLY_AFTER_S="${1:-90}"
+# The Bun node runs natively here (see local/docker-compose.local.yaml).
+case "$(uname -m)" in
+  arm64|aarch64) export LOCAL_PLATFORM="${LOCAL_PLATFORM:-linux/arm64}" ;;
+  *) export LOCAL_PLATFORM="${LOCAL_PLATFORM:-linux/amd64}" ;;
+esac
 compose=("${engine}" compose -f "${here}/config/docker-compose.yaml" -f "${here}/local/docker-compose.local.yaml")
 out="${here}/out/$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "${out}"
@@ -32,10 +37,10 @@ done
 code="$("${engine}" inspect -f '{{.State.ExitCode}}' driver)"
 
 "${compose[@]}" cp driver:/tmp/sdk.jsonl "${out}/sdk.jsonl" || true
-for svc in mcp-netty mcp-socket; do
+for svc in mcp-netty mcp-socket mcp-bun; do
   "${compose[@]}" cp "${svc}:/tmp/sdk.jsonl" "${out}/sdk-${svc}.jsonl" || true
 done
-for svc in driver mcp-netty mcp-socket; do
+for svc in driver mcp-netty mcp-socket mcp-bun; do
   "${compose[@]}" logs --no-color "${svc}" > "${out}/${svc}.log" 2>&1 || true
 done
 # Down, not stop: `snouty validate` refuses a project with containers left over.
