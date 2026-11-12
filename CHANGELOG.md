@@ -152,6 +152,37 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   4096-element chunk; it is now a single-element stream. Affects every HTTP backend built on the
   shared handler.
 
+### Security
+
+- **The socket HTTP backend parses requests strictly** (TJC-5087). It is the default on Scala
+  Native and opt-in on the JVM, and it usually sits behind a reverse proxy, so a request the two
+  could read differently is now refused instead of repaired. Each refusal is a `400` JSON-RPC
+  transport error followed by `Connection: close`; nothing else on that connection is served.
+  - Request head: every line ends in CRLF. A bare LF, a bare CR, NUL, any other control character
+    except HTAB inside a field value, or DEL is refused as soon as it is read — also in the empty
+    lines allowed before the request line. `LF LF` and `LF CRLF` no longer end a head.
+  - Only SP and HTAB are removed around a field value (it used to be every character up to
+    U+0020), so `Content-Length` / `Transfer-Encoding` values padded with control characters are
+    refused rather than recognised. `Content-Length` is ASCII digits only.
+  - Methods and field names are ASCII `tchar` only. The request line is
+    `method SP target SP version` exactly: repeated, leading or trailing spaces and HTAB are refused.
+  - Chunked request bodies: a chunk-size line is hex digits from its first byte (at most 7),
+    optionally followed by chunk extensions, and ends in CRLF; chunk data is followed by exactly
+    CRLF; trailer lines are field lines ending in CRLF. Padded sizes, a bare LF or CR anywhere in
+    the framing, control characters in a chunk extension and trailer lines that are not field lines
+    are refused. Well-formed chunked bodies, extensions and trailers decode as before.
+- **A repeated routing header on a POST is refused** (TJC-5087): `MCP-Protocol-Version`,
+  `Mcp-Method`, `Mcp-Name` and every `Mcp-Param-*` carry one value, and the header/body checks
+  read one occurrence. A 2026-07-28 POST that carries any of them more than once is now answered
+  `400` with the header-mismatch error (`-32020`), whatever the values and their order — also when
+  the occurrences agree. Before, the zio-http and socket backends compared the first occurrence
+  only. A repeated `MCP-Protocol-Version` is refused on every POST, so its first value cannot
+  select the legacy path while a later one says `2026-07-28`. On Bun the runtime joins a repeated
+  header into one value before the server sees it: a joined `MCP-Protocol-Version` was already
+  refused there and now gets `-32020` instead of `-32022`, and the other headers are compared with
+  the body as the joined value, as before. Requests that send each of these headers once are
+  unaffected.
+
 ## [1.0.1] - 2026-09-18
 
 ### Security

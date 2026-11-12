@@ -833,6 +833,80 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     bodyOf(valid) should include("42")
   }
 
+  test("modern POST: a repeated routing header is a header mismatch (400, -32020), whatever the order") {
+    val routes = buildRoutes(stateless = false)
+    val version = "mcp-protocol-version" -> "2026-07-28"
+    val legacy = "mcp-protocol-version" -> "2025-11-25"
+    val method = "mcp-method" -> "tools/call"
+    val name = "mcp-name" -> "add"
+    def send(body: String, headers: (String, String)*): Response =
+      rawPost(routes, body, (JsonHeaders ++ headers)*)
+    def mismatch(body: String, headers: (String, String)*): Unit =
+      withClue(s"headers $headers: ") {
+        val response = send(body, headers*)
+        response.status shouldBe Status.BadRequest
+        bodyOf(response) should include(""""code":-32020""")
+      }
+
+    // One occurrence of each: served as before.
+    val single = send(modernCallFrame, version, method, name)
+    single.status shouldBe Status.Ok
+    bodyOf(single) should include("42")
+
+    // Two different Mcp-Name values are refused whichever of them matches the body.
+    mismatch(modernCallFrame, version, method, name, "mcp-name" -> "slow")
+    mismatch(modernCallFrame, version, method, "mcp-name" -> "slow", name)
+    mismatch(modernCallFrame, version, method, name, "Mcp-Name" -> "add")
+    mismatch(modernCallFrame, version, method, "mcp-method" -> "tools/list", name)
+    mismatch(modernCallFrame, version, "mcp-method" -> "tools/list", method, name)
+    mismatch(modernCallFrame, version, method, name, method)
+    mismatch(modernCallFrame, version, method, name, "mcp-param-x" -> "1", "MCP-Param-X" -> "2")
+    mismatch(modernCallFrame, version, version, method, name)
+    mismatch(modernCallFrame, version, legacy, method, name)
+    mismatch(modernCallFrame, legacy, version, method, name)
+    // A body without the 2026-07-28 metadata: the first value must not pick the legacy path
+    // while a later one says 2026-07-28.
+    mismatch(initFrame, legacy, version)
+    mismatch(initFrame, version, legacy)
+    mismatch(initFrame, legacy, legacy)
+    send(initFrame, legacy).status shouldBe Status.Ok
+
+    // Notifications carry Mcp-Method too.
+    val cancelled =
+      """{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":99}}"""
+    val cancelMethod = "mcp-method" -> "notifications/cancelled"
+    send(cancelled, version, cancelMethod).status shouldBe Status.Accepted
+    mismatch(cancelled, version, cancelMethod, method)
+    mismatch(cancelled, version, method, cancelMethod)
+  }
+
+  test("modern POST: an MCP-Protocol-Version value joined from repeats is a header mismatch, not a version") {
+    val routes = buildRoutes(stateless = false)
+    def send(body: String, headers: (String, String)*): Response =
+      rawPost(routes, body, (JsonHeaders ++ headers)*)
+    // What a backend whose header lookup joins repeats (Bun's `Headers.get`), or a proxy that
+    // merges field lines, presents for a version header sent twice.
+    List("2026-07-28, 2026-07-28", "2025-11-25, 2026-07-28", "2026-07-28,2025-11-25").foreach { joined =>
+      withClue(s"version '$joined': ") {
+        val call = send(
+          modernCallFrame,
+          "mcp-protocol-version" -> joined,
+          "mcp-method" -> "tools/call",
+          "mcp-name" -> "add"
+        )
+        call.status shouldBe Status.BadRequest
+        bodyOf(call) should include(""""code":-32020""")
+        val notification = send(
+          """{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":99}}""",
+          "mcp-protocol-version" -> joined,
+          "mcp-method" -> "notifications/cancelled"
+        )
+        notification.status shouldBe Status.BadRequest
+        bodyOf(notification) should include(""""code":-32020""")
+      }
+    }
+  }
+
   test("streamable endpoint returns 405 for a modern-style GET without a legacy session") {
     val routes = buildRoutes(stateless = false)
     run(routes, Request.get(URL(Path.root / "mcp"))).status shouldBe Status.MethodNotAllowed

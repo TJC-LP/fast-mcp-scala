@@ -52,6 +52,18 @@ Hardening knobs worth knowing when you deploy over HTTP
   client cannot hold a slot indefinitely, but a client that keeps making progress within those
   limits can hold one, and 256 such clients exhaust the listener. Put it behind a reverse proxy
   that limits connections per client when it is reachable by untrusted peers.
+- The socket HTTP backend reads HTTP/1.1 strictly, because a proxy in front of it and the server
+  must agree on where each request ends: lines end in CRLF only, control characters are refused
+  (HTAB is allowed inside a field value), only SP and HTAB count as whitespace, and chunked
+  framing must be exact. Anything else is answered `400` and the connection is closed. This
+  narrows what a front end can be made to disagree about; it does not replace a proxy that
+  normalises or rejects malformed requests itself.
+- On a 2026-07-28 POST the routing headers (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`,
+  `Mcp-Param-*`) must each appear once: a repeat is refused with `-32020` on every backend, so a
+  gateway that authorises on one occurrence and the server can never act on different ones. A
+  gateway should still reject repeats itself rather than pick one. (Bun joins a repeated header
+  into one value before the server sees it; there the joined value is what is compared with the
+  body.)
 - `contextHeaders` (empty by default) exposes the listed request headers to handlers through
   `McpContext.header`. The library does not authenticate them: they are whatever the peer sent,
   so list a header only when a proxy in front of the server sets or strips it on every request,
