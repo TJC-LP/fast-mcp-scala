@@ -52,6 +52,12 @@ Hardening knobs worth knowing when you deploy over HTTP
   client cannot hold a slot indefinitely, but a client that keeps making progress within those
   limits can hold one, and 256 such clients exhaust the listener. Put it behind a reverse proxy
   that limits connections per client when it is reachable by untrusted peers.
+- `contextHeaders` (empty by default) exposes the listed request headers to handlers through
+  `McpContext.header`. The library does not authenticate them: they are whatever the peer sent,
+  so list a header only when a proxy in front of the server sets or strips it on every request,
+  and keep the listener unreachable except through that proxy. A header sent more than once is
+  seen as its joined value, and the library never logs the values — a forwarded access token is
+  a credential, so keep it out of your own logs and tool results too.
 - Every POST must carry `Content-Type: application/json` (415 otherwise), evaluated before the
   body is read or a session is minted.
 - `maxRequestBodyBytes` (1 MiB) caps request bodies on every backend (413 before decoding), and

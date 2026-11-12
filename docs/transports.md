@@ -91,6 +91,14 @@ its final response. Protocol sessions, `Mcp-Session-Id`, the standalone GET stre
 and HTTP DELETE are **not used** by the modern path. Closing a response stream interrupts its
 dispatch fiber; `subscriptions/listen` uses the same long-lived POST response.
 
+The shape of a modern reply is chosen from the request's first frame: an error that maps to an HTTP
+status is answered as plain JSON with that status (see the table below), anything else opens the
+SSE stream. With `keepAliveInterval` set, that wait is bounded by one interval — a handler that has
+produced nothing by then gets its stream opened with a heartbeat, and heartbeats continue until the
+reply, so a proxy in front sees bytes during a long quiet tool call. An error that maps to an HTTP
+status and is raised after the stream opened is delivered in-band (HTTP 200, the JSON-RPC error as
+the final event). Without `keepAliveInterval` the reply waits for the first frame.
+
 Modern Streamable HTTP is identical on the JVM (ZIO HTTP) and Bun (`Bun.serve`). Both backends
 serve plaintext HTTP/1.1 only — there is no TLS setting by design; terminate TLS and authentication
 at a reverse proxy in front of the MCP endpoint. Neither backend adds CORS headers or answers an
@@ -135,6 +143,43 @@ alike — so keep secrets out of the exception messages your tools can throw.
 
 The complete wire-behavior and review matrix is in the
 [2026-07-28 upgrade guide](./2026-07-28-upgrade.md#wire-behavior).
+
+### Request headers in handlers (`contextHeaders`)
+
+A server behind an authenticating proxy usually needs the identity the proxy forwards: who made
+the call, and often a forwarded access token to act as that user downstream. List the header names
+and read them from the context:
+
+```scala
+val settings = McpServerSettings(
+  contextHeaders = Set("x-forwarded-email", "x-forwarded-access-token")
+)
+
+@Tool(name = Some("whoami"))
+def whoami(ctx: McpContext): String =
+  ctx.header("x-forwarded-email").getOrElse("anonymous")   // ctx.headers: Map[String, String]
+```
+
+- **Nothing is exposed unless listed.** Names compare case-insensitively; `ctx.headers` is keyed
+  by lower-cased name and holds the listed headers that the request carried.
+- **Per request, not per session.** Each call sees the headers of the HTTP request that carried
+  it: a token the proxy rotates during a legacy session's life is seen with its new value, and a
+  2026-07-28 request sees its own. A task keeps the headers of the request that created it —
+  the requests that poll it do not change what the task's handler sees.
+- **A header sent more than once is seen joined** (`"a, b"`), on every backend. A value a client
+  sent and a proxy appended to is therefore never read as the proxy's value alone; a proxy should
+  still *replace* the header.
+- **The values are whatever the peer sent.** Listing a name is your statement that the proxy sets
+  or strips that header on every request. A client that can reach the server directly can send
+  any header it likes, so keep the listener on loopback or a private network behind the proxy.
+- The library never logs these values. Treat them as credentials in your own logging too.
+- Same behaviour on the JVM (zio-http and the socket backend), Bun and Scala Native. On stdio
+  `ctx.header` is always `None` and `ctx.headers` is empty.
+
+`ctx.protocolSessionId` tells a protocol session from a stand-in: it is `Some` (the
+`Mcp-Session-Id` value) only for a durable legacy session and `None` for a 2026-07-28 request,
+legacy stateless mode and stdio — for which `ctx.sessionId` still returns `request-…`,
+`stateless` and `stdio`.
 
 ### The legacy compatibility adapter
 
@@ -182,7 +227,7 @@ clients share one session identity, which is why legacy task requests there are 
 | `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless. |
 | `disallowDelete` | `false` | Legacy adapter: answer 405 to HTTP DELETE instead of terminating the session. |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity. Live legacy GET streams are exempt from the periodic sweep but become evictable at the `maxSessions` cap once idle this long; `None` disables both. |
-| `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. Legacy POST/GET streams heartbeat from the first byte; a modern per-request stream is opened — and its first heartbeat sent — only once the first frame is available, so a silent long tool call sends nothing until then (tracked for 1.0.1). Neither listener closes a quiet stream on its own: the JVM has no idle timeout and Bun runs with `idleTimeout: 0` (its 10 s default used to cut a slow tool's reply). Heartbeats are also what lets the OS detect a GET peer that vanished without closing its connection (the socket is only probed when the server writes to it, and the OS gives up after its retransmission budget); without them such a stream stays live until the cap-time eviction described under `maxSessions`. |
+| `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. Legacy POST/GET streams heartbeat from the first byte. A modern per-request reply waits for the handler's first frame for at most one interval: a call that is still silent then gets its SSE response opened with a heartbeat (since 1.1.0; see "The modern path"). With `None` a modern reply waits for the first frame however long that takes. Neither listener closes a quiet stream on its own: the JVM has no idle timeout and Bun runs with `idleTimeout: 0` (its 10 s default used to cut a slow tool's reply). Heartbeats are also what lets the OS detect a GET peer that vanished without closing its connection (the socket is only probed when the server writes to it, and the OS gives up after its retransmission budget); without them such a stream stays live until the cap-time eviction described under `maxSessions`. |
 | `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` value must parse as one `host[:port]` authority and its hostname (or the verbatim `host:port`) must be listed — the port itself is not compared; a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, a `Host` or `Origin` sent more than once (seen as its `", "`-joined value), and malformed `Host`/`Origin` ports are refused (403), with or without the other header. IPv6 entries are written bracketed, exactly as they appear in the `Host` header: `Set("[::1]")`, not `Set("::1")`. |
 | `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted in addition to the request's own authority **when `allowedHosts` is also set**; with `allowedOrigins` alone only the listed origins pass (the request's own authority is then refused 403 too). Malformed entries fail `runHttp()` at startup. |
 | `maxRequestBodyBytes` | `1 MiB` | Request body cap on every backend; larger bodies get 413 before decoding (empty 413 on the wire from netty/Bun, JSON-RPC `-32000` on first-party paths); must not exceed `limits.maxFrameChars`. This is the cap a large `sampling/createMessage` or elicitation *result* meets over HTTP (a legacy client then waits out its 60 s request timeout): raise it together with `limits.maxFrameChars` — see [Input limits](#input-limits). |
@@ -190,6 +235,7 @@ clients share one session identity, which is why legacy task requests there are 
 | `loggingEnabled` | `false` | Advertise logging; modern clients use per-request `_meta` levels, legacy clients `logging/setLevel`. |
 | `resourcesSubscribe` | `false` | Enable legacy `resources/subscribe`; modern clients use `subscriptions/listen`. |
 | `exposeTemplatesEndpoint` | `false` | List registered resource templates through `resources/templates/list`. `resources/list` never lists templates; with the default the templates endpoint answers an empty page (clients derive templates from `{}` URIs) and `resources/read` on a matching URI works either way. Applies on every transport. |
+| `contextHeaders` | `Set.empty` | HTTP request headers a handler may read through `McpContext.header` / `McpContext.headers`; nothing is exposed unless listed. See "Request headers in handlers". |
 | `tasks` | `TaskSettings()` | The Tasks extension, off by default (see [tasks.md](./tasks.md)). |
 | `limits` | `LimitSettings()` | Input bounds on every transport: `maxFrameChars` 4 MiB, `maxDepth` 64, `maxObjectFields` 1024 (`-32700` / HTTP 400 before dispatch), `maxUriChars` 8192 and `maxSubscriptionsPerSession` 1024 (`-32602`). See [Input limits](#input-limits). |
 

@@ -142,8 +142,8 @@ case class SkillSettings(
 
 /** Settings for an MCP server. HTTP-specific fields (`host`, `port`, `httpEndpoint`, `stateless`,
   * `keepAliveInterval`, `sessionIdleTimeout`, `disallowDelete`, `allowedHosts`, `allowedOrigins`,
-  * `maxRequestBodyBytes`, `maxSessions`) are ignored under stdio transports. `limits` and `tasks`
-  * apply on every transport.
+  * `maxRequestBodyBytes`, `maxSessions`, `contextHeaders`) are ignored under stdio transports.
+  * `limits` and `tasks` apply on every transport.
   */
 case class McpServerSettings(
     // Spec: HTTP servers SHOULD bind to localhost by default (DNS-rebinding surface). Deployments
@@ -216,7 +216,14 @@ case class McpServerSettings(
     instructions: Option[String] = None,
     // Optional io.modelcontextprotocol/skills extension (SEP-2640). Declared when enabled or when a
     // skill / provider is registered; see [[SkillSettings]] and docs/skills.md.
-    skills: SkillSettings = SkillSettings()
+    skills: SkillSettings = SkillSettings(),
+    // HTTP request headers a handler may read through `McpContext.header` / `McpContext.headers`.
+    // Nothing is exposed unless listed; names compare case-insensitively. Meant for an identity a
+    // proxy in front of the server forwards (a user id, a forwarded access token). Listing a name
+    // is the server author's statement that the proxy sets or strips it: a client that reaches the
+    // server directly can send any header it likes. Values are read per request, are never logged
+    // by the library, and a header sent more than once is seen as its ", "-joined value.
+    contextHeaders: Set[String] = Set.empty
 )
 
 /** Input limits applied to every inbound JSON-RPC frame on every transport (stdio and HTTP; JVM,

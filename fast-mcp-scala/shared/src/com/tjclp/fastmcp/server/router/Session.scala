@@ -29,6 +29,10 @@ final class Session private (
       * never derived from request content.
       */
     val clientKey: Option[String],
+    /** True only for a durable legacy streamable-HTTP session — the one case where [[sessionId]] is
+      * a protocol session id (the `Mcp-Session-Id` value) rather than a stand-in.
+      */
+    val isProtocolSession: Boolean,
     private val protocolVersionRef: Ref[String],
     private val logLevelRef: Ref[Option[LoggingLevel]],
     private val initializedRef: Ref[Boolean],
@@ -270,6 +274,18 @@ object Session:
       supportsTasks: Boolean = true,
       clientKey: Option[String] = None
   ): UIO[Session] =
+    build(sessionId, supportsTasks, clientKey, isProtocolSession = false)
+
+  /** A durable legacy streamable-HTTP session, whose id is the client's `Mcp-Session-Id`. */
+  private[fastmcp] def makeProtocolSession(sessionId: String): UIO[Session] =
+    build(sessionId, supportsTasks = true, clientKey = None, isProtocolSession = true)
+
+  private def build(
+      sessionId: String,
+      supportsTasks: Boolean,
+      clientKey: Option[String],
+      isProtocolSession: Boolean
+  ): UIO[Session] =
     for
       pv <- Ref.make("")
       ll <- Ref.make(Option.empty[LoggingLevel])
@@ -296,6 +312,7 @@ object Session:
       sessionId,
       supportsTasks,
       clientKey,
+      isProtocolSession,
       pv,
       ll,
       init,

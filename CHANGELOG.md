@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The next release is **1.1.0** (the `1.0.2` patch line was not cut).
+
 ### Added
+
+- **Allow-listed HTTP request headers on `McpContext`** (#130): `McpServerSettings.contextHeaders:
+  Set[String]` (default empty) names the request headers a handler may read through
+  `McpContext.header(name)` and `McpContext.headers` (lower-cased names, listed entries only).
+  Meant for an identity that an authenticating proxy forwards — a user id, an email, a forwarded
+  access token — so a tool can record who made a call and act as that user downstream.
+  - Names compare case-insensitively on the allow-list, on the wire and in the accessor. Nothing is
+    exposed unless listed.
+  - Read **per request**: a header that changes between two calls of one legacy session is seen
+    with its new value, and a 2026-07-28 request (which has no session) sees its own. A task keeps
+    the headers of the request that created it, not of the requests that poll it.
+  - A header sent more than once is seen as its `", "`-joined value on every backend, so a value a
+    client sent and a proxy appended to is never mistaken for the proxy's.
+  - Identical on the JVM (zio-http and the socket backend), Bun and Scala Native; always empty on
+    stdio. The library never logs the values.
+  - Listing a name is the server author's statement that the proxy sets or strips it — a client
+    that reaches the server directly can send any header. See SECURITY.md.
+- **`McpContext.protocolSessionId: Option[String]`** (#130): `Some` only for a durable legacy
+  streamable-HTTP session (the `Mcp-Session-Id` value); `None` for a 2026-07-28 request, legacy
+  stateless mode and stdio. `sessionId` is unchanged and keeps returning a stand-in for those
+  (`request-…`, `stateless`, `stdio`), so "is there a protocol session?" no longer needs
+  pattern-matching the id.
 
 - **Streamable HTTP on Scala Native, and a netty-free HTTP backend on the JVM** (TJC-2223, #81):
   a small HTTP/1.1 + SSE server over `java.net.ServerSocket` (`fast-mcp-scala/jvm-native/`, compiled
@@ -73,6 +97,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A silent 2026-07-28 call opens its SSE reply on the first heartbeat** (#114 D3.4 / D4.8), on
+  every HTTP backend. With `keepAliveInterval` set, a modern POST whose handler has produced
+  nothing after one interval gets its `text/event-stream` response started with a heartbeat, and
+  heartbeats continue until the reply. Before, the response was withheld until the handler's first
+  frame, so a long quiet tool call sent zero bytes and a proxy's idle timeout could cut it.
+  Consequence: an error that maps to an HTTP status (`-32020`, `-32021`, `-32022` → 400) raised
+  *after* the stream opened is delivered in-band — HTTP 200, the JSON-RPC error as the stream's
+  final event — because the status line has already gone. Errors raised within the first interval
+  keep their status, and nothing changes when `keepAliveInterval` is `None` (the default).
 - **`JvmHttpBackend` is a zio-http adapter over the shared `StreamableHttpHandler`** (TJC-2223):
   every streamable-HTTP decision — the admission gates, body and session caps with eviction,
   only-`initialize`-mints, request→SSE, the GET channel, DELETE, the 2026-07-28 stateless path, the

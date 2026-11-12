@@ -99,3 +99,15 @@ object MessageLoop:
 
   private[fastmcp] def isCloseSentinel(message: JsonRpcMessage): Boolean =
     message == CloseSentinel
+
+  /** Heartbeat marker a timer fiber offers into a per-request queue. Like [[CloseSentinel]] it
+    * never reaches the wire as a JSON-RPC message: the transports turn it into an SSE heartbeat or
+    * drop it. Offering it — instead of timing out the `take` that waits for the next frame — is
+    * what keeps a heartbeat from ever discarding a reply (TJC-2337: an interrupted `take` whose
+    * promise already held the reply lost it).
+    */
+  private[fastmcp] val KeepAliveSentinel: JsonRpcMessage =
+    Notification("$fastmcp/internal/keepalive", None)
+
+  private[fastmcp] def isKeepAliveSentinel(message: JsonRpcMessage): Boolean =
+    message == KeepAliveSentinel

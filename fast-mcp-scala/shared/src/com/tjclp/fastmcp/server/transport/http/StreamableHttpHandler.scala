@@ -8,7 +8,7 @@ import zio.stream.*
 import com.tjclp.fastmcp.core.{ErrorCodes, Protocol}
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError, RequestId}
 import com.tjclp.fastmcp.server.McpServerSettings
-import com.tjclp.fastmcp.server.router.{McpRouter, Session}
+import com.tjclp.fastmcp.server.router.{McpRouter, RequestHeaders, Session}
 import com.tjclp.fastmcp.server.transport.{HttpRequestGuards, MessageLoop, ModernHttpValidation}
 
 /** The streamable-HTTP MCP semantics, written once against the platform-neutral [[HttpRequest]] /
@@ -47,6 +47,9 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
 
   /** SSE heartbeat interval handed to the backend with every stream (see [[HttpReply.Sse]]). */
   private val keepAlive: Option[Duration] = settings.keepAliveInterval.map(Duration.fromJava)
+
+  /** `settings.contextHeaders` in matching form (lower-cased); empty for most servers. */
+  private val contextHeaders: Set[String] = RequestHeaders.normalise(settings.contextHeaders)
 
   /** Headers-only verdict for backends that read the request body themselves: `Some` is the final
     * reply — `404` off the endpoint, `405` for an unsupported method, or a POST refused by the
@@ -111,11 +114,18 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
               case Left(parseFailure) =>
                 ZIO.succeed(HttpReply.Json(400, parseFailure.toJson))
               case Right(message) =>
-                if ModernHttpValidation.isModern(req.header, message) then modernPost(req, message)
-                else
-                  store match
-                    case None => legacyStatelessDispatch(message)
-                    case Some(sessions) => legacySessionDispatch(sessions, req, message)
+                // Bind the allow-listed headers of THIS request around its dispatch (a no-op with
+                // an empty allow-list). The joined lookup, as for the gates: a header a client
+                // sent and a proxy then appended to shows up as one combined value, not as the
+                // client's.
+                RequestHeaders.scoped(contextHeaders, req.gateHeader) {
+                  if ModernHttpValidation.isModern(req.header, message) then
+                    modernPost(req, message)
+                  else
+                    store match
+                      case None => legacyStatelessDispatch(message)
+                      case Some(sessions) => legacySessionDispatch(sessions, req, message)
+                }
         }
 
   /** GET opens the server→client SSE channel for a session: each message offered to the session's
@@ -226,7 +236,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
   ): URIO[R, HttpReply] =
     for
       id <- randomId
-      session <- Session.make(id)
+      session <- Session.makeProtocolSession(id)
       outcome <- sessions.modifyZIO { m =>
         if !HttpRequestGuards.capReached(m.size, settings) then
           ZIO.succeed((Right(None), m + (id -> session)))
@@ -299,19 +309,58 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
         .forkDaemon
       response <-
-        if modern then
-          reqQueue.take.onInterrupt(dispatchFiber.interrupt *> reqQueue.shutdown).flatMap { first =>
-            ModernHttpValidation.errorStatus(first) match
-              case Some(status) =>
-                (dispatchFiber.interrupt *> reqQueue.shutdown)
-                  .as(HttpReply.Json(status, first.toJson))
-              case None =>
-                ZIO.succeed(
-                  requestSse(reqQueue, reqId, session, isNew, dispatchFiber, modern, Some(first))
-                )
-          }
+        if modern then modernReply(reqQueue, reqId, session, dispatchFiber)
         else ZIO.succeed(requestSse(reqQueue, reqId, session, isNew, dispatchFiber, modern, None))
     yield response
+
+  /** Choose the HTTP shape of a 2026-07-28 reply from the request's FIRST frame: an error that maps
+    * to an HTTP status is answered as plain JSON with that status, anything else opens the
+    * request's SSE stream.
+    *
+    * Without `keepAliveInterval` the reply waits for that frame, however long the handler is
+    * silent. With it, the wait is bounded by one interval: a handler that has produced nothing by
+    * then gets its SSE stream opened anyway, starting with a heartbeat, so a proxy in front sees
+    * bytes at the same cadence as on every other stream. The cost is that a status-mapped error
+    * arriving after the stream opened is delivered in-band (HTTP 200, the JSON-RPC error as the
+    * stream's final event) — the status line is gone by then.
+    *
+    * The bound is a timer fiber that OFFERS [[MessageLoop.KeepAliveSentinel]] into the request's
+    * queue; the wait itself stays one plain `take`, so the timer can never discard a frame.
+    */
+  private def modernReply(
+      reqQueue: Queue[JsonRpcMessage],
+      reqId: RequestId,
+      session: Session,
+      dispatchFiber: Fiber.Runtime[?, ?]
+  ): UIO[HttpReply] =
+    val abandon = dispatchFiber.interrupt *> reqQueue.shutdown
+    def sse(first: Option[JsonRpcMessage], openedByHeartbeat: Boolean): HttpReply =
+      requestSse(
+        reqQueue,
+        reqId,
+        session,
+        isNew = false,
+        dispatchFiber,
+        modern = true,
+        first,
+        openedByHeartbeat
+      )
+    def shaped(first: JsonRpcMessage): UIO[HttpReply] =
+      ModernHttpValidation.errorStatus(first) match
+        case Some(status) => abandon.as(HttpReply.Json(status, first.toJson))
+        case None => ZIO.succeed(sse(Some(first), openedByHeartbeat = false))
+    keepAlive match
+      case None => reqQueue.take.onInterrupt(abandon).flatMap(shaped)
+      case Some(interval) =>
+        for
+          // An offer into a queue that was shut down meanwhile interrupts this fiber by itself.
+          timer <- (ZIO.sleep(interval) *> reqQueue.offer(MessageLoop.KeepAliveSentinel)).forkDaemon
+          first <- reqQueue.take.onInterrupt(timer.interruptFork *> abandon)
+          reply <-
+            if MessageLoop.isKeepAliveSentinel(first) then
+              ZIO.succeed(sse(None, openedByHeartbeat = true))
+            else timer.interruptFork *> shaped(first)
+        yield reply
 
   private def requestSse(
       reqQueue: Queue[JsonRpcMessage],
@@ -320,19 +369,24 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       isNew: Boolean,
       dispatchFiber: Fiber.Runtime[?, ?],
       modern: Boolean,
-      first: Option[JsonRpcMessage]
+      first: Option[JsonRpcMessage],
+      openedByHeartbeat: Boolean = false
   ): HttpReply =
     // `ZStream.succeed`, not `ZStream.fromIterable(List(first))`: the iterable form sizes its chunk
     // builder for a full default chunk (4096 slots, a 32 KiB array) to carry this one message — on
     // every 2026-07-28 request. Besides the waste, an allocation that size takes Scala Native's
     // large-object path, which is not safe under concurrent allocation in 0.5.12.
     val queued = ZStream.fromQueue(reqQueue)
-    val messages = first.fold(queued)(message => ZStream.succeed(message) ++ queued)
-    val frames: ZStream[Any, Nothing, SseFrame] =
-      messages
+    val messages: ZStream[Any, Nothing, SseFrame] =
+      first
+        .fold(queued)(message => ZStream.succeed(message) ++ queued)
         .takeUntil(msg => isFinalReply(msg, reqId) || MessageLoop.isCloseSentinel(msg))
-        .filter(!MessageLoop.isCloseSentinel(_))
+        // The opening timer's sentinel can land after the first frame was taken (it is
+        // interrupted without waiting); it is not a message.
+        .filter(msg => !MessageLoop.isCloseSentinel(msg) && !MessageLoop.isKeepAliveSentinel(msg))
         .map(SseFrame.message)
+    val frames: ZStream[Any, Nothing, SseFrame] =
+      (if openedByHeartbeat then ZStream.succeed(SseFrame.Ping) ++ messages else messages)
         // Runs on the normal end of stream too, not just client abort. Task fibers are safe: they
         // are forked under Session.runWithoutSink (TaskRouting), so they never hold this queue.
         .ensuring(dispatchFiber.interrupt *> reqQueue.shutdown)

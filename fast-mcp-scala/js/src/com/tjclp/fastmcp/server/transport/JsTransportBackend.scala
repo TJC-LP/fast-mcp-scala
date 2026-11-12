@@ -19,7 +19,7 @@ import com.tjclp.fastmcp.facades.runtime.{
 }
 import com.tjclp.fastmcp.interop.ZioJsPromise
 import com.tjclp.fastmcp.server.McpServerSettings
-import com.tjclp.fastmcp.server.router.{McpRouter, Session}
+import com.tjclp.fastmcp.server.router.{McpRouter, RequestHeaders, Session}
 
 /** Scala.js (Bun-first) [[TransportBackend]].
   *
@@ -305,8 +305,16 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       headerErr match
         case Some(err) => ZIO.succeed(err)
         case None =>
-          if settings.stateless then handleStateless(router, settings, req, clientKey)
-          else handleStreamable(router, settings, store, req, clientKey)
+          val handled =
+            if settings.stateless then handleStateless(router, settings, req, clientKey)
+            else handleStreamable(router, settings, store, req, clientKey)
+          // Bind the allow-listed headers of THIS request around its dispatch (JVM twin:
+          // `StreamableHttpHandler.post`). `Headers.get` already joins a repeated header.
+          if settings.contextHeaders.isEmpty || methodOf(req) != "POST" then handled
+          else
+            RequestHeaders.scoped(RequestHeaders.normalise(settings.contextHeaders), headerOf(req))(
+              handled
+            )
 
   private def reject(r: HttpRequestGuards.Rejection): js.Dynamic =
     jsonRpcErrorResponse(r.status, r.message)
@@ -427,7 +435,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   ): ZIO[R, Throwable, js.Dynamic] =
     for
       sid <- randomId()
-      session <- Session.make(sid)
+      session <- Session.makeProtocolSession(sid)
       outcome <- ZIO.succeed {
         if !HttpRequestGuards.capReached(store.size, settings) then
           store(sid) = session
@@ -496,11 +504,10 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         }
 
   /** Heartbeat marker the keepalive fiber offers into a request's `reqQueue`; the pull turns it
-    * into an SSE comment frame (`: ping`). Like [[MessageLoop.CloseSentinel]] it never reaches the
-    * wire as a JSON-RPC message.
+    * into an SSE comment frame (`: ping`). Shared with the JVM handler, which uses it to open a
+    * silent 2026-07-28 reply on the first heartbeat.
     */
-  private val KeepAliveSentinel: JsonRpcMessage =
-    JsonRpcMessage.Notification("$fastmcp/internal/keepalive", None)
+  private val KeepAliveSentinel: JsonRpcMessage = MessageLoop.KeepAliveSentinel
 
   /** Build a Bun SSE `Response` whose `ReadableStream` is pull-fed from `reqQueue`: each take emits
     * one `event: message` frame, and the stream closes right after the request's final reply.
@@ -626,7 +633,20 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                 .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
                 .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
                 .forkDaemon
-              first <- reqQueue.take.onInterrupt(fiber.interrupt *> reqQueue.shutdown)
+              // With `keepAliveInterval`, the wait for the first frame is bounded by one interval:
+              // a timer OFFERS the heartbeat sentinel, and a reply that is still silent then opens
+              // its SSE stream with a heartbeat (JVM twin: `StreamableHttpHandler.modernReply`). A
+              // status-mapped error arriving after that is delivered in-band.
+              timer <- settings.keepAliveInterval match
+                case None => ZIO.none
+                case Some(interval) =>
+                  (ZIO.sleep(Duration.fromJava(interval)) *> reqQueue.offer(
+                    KeepAliveSentinel
+                  )).forkDaemon
+                    .map(Some(_))
+              stopTimer = timer.fold(ZIO.unit)(_.interruptFork)
+              first <- reqQueue.take.onInterrupt(stopTimer *> fiber.interrupt *> reqQueue.shutdown)
+              _ <- stopTimer
               response <- modernErrorStatus(first) match
                 case Some(status) =>
                   (fiber.interrupt *> reqQueue.shutdown).as(
