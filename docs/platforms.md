@@ -20,19 +20,22 @@ contracts compile and mount unchanged on all three.
 | `ToolSchemaProvider[A]` auto-derivation from `@Param` | ✅ native macro | ✅ native macro | ✅ native macro |
 | `ToHandlerEffect[F]` — plain values / ZIO / Either / Try | ✅ | ✅ | ✅ |
 | Stdio transport | ✅ | ✅ (Node stdio) | ✅ (LLVM binary) |
-| Streamable HTTP, MCP 2026-07-28 (stateless POST + request-scoped SSE) | ✅ (ZIO HTTP) | ✅ (`Bun.serve`) | ✗ by design¹ |
-| Legacy HTTP adapter (initialize, `Mcp-Session-Id`, GET stream, DELETE) | ✅ | ✅ (GET answers 405; per-request SSE covers server→client) | ✗ by design¹ |
-| Tasks extension (bearer handles) | ✅ | ✅ | ✅ (over stdio) |
-| Skills extension (`skills/list`, `skills/get`, `resources/directory/read`, skill files as resources) | ✅ | ✅ | ✅ (over stdio) |
+| Streamable HTTP, MCP 2026-07-28 (stateless POST + request-scoped SSE) | ✅ (ZIO HTTP; opt-in socket server) | ✅ (`Bun.serve`) | ✅ (built-in socket server)¹ |
+| Legacy HTTP adapter (initialize, `Mcp-Session-Id`, GET stream, DELETE) | ✅ | ✅ (GET answers 405; per-request SSE covers server→client) | ✅¹ |
+| Tasks extension (bearer handles) | ✅ | ✅ | ✅ |
+| Skills extension (`skills/list`, `skills/get`, `resources/directory/read`, skill files as resources) | ✅ | ✅ | ✅ (tested over stdio; HTTP serves it through the same shared handler) |
 | `SkillDirectoryLoader` (publish an on-disk skill directory) | ✅ | — (in-memory skills and providers) | — (in-memory skills and providers) |
 | SHA-256 for skill digests | `MessageDigest` | portable FIPS 180-4 (`core.skills.Sha256`) | portable FIPS 180-4 |
 | Custom decoders (`given JsonDecoder[T] → McpDecoder[T]`) | ✅ | ✅ (same shared zio-json path) | ✅ same |
 | Standalone binary | GraalVM native image (stdio + HTTP) | — | LLVM binary via Scala Native |
 
-¹ zio-http is not published for Scala Native (upstream support is 4.x-milestoned). The platform
-provides no `HttpTransportBackend` given, so `McpServerApp[Http]` programs fail to compile: a
-compile-time property, not a runtime failure. A socket-based HTTP backend is in progress
-([#81](https://github.com/TJC-LP/fast-mcp-scala/issues/81)).
+¹ zio-http is not published for Scala Native (upstream support is 4.x-milestoned), so the
+platform's `HttpTransportBackend` is `NativeHttpBackend`: a built-in HTTP/1.1 + SSE server over
+`java.net.ServerSocket` that renders the same shared `StreamableHttpHandler` as the JVM. It is on
+`main` (unreleased after 1.0.1), plaintext only, and experimental — read
+[the socket backend](./transports.md#the-socket-backend) before deploying it, in particular the
+Scala Native allocator limitation for payloads of 8 KiB and up. The same server is the JVM's
+opt-in netty-free backend (`JvmSocketHttpBackend`).
 
 Node and Deno parity for the HTTP listener is a follow-up; only the `Bun.serve(...)` entry point is
 Bun-specific today.
@@ -146,7 +149,14 @@ which spawn servers over pipes, see.
 
 Caveats (experimental):
 
-- stdio only (see the matrix footnote);
+- HTTP is the built-in socket server (see the matrix footnote): plaintext HTTP/1.1, one thread
+  per connection, 256 concurrent connections by default;
+- Scala Native 0.5.12 can abort the process when several threads allocate objects of 8 KiB or more
+  at the same time (its large-object allocator hands a racing thread a null pointer). The HTTP
+  request path itself stays below that size, but concurrent requests or replies of 8 KiB and up
+  do reach it — see [the socket backend](./transports.md#the-socket-backend);
+- request fibers are not listed in `Fiber.roots` / fiber dumps on this platform (registering them
+  costs a `WeakReference` each, which Scala Native does not reclaim at request rates);
 - session and task ids come from `/dev/urandom` (Unix only);
 - ZIO's signal handlers and shutdown hooks are no-ops on Scala Native, so shutdown is EOF-driven
   (the client closing stdin ends the loop) and SIGINT falls back to the OS default.
@@ -160,8 +170,9 @@ CI-gated. Recipes, flags, and the metadata audit loop are in [native-image.md](.
 ## How platform parity is verified
 
 `ci.yml` builds and tests the JVM and Scala.js modules on JDK 17, 21, and 25 and runs the Scala
-Native test suite, links the demo binary, and smokes it over stdio. `conformance.yml` runs the
-official MCP conformance harness against the JVM and Bun HTTP servers in both modes on every PR:
+Native test suite (which includes the socket server's wire tests, shared with the JVM), links
+the demo binary, and smokes it over stdio. `conformance.yml` runs the official MCP conformance
+harness against the JVM, Bun and Scala Native HTTP servers in both modes on every PR:
 the active suite at **73/73** checks (31 scenarios, 2025-11-25 wire, zero expected failures) and
 the 2026-07-28 requirements run at **37/37** scored scenarios (harness pinned and lock-frozen under
 `conformance/`); `native.yml` runs both against the GraalVM HTTP image — the 2026-07-28 run as a

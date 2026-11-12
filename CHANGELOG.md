@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Streamable HTTP on Scala Native, and a netty-free HTTP backend on the JVM** (TJC-2223, #81):
+  a small HTTP/1.1 + SSE server over `java.net.ServerSocket` (`fast-mcp-scala/jvm-native/`, compiled
+  by both the JVM and Scala Native modules) backs `McpServerApp[Http]` / `runHttp()` on Scala Native
+  (`NativeHttpBackend`, the platform default — zio-http has no Native artifacts) and ships on the
+  JVM as the opt-in `JvmSocketHttpBackend`. It renders the same shared `StreamableHttpHandler` as
+  the zio-http backend, so the header gates, body and session caps, the legacy adapter and the
+  2026-07-28 stateless path behave identically; it is held to the JVM's EMPTY conformance baseline
+  through the new `scripts/conformance.sh scala-native` lane (both modes, on every PR).
+  - One thread per connection (ZIO's blocking executor) with plain blocking I/O; the handler runs
+    through `Runtime.unsafe.runOrFork`, and a ready reply leaves as a single write. Keep-alive,
+    `Content-Length` and chunked request bodies, `Expect: 100-continue`, HTTP/1.0 clients, chunked
+    SSE, a once-a-second liveness probe on quiet streams; 8 KiB head cap (431),
+    `maxRequestBodyBytes` on the wire (413), 256 concurrent connections by default
+    (`new SocketHttpBackend(backend, maxConnections = n)`), 60 s idle timeout; plaintext only.
+  - JVM opt-in: `import com.tjclp.fastmcp.server.transport.JvmSocketHttpBackend.httpInstance` next
+    to the root import (a named import; a differently-named top-level given silently loses to the
+    root import inside an object), or `server.runHttp()(using JvmSocketHttpBackend)`.
+  - **Experimental on Scala Native.** Scala Native 0.5.12's large-object allocator can abort the
+    process when several threads allocate 8 KiB or more at once. The request path stays below that
+    size, but concurrent requests or replies of 8 KiB and up reach it — see docs/transports.md
+    "The socket backend". Request fibers are not listed in `Fiber.roots` on this platform.
 - **Skills extension (`io.modelcontextprotocol/skills`, SEP-2640)** as a native part of the shared
   core on JVM, Scala.js/Bun and Scala Native, over stdio and (where available) HTTP, in both the
   2026-07-28 stateless path and the initialize/session adapter. Implements the stable extension page
@@ -41,6 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`JvmHttpBackend` is a zio-http adapter over the shared `StreamableHttpHandler`** (TJC-2223):
+  every streamable-HTTP decision — the admission gates, body and session caps with eviction,
+  only-`initialize`-mints, request→SSE, the GET channel, DELETE, the 2026-07-28 stateless path, the
+  JSON-RPC 500 boundary — now lives once in `shared/.../server/transport/http/` and is rendered by
+  both the zio-http adapter and the socket server. Wire behaviour on the JVM is unchanged (the
+  existing HTTP suites and both conformance modes pass unmodified). The Bun backend still carries
+  its own rendering.
+- **The router forks each request handler with `forkDaemon`** (TJC-2223): the handler's lifetime
+  was already managed explicitly (awaited, and interrupted with its request), so nothing observable
+  changes; a scoped `fork` allocated a `WeakReference` per request, which Scala Native does not
+  reclaim at request rates.
 - `ResourceManager` gains mounted `ResourceSource`s (resolved after static resources and before
   templates) and `readResourceWithMime`; registering a static resource or a template that collides
   with a URI a mounted source serves now fails instead of overwriting.
@@ -48,6 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `McpServer`). Third-party implementations of the trait must add them.
 - `McpRouter.deriveCapabilities` declares the skills extension when its methods are registered;
   `RouterBuilder.build` and `Builtins` take an optional `SkillRegistry`.
+
+### Fixed
+
+- **2026-07-28 request replies no longer allocate a 32 KiB array each** (TJC-2223): the reply
+  stream carried its first message through `ZStream.fromIterable`, which sizes a builder for a full
+  4096-element chunk; it is now a single-element stream. Affects every HTTP backend built on the
+  shared handler.
 
 ## [1.0.1] - 2026-09-18
 

@@ -262,13 +262,74 @@ tools. Compiling with `-Wnonunit-statement` flags exactly this mistake
 `McpServer.typed[R]("name")` builds a server whose handlers may require a ZIO environment `R`;
 provide the layer at the boundary with `.provide(...)` on `runStdio()` / `runHttp()`.
 
+### The socket backend
+
+Scala Native has no zio-http, so its `HttpTransportBackend` is a small HTTP/1.1 + SSE server over
+`java.net.ServerSocket`, written for MCP and nothing else (`SocketHttpServer`, compiled into both
+the JVM and Scala Native modules from `fast-mcp-scala/jvm-native/`). It renders the same shared
+`StreamableHttpHandler` as the zio-http backend, so every rule in this document — the gates and
+their order, the body and session caps, the legacy adapter, the 2026-07-28 stateless path — applies
+unchanged. On Scala Native it is the default (`NativeHttpBackend`); on the JVM it is an opt-in
+(`JvmSocketHttpBackend`) for netty-free deployments and GraalVM images.
+
+**Opting in on the JVM.** Import the backend's given *by name* next to the root import:
+
+```scala 3 raw
+import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.server.transport.JvmSocketHttpBackend.httpInstance
+
+object MyServer extends McpServerApp[Http, MyServer.type]:
+  @Tool() def add(a: Int, b: Int): Int = a + b
+```
+
+The given has the same name as the default backend's on purpose: a named import outranks the root
+wildcard import and replaces the default everywhere in the file. Do not declare your own
+`given JvmSocketHttpBackend.type = JvmSocketHttpBackend` at the top level instead — inside any
+object the root import still wins and the server silently binds netty. For a single call,
+`server.runHttp()(using JvmSocketHttpBackend)` passes the backend explicitly. Excluding
+`dev.zio::zio-http` from the dependency then removes netty from the classpath.
+
+**How it runs.** One thread per connection, taken from ZIO's blocking executor, owns the socket
+and does plain blocking I/O; it enters ZIO only to run the MCP handler. A reply whose frames are
+ready is written as a single packet (head, SSE frames and the chunked terminator together).
+
+| Aspect | Behaviour |
+|---|---|
+| Protocol | HTTP/1.1 keep-alive, requests served one at a time per connection; HTTP/1.0 and `Connection: close` get close-delimited replies. No HTTP/2, no TLS (terminate both at a proxy) |
+| Request bodies | `Content-Length` and `Transfer-Encoding: chunked`, bounded on the wire by `maxRequestBodyBytes` (413); `Expect: 100-continue` is answered only after the header gates pass |
+| Request head | at most 8 KiB (431) |
+| Connections | 256 concurrent by default (`new SocketHttpBackend(backend, maxConnections = n)`); more wait in the kernel backlog. An idle keep-alive connection is closed after 60 s |
+| SSE | chunked transfer-encoding; `keepAliveInterval` pings are written by the connection thread when the stream has been quiet that long |
+| Vanished clients | while a reply or a GET stream is quiet, the read side is probed once a second; a closed peer interrupts the request and releases the session's GET slot. A request that finishes within a second is never probed |
+| Shutdown | closing the server's scope closes the listener and every connection. ZIO signal handlers are no-ops on Scala Native, so SIGTERM there ends the process by the OS default |
+| Diagnostics | `FASTMCP_HTTP_DEBUG=1` prints per-connection failures to stderr |
+
+**Known limitation on Scala Native (0.5.12).** Scala Native allocates objects of 8 KiB and up
+through a separate large-object allocator, and that allocator's slow path is not safe when several
+threads use it at once: it retries a single time after growing the heap by exactly one object, and
+a thread that loses the race receives a null pointer and the process aborts with `Unhandled signal
+11`. The fault is in the runtime (it reproduces with four threads allocating 8 KiB arrays in a
+loop, with no ZIO and no fast-mcp-scala code, under both the Immix and Commix collectors), and it
+has no configuration switch; a larger `GC_INITIAL_HEAP_SIZE` makes it rarer but does not remove
+it. The request path of this server is kept below the threshold — per-connection buffers start at
+4 KiB and a small request allocates nothing that large — so ordinary small tool calls do not reach
+it. Concurrent requests or replies of 8 KiB and up do: in a stress test with 16 KiB request bodies
+on 16 connections the process aborted within seconds in most runs. Until that is fixed upstream,
+treat Scala Native HTTP as suitable for small payloads or low concurrency, and run it under a
+supervisor that restarts it. The JVM socket backend is not affected.
+
+Two more Scala Native specifics: request fibers are not registered in `Fiber.roots` (each
+registration allocates a `WeakReference`, which Scala Native does not reclaim at request rates —
+the heap grew by gigabytes per minute under load before this was switched off), and the listener
+is plaintext only because `javax.net.ssl` is absent from the Scala Native javalib.
+
 ## Platform notes
 
 | | JVM | Scala.js / Bun | Scala Native |
 |---|---|---|---|
 | stdio | `System.in` / `System.out` (`JvmTransportBackend`) | Node `process.stdin` / `stdout` (`JsTransportBackend`) | `System.in` / `System.out`, ids from `/dev/urandom` (`NativeTransportBackend`) |
-| HTTP | ZIO HTTP on netty (`JvmHttpBackend`); NIO inside GraalVM images, `-Dfastmcp.http.channelType` overrides | `Bun.serve` (`JsTransportBackend`) | none by design: zio-http has no Native artifacts, so `McpServerApp[Http]` does not compile ([#81](https://github.com/TJC-LP/fast-mcp-scala/issues/81) tracks a socket backend) |
-| Legacy GET push stream | ✅ | 405 | n/a |
+| HTTP | ZIO HTTP on netty (`JvmHttpBackend`); NIO inside GraalVM images, `-Dfastmcp.http.channelType` overrides. Opt-in: the socket server (`JvmSocketHttpBackend`) | `Bun.serve` (`JsTransportBackend`) | the socket server (`NativeHttpBackend`) — zio-http has no Native artifacts |
+| Legacy GET push stream | ✅ | 405 | ✅ |
 
 Node and Deno parity for the HTTP listener is a follow-up; only the `Bun.serve(...)` entry point is
 Bun-specific today. `httpEndpoint` is matched as an exact path on Bun; the JVM additionally accepts

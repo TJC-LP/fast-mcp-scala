@@ -24,14 +24,14 @@ Two registration paths, `@Tool`-style annotations and typed `McpTool` contracts,
 // sbt — JVM
 libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "1.0.1"
 
-// sbt — Scala.js (Bun-first) or Scala Native (stdio only, experimental); %%% picks the platform artifact
+// sbt — Scala.js (Bun-first) or Scala Native (experimental); %%% picks the platform artifact
 libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "1.0.1"
 
 //> using dep com.tjclp::fast-mcp-scala:1.0.1    // scala-cli, JVM
 //> using dep com.tjclp::fast-mcp-scala::1.0.1   // scala-cli, Scala.js or Native (with `//> using platform ...`)
 ```
 
-Built against Scala 3.9.0 LTS: **consuming 1.0.0 requires Scala 3.9.0 or newer** (it emits TASTy 28.9, which 3.8 and older compilers cannot read; the RC3 prerelease, built with Scala 3.8.3, is the last release a Scala 3.8 project can use). 1.0.0 is not compiled with `-experimental`, so consumers no longer need the flag (the release candidates required it on every registration path; TJC-2335). JVM: JDK 17+ (CI tests the LTS releases 17, 21, and 25). Scala.js: `sjs1_3`, runs on Bun (first-class) and, for stdio, on Node 18+ (verified with Node 18 and 26 in the 1.0.0 dogfood, not yet in CI; the HTTP listener is `Bun.serve`-only, and bearer task ids come from `globalThis.crypto`, which Node 18 exposes only behind `--experimental-global-webcrypto`); Scala 3.9 output needs a Scala.js 1.22+ linker (Mill: mill-bun 0.3.x with an explicit `scalaJSVersion`; scala-cli: `--js-version 1.22.0`). Scala Native: `native0.5_3`, stdio only, experimental. Platform details and quickstarts: [docs/platforms.md](docs/platforms.md).
+Built against Scala 3.9.0 LTS: **consuming 1.0.0 requires Scala 3.9.0 or newer** (it emits TASTy 28.9, which 3.8 and older compilers cannot read; the RC3 prerelease, built with Scala 3.8.3, is the last release a Scala 3.8 project can use). 1.0.0 is not compiled with `-experimental`, so consumers no longer need the flag (the release candidates required it on every registration path; TJC-2335). JVM: JDK 17+ (CI tests the LTS releases 17, 21, and 25). Scala.js: `sjs1_3`, runs on Bun (first-class) and, for stdio, on Node 18+ (verified with Node 18 and 26 in the 1.0.0 dogfood, not yet in CI; the HTTP listener is `Bun.serve`-only, and bearer task ids come from `globalThis.crypto`, which Node 18 exposes only behind `--experimental-global-webcrypto`); Scala 3.9 output needs a Scala.js 1.22+ linker (Mill: mill-bun 0.3.x with an explicit `scalaJSVersion`; scala-cli: `--js-version 1.22.0`). Scala Native: `native0.5_3`, experimental (stdio in 1.0.x; streamable HTTP is on `main`, unreleased). Platform details and quickstarts: [docs/platforms.md](docs/platforms.md).
 
 ## Quickstart
 
@@ -291,14 +291,14 @@ One core, three targets. The protocol layer is shared; each platform contributes
 |---|---|---|---|
 | Annotations, typed contracts, `McpServerApp` | ✅ | ✅ | ✅ |
 | Stdio | ✅ | ✅ | ✅ (LLVM binary) |
-| Streamable HTTP, MCP 2026-07-28 | ✅ ZIO HTTP | ✅ `Bun.serve` | ✗ by design¹ |
-| Legacy HTTP session adapter | ✅ | ✅ | ✗ by design¹ |
-| Tasks extension | ✅ | ✅ | ✅ (stdio) |
+| Streamable HTTP, MCP 2026-07-28 | ✅ ZIO HTTP | ✅ `Bun.serve` | ✅ built-in socket server¹ |
+| Legacy HTTP session adapter | ✅ | ✅ | ✅¹ |
+| Tasks extension | ✅ | ✅ | ✅ |
 | Standalone binary | GraalVM native image | — | LLVM via Scala Native |
 
-¹ zio-http has no Scala Native artifacts, so `McpServerApp[Http]` does not compile there; a socket-based backend is in progress ([#81](https://github.com/TJC-LP/fast-mcp-scala/issues/81)).
+¹ zio-http has no Scala Native artifacts, so Scala Native serves HTTP through a built-in HTTP/1.1 + SSE server over `java.net.ServerSocket` (plaintext; terminate TLS at a proxy). It is unreleased (on `main`, after 1.0.1) and experimental: see the [known limitation](docs/transports.md#the-socket-backend) for payloads of 8 KiB and up. The same server is an opt-in, netty-free HTTP backend on the JVM.
 
-The official MCP conformance suite runs in CI against the JVM and Bun servers and against the GraalVM native binary, with empty expected-failure baselines. Full parity matrix, Bun and Scala Native quickstarts: [docs/platforms.md](docs/platforms.md); coverage details: [docs/spec-coverage.md](docs/spec-coverage.md).
+The official MCP conformance suite runs in CI against the JVM, Bun and Scala Native servers and against the GraalVM native binary, with empty expected-failure baselines. Full parity matrix, Bun and Scala Native quickstarts: [docs/platforms.md](docs/platforms.md); coverage details: [docs/spec-coverage.md](docs/spec-coverage.md).
 
 ## Documentation
 

@@ -195,14 +195,14 @@ every PR.
 The JVM's default `HttpTransportBackend` is ZIO HTTP on Netty, which is why the HTTP image above
 needs the netty-specific flags. Since TJC-2223 (#81) the JVM can also serve streamable HTTP with
 `JvmSocketHttpBackend` — the same `java.net.ServerSocket` server that is the Scala Native HTTP
-backend, rendering the same shared `StreamableHttpHandler`. Opt in with a given of its singleton
-type and exclude `dev.zio::zio-http` from the dependency:
+backend, rendering the same shared `StreamableHttpHandler`. Opt in by importing its given by name
+(a differently-named given of your own loses to the root import inside an object — see
+[transports.md](./transports.md#the-socket-backend)) and exclude `dev.zio::zio-http` from the
+dependency:
 
 ```scala
 import com.tjclp.fastmcp.{*, given}
-import com.tjclp.fastmcp.server.transport.JvmSocketHttpBackend
-
-given JvmSocketHttpBackend.type = JvmSocketHttpBackend
+import com.tjclp.fastmcp.server.transport.JvmSocketHttpBackend.httpInstance
 
 object MyServer extends McpServerApp[Http, MyServer.type]: ...
 ```

@@ -4,7 +4,7 @@ A short tour of how the library is put together. For a user-facing overview see 
 
 ## One native core, one platform seam
 
-As of 0.5.0 the entire MCP protocol layer is native Scala 3 in `shared/` — JSON-RPC envelope, wire types, router, built-in handlers, middleware, and the Tasks state machine. There is exactly one server class, `McpServer[R]`, and one platform seam split along transport lines: `TransportBackend` (stdio + `randomId`) and `HttpTransportBackend` (HTTP) — split so stdio-only programs, and their GraalVM native images, never reach the HTTP stack. The JVM supplies `System.in/out` (`JvmTransportBackend`) and ZIO HTTP (`JvmHttpBackend`); Scala.js supplies Node stdio + `Bun.serve` (`JsTransportBackend`, both givens); Scala Native supplies `System.in/out` with `/dev/urandom` ids (`NativeTransportBackend`, stdio only). No vendored SDK remains on any platform (the official TS SDK survives only as a test-time conformance client).
+As of 0.5.0 the entire MCP protocol layer is native Scala 3 in `shared/` — JSON-RPC envelope, wire types, router, built-in handlers, middleware, and the Tasks state machine. There is exactly one server class, `McpServer[R]`, and one platform seam split along transport lines: `TransportBackend` (stdio + `randomId`) and `HttpTransportBackend` (HTTP) — split so stdio-only programs, and their GraalVM native images, never reach the HTTP stack. The JVM supplies `System.in/out` (`JvmTransportBackend`) and ZIO HTTP (`JvmHttpBackend`); Scala.js supplies Node stdio + `Bun.serve` (`JsTransportBackend`, both givens); Scala Native supplies `System.in/out` with `/dev/urandom` ids (`NativeTransportBackend`) and a built-in socket HTTP server (`NativeHttpBackend`). The streamable-HTTP semantics themselves are shared too: `StreamableHttpHandler` in `shared/` is rendered by the zio-http adapter and by the socket server alike (the Bun backend still carries its own rendering). No vendored SDK remains on any platform (the official TS SDK survives only as a test-time conformance client).
 
 ```
                    ┌──────────────────────────────────────┐
@@ -68,11 +68,18 @@ fast-mcp-scala/
 │       ├── skills/                       # SkillRegistry, SkillProvider, SkillCursor
 │       ├── router/                       # McpRouter, Builtins, Session, middleware
 │       └── transport/                    # TransportBackend + HttpTransportBackend seam,
-│                                         #   StdioLoop, MessageLoop, HostGuard
+│           │                             #   StdioLoop, MessageLoop, HostGuard
+│           └── http/                     # StreamableHttpHandler + HttpRequest/HttpReply/SseFrame:
+│                                         #   the streamable-HTTP semantics, written once
+│
+├── jvm-native/src/com/tjclp/fastmcp/    # compiled by BOTH the jvm and scalaNative modules
+│   └── server/transport/                 # SocketHttpBackend; http/SocketHttpServer + Http1
+│                                         #   (HTTP/1.1 + SSE over java.net.ServerSocket)
 │
 ├── jvm/src/com/tjclp/fastmcp/           # JVM-specific
 │   ├── server/transport/JvmTransportBackend.scala   # System.in/out (stdio; netty-free)
-│   ├── server/transport/JvmHttpBackend.scala          # ZIO HTTP (streamable + stateless)
+│   ├── server/transport/JvmHttpBackend.scala          # zio-http adapter over StreamableHttpHandler
+│   ├── server/transport/JvmSocketHttpBackend.scala    # opt-in netty-free backend (the socket server)
 │   ├── server/skills/SkillDirectoryLoader.scala       # filesystem → McpSkill (JVM only)
 │   └── examples/                         # JVM-only examples (HttpServer, TaskManagerServer,
 │                                         #   SkillsHttpServer, SkillDirectoryServer)
@@ -83,11 +90,12 @@ fast-mcp-scala/
 │   ├── server/transport/JsTransportBackend.scala    # Bun.serve + Node stdio
 │   └── examples/                         # Bun HTTP example
 │
-└── native/src/com/tjclp/fastmcp/        # Scala Native (EXPERIMENTAL, stdio only)
-    └── server/transport/NativeTransportBackend.scala # System.in/out + /dev/urandom ids
+└── native/src/com/tjclp/fastmcp/        # Scala Native (EXPERIMENTAL)
+    ├── server/transport/NativeTransportBackend.scala # System.in/out + /dev/urandom ids
+    └── server/transport/NativeHttpBackend.scala      # the socket server as the platform HTTP given
 ```
 
-Every module's sources are exactly `shared/src/` + its own platform tree — no module reaches across into another's. That is an invariant worth preserving: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/src/` plus any one platform tree compiles on its own (the shared examples need that platform's `given TransportBackend`), and `shared/` never reaches across platform trees. Mill wires this in `fast-mcp-scala/package.mill` (module definitions live next to the code; the root `build.mill` holds only versions, compiler flags, and shared traits).
+Every module's sources are exactly `shared/src/` + its own platform tree — plus, for the JVM and Scala Native modules, `jvm-native/src/` (the socket HTTP server, which needs `java.net` and so cannot live in `shared/`) — and no module reaches across into another's platform tree. That is an invariant worth preserving: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/src/` plus any one platform tree compiles on its own (the shared examples need that platform's `given TransportBackend`), and `shared/` never reaches across platform trees. Mill wires this in `fast-mcp-scala/package.mill` (module definitions live next to the code; the root `build.mill` holds only versions, compiler flags, and shared traits).
 
 The stdio serving lifecycle is shared too: `StdioLoop` owns the session, the single-writer stdout lock, the outbound drainer fiber, and EOF teardown, so the JVM and Scala Native backends contribute only their stdin stream and their `randomId` source. The JS backend drives Node's callback IO directly and does not use it.
 
@@ -129,7 +137,7 @@ The protocol layer that used to be delegated to the wrapped SDKs is now four sma
 - **`jsonrpc/`** — the JSON-RPC 2.0 envelope (`JsonRpcMessage` with structural discrimination: requests, notifications, responses, and an `Invalid` case so envelope violations answer `-32600` with the offender's id) and `McpError`, including the 2026 allocated codes `-32020` through `-32022`. Unknown resources now use JSON-RPC Invalid Params (`-32602`).
 - **`core/wire/`** — the 2026-07-28 wire shapes for discovery, cacheable results, MRTR, subscriptions, capabilities, tools, resources, prompts, deprecated client-input features, and the older initialization adapter.
 - **`server/router/`** — `McpRouter` (stateless dispatch and compatibility routing), `RequestContext` (fiber-local per-call version, identity, capabilities, log level, trace metadata, and MRTR retry data), `Builtins`, `Session` (transport queues plus legacy connection state), `WireMapping`, `ValidationMiddleware`, and `TaskRouting`.
-- **`server/transport/`** — the `TransportBackend` trait (`serveStdio`, `randomId` — session/task ids come from the platform CSPRNG) and the `HttpTransportBackend` trait (`serveHttp`; a separate trait with a conditional `TransportRunner[Http]` given, so stdio-only programs have no reachable path into the HTTP stack), the shared `MessageLoop` (limit checks → parse → dispatch → reply framing, used identically by every transport; the limit checks are `JsonLimits`' linear pre-scan against `McpServerSettings.limits`), `BoundedLines` (the stdio line splitter bounded at `limits.maxFrameChars`), `HostGuard` (full-origin DNS-rebinding/CSRF protection) and `HttpRequestGuards` (the shared HTTP admission gates: 403 → 415 → 413 → 406, body cap, session cap).
+- **`server/transport/`** — the `TransportBackend` trait (`serveStdio`, `randomId` — session/task ids come from the platform CSPRNG) and the `HttpTransportBackend` trait (`serveHttp`; a separate trait with a conditional `TransportRunner[Http]` given, so stdio-only programs have no reachable path into the HTTP stack), the shared `MessageLoop` (limit checks → parse → dispatch → reply framing, used identically by every transport; the limit checks are `JsonLimits`' linear pre-scan against `McpServerSettings.limits`), `BoundedLines` (the stdio line splitter bounded at `limits.maxFrameChars`), `HostGuard` (full-origin DNS-rebinding/CSRF protection), `HttpRequestGuards` (the shared HTTP admission gates: 403 → 415 → 413 → 406, body cap, session cap), and `http/StreamableHttpHandler` (the streamable-HTTP semantics over a neutral `HttpRequest` / `HttpReply` model: session store, cap and eviction, request→SSE, the GET channel, DELETE, the 2026-07-28 stateless path — rendered by the zio-http adapter and the socket server).
 
 Users only see the public methods on `McpServer` (`.tool`, `.prompt`, `.resource`, `.completion`, `.scanAnnotations`, `.runStdio`, `.runHttp`).
 
@@ -140,8 +148,8 @@ All transports are thin adapters over the shared `MessageLoop` + router:
 | Transport | Entry point | JVM | Scala.js | Scala Native |
 |---|---|---|---|---|
 | Stdio | `server.runStdio()` | `ZStream` over `System.in`, serialized writer on `System.out` | Node `process.stdin`/`stdout` | `ZStream.fromReader` over `System.in`, ids from `/dev/urandom` |
-| Streamable HTTP, MCP 2026-07-28 (stateless POST + request-scoped SSE) | `server.runHttp()` | ZIO HTTP | `Bun.serve` | not available (no `HttpTransportBackend` given; `runHttp()` does not compile) |
-| Legacy HTTP adapter (initialize, `Mcp-Session-Id`, GET stream, DELETE) | `server.runHttp()`; `stateless = true` disables its session store | ZIO HTTP | `Bun.serve` (GET answers 405) | not available |
+| Streamable HTTP, MCP 2026-07-28 (stateless POST + request-scoped SSE) | `server.runHttp()` | ZIO HTTP (opt-in: socket server) | `Bun.serve` | socket server over `java.net.ServerSocket` |
+| Legacy HTTP adapter (initialize, `Mcp-Session-Id`, GET stream, DELETE) | `server.runHttp()`; `stateless = true` disables its session store | ZIO HTTP (opt-in: socket server) | `Bun.serve` (GET answers 405) | socket server |
 
 Modern Streamable HTTP is identical on both platforms: every request is an independent POST, carries per-request protocol metadata plus `MCP-Protocol-Version`/`Mcp-Method`/conditional `Mcp-Name` headers, and receives JSON or a request-scoped SSE stream. There is no modern protocol session, GET endpoint, DELETE lifecycle, SSE event ID, replay, or redelivery. Closing a response stream interrupts its dispatch fiber; `subscriptions/listen` uses the same long-lived POST response. Header mismatches are HTTP 400/`-32020`, unsupported versions are HTTP 400/`-32022`, missing required client capabilities are HTTP 400/`-32021`, and unknown request methods are HTTP 404/`-32601`.
 
