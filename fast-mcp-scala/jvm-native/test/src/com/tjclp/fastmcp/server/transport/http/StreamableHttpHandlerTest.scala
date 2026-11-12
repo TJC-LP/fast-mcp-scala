@@ -106,8 +106,8 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
       case HttpReply.SseComplete(_, frame) => zio.stream.ZStream.succeed(frame)
       case other => fail(s"expected an SSE reply, got $other")
 
-  test("a reply stream halted before its first pull still runs the handler's finalizers") {
-    val handler = makeHandler()
+  test("a reply stream halted before its first pull frees the GET slot, at once or by the grace") {
+    val handler = makeHandler(grace = 300.millis)
     val init = runUnsafe(
       handler.post(
         request(
@@ -130,17 +130,23 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
     val first = runUnsafe(handler.get(request("GET", getHeaders)))
     first.status shouldBe 200
 
-    // What the socket layer does when the head write fails: complete `dead` up front and run the
-    // stream through interruptWhen so it halts immediately. Its `ensuring(session.releaseGet)`
-    // must still fire — otherwise this session answers 409 to every later GET, forever.
+    // A backend that runs the stream already halted instead of calling `abandon`: complete `dead`
+    // up front and run the stream through interruptWhen. Whether the stream's own finalizer runs
+    // is a race — the halt can win before the stream has registered it — so the slot comes back
+    // at once or, at the latest, when the unstarted-reply grace passes. Either way this session
+    // must not answer 409 to every later GET for ever.
     runUnsafe(
       Promise.make[Nothing, Unit].flatMap { dead =>
         dead.succeed(()) *> framesOf(first).interruptWhen(dead).runDrain
       }
     )
 
-    val second = runUnsafe(handler.get(request("GET", getHeaders)))
-    second.status shouldBe 200
+    val second = runUnsafe(
+      (handler.get(request("GET", getHeaders)) <* ZIO.sleep(20.millis))
+        .repeatUntil(_.status == 200)
+        .timeout(5.seconds)
+    )
+    second.map(_.status) shouldBe Some(200)
   }
 
   test("a POST whose header names show a repeated routing header is a header mismatch (400, -32020)") {

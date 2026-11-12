@@ -445,12 +445,15 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         reqQueue <- Queue.unbounded[JsonRpcMessage]
         // `ensuring` (uninterruptible) offers the close sentinel after the dispatch delivers its
         // reply — or after it is cancelled / dies replyless — so a streamed reply always ends.
+        //
+        // A fork inherits the region it is made in, so the fiber starts uninterruptible and only
+        // the dispatch itself is made interruptible. An interrupt that reaches the fiber before it
+        // has run a step therefore lands inside the `ensuring`, and the sentinel is still offered.
         dispatchFiber <- session
           .runWithSink(reqQueue)(dispatch)
           .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
-          .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
-          // A fork inherits the region it is made in; the dispatch must stay interruptible.
           .interruptible
+          .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
           .forkDaemon
         response <- firstFrameReply(
           restore,
