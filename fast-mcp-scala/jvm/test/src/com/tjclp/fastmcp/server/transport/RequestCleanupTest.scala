@@ -124,7 +124,7 @@ class RequestCleanupTest extends AnyFunSuite with Matchers:
     // that interrupts the handler fiber from inside that log call lands the interrupt exactly
     // there, on the fiber's own thread, before its next step.
     val target = new AtomicReference[Option[Fiber.Runtime[?, ?]]](None)
-    val interruptOnEviction = new ZLogger[String, Unit]:
+    def onEvictionLog(react: () => Unit): ZLogger[String, Unit] = new ZLogger[String, Unit]:
       def apply(
           trace: Trace,
           fiberId: FiberId,
@@ -135,10 +135,12 @@ class RequestCleanupTest extends AnyFunSuite with Matchers:
           spans: List[LogSpan],
           annotations: Map[String, String]
       ): Unit =
-        if message().contains("evicted session") then
-          target.get.foreach { fiber =>
-            Unsafe.unsafe(implicit u => fiber.unsafe.interrupt(Cause.interrupt(FiberId.None)))
-          }
+        if message().contains("evicted session") then react()
+    val interruptOnEviction = onEvictionLog { () =>
+      target.get.foreach { fiber =>
+        Unsafe.unsafe(implicit u => fiber.unsafe.interrupt(Cause.interrupt(FiberId.None)))
+      }
+    }
 
     val exit = runUnsafe(
       for
@@ -162,6 +164,21 @@ class RequestCleanupTest extends AnyFunSuite with Matchers:
     // else (DELETE, the idle sweeper) could ever terminate it.
     runUnsafe(handler.session(evictedId)) shouldBe None
     runUnsafe(evicted.isTerminated) shouldBe true
+
+    // The interrupted initialize's own session went with it: its client never learned the id, so
+    // it must not be left holding the store's one slot. The next initialize finds room and evicts
+    // nobody.
+    val evictions = new java.util.concurrent.atomic.AtomicInteger(0)
+    val next = runUnsafe(
+      ZIO.scoped(
+        ZIO.withLoggerScoped(onEvictionLog(() => { val _ = evictions.incrementAndGet() })) *>
+          handler.post(request("POST", postHeaders, initFrame))
+      )
+    )
+    next.status shouldBe 200
+    withClue("the interrupted initialize left its session in the store: ") {
+      evictions.get shouldBe 0
+    }
   }
 
   test("zio-http: a GET whose request ends by interruption before its stream starts frees the slot at once") {

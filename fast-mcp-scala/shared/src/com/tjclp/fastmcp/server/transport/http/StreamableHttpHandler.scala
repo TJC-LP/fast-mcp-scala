@@ -266,7 +266,13 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     *   - the store update and the terminations it calls for are one uninterruptible step
     *     ([[answerInitialize]]). Once a victim has left the store nothing can reach it by id — not
     *     DELETE, not the idle sweeper — so an `initialize` whose client goes away right then must
-    *     still terminate it, or its in-flight requests and tasks would never be released.
+    *     still terminate it, or its in-flight requests and tasks would never be released;
+    *   - an interruption that arrives during that step is taken at an explicit interruption point
+    *     right after it, still within `onInterrupt`'s reach. Without one it would be taken only
+    *     after this method had returned: ZIO does not interrupt a fiber that leaves one
+    *     uninterruptible region straight into another, and `onInterrupt` is such a region. The
+    *     session would then sit in the store, under an id nobody was ever told, until the idle
+    *     sweeper or a cap eviction found it.
     */
   private def mintSession(
       sessions: Ref.Synchronized[Map[String, Session]],
@@ -277,8 +283,13 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       id <- randomId
       session <- Session.makeProtocolSession(id, req.clientKey)
       // A client that goes away before the reply is built never learns the id: drop the session.
-      reply <- answerInitialize(sessions, session, message)
-        .onInterrupt(sessions.update(_ - id) *> session.terminate)
+      reply <- ZIO.uninterruptibleMask { restore =>
+        restore(answerInitialize(sessions, session, message))
+          // The interruption point: entering an interruptible region interrupts a fiber whose
+          // interruption is pending.
+          .flatMap(reply => restore(ZIO.succeed(reply)))
+          .onInterrupt(sessions.update(_ - id) *> session.terminate)
+      }
     yield reply
 
   private def answerInitialize(
