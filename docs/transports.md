@@ -127,7 +127,7 @@ Schema-driven `Mcp-Param-*` values may be supplied through `x-mcp-header`.
 | `Host`/`Origin` refused by `allowedHosts` / `allowedOrigins` | 403 | `-32000` |
 | Missing or wrong `Content-Type` (any POST; a non-utf-8 `charset` counts as wrong) | 415 | `-32000` |
 | Body larger than `maxRequestBodyBytes` | 413 | `-32000` on first-party paths; netty and Bun answer an empty 413 when they refuse the body first |
-| Frame over `limits` (`maxFrameChars` / `maxDepth` / `maxObjectFields`) | 400 | `-32700` |
+| Frame over `limits` (`maxFrameChars` / `maxDepth` / `maxObjectFields` / `maxArrayElements` / `maxValues` / `maxNumberDigits` / `maxNumberExponent`) | 400 | `-32700` |
 | Header/body mismatch | 400 | `-32020` |
 | Missing required client capability | 400 | `-32021` |
 | Unsupported protocol version (answer carries `data.supported`) | 400 | `-32022` |
@@ -248,7 +248,7 @@ clients share one session identity, which is why legacy task requests there are 
 | `exposeTemplatesEndpoint` | `false` | List registered resource templates through `resources/templates/list`. `resources/list` never lists templates; with the default the templates endpoint answers an empty page (clients derive templates from `{}` URIs) and `resources/read` on a matching URI works either way. Applies on every transport. |
 | `contextHeaders` | `Set.empty` | HTTP request headers a handler may read through `McpContext.header` / `McpContext.headers`; nothing is exposed unless listed. See "Request headers in handlers". |
 | `tasks` | `TaskSettings()` | The Tasks extension, off by default (see [tasks.md](./tasks.md)). |
-| `limits` | `LimitSettings()` | Input bounds on every transport: `maxFrameChars` 4 MiB, `maxDepth` 64, `maxObjectFields` 1024 (`-32700` / HTTP 400 before dispatch), `maxUriChars` 8192 and `maxSubscriptionsPerSession` 1024 (`-32602`). See [Input limits](#input-limits). |
+| `limits` | `LimitSettings()` | Input bounds on every transport: `maxFrameChars` 4 MiB, `maxDepth` 64, `maxObjectFields` 1024, `maxArrayElements` 4096, `maxValues` 65536, `maxNumberDigits` 512, `maxNumberExponent` 512 (`-32700` / HTTP 400 before dispatch), `maxUriChars` 8192 and `maxSubscriptionsPerSession` 1024 (`-32602`). See [Input limits](#input-limits). |
 
 HTTP-specific fields are ignored under stdio; `limits`, `tasks` and `exposeTemplatesEndpoint` apply on every transport.
 
@@ -263,23 +263,77 @@ cannot be disabled, only moved; the constructor rejects out-of-range values at c
 | `maxFrameChars` | `4 * 1024 * 1024` | One decoded frame (one stdio line / one HTTP body), in UTF-16 chars. |
 | `maxDepth` | `64` | JSON nesting depth (the envelope object is depth 1; every nested `{` / `[` adds one). Hard ceiling `LimitSettings.MaxSupportedDepth`. |
 | `maxObjectFields` | `1024` | Members of any single JSON object anywhere in the frame. |
+| `maxArrayElements` | `4096` | Elements of any single JSON array anywhere in the frame. |
+| `maxValues` | `65536` | JSON values in the whole frame: every object, array, string, number, boolean and `null` counts once (member names do not). |
+| `maxNumberDigits` | `512` | Digits in the significand of a number as written (integer and fraction part, leading and trailing zeros included). Hard ceiling `LimitSettings.MaxSupportedNumberDigits` (4096). |
+| `maxNumberExponent` | `512` | Absolute value of a number's exponent (the part after `e` / `E`). Hard ceiling `LimitSettings.MaxSupportedNumberExponent` (4096). |
 | `maxUriChars` | `8192` | A client-supplied resource URI (`resources/read`, `resources/subscribe`, `resources/unsubscribe`, `subscriptions/listen` entries). |
 | `maxSubscriptionsPerSession` | `1024` | Distinct URIs one legacy session may hold via `resources/subscribe`. |
 
-A frame that violates `maxFrameChars`, `maxDepth`, or `maxObjectFields` is answered with JSON-RPC
-`-32700` (HTTP 400) by a linear pre-scan of the raw text, and never mints a session; `maxUriChars`
-and `maxSubscriptionsPerSession` violations answer `-32602`. On HTTP an oversized body meets
-`maxRequestBodyBytes` first (413), so keep that cap at or below `maxFrameChars` — `runHttp()`
-refuses to start otherwise; `maxFrameChars` is the transport-independent backstop. On stdio the
-line splitter itself is bounded at `maxFrameChars`: an over-long line is truncated, answered with
-`-32700`, and the rest of it discarded.
+A frame that violates `maxFrameChars`, `maxDepth`, `maxObjectFields`, `maxArrayElements`,
+`maxValues`, `maxNumberDigits` or `maxNumberExponent` is answered with JSON-RPC `-32700` (HTTP 400)
+by a linear pre-scan of the raw text — before the parser allocates anything — and never mints a
+session; the parsed tree is then re-checked against the same bounds. `maxUriChars` and
+`maxSubscriptionsPerSession` violations answer `-32602`. Text inside JSON strings is never
+interpreted: a base64 payload or a string full of digits and brackets is one value. The pre-scan is
+a single pass with no allocation per token; on the JVM it costs about a nanosecond per character of
+structured JSON and far less for long strings, a fraction of what parsing the same frame costs.
 
-`maxObjectFields` bounds the residual cost of building a `Map` from attacker-chosen, hash-colliding
-keys after the frame check: each object costs up to `maxObjectFields² / 2` string comparisons, so
-the per-frame constant grows quadratically with this knob (at the defaults about 0.4 s per 4 MiB
-frame on the JVM, several times that on single-threaded Bun). Operators exposing a Bun server to
-untrusted networks should lower it (for example to 256); the wire shapes never need more than a few
-dozen members per object.
+On HTTP an oversized body meets `maxRequestBodyBytes` first (413), so keep that cap at or below
+`maxFrameChars` — `runHttp()` refuses to start otherwise; `maxFrameChars` is the
+transport-independent backstop. On stdio the line splitter itself is bounded at `maxFrameChars`: an
+over-long line is truncated, answered with `-32700`, and the rest of it discarded.
+
+`maxValues`, `maxObjectFields` and `maxArrayElements` together bound what an accepted frame can
+cost, independently of its size in bytes:
+
+- **Memory.** The parsed tree has at most `maxValues` nodes, so it is bounded by the frame text
+  plus a fixed overhead per node (65 536 nodes at the defaults) — not by a multiple of
+  `maxRequestBodyBytes`. A megabyte of one-character array elements is refused; it is not parsed
+  into a tree tens of times its size.
+- **Hash collisions.** Building a `Map` from one object's attacker-chosen, hash-colliding keys
+  costs up to `maxObjectFields² / 2` string comparisons (about 5 × 10^5 at the default), and
+  building a `Set` (or any type containing one) from one array's colliding elements costs up to
+  `maxArrayElements² / 2` (about 8.4 × 10^6 at the default, a few tens of milliseconds on the
+  JVM). Because `maxValues` caps the members of all objects and arrays in a frame together, the
+  whole frame costs at most `maxValues × max(maxObjectFields, maxArrayElements) / 2` comparisons:
+  about 3.4 × 10^7 through `Map` sinks, which every server has, and about 1.3 × 10^8 — half a
+  second to a second on the JVM, several times that on single-threaded Bun — for a handler that
+  builds a `Set` from a client array.
+
+The array default is 4096 rather than 1024 so that an embedding vector of 1536 or 3072 numbers
+passes without configuration; the cost is the 16-fold larger per-array figure above. The per-frame
+constant grows linearly with each of `maxObjectFields` and `maxArrayElements`, so a server with no
+tool that takes long arrays — and any Bun server exposed to untrusted networks — should lower both
+(for example to 256); the wire shapes never need more than a few dozen members per object. The
+defaults hold sixteen 3072-number vectors, or a table of 4096 rows by 14 columns, in one frame.
+Raise `maxArrayElements` for tools that take longer arrays by design, and `maxValues` with it when
+a single call carries more than about 65 000 values:
+
+```scala 3 raw
+McpServerSettings(limits = LimitSettings(maxArrayElements = 16384, maxValues = 262144))
+```
+
+`maxNumberDigits` and `maxNumberExponent` bound the magnitude a client can write in a few bytes.
+The defaults admit the full `Long` range and every finite `Double` (whose shortest form has an
+exponent between -324 and 308) and refuse a number such as `1e999999999` from its text, with work
+that does not depend on the magnitude. A number inside the bounds expands to an integer of at most
+`maxNumberDigits + maxNumberExponent` decimal digits (1024 by default: at most 3402 bits), and a
+`BigDecimal` decoded from it has a scale within the same window, so a handler parameter typed
+`BigInt`, `java.math.BigInteger` or `BigDecimal` costs a small constant per number — at decode time
+and in whatever arithmetic the handler then does. That guarantee is checked again on the value
+itself in front of every argument decoder (at most `maxNumberDigits` significant digits, none of
+them outside `10^±(maxNumberDigits + maxNumberExponent)`), so it also holds for a value that did
+not arrive as a JSON number in a frame: an in-process call, a prompt or resource-template argument
+(always a string), or a number a client writes as a JSON string. `"1e999999999"` is an ordinary
+value for a `String` parameter and is refused when it decodes into a `BigDecimal` — `isError: true`
+on `tools/call`, an error reply on `prompts/get` and `resources/read`. For string-encoded numbers
+the check looks inside case classes, tuples, `Option`, `Either`, arrays and standard collections; a
+`BigDecimal` that a custom decoder wraps in a class of its own is not seen. The parser
+independently refuses a significand over 256 bits (about 77 significant digits).
+
+JSON embedded in a string argument (`McpDecodeContext.parseJsonObject` / `parseJsonArray`) is held
+to the same depth, object, array, value-count and number bounds, answered with `-32602`.
 
 Frames carrying large payloads must fit: a `sampling/createMessage` result with base64 images over
 stdio may need a larger frame, e.g.
