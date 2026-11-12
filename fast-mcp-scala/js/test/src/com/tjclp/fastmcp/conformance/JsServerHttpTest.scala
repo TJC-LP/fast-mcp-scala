@@ -14,7 +14,8 @@ import zio.json.*
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.TaskSettings
-import com.tjclp.fastmcp.server.router.Session
+import com.tjclp.fastmcp.core.wire.Implementation
+import com.tjclp.fastmcp.server.router.{Middleware, RequestHandler, RouterBuilder, Session}
 import com.tjclp.fastmcp.server.transport.{
   BunHttpHandle,
   JsTransportBackend,
@@ -1915,4 +1916,72 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       )
       _ <- waitFor("the 2026-07-28 handler's interruption", 5000)(watchedInterrupted >= before + 2)
     yield watchedInterrupted shouldBe before + 2
+  }
+
+  // A header-less `initialize` is answered before a session is stored for it, so its dispatch does
+  // not go through the per-request queue the tests above exercise. The request's abort signal must
+  // own it all the same, and a client that left must not be given a slot in the store.
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private var initInterrupted = 0
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private var initDelayMs = 30000
+
+  "a client that goes away during a header-less initialize (Bun)" should "stop its dispatch and store no session" in {
+    val initPort = 38943
+    val settings = McpServerSettings(host = "127.0.0.1", port = initPort, httpEndpoint = "/mcp")
+    val server = com.tjclp.fastmcp.server.McpServer("JsHttpInitAbortServer", "0.1.0", settings)
+    // The handler chain parks before `initialize` answers, as a slow middleware would.
+    val slowInitialize = new Middleware[Any]:
+      def wrap(method: String, next: RequestHandler[Any]): RequestHandler[Any] =
+        if method != "initialize" then next
+        else
+          (session, params) =>
+            ZIO
+              .sleep(initDelayMs.millis)
+              .onInterrupt(ZIO.succeed { initInterrupted += 1 }) *> next(session, params)
+    val router = RouterBuilder.build[Any](
+      serverInfo = Implementation(name = "JsHttpInitAbortServer", version = "0.1.0"),
+      instructions = None,
+      toolManager = server.toolManager,
+      promptManager = server.promptManager,
+      resourceManager = server.resourceManager,
+      settings = settings,
+      extraMiddlewares = List(slowInitialize)
+    )
+    val store = js.Dictionary.empty[Session]
+    val handle = JsTransportBackend.startBun(router, Runtime.default, settings, store)
+    def initialize(signal: js.UndefOr[js.Dynamic]): Future[js.Dynamic] =
+      val init =
+        js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyInitBody)
+      signal.foreach(s => init.updateDynamic("signal")(s))
+      fetchAt(initPort, init)
+
+    val checked =
+      for
+        // Aborted 200 ms into an initialize that would take 30 s.
+        _ <- {
+          val controller = js.Dynamic.newInstance(js.Dynamic.global.AbortController)()
+          val call = initialize(controller.signal)
+          delay(200).flatMap { _ =>
+            val _ = controller.abort()
+            call.map(_ => ()).recover { case _ => () }
+          }
+        }
+        _ <- waitFor("the abandoned initialize's interruption", 5000)(initInterrupted >= 1)
+        // Let whatever follows the interruption on the server settle before looking at the store.
+        _ <- delay(100)
+        abandonedStored = store.size
+        // An initialize whose client stays is answered and stored as before.
+        _ = initDelayMs = 20
+        kept <- initialize(js.undefined)
+        _ <- text(kept)
+      yield
+        abandonedStored shouldBe 0
+        initInterrupted shouldBe 1
+        status(kept) shouldBe 200
+        header(kept, "mcp-session-id") should not be empty
+        store.size shouldBe 1
+    checked.andThen { case _ => handle.stop() }
   }
