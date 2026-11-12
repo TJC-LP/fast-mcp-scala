@@ -234,6 +234,18 @@ class DefaultHostValidationTest extends AnyFunSuite with Matchers:
   private def mentions(text: String, phrase: String): Unit =
     withClue(s"expected to find: $phrase — ")(text.contains(phrase) shouldBe true)
 
+  test("HttpServerJs enables the guard and no longer presents loopback binding as a substitute") {
+    // The Scala.js example cannot be loaded on the JVM; `JsDefaultHostValidationTest` drives it on
+    // Bun. Here: its settings list the loopback names, and the misleading comment is gone.
+    val source =
+      textOf("fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HttpServerJs.scala")
+    mentions(source, """allowedHosts = Some(Set("localhost", "127.0.0.1", "[::1]"))""")
+    mentions(source, "keeps a web page in a local browser out")
+    withClue("the old comment is still there: ") {
+      source.contains("unless you set allowedHosts") shouldBe false
+    }
+  }
+
   test("no shipped example opts out of the guard or binds a non-loopback address") {
     val root = repoRoot.resolve("fast-mcp-scala")
     val sources = List("shared", "jvm", "js", "native", "jvm-native")
