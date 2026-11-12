@@ -122,13 +122,23 @@ additionally include:
 The protocol version and client capabilities are repeated in every request's `params._meta`.
 Schema-driven `Mcp-Param-*` values may be supplied through `x-mcp-header`.
 
+Each of `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and every `Mcp-Param-*` must appear
+**once**. A request that carries one of them more than once is refused as a header/body mismatch
+(400, `-32020`) on every backend, whatever the values and their order and even when they agree —
+the server never picks one occurrence. A repeated `MCP-Protocol-Version` is refused on any POST,
+legacy ones included. On Bun the runtime joins a repeated header into one `", "`-separated value
+before the server sees it, so the server cannot count field lines there: a joined
+`MCP-Protocol-Version` is refused as above, and a joined `Mcp-Method` / `Mcp-Name` / `Mcp-Param-*`
+is compared with the body as that one value — a mismatch unless the body's value is literally the
+joined string.
+
 | Condition | HTTP | JSON-RPC code |
 |---|---|---|
 | `Host`/`Origin` refused by `allowedHosts` / `allowedOrigins` | 403 | `-32000` |
 | Missing or wrong `Content-Type` (any POST; a non-utf-8 `charset` counts as wrong) | 415 | `-32000` |
 | Body larger than `maxRequestBodyBytes` | 413 | `-32000` on first-party paths; netty and Bun answer an empty 413 when they refuse the body first |
 | Frame over `limits` (`maxFrameChars` / `maxDepth` / `maxObjectFields`) | 400 | `-32700` |
-| Header/body mismatch | 400 | `-32020` |
+| Header/body mismatch, or a routing header sent more than once | 400 | `-32020` |
 | Missing required client capability | 400 | `-32021` |
 | Unsupported protocol version (answer carries `data.supported`) | 400 | `-32022` |
 | Unknown request method | 404 | `-32601` |
@@ -384,6 +394,8 @@ ready is written as a single packet (head, SSE frames and the chunked terminator
 | Protocol | HTTP/1.1 keep-alive, requests served one at a time per connection; HTTP/1.0 and `Connection: close` get close-delimited replies. No HTTP/2, no TLS (terminate both at a proxy) |
 | Request bodies | `Content-Length` and `Transfer-Encoding: chunked`, bounded on the wire by `maxRequestBodyBytes` (413); `Expect: 100-continue` is answered only after the header gates pass |
 | Request head | at most 8 KiB (431) |
+| Strict parsing | the server refuses what a proxy in front of it could read differently, with a `400` and a closed connection: a line of the request head not ending in CRLF (a bare LF or a bare CR, also before the request line), NUL / another control character / DEL anywhere in the head (HTAB is allowed inside a field value), a request line that is not `method SP target SP version` exactly, a method or field name with a character outside ASCII `tchar`, obsolete line folding. Only SP and HTAB are trimmed around a field value, and `Content-Length` is ASCII digits |
+| Chunked request bodies | read exactly as RFC 9112 §7.1 writes them: the chunk size is 1–7 hex digits from the first byte of its line, optionally followed by chunk extensions (ignored; control characters in them are refused); the size line, the chunk data and every trailer line end in CRLF; trailer lines must be field lines (their content is not used). Any other framing is a `400` and the connection is closed |
 | Connections | 256 concurrent by default; more wait in the kernel backlog. The cap is a hard limit, so three timeouts keep a client from holding a slot without making progress. All four are set with `JvmSocketHttpBackend.withSettings(maxConnections = n, ...)` on the JVM or `NativeHttpBackend.withSettings(...)` on Scala Native (experimental, like the backend itself); the backend class has no public constructor, so on Scala Native there is no way to build one outside the `-experimental` opt-in |
 | `idleTimeout` (60 s) | a keep-alive connection with no request activity is closed |
 | `requestReadTimeout` (60 s) | the allowance for a whole request, head and body, from its first byte (408 when it runs out). Every 4 KiB received extends it by one second, so a slow client that is still sending a large body gets the time it needs, while one sending a byte or a line at a time cannot keep the connection |
