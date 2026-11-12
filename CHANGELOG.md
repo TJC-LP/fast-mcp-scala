@@ -231,6 +231,45 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     `maxOutboundMessages` behind loses the oldest messages; a server-to-client request a task
     body issues after its POST was answered is not delivered on Bun or without a GET stream (it
     fails with its timeout, as before); task status is always available from `tasks/get`.
+- **Inbound frames are bounded in array length, value count and number magnitude** (TJC-5087). Four
+  new `LimitSettings` fields, enforced like the existing ones on every transport and platform — by
+  the linear pre-scan of the raw text before the parser allocates anything, then again on the
+  parsed tree — and answered with `-32700` (HTTP 400) before dispatch:
+  - `maxArrayElements` (default `4096`): elements of any single JSON array. The array counterpart
+    of `maxObjectFields`: a handler parameter that builds a `Set` from a client array is bounded
+    to `maxArrayElements² / 2` comparisons per array. The default leaves room for 1536- and
+    3072-number embedding vectors, at 16 times the per-object worst case; lower it when no tool
+    takes long arrays.
+  - `maxValues` (default `65536`): JSON values in one frame. The parsed tree is bounded by this
+    figure rather than by a multiple of the body size, and the summed size of all arrays and
+    objects in a frame is capped, so the hash-collision cost of a frame is at most
+    `maxValues × max(maxObjectFields, maxArrayElements) / 2` comparisons whatever its size.
+  - `maxNumberDigits` and `maxNumberExponent` (default `512` each; hard ceilings
+    `LimitSettings.MaxSupportedNumberDigits` / `MaxSupportedNumberExponent`, 4096): a number
+    literal outside them is refused without work proportional to its magnitude. The full `Long`
+    range and every finite `Double` are inside the defaults.
+- **Arbitrary-precision argument decoding is bounded by the request size.** The number bounds are
+  applied again in `DefaultDecodeContext.decodeRaw`, in front of every argument decoder (typed
+  contracts and annotated methods alike), so a `BigInt`, `java.math.BigInteger` or `BigDecimal`
+  parameter never receives a number that expands to more than `maxNumberDigits +
+  maxNumberExponent` decimal digits (1024 by default, at most 3402 bits) — also for values that
+  did not arrive as a JSON number in a frame: in-process calls, prompt and resource-template
+  arguments, and a number written as a JSON string, which is refused only when it decodes into a
+  `BigDecimal` (`isError: true` on `tools/call`, an error reply on `prompts/get` and
+  `resources/read`).
+- JSON embedded in string arguments (`McpDecodeContext.parseJsonObject` / `parseJsonArray`) gets
+  the same array, value-count and number bounds (`-32602`); `DefaultDecodeContext` takes them as
+  four new constructor parameters with the same defaults.
+
+  Upgrading: a frame with an array of more than 4096 elements, more than 65 536 values, or a number
+  with more than 512 digits or an exponent beyond ±512 used to be parsed and is now answered
+  `400` / `-32700` (`Parse error: a JSON array exceeds limits.maxArrayElements (4096)`, and
+  likewise for `maxValues`, `maxNumberDigits`, `maxNumberExponent`). A server whose tools take
+  longer arrays or bulk tables by design raises the bounds, e.g.
+  `McpServerSettings(limits = LimitSettings(maxArrayElements = 16384, maxValues = 262144))`.
+  `LimitSettings` and `DefaultDecodeContext` gain fields at the end with defaults: source
+  compatible for named and positional construction (a pattern match that destructures
+  `LimitSettings` positionally needs the new fields), not binary compatible.
 
 ### Added
 

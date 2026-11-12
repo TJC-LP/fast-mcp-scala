@@ -92,8 +92,14 @@ Hardening knobs worth knowing when you deploy over HTTP
   body is read or a session is minted.
 - `maxRequestBodyBytes` (1 MiB) caps request bodies on every backend (413 before decoding), and
   `limits: LimitSettings` bounds every inbound frame on every transport — frame size 4 MiB, JSON
-  depth 64, object width 1024 (`-32700` before dispatch), resource URI length 8192 and
-  subscriptions per session 1024 (`-32602`). The limits cannot be disabled, only moved.
+  depth 64, object width 1024, array length 4096, 65 536 values per frame, and numbers of at most
+  512 digits with an exponent within ±512 (`-32700` before dispatch), resource URI length 8192 and
+  subscriptions per session 1024 (`-32602`). The limits cannot be disabled, only moved. The value
+  count bounds the parsed tree independently of the body size; the object and array bounds cap the
+  hash-collision work a frame can cause (lower `maxArrayElements` and `maxObjectFields` when no
+  tool takes long arrays, especially on Bun); the number bounds keep `BigInt` / `BigDecimal`
+  handler parameters from being handed a magnitude that is expensive to expand
+  ([docs/transports.md](docs/transports.md#input-limits)).
 - `limits.maxOutboundMessages` (256) bounds what one session buffers for messages emitted outside
   a request's own response stream (legacy task status notifications, a task body's log and
   progress messages). A legacy JVM HTTP session drops the oldest at the bound, so a client that
