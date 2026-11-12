@@ -263,7 +263,6 @@ private[fastmcp] object SocketHttpServer:
           var handedOff = false
           try
             val socket = server.accept()
-            failures = 0
             val connection = new Connection[R](socket, this)
             live.put(connection, java.lang.Boolean.TRUE)
             try
@@ -272,21 +271,31 @@ private[fastmcp] object SocketHttpServer:
               if closed.get then throw new SocketException("listener closed")
               Unsafe.unsafe(implicit u => executor.submitOrThrow(connection))
               handedOff = true
+              // Reset only once a connection is actually being served: a hand-off that keeps
+              // failing after a successful accept must still back off and warn once a minute.
+              failures = 0
             finally
               if !handedOff then
                 live.remove(connection)
                 connection.closeSocket()
           catch
             case _: SocketTimeoutException => ()
-            case NonFatal(e) if !closed.get =>
+            // `OutOfMemoryError` too: when the process is at its thread limit, starting the
+            // connection's thread fails with "unable to create native thread", which is a
+            // `VirtualMachineError` and so not `NonFatal` — but it is exactly the kind of
+            // exhaustion that passes, and it must not end the listener.
+            case e @ (NonFatal(_) | _: OutOfMemoryError) if !closed.get =>
               failures += 1
               debugLog(s"accept failed ($failures in a row), retrying: $e")
               if failures % AcceptWarnEvery == 1 then
-                val _ = runSync(
-                  ZIO.logWarning(
-                    s"HTTP listener on port $port cannot accept connections ($failures failures in a row, still retrying): $e"
+                // Best effort: reporting must not be what ends the loop it reports on.
+                try
+                  val _ = runSync(
+                    ZIO.logWarning(
+                      s"HTTP listener on port $port cannot accept connections ($failures failures in a row, still retrying): $e"
+                    )
                   )
-                )
+                catch case NonFatal(_) | _: OutOfMemoryError => ()
               Thread.sleep(math.min(AcceptRetryMaxMs, AcceptRetryMinMs << math.min(failures, 7)))
           finally if !handedOff then gate.release()
       throw new SocketException("listener closed")

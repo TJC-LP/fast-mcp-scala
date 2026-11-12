@@ -78,7 +78,8 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
   /** Start the socket backend on a free port for the duration of `body`, then tear it down. */
   private def withServer[A](
       settings: McpServerSettings = baseSettings,
-      backend: SocketHttpBackend = new SocketHttpBackend(summon[TransportBackend])
+      backend: SocketHttpBackend = new SocketHttpBackend(summon[TransportBackend]),
+      blockingExecutor: Option[Executor] = None
   )(body: Int => A): A =
     val server = McpServer.typed[Any]("SocketT", "0.1.0", settings)
     runUnsafe(server.tool(addTool) *> server.tool(chattyTool) *> server.tool(bigTool))
@@ -87,6 +88,9 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
         .scoped {
           for
             router <- server.buildRouter
+            // The server takes its connection threads from ZIO's blocking executor; a test can
+            // substitute one to make the hand-off fail.
+            _ <- ZIO.foreachDiscard(blockingExecutor)(e => Runtime.setBlockingExecutor(e).build)
             started <- backend.start(router, settings)
             // Blocking client reads cannot be interrupted, so race the body against the accept
             // loop: a loop that dies (a platform surprise in `accept`) fails the test at once
@@ -685,6 +689,39 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       reply.status shouldBe 408
       client.atEof() shouldBe true
       client.close()
+    }
+  }
+
+  test("a failed hand-off to a connection thread is retried; the listener survives it") {
+    // What a JVM at its thread limit does: starting the connection's thread throws
+    // `OutOfMemoryError: unable to create native thread` out of the executor. That must cost the
+    // one connection, not the listener.
+    val failuresLeft = new java.util.concurrent.atomic.AtomicInteger(3)
+    val injected = new java.util.concurrent.atomic.AtomicInteger(0)
+    val real = runUnsafe(ZIO.blockingExecutor)
+    val failingForConnections = new Executor:
+      def metrics(implicit unsafe: Unsafe): Option[zio.internal.ExecutionMetrics] = None
+      def submit(runnable: Runnable)(implicit unsafe: Unsafe): Boolean =
+        if runnable.getClass.getName.contains("SocketHttpServer$Connection") &&
+          failuresLeft.getAndDecrement() > 0
+        then
+          val _ = injected.incrementAndGet()
+          throw new OutOfMemoryError("unable to create native thread: test")
+        else real.submit(runnable)
+    withServer(blockingExecutor = Some(failingForConnections)) { port =>
+      // The first three connections are accepted and then dropped; a later one is served. The
+      // accept loop dying would fail this test at once (`withServer` races the body against it).
+      def attempt(): Option[Int] =
+        val client = new RawClient(port, readTimeoutMs = 5_000)
+        try
+          client.send(post(initFrame))
+          Some(client.readReply().status)
+        catch case _: Throwable => None
+        finally client.close()
+      val outcomes = (1 to 8).map(_ => attempt())
+      injected.get shouldBe 3
+      outcomes.count(_.isEmpty) shouldBe 3
+      outcomes.drop(3).foreach(_ shouldBe Some(200))
     }
   }
 
