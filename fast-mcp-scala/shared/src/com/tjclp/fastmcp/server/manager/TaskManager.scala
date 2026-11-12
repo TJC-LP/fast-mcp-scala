@@ -61,8 +61,17 @@ private final case class TaskEntry(
     pollIntervalMs: Long,
     status: TaskStatus,
     statusMessage: Option[String],
-    fiber: Fiber.Runtime[Throwable, Any],
+    /** The task's fiber while it runs, so it can be interrupted; `None` once the task is terminal.
+      * A fiber handle keeps every `FiberRef` value the fiber inherited reachable for as long as the
+      * handle is — on the 2026-07-28 path that includes the request's whole `RequestContext` — so a
+      * stored result must never hold one.
+      */
+    fiber: Option[Fiber.Runtime[Throwable, Any]],
     result: Promise[Throwable, Any],
+    /** Estimated bytes this entry is charged ([[RetainedBytes]]): the request the task keeps while
+      * it runs, then the result it stores once terminal.
+      */
+    bytes: Long,
     /** Monotonic insertion number; breaks millisecond ties so eviction is FIFO among equals. */
     seq: Long = 0L
 ):
@@ -77,16 +86,21 @@ private final case class TaskEntry(
     pollInterval = Some(pollIntervalMs)
   )
 
-/** Running (non-terminal) and total (terminal included) entry counts. */
-private[fastmcp] final case class Counts(running: Int, total: Int)
+/** Running (non-terminal) and total (terminal included) entry counts, and the estimated bytes
+  * ([[RetainedBytes]]) those entries are charged.
+  */
+private[fastmcp] final case class Counts(running: Int, total: Int, bytes: Long = 0L)
 
-/** Test-visible view of the store's indices. */
+/** Test-visible view of the store's indices. `heldFibers` counts the entries that still reference
+  * their task fiber — only running tasks may.
+  */
 private[fastmcp] final case class TaskStoreStats(
     total: Int,
     running: Int,
     sweeperActive: Boolean,
     perOwner: Map[Option[String], Counts],
-    perPool: Map[PoolKind, Counts]
+    perPool: Map[PoolKind, Counts],
+    heldFibers: Int = 0
 )
 
 /** The task store: entries plus O(1) per-owner and per-pool indices, and the sweeper claim flag.
@@ -104,18 +118,21 @@ private final case class TaskStore(
     val e = entry.copy(seq = nextSeq)
     copy(
       entries = entries.updated(e.taskId, e),
-      owners = owners.updated(e.ownerKey, bump(owners.get(e.ownerKey), 1, 1)),
-      pools = pools.updated(e.pool, bump(pools.get(e.pool), 1, 1)),
+      owners = owners.updated(e.ownerKey, bump(owners.get(e.ownerKey), 1, 1, e.bytes)),
+      pools = pools.updated(e.pool, bump(pools.get(e.pool), 1, 1, e.bytes)),
       nextSeq = nextSeq + 1
     )
 
-  /** `prev` -> `next` status transition. Decrements `running` iff `prev` was non-terminal. */
+  /** `prev` -> `next` status transition. Decrements `running` iff `prev` was non-terminal, and
+    * swaps the entry's byte charge (the request it kept for the result it stores).
+    */
   def markTerminal(prev: TaskEntry, next: TaskEntry): TaskStore =
     val dRunning = if prev.status.isTerminal then 0 else -1
+    val dBytes = next.bytes - prev.bytes
     copy(
       entries = entries.updated(next.taskId, next),
-      owners = owners.updated(prev.ownerKey, bump(owners.get(prev.ownerKey), dRunning, 0)),
-      pools = pools.updated(prev.pool, bump(pools.get(prev.pool), dRunning, 0))
+      owners = owners.updated(prev.ownerKey, bump(owners.get(prev.ownerKey), dRunning, 0, dBytes)),
+      pools = pools.updated(prev.pool, bump(pools.get(prev.pool), dRunning, 0, dBytes))
     )
 
   def remove(es: Iterable[TaskEntry]): TaskStore =
@@ -125,10 +142,48 @@ private final case class TaskStore(
         val dRunning = if e.status.isTerminal then 0 else -1
         s.copy(
           entries = s.entries.removed(e.taskId),
-          owners = drop(s.owners, e.ownerKey, bump(s.owners.get(e.ownerKey), dRunning, -1)),
-          pools = drop(s.pools, e.pool, bump(s.pools.get(e.pool), dRunning, -1))
+          owners =
+            drop(s.owners, e.ownerKey, bump(s.owners.get(e.ownerKey), dRunning, -1, -e.bytes)),
+          pools = drop(s.pools, e.pool, bump(s.pools.get(e.pool), dRunning, -1, -e.bytes))
         )
     }
+
+  def ownerBytes(owner: Option[String]): Long = owners.get(owner).fold(0L)(_.bytes)
+  def poolBytes(pool: PoolKind): Long = pools.get(pool).fold(0L)(_.bytes)
+
+  /** The entries a byte budget may evict for `owner`'s benefit, in eviction order — the order the
+    * stored-entry caps use: `owner`'s own stale results oldest first, then (`ownOnly = false`, the
+    * pool budget) everyone else's, the owner holding the most stale results first. `except` is
+    * never a victim (a finishing task must not evict itself).
+    */
+  def byteVictims(
+      pool: PoolKind,
+      owner: Option[String],
+      cutoff: Long,
+      ownOnly: Boolean,
+      except: Option[String] = None
+  ): List[TaskEntry] =
+    val candidates = stale(pool, cutoff).filter(e => !except.contains(e.taskId)).toList
+    val (own, others) = candidates.partition(_.ownerKey == owner)
+    val oldestFirst = (e: TaskEntry) => (e.lastUpdatedMonoMs, e.seq)
+    if ownOnly then own.sortBy(oldestFirst)
+    else
+      val held = others.groupBy(_.ownerKey)
+      val ranked = held.toList.sortBy { case (key, es) => (-es.size, key.getOrElse("")) }
+      own.sortBy(oldestFirst) ++ ranked.flatMap(_._2.sortBy(oldestFirst))
+
+  /** Remove `victims` in order until `fits` holds. `None` when it still does not hold with every
+    * victim gone. `victims` is evaluated only when the store does not fit as it is.
+    */
+  def evictUntil(victims: => List[TaskEntry])(fits: TaskStore => Boolean): Option[TaskStore] =
+    @scala.annotation.tailrec
+    def loop(s: TaskStore, rest: List[TaskEntry]): Option[TaskStore] =
+      if fits(s) then Some(s)
+      else
+        rest match
+          case Nil => None
+          case victim :: tail => loop(s.remove(List(victim)), tail)
+    if fits(this) then Some(this) else loop(this, victims)
 
   /** Terminal entries of `pool` whose last update (monotonic) is at or before `cutoff` — the only
     * entries a stored cap may evict.
@@ -160,13 +215,20 @@ private final case class TaskStore(
 
   def stats: TaskStoreStats =
     val pool = pools.values.foldLeft(Counts(0, 0))((a, c) =>
-      Counts(a.running + c.running, a.total + c.total)
+      Counts(a.running + c.running, a.total + c.total, a.bytes + c.bytes)
     )
-    TaskStoreStats(pool.total, pool.running, sweeperActive, owners, pools)
+    TaskStoreStats(
+      pool.total,
+      pool.running,
+      sweeperActive,
+      owners,
+      pools,
+      entries.valuesIterator.count(_.fiber.isDefined)
+    )
 
-  private def bump(c: Option[Counts], dRunning: Int, dTotal: Int): Counts =
+  private def bump(c: Option[Counts], dRunning: Int, dTotal: Int, dBytes: Long): Counts =
     val base = c.getOrElse(Counts(0, 0))
-    Counts(base.running + dRunning, base.total + dTotal)
+    Counts(base.running + dRunning, base.total + dTotal, base.bytes + dBytes)
 
   private def drop[K](m: Map[K, Counts], k: K, next: Counts): Map[K, Counts] =
     if next.total <= 0 then m.removed(k) else m.updated(k, next)
@@ -199,6 +261,15 @@ private object TaskStore:
   * the flooder pays for its own flood, and an owner whose entries are all running or inside the
   * grace is never a victim. Rejections never mutate the store.
   *
+  * Bytes. Counting entries does not bound memory, so every entry is also charged an estimate of
+  * what it keeps reachable ([[RetainedBytes]]): while it runs, the request its fiber holds on to
+  * (`maxRequestBytes` per task, `-32602` beyond); once terminal, its result (`maxResultBytes` per
+  * result — a larger one is dropped and the task ends `failed`). The charges of an owner and of a
+  * pool stay within `maxBytesPerOwner` / `maxBytesTotal` at all times: a create that does not fit
+  * evicts stale results in the stored-cap order and is otherwise refused (`-32003`); a finishing
+  * task whose result does not fit evicts the same way and otherwise ends `failed` with the result
+  * discarded. A terminal entry holds neither its fiber nor anything of the request.
+  *
   * Clocks. Wire timestamps (`createdAt`, `lastUpdatedAt`) are wall-clock; expiry, the retention
   * grace and eviction order use the monotonic clock ([[TaskManager.monotonicMs]]) so an NTP step or
   * VM resume neither sweeps running tasks early nor extends retention.
@@ -226,7 +297,11 @@ class TaskManager[R] private[manager] (
     /** Test hook invoked at `"forked"` (task fiber parked, nothing registered) and `"registered"`
       * (entry admitted, gate still closed). `_ => ZIO.unit` in production.
       */
-    private[fastmcp] val checkpoint: String => UIO[Unit]
+    private[fastmcp] val checkpoint: String => UIO[Unit],
+    /** The `FiberRef` values the sweeper fiber runs with: those of the fiber that built this
+      * manager ([[TaskManager.make]]: the server's runtime configuration, no request in sight).
+      */
+    sweeperFiberRefs: FiberRefs = FiberRefs.empty
 ):
 
   private val perOwnerRunning: Int = settings.maxConcurrentPerSession
@@ -234,15 +309,24 @@ class TaskManager[R] private[manager] (
   private val poolRunning: Int = settings.maxConcurrentTotal
   private val poolStored: Int = math.max(settings.maxStoredTotal, poolRunning)
 
+  /** `settings.maxRequestBytes`: what one running task may keep of the request that created it. */
+  private[fastmcp] val maxRequestBytes: Long = settings.maxRequestBytes
+
   /** Create a task wrapping `run`. Returns immediately with a [[CreateTaskResult]]; the underlying
     * effect executes on a background daemon fiber.
     *
     * Fails with [[TaskConcurrencyLimitExceeded]] (`-32602`) when the owner already has
-    * `settings.maxConcurrentPerSession` running tasks, and with [[TaskCapacityExceeded]] (`-32003`)
-    * when the pool's running ceiling or a stored-entry cap is hit with nothing evictable. Other
+    * `settings.maxConcurrentPerSession` running tasks, with [[TaskCapacityExceeded]] (`-32003`)
+    * when the pool's running ceiling or a stored-entry cap is hit with nothing evictable, and with
+    * [[TaskByteBudgetExceeded]] (`-32003`) when the owner's or the pool's byte budget is. Other
     * failures bubble through as `Throwable`.
     *
     * Registration is all-or-nothing with respect to interruption of the calling fiber.
+    *
+    * The result is charged to the store's byte budgets when the task finishes. What `run` itself
+    * keeps reachable while it runs (whatever it closes over) cannot be seen from here: this entry
+    * point charges a running task nothing. The router measures the request it hands a task and uses
+    * [[createSized]].
     *
     * @param scope
     *   Visibility scope + accounting owner ([[TaskScope.session]] / [[TaskScope.bearer]]).
@@ -259,6 +343,32 @@ class TaskManager[R] private[manager] (
   def create(
       scope: TaskScope,
       requestedTtlMs: Option[Long],
+      run: ZIO[R, Throwable, Any],
+      onStatusChange: Task => UIO[Unit]
+  ): ZIO[R, Throwable, CreateTaskResult] =
+    createSized(scope, requestedTtlMs, requestBytes = 0L, run, onStatusChange)
+
+  /** [[create]] for a caller that knows what `run` keeps reachable for as long as it runs:
+    * `requestBytes` is the [[RetainedBytes]] estimate of the request the task was created from (its
+    * params, and on the 2026-07-28 path the request context its fiber inherits). It is refused with
+    * [[TaskRequestTooLarge]] (`-32602`) above `settings.maxRequestBytes`, before anything is
+    * forked, and otherwise charged to the owner and the pool until the task is terminal.
+    */
+  private[fastmcp] def createSized(
+      scope: TaskScope,
+      requestedTtlMs: Option[Long],
+      requestBytes: Long,
+      run: ZIO[R, Throwable, Any],
+      onStatusChange: Task => UIO[Unit]
+  ): ZIO[R, Throwable, CreateTaskResult] =
+    if requestBytes > settings.maxRequestBytes then
+      ZIO.fail(new TaskRequestTooLarge(settings.maxRequestBytes))
+    else createAdmitted(scope, requestedTtlMs, math.max(requestBytes, 0L), run, onStatusChange)
+
+  private def createAdmitted(
+      scope: TaskScope,
+      requestedTtlMs: Option[Long],
+      requestBytes: Long,
       run: ZIO[R, Throwable, Any],
       onStatusChange: Task => UIO[Unit]
   ): ZIO[R, Throwable, CreateTaskResult] =
@@ -284,7 +394,17 @@ class TaskManager[R] private[manager] (
         // A child forked inside the mask inherits the mask's uninterruptibility; `.interruptible`
         // is mandatory or tasks/cancel and TTL expiry would never land.
         fiber <- wrapped.interruptible.forkDaemon
-        result <- registerOrRollback(taskId, scope, ttlMs, nowMs, nowMono, fiber, promise, start)
+        result <- registerOrRollback(
+          taskId,
+          scope,
+          ttlMs,
+          nowMs,
+          nowMono,
+          requestBytes,
+          fiber,
+          promise,
+          start
+        )
           .onExit(exit => ZIO.unless(exit.isSuccess)(rollback(taskId) *> start.succeed(false)).unit)
       yield result
     }
@@ -311,6 +431,7 @@ class TaskManager[R] private[manager] (
       ttlMs: Option[Long],
       nowMs: Long,
       nowMono: Long,
+      bytes: Long,
       fiber: Fiber.Runtime[Throwable, Any],
       promise: Promise[Throwable, Any],
       start: Promise[Nothing, Boolean]
@@ -333,8 +454,9 @@ class TaskManager[R] private[manager] (
         pollIntervalMs = settings.pollIntervalMs,
         status = TaskStatus.Working,
         statusMessage = Some("The operation is now in progress."),
-        fiber = fiber,
-        result = promise
+        fiber = Some(fiber),
+        result = promise,
+        bytes = bytes
       )
       admission <- storeRef.modify(admit(entry, nowMono))
       result <- admission match
@@ -402,8 +524,34 @@ class TaskManager[R] private[manager] (
         if p1.total >= poolStored && poolEvict.isEmpty then
           (Left(TaskCapacityExceeded("stored", poolStored)), s)
         else
-          val next = s1.remove(poolEvict.toList).insert(entry)
-          (Right(!s.sweeperActive), next.copy(sweeperActive = true))
+          // Byte budgets, after the count caps: the new entry's charge must fit beside what the
+          // owner and the pool already hold. Stale results make room in the stored-cap order.
+          fitBytes(s1.remove(poolEvict.toList), owner, pool, cutoff, entry.bytes, None) match
+            case Left(err) => (Left(err), s)
+            case Right(fitted) =>
+              (Right(!s.sweeperActive), fitted.insert(entry).copy(sweeperActive = true))
+
+  /** Make `extra` more bytes fit inside `owner`'s and `pool`'s byte budgets by evicting stale
+    * results (never `except`), or say which budget cannot be met.
+    */
+  private def fitBytes(
+      s: TaskStore,
+      owner: Option[String],
+      pool: PoolKind,
+      cutoff: Long,
+      extra: Long,
+      except: Option[String]
+  ): Either[TaskByteBudgetExceeded, TaskStore] =
+    s.evictUntil(s.byteVictims(pool, owner, cutoff, ownOnly = true, except))(
+      _.ownerBytes(owner) + extra <= settings.maxBytesPerOwner
+    ).toRight(TaskByteBudgetExceeded("maxBytesPerOwner", settings.maxBytesPerOwner))
+      .flatMap(own =>
+        own
+          .evictUntil(own.byteVictims(pool, owner, cutoff, ownOnly = false, except))(
+            _.poolBytes(pool) + extra <= settings.maxBytesTotal
+          )
+          .toRight(TaskByteBudgetExceeded("maxBytesTotal", settings.maxBytesTotal))
+      )
 
   // ------- sweeper -------
 
@@ -423,7 +571,7 @@ class TaskManager[R] private[manager] (
         .flatMap { case (expired, next) =>
           // interruptFork: never block the sweeper on a task body; the task's release then no-ops
           // against the removed entry. Parked (never-started) fibers die the same way.
-          ZIO.foreachDiscard(expired.filter(!_.status.isTerminal))(_.fiber.interruptFork) *>
+          interruptRunning(expired) *>
             next.fold(ZIO.unit) { deadline =>
               val sleepMs = math.max(1L, math.min(deadline - now, settings.sweepIntervalMs))
               ZIO.sleep(Duration.fromMillis(sleepMs)) *> sweepLoop
@@ -435,9 +583,18 @@ class TaskManager[R] private[manager] (
     * the claim is released and logged so the next `create` starts a fresh sweeper instead of TTL
     * expiry silently stopping for the life of the server. Interruption (shutdown) keeps the claim:
     * `shutdown` drains the store right after.
+    *
+    * The log goes through the loggers in [[sweeperFiberRefs]]: those installed when the manager was
+    * built with [[TaskManager.make]] (on stdio, the stderr logger), ZIO's defaults for a manager
+    * built with `makeUnsafe`.
     */
   private def startSweeperFiber: UIO[Unit] =
-    sweepLoop
+    // The sweeper is forked by whichever `create` finds none running, and it then runs for as long
+    // as the store is non-empty — under steady traffic, indefinitely. A forked fiber starts with a
+    // copy of its parent's `FiberRef` values, so it would hold that one request's context (the
+    // client's `_meta`, `inputResponses`, headers) for all that time. Its first step swaps them
+    // for the manager's own.
+    (ZIO.updateFiberRefs((id, _) => sweeperFiberRefs.forkAs(id)) *> sweepLoop)
       .catchAllCause { cause =>
         ZIO
           .unless(cause.isInterruptedOnly)(
@@ -510,7 +667,7 @@ class TaskManager[R] private[manager] (
           // under heavy concurrent test load the read can occasionally observe the pre-update
           // entry. Synthesize a Cancelled view if so — the fiber is definitionally cancelled at
           // this point regardless of what the Ref happens to show.
-          entry.fiber.interrupt *> storeRef.get.map { latest =>
+          ZIO.foreachDiscard(entry.fiber)(_.interrupt) *> storeRef.get.map { latest =>
             latest.entries.get(taskId) match
               case Some(e) if e.status.isTerminal => Right(e.toTask)
               case _ =>
@@ -553,9 +710,7 @@ class TaskManager[R] private[manager] (
             val mine = s.entries.values.filter(_.ownerKey.contains(key)).toList
             (mine, s.remove(mine))
           }
-          .flatMap(mine =>
-            ZIO.foreachDiscard(mine.filter(!_.status.isTerminal))(_.fiber.interruptFork)
-          )
+          .flatMap(interruptRunning)
 
   /** Stop the sweeper (awaiting its exit), then drain the store, interrupting running tasks. For
     * embedders that stop a server without exiting the process, and for test cleanup — the sweeper
@@ -570,9 +725,7 @@ class TaskManager[R] private[manager] (
       sweeper <- sweeperRef.getAndSet(None)
       _ <- ZIO.foreachDiscard(sweeper)(_.interrupt)
       drained <- storeRef.getAndSet(TaskStore.empty)
-      _ <- ZIO.foreachDiscard(drained.entries.values.filter(!_.status.isTerminal))(
-        _.fiber.interruptFork
-      )
+      _ <- interruptRunning(drained.entries.values)
     yield ()
 
   /** Resolve the bucket key of a modern bearer task per `settings.ownerKey`. */
@@ -600,9 +753,58 @@ class TaskManager[R] private[manager] (
   ): Option[TaskEntry] =
     all.get(taskId).filter(sessionVisible(_, sessionId))
 
+  /** Interrupt the fibers of the still-running entries among `entries` (a terminal entry holds
+    * none), without waiting for them.
+    */
+  private def interruptRunning(entries: Iterable[TaskEntry]): UIO[Unit] =
+    ZIO.foreachDiscard(entries)(entry => ZIO.foreachDiscard(entry.fiber)(_.interruptFork))
+
   private def effectiveTtl(requested: Option[Long]): Option[Long] =
     val raw = requested.getOrElse(settings.defaultTtlMs)
     Some(math.min(math.max(raw, 0L), settings.maxTtlMs))
+
+  /** What a finished task leaves behind: its terminal status, the bytes its outcome is charged, and
+    * the outcome the result promise is completed with.
+    */
+  private final case class Settled(
+      status: TaskStatus,
+      message: Option[String],
+      bytes: Long,
+      outcome: Exit[Throwable, Any]
+  )
+
+  private def failed(error: Throwable): Settled =
+    Settled(TaskStatus.Failed, Some(error.getMessage), 0L, Exit.fail(error))
+
+  /** Size the task's exit against `maxResultBytes`. A result (or a failure) over the limit is not
+    * kept at all: the task ends `failed` with [[TaskResultTooLarge]] in its place.
+    */
+  private def settle(taskId: String, exit: Exit[Throwable, Any]): Settled =
+    val limit = settings.maxResultBytes
+    exit match
+      case Exit.Success(value) =>
+        val bytes = RetainedBytes.of(value, limit)
+        if bytes > limit then failed(new TaskResultTooLarge(taskId, limit))
+        else
+          Settled(TaskStatus.Completed, Some("The operation completed successfully."), bytes, exit)
+      // Cancelled (tasks/cancel, TTL sweep, session release): complete the promise with a
+      // failure VALUE, never the raw interrupt cause. `result` re-raises whatever is stored in
+      // the awaiting `tasks/result` handler fiber, and an interrupt-only cause there is
+      // indistinguishable from the *request* being cancelled — the router emits no response
+      // frame at all (TJC-2353). Real failures keep their full cause so defects keep traces.
+      case Exit.Failure(cause) if cause.isInterruptedOnly =>
+        Settled(
+          TaskStatus.Cancelled,
+          Some("The task was cancelled by request."),
+          0L,
+          Exit.fail(new TaskCancelledError(taskId))
+        )
+      case Exit.Failure(cause) =>
+        val bytes = RetainedBytes.ofCause(cause, limit)
+        if bytes > limit then failed(new TaskResultTooLarge(taskId, limit))
+        else
+          val message = cause.failureOption.flatMap(t => Option(t.getMessage)).filter(_.nonEmpty)
+          Settled(TaskStatus.Failed, message.map(TaskManager.clipStatusMessage), bytes, exit)
 
   private def recordTerminal(
       taskId: String,
@@ -610,39 +812,41 @@ class TaskManager[R] private[manager] (
       promise: Promise[Throwable, Any],
       onStatusChange: Task => UIO[Unit]
   ): UIO[Unit] =
-    val (status, message) = exit match
-      case Exit.Success(_) =>
-        (TaskStatus.Completed, Some("The operation completed successfully."))
-      case Exit.Failure(cause) if cause.isInterruptedOnly =>
-        (TaskStatus.Cancelled, Some("The task was cancelled by request."))
-      case Exit.Failure(cause) =>
-        val firstFailureMsg = cause.failureOption.flatMap(t => Option(t.getMessage))
-        (TaskStatus.Failed, firstFailureMsg.filter(_.nonEmpty))
+    val settled = settle(taskId, exit)
     val nowMs = System.currentTimeMillis()
     val nowMono = TaskManager.monotonicMs()
     for
-      updated <- storeRef.modify { s =>
+      recorded <- storeRef.modify { s =>
         s.entries.get(taskId) match
-          case None => (None, s)
+          case None => ((None, settled.outcome), s)
           case Some(entry) =>
-            val next = entry.copy(
-              status = status,
-              statusMessage = message,
-              lastUpdatedAtMs = nowMs,
-              lastUpdatedMonoMs = nowMono
-            )
-            (Some(next), s.markTerminal(entry, next))
+            // The terminal entry drops the fiber handle (and with it everything the fiber
+            // inherited from the request) and swaps the request's byte charge for the result's.
+            def terminal(as: Settled): TaskEntry =
+              entry.copy(
+                status = as.status,
+                statusMessage = as.message,
+                lastUpdatedAtMs = nowMs,
+                lastUpdatedMonoMs = nowMono,
+                fiber = None,
+                bytes = as.bytes
+              )
+            val cutoff = nowMono - settings.minResultRetentionMs
+            val kept = s.markTerminal(entry, terminal(settled))
+            // The stored result must fit the owner's and the pool's byte budgets. Older results
+            // past the retention grace make room; inside the grace nobody is evicted and it is
+            // this result that is discarded.
+            fitBytes(kept, entry.ownerKey, entry.pool, cutoff, 0L, Some(taskId)) match
+              case Right(fitted) => ((fitted.entries.get(taskId), settled.outcome), fitted)
+              case Left(budget) =>
+                val discarded = failed(
+                  new TaskResultDiscarded(taskId, budget.setting, budget.limitBytes)
+                )
+                val next = terminal(discarded)
+                ((Some(next), discarded.outcome), s.markTerminal(entry, next))
       }
-      _ <- exit match
-        case Exit.Success(value) => promise.succeed(value).unit
-        // Cancelled (tasks/cancel, TTL sweep, session release): complete the promise with a
-        // failure VALUE, never the raw interrupt cause. `result` re-raises whatever is stored in
-        // the awaiting `tasks/result` handler fiber, and an interrupt-only cause there is
-        // indistinguishable from the *request* being cancelled — the router emits no response
-        // frame at all (TJC-2353). Real failures keep their full cause so defects keep traces.
-        case Exit.Failure(cause) if cause.isInterruptedOnly =>
-          promise.fail(new TaskCancelledError(taskId)).unit
-        case Exit.Failure(cause) => promise.failCause(cause).unit
+      (updated, outcome) = recorded
+      _ <- promise.done(outcome)
       _ <- ZIO.foreachDiscard(updated)(e => onStatusChange(e.toTask).ignore)
     yield ()
 
@@ -671,6 +875,53 @@ final class TaskCapacityExceeded(val kind: String, val limit: Int)
     with McpErrorCarrier:
   def toMcpError: McpError = McpError(ErrorCodes.CapacityExceeded, getMessage)
 
+/** Raised by [[TaskManager.create]] when the new task's charge does not fit the byte budget named
+  * by `setting` (`maxBytesPerOwner` or `maxBytesTotal`) and no stored result is old enough to be
+  * evicted for it. Maps to `-32003`, like the stored-entry caps: a server condition the client may
+  * retry later.
+  */
+final class TaskByteBudgetExceeded(val setting: String, val limitBytes: Long)
+    extends RuntimeException(
+      s"Task capacity exceeded (TaskSettings.$setting = $limitBytes estimated bytes)"
+    )
+    with McpErrorCarrier:
+  def toMcpError: McpError = McpError(ErrorCodes.CapacityExceeded, getMessage)
+
+/** The request is too large to be kept for the lifetime of a task (`TaskSettings.maxRequestBytes`).
+  * The request's own fault, so `-32602`; nothing is forked or stored.
+  */
+final class TaskRequestTooLarge(val limitBytes: Long)
+    extends RuntimeException(
+      "tools/call: the request is too large to run as a task " +
+        s"(TaskSettings.maxRequestBytes = $limitBytes estimated bytes)"
+    )
+    with McpErrorCarrier:
+  def toMcpError: McpError = McpError.invalidParams(getMessage)
+
+/** What a task's result is replaced with when the result (or failure) the tool produced is larger
+  * than `TaskSettings.maxResultBytes`: the task ends `failed` and the oversized value is not kept.
+  * A server-side condition of the tool's output, so `-32603`.
+  */
+final class TaskResultTooLarge(val taskId: String, val limitBytes: Long)
+    extends RuntimeException(
+      "The task's result was not kept: it is larger than " +
+        s"TaskSettings.maxResultBytes = $limitBytes estimated bytes"
+    )
+    with McpErrorCarrier:
+  def toMcpError: McpError = McpError.internalError(getMessage)
+
+/** What a task's result is replaced with when storing it would take its owner or its pool over the
+  * byte budget named by `setting` and no older result may be evicted yet: the task ends `failed`.
+  * Maps to `-32003` — the same work may succeed once stored results have been collected or aged.
+  */
+final class TaskResultDiscarded(val taskId: String, val setting: String, val limitBytes: Long)
+    extends RuntimeException(
+      "The task's result was discarded: the task store is at " +
+        s"TaskSettings.$setting = $limitBytes estimated bytes"
+    )
+    with McpErrorCarrier:
+  def toMcpError: McpError = McpError(ErrorCodes.CapacityExceeded, getMessage)
+
 /** Unknown / cross-session task id from `tasks/result`. Maps to JSON-RPC `-32602` so it agrees with
   * `tasks/get`'s "Unknown task" error.
   */
@@ -694,6 +945,15 @@ object TaskManager:
 
   private val noCheckpoint: String => UIO[Unit] = _ => ZIO.unit
 
+  /** A failed task's `statusMessage` is the tool's failure message, which the store keeps and every
+    * `tasks/get` and status notification repeats: keep the head of an overlong one.
+    */
+  private[fastmcp] val MaxStatusMessageChars: Int = 1024
+
+  private[manager] def clipStatusMessage(message: String): String =
+    if message.length <= MaxStatusMessageChars then message
+    else message.take(MaxStatusMessageChars) + "..."
+
   /** Monotonic milliseconds (`System.nanoTime`, available on JVM, Scala.js and Scala Native). Only
     * differences are meaningful; never persisted or put on the wire.
     */
@@ -707,7 +967,9 @@ object TaskManager:
     for
       store <- Ref.make(TaskStore.empty)
       sweeper <- Ref.make(Option.empty[Fiber.Runtime[Nothing, Unit]])
-    yield new TaskManager[R](settings, store, newId, sweeper, noCheckpoint)
+      // The building fiber's FiberRefs (loggers, executors, environment) become the sweeper's.
+      fiberRefs <- ZIO.getFiberRefs
+    yield new TaskManager[R](settings, store, newId, sweeper, noCheckpoint, fiberRefs)
 
   /** Synchronous constructor for non-ZIO call sites (tests). Internally identical to [[make]]. */
   def makeUnsafe[R](settings: TaskSettings, newId: UIO[String]): TaskManager[R] =

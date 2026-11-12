@@ -210,7 +210,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
 
   private def legacyStatelessDispatch(message: JsonRpcMessage): URIO[R, HttpReply] =
     for
-      session <- Session.make("stateless", supportsTasks = false)
+      session <- Session.makeRequestScoped("stateless", supportsTasks = false)
       // Legacy stateless compatibility mode starts ready without a handshake.
       _ <- session.markInitialized
       reply <- router.dispatch(session, message)
@@ -281,7 +281,13 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
   ): URIO[R, HttpReply] =
     for
       id <- randomId
-      session <- Session.makeProtocolSession(id, req.clientKey)
+      // The peer address counts this client's sessions at the cap (`admit`); the capacity bounds
+      // what the session buffers for a GET stream the client may never read.
+      session <- Session.makeProtocolSession(
+        id,
+        req.clientKey,
+        settings.limits.maxOutboundMessages
+      )
       // A client that goes away before the reply is built never learns the id: drop the session.
       reply <- ZIO.uninterruptibleMask { restore =>
         restore(answerInitialize(sessions, session, message))
@@ -577,7 +583,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
             // Peer address of the request — the default owner key for bearer-task buckets
             // (`TaskOwnerKey.Transport`); behind a reverse proxy use `TaskOwnerKey.Custom`.
             Session
-              .make(s"request-${rpc.id.toString}", clientKey = req.clientKey)
+              .makeRequestScoped(s"request-${rpc.id.toString}", clientKey = req.clientKey)
               .flatMap(session => streamRequest(session, rpc, isNew = false, Some(context)))
       case _: JsonRpcMessage.Invalid =>
         val failure: JsonRpcMessage = JsonRpcMessage.Failure(
@@ -592,7 +598,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
             ZIO.succeed(HttpReply.Json(status, failure.toJson))
           case Right(_) =>
             Session
-              .make("notification")
+              .makeRequestScoped("notification")
               .flatMap(session => router.dispatch(session, notification))
               .as(HttpReply.Empty(202))
       case _ =>

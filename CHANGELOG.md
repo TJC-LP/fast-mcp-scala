@@ -194,6 +194,43 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     `HttpServerJs` comment that presented loopback binding as an alternative to `allowedHosts` is
     corrected. README, `docs/transports.md` and SECURITY.md now say that the two are separate
     protections.
+- **The task store is bounded in bytes, not only in entries.** Affects servers with
+  `tasks.enabled = true` and at least one tool whose task support is optional or required.
+  - A finished task's store entry no longer references its fiber, so nothing of the request that
+    created it (its `_meta`, `inputResponses`, allow-listed headers) stays reachable while the
+    result waits to be collected. The store's TTL sweeper no longer carries the context of the
+    request that happened to start it.
+  - A request that becomes a task is measured and capped: new `TaskSettings.maxRequestBytes`
+    (default 2 MiB). A larger one is refused with `-32602` before anything is started. While the
+    task runs, that size is charged to its owner and pool.
+  - A stored result is measured and capped: new `TaskSettings.maxResultBytes` (default 8 MiB). A
+    task whose result (or failure) is larger ends `failed` and the oversized value is not kept.
+  - New per-owner and per-pool budgets, `TaskSettings.maxBytesPerOwner` (default 16 MiB) and
+    `TaskSettings.maxBytesTotal` (default 128 MiB per pool; there are two pools). A create that
+    does not fit evicts stored results older than `minResultRetentionMs` in the same order as the
+    stored-entry caps and is otherwise refused with `-32003`; a finishing task whose result does
+    not fit evicts the same way and otherwise ends `failed` with its result discarded.
+  - Sizes are estimated heap bytes (two per string character plus a fixed overhead per JSON node),
+    so a document of many small values is charged several times its wire size.
+  - A failed task's `statusMessage` keeps at most the first 1024 characters of the failure
+    message.
+- **A session's out-of-request channel is bounded.** Messages a server emits outside a request's
+  own response stream — legacy `notifications/tasks/status`, and the log, progress and
+  server-to-client request messages of a task body — used to be queued without limit, whether or
+  not anything would ever read them. New `LimitSettings.maxOutboundMessages` (default 256):
+  - a legacy streamable-HTTP session on the JVM buffers at most that many for its standalone GET
+    stream and drops the oldest at the bound, so the emitting task is never blocked or interrupted
+    by a client that does not read;
+  - sessions with no reader for the channel — every Bun HTTP session, every 2026-07-28 HTTP
+    request, the legacy stateless adapter — buffer nothing: such a message is discarded;
+  - the stdio session buffers at most that many and applies back-pressure instead: an emitter
+    waits for the stdout writer, so nothing is lost. After stdin reaches EOF nothing is buffered.
+  - `Session.make` (unchanged signature; used by tests and embedders that drive a router
+    directly) now builds a session whose `outbound` holds 256 messages and drops the oldest.
+  - Consequences to plan for: a legacy JVM client whose GET stream falls more than
+    `maxOutboundMessages` behind loses the oldest messages; a server-to-client request a task
+    body issues after its POST was answered is not delivered on Bun or without a GET stream (it
+    fails with its timeout, as before); task status is always available from `tasks/get`.
 
 ### Added
 
