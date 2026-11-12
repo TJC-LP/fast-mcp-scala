@@ -33,7 +33,8 @@ import com.tjclp.fastmcp.server.transport.http.{
   * @param idleTimeout
   *   a connection with no request activity is closed after this long
   * @param requestReadTimeout
-  *   a whole request (head + body) must arrive within this long of its first byte (408)
+  *   the allowance for a whole request (head + body) from its first byte, extended by one second
+  *   per 4 KiB received: a steady slow upload is given the time it needs, a trickle gets 408
   * @param writeStallTimeout
   *   a write blocked this long — the peer stopped reading a reply or an event stream — closes the
   *   connection, so a stalled client cannot hold one of the `maxConnections` slots indefinitely

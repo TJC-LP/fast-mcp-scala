@@ -86,7 +86,8 @@ private[fastmcp] object SocketHttpServer:
     * @param idleTimeoutMs
     *   a connection with no request activity is closed after this long
     * @param requestReadTimeoutMs
-    *   the whole request (head + body) must arrive within this long of its first byte (408)
+    *   the allowance for a whole request (head + body), counted from its first byte and extended by
+    *   one second per 4 KiB received, so it bounds slowness, not size (408)
     * @param writeStallTimeoutMs
     *   a single write blocked this long (the peer stopped reading) closes the connection
     */
@@ -133,6 +134,15 @@ private[fastmcp] object SocketHttpServer:
     */
   private val LingerQuietMs = 200
   private val LingerMaxMs = 5_000L
+
+  /** Minimum average rate a request must arrive at once its initial allowance
+    * (`requestReadTimeoutMs`) is used up: every byte received extends the request's deadline by 1 /
+    * this many seconds. 4 KiB/s (about 33 kbit/s) lets a slow link finish a large upload — the
+    * default 1 MiB body cap gets up to 60 s + 256 s — while a client sending a byte or a line at a
+    * time earns next to nothing and still times out.
+    */
+  private val MinRequestBytesPerSecond = 4 * 1024L
+  private val RequestNanosPerByte = 1_000_000_000L / MinRequestBytesPerSecond
 
   /** Socket writes go out in slices this size so the write-stall clock measures progress. */
   private val WriteSliceBytes = 16 * 1024
@@ -811,8 +821,10 @@ private[fastmcp] object SocketHttpServer:
       end = 0
       in.read(buf, 0, buf.length)
 
-    /** `true` once the request being read has overrun its deadline. The socket's own read timeout
-      * only bounds one read, so a peer sending a byte at a time would otherwise never time out.
+    /** `true` once the request being read has overrun its deadline: the initial allowance plus what
+      * its bytes have earned (see `MinRequestBytesPerSecond`). The socket's own read timeout only
+      * bounds one read, so a peer sending a byte at a time would otherwise never time out; a fixed
+      * deadline alone would instead cut off a slow client that is still sending.
       */
     def timedOut: Boolean = java.lang.System.nanoTime() > deadline
 
@@ -858,7 +870,11 @@ private[fastmcp] object SocketHttpServer:
           start = 0
         else buf = java.util.Arrays.copyOf(buf, buf.length * 2)
       val n = in.read(buf, end, buf.length - end)
-      if n > 0 then end += n
+      if n > 0 then
+        end += n
+        // Bytes that arrive buy the request time: the deadline bounds how slowly a request may
+        // come in, not how long a large one may take.
+        if deadline != Long.MaxValue then deadline += n * RequestNanosPerByte
       n
 
     /** Read a request head up to (excluding) its blank-line terminator (`CRLF CRLF`, or bare `LF

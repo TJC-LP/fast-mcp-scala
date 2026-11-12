@@ -688,6 +688,34 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     }
   }
 
+  test("a slow but steady upload outlives the request-read allowance") {
+    // 48 KiB in 8 KiB pieces 150 ms apart: about 0.9 s in all, more than twice the 400 ms
+    // allowance, but at ~53 KiB/s — far above the 4 KiB/s floor — every piece extends the deadline.
+    val backend =
+      new SocketHttpBackend(summon[TransportBackend], requestReadTimeout = 400.millis)
+    withServer(baseSettings.copy(stateless = true), backend) { port =>
+      val client = new RawClient(port)
+      val pad = "x" * (48 * 1024 - 100)
+      val frame =
+        s"""{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":40,"pad":"$pad"}}}"""
+      val bytes = frame.getBytes(StandardCharsets.UTF_8)
+      client.send(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" +
+          s"Accept: application/json\r\nContent-Length: ${bytes.length}\r\n\r\n"
+      )
+      var offset = 0
+      while offset < frame.length do
+        val end = math.min(frame.length, offset + 8 * 1024)
+        client.send(frame.substring(offset, end))
+        offset = end
+        Thread.sleep(150)
+      val reply = client.readReply()
+      reply.status shouldBe 200
+      reply.body should include(""""id":9""")
+      client.close()
+    }
+  }
+
   test("a request dribbled in past the request-read deadline is answered 408") {
     val backend =
       new SocketHttpBackend(summon[TransportBackend], requestReadTimeout = 400.millis)
