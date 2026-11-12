@@ -151,6 +151,49 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - Docs: `docs/custom-types.md` § "What the server enforces", `SECURITY.md`, the Scaladoc of
     `@Param(schema)`, `McpSchema`, `McpInputCodec`, `McpTool.withSchema` and
     `ToolRegistrationOptions`.
+- **BEHAVIOUR CHANGE — Host / Origin validation is on by default for loopback HTTP servers**
+  (TJC-5087). A server whose `host` is a loopback bind address (`127.0.0.0/8`, `::1`, `localhost`
+  — including the default `127.0.0.1`) now answers **403** to a request whose `Host` is not a
+  loopback name, and to a request whose present `Origin` is not the server's own origin or listed
+  in `allowedOrigins`, **without any setting**. Previously the guard existed only when
+  `allowedHosts` / `allowedOrigins` was set, so a server started with default settings accepted
+  any `Host` and `Origin`. Binding loopback keeps other machines out; it does not keep out a web
+  page open in a browser on the same machine, and this guard is what does.
+  - **What may break: a loopback listener behind a reverse proxy that forwards its own `Host`**
+    (`Host: mcp.example.com` arriving at `127.0.0.1:8000`), or a browser front-end on another
+    origin talking to a default-settings server. Those requests are now refused with
+    `403 {"error":{"code":-32000,"message":"Host/Origin not allowed (DNS-rebinding protection)"}}`.
+    Fix it one of two ways:
+    - **preferred:** list what the proxy forwards —
+      `McpServerSettings(allowedHosts = Some(Set("mcp.example.com")))`, plus
+      `allowedOrigins = Some(Set("https://app.example.com"))` for a browser front-end on another
+      origin. An explicit `allowedHosts` replaces the automatic names, so add `"localhost"` /
+      `"127.0.0.1"` to it if local clients must keep working;
+    - **or opt out:** `McpServerSettings(dnsRebindingProtection = false)` (new setting, default
+      `true`) accepts every `Host` and `Origin`, as before. It is valid only with both
+      allow-lists unset; `runHttp()` refuses the contradictory combination at startup.
+  - Clients that reach the server as `localhost`, `127.0.0.1` or `[::1]` — MCP clients, `curl`,
+    the conformance harness, an `ssh -L` or IDE port-forward — are unaffected: the automatic names
+    are `localhost`, `127.0.0.1`, `[::1]` and the bound address itself, **on any port** (the port
+    is not compared). A request with no `Host` and no `Origin` still passes. A host name that only
+    resolves to loopback (an `/etc/hosts` alias) is not recognised as a loopback bind: list it.
+  - `allowedHosts = None` therefore now means "automatic", not "off"; `Some(Set.empty)` reads the
+    same. An explicit `allowedHosts` behaves exactly as before on every bind address.
+    `allowedOrigins` on its own keeps its meaning (only the listed origins pass) and, on a loopback
+    bind, the `Host` is now additionally held to the loopback names.
+  - **A non-loopback bind is not guarded automatically** — the names clients use cannot be
+    inferred from `0.0.0.0` or a LAN address — so `runHttp()` (and Bun's `startStatefulHttp()` /
+    `startStatelessHttp()`) now logs a **WARN at startup** when `host` is not loopback and neither
+    allow-list is set. The server still starts: a container behind an authenticating proxy binds
+    `0.0.0.0` legitimately. Set `allowedHosts` / `allowedOrigins`, or `dnsRebindingProtection =
+    false` to acknowledge it and silence the warning.
+  - Identical on every HTTP backend (zio-http, the socket backend on the JVM and Scala Native,
+    `Bun.serve`): the decision is the shared `HostGuard`, now resolved once per settings value
+    instead of on every request.
+  - The shipped `HttpServer` and `HttpServerJs` examples spell the loopback allow-list out, and the
+    `HttpServerJs` comment that presented loopback binding as an alternative to `allowedHosts` is
+    corrected. README, `docs/transports.md` and SECURITY.md now say that the two are separate
+    protections.
 
 ### Added
 

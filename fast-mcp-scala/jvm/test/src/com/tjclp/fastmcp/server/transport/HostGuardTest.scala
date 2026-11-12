@@ -278,7 +278,180 @@ class HostGuardTest extends AnyFunSuite with Matchers:
     HostGuard.isAllowed(sameHost, Some("https://app.example.com"), settings) shouldBe true
     HostGuard.isAllowed(sameHost, Some("http://localhost:8000"), settings) shouldBe true
     HostGuard.isAllowed(sameHost, Some("http://localhost:3000"), settings) shouldBe false
-    HostGuard.isAllowed(sameHost, Some("http://localhost:3000"), McpServerSettings()) shouldBe true
+    // Nothing listed: the automatic loopback guard refuses the cross-port page; only the explicit
+    // opt-out (or a non-loopback bind, which warns at startup) admits it.
+    HostGuard.isAllowed(sameHost, Some("http://localhost:3000"), McpServerSettings()) shouldBe false
+    HostGuard.isAllowed(
+      sameHost,
+      Some("http://localhost:3000"),
+      McpServerSettings(dnsRebindingProtection = false)
+    ) shouldBe true
+    HostGuard.isAllowed(
+      sameHost,
+      Some("http://localhost:3000"),
+      McpServerSettings(host = "0.0.0.0")
+    ) shouldBe true
+  }
+
+  // ---- the guard a settings value resolves to (automatic loopback default, opt-out) ----
+
+  private def verdict(settings: McpServerSettings, host: String, origin: Option[String] = None) =
+    HostGuard.isAllowed(Some(host), origin, settings)
+
+  test("loopbackHostNames: loopback bind addresses in every spelling, with the bound literal") {
+    val base = Set("localhost", "127.0.0.1", "[::1]")
+    HostGuard.loopbackHostNames("127.0.0.1") shouldBe Some(base)
+    HostGuard.loopbackHostNames("localhost") shouldBe Some(base)
+    HostGuard.loopbackHostNames(" LocalHost ") shouldBe Some(base)
+    HostGuard.loopbackHostNames("::1") shouldBe Some(base)
+    HostGuard.loopbackHostNames("[::1]") shouldBe Some(base)
+    HostGuard.loopbackHostNames("::1%lo0") shouldBe Some(base)
+    HostGuard.loopbackHostNames("127.0.0.2") shouldBe Some(base + "127.0.0.2")
+    HostGuard.loopbackHostNames("127.255.255.254") shouldBe Some(base + "127.255.255.254")
+    HostGuard.loopbackHostNames("0:0:0:0:0:0:0:1") shouldBe Some(base + "[0:0:0:0:0:0:0:1]")
+    HostGuard.loopbackHostNames("0000:0000:0000:0000:0000:0000:0000:0001").isDefined shouldBe true
+    HostGuard.loopbackHostNames("0::1").isDefined shouldBe true
+    HostGuard.loopbackHostNames("::0:1").isDefined shouldBe true
+    HostGuard.loopbackHostNames("::ffff:127.0.0.1") shouldBe
+      Some(base + "[::ffff:127.0.0.1]")
+  }
+
+  test("loopbackHostNames: wildcards, LAN and public addresses, names and junk are not loopback") {
+    for notLoopback <- List(
+        "0.0.0.0",
+        "::",
+        "[::]",
+        "",
+        "  ",
+        "192.168.1.20",
+        "10.0.0.1",
+        "128.0.0.1",
+        "1.127.0.0",
+        "127.0.0",
+        "127.0.0.1.",
+        "127.0.0.256",
+        "127.0.0.1.evil.example.com",
+        "127.0.0.x",
+        "localhost.evil.example.com",
+        "localhost.",
+        "evil.example.com",
+        "mcp.internal",
+        "::2",
+        "1::1",
+        "::1::",
+        ":::1",
+        "0:0:0:0:0:0:0:0:1",
+        "::ffff:10.0.0.1",
+        "::10000",
+        "::g",
+        "::\uff11", // a fullwidth digit one is not an ASCII hex digit
+        "127.0.0.\uff11"
+      )
+    do
+      withClue(s"'$notLoopback'") {
+        HostGuard.loopbackHostNames(notLoopback) shouldBe None
+        HostGuard.isLoopbackBind(notLoopback) shouldBe false
+      }
+  }
+
+  test("policy: default settings resolve to the automatic loopback guard") {
+    val policy = McpServerSettings().hostGuardPolicy
+    policy.mode shouldBe HostGuard.Mode.AutomaticLoopback
+    policy.enforced shouldBe true
+    policy.hosts shouldBe HostGuard.LoopbackNames
+    policy.origins shouldBe Set.empty
+    policy.sameAuthorityOrigins shouldBe true
+    verdict(McpServerSettings(), "127.0.0.1:8000") shouldBe true
+    verdict(McpServerSettings(), "localhost:54321") shouldBe true // port is not compared
+    verdict(McpServerSettings(), "[::1]:8000") shouldBe true
+    verdict(McpServerSettings(), "evil.example.com:8000") shouldBe false
+    verdict(McpServerSettings(), "127.0.0.2:8000") shouldBe false // not this listener's address
+    verdict(McpServerSettings(), "localhost:8000", Some("http://localhost:8000")) shouldBe true
+    verdict(McpServerSettings(), "localhost:8000", Some("http://evil.example.com")) shouldBe false
+    HostGuard.isAllowed(None, None, McpServerSettings()) shouldBe true // non-browser client
+    HostGuard.isAllowed(None, Some("http://evil.example.com"), McpServerSettings()) shouldBe false
+  }
+
+  test("policy: an explicit allowedHosts replaces the automatic names, on any bind address") {
+    val proxied = McpServerSettings(allowedHosts = Some(Set("mcp.example.com")))
+    proxied.hostGuardPolicy.mode shouldBe HostGuard.Mode.Explicit
+    verdict(proxied, "mcp.example.com") shouldBe true
+    verdict(proxied, "localhost:8000") shouldBe false // exactly the listed names, as before
+    val public = McpServerSettings(host = "0.0.0.0", allowedHosts = Some(Set("mcp.example.com")))
+    public.hostGuardPolicy.mode shouldBe HostGuard.Mode.Explicit
+    verdict(public, "mcp.example.com") shouldBe true
+    verdict(public, "evil.example.com") shouldBe false
+  }
+
+  test("policy: allowedOrigins alone keeps the automatic Host names on a loopback bind") {
+    val settings = McpServerSettings(allowedOrigins = Some(Set("http://localhost:5173")))
+    settings.hostGuardPolicy.mode shouldBe HostGuard.Mode.AutomaticLoopback
+    verdict(settings, "localhost:8000", Some("http://localhost:5173")) shouldBe true
+    verdict(settings, "localhost:8000", Some("http://localhost:3000")) shouldBe false
+    // As before the automatic guard: with origins alone, only the listed origins pass — the
+    // request's own authority included. The automatic names add the Host check, nothing else.
+    verdict(settings, "localhost:8000", Some("http://localhost:8000")) shouldBe false
+    verdict(settings, "localhost:8000") shouldBe true
+    verdict(settings, "evil.example.com:8000") shouldBe false
+    verdict(settings, "evil.example.com:8000", Some("http://localhost:5173")) shouldBe false
+    // On a non-loopback bind there are no automatic names: Origin-only, exactly as before.
+    val wildcard = settings.copy(host = "0.0.0.0")
+    wildcard.hostGuardPolicy.mode shouldBe HostGuard.Mode.Explicit
+    verdict(wildcard, "anything.example") shouldBe true
+    verdict(wildcard, "anything.example", Some("http://localhost:5173")) shouldBe true
+    verdict(wildcard, "anything.example", Some("http://evil.example.com")) shouldBe false
+  }
+
+  test("policy: Some(Set.empty) is not an opt-out — it reads as None (automatic)") {
+    val settings = McpServerSettings(allowedHosts = Some(Set.empty), allowedOrigins = Some(Set.empty))
+    settings.hostGuardPolicy.mode shouldBe HostGuard.Mode.AutomaticLoopback
+    verdict(settings, "evil.example.com") shouldBe false
+    verdict(settings, "localhost:8000") shouldBe true
+  }
+
+  test("policy: a non-loopback bind with nothing listed is unprotected (and flagged as such)") {
+    for bind <- List("0.0.0.0", "::", "192.168.1.20", "mcp.internal") do
+      withClue(s"host = $bind") {
+        val settings = McpServerSettings(host = bind)
+        settings.hostGuardPolicy.mode shouldBe HostGuard.Mode.Unprotected
+        settings.hostGuardPolicy.enforced shouldBe false
+        verdict(settings, "evil.example.com", Some("http://evil.example.com")) shouldBe true
+      }
+  }
+
+  test("policy: dnsRebindingProtection = false is the explicit opt-out") {
+    val off = McpServerSettings(dnsRebindingProtection = false)
+    off.hostGuardPolicy.mode shouldBe HostGuard.Mode.Disabled
+    off.hostGuardPolicy.enforced shouldBe false
+    verdict(off, "evil.example.com", Some("http://evil.example.com")) shouldBe true
+    verdict(off, "evil.example.com", Some("null")) shouldBe true
+    McpServerSettings(host = "0.0.0.0", dnsRebindingProtection = false).hostGuardPolicy.mode shouldBe
+      HostGuard.Mode.Disabled
+    // The default keeps the guard.
+    McpServerSettings().dnsRebindingProtection shouldBe true
+  }
+
+  test("policy: the opt-out never silently drops an explicit list (startup refuses the pair)") {
+    val hostsListed =
+      McpServerSettings(allowedHosts = Some(Set("localhost")), dnsRebindingProtection = false)
+    verdict(hostsListed, "evil.example.com") shouldBe false
+    verdict(hostsListed, "localhost:8000") shouldBe true
+    val originsListed = McpServerSettings(
+      allowedOrigins = Some(Set("https://app.example.com")),
+      dnsRebindingProtection = false
+    )
+    verdict(originsListed, "x.example", Some("http://evil.example.com")) shouldBe false
+    verdict(originsListed, "x.example", Some("https://app.example.com")) shouldBe true
+  }
+
+  test("the resolved policy is computed once per settings value and follows copy") {
+    val settings = McpServerSettings()
+    settings.hostGuardPolicy should be theSameInstanceAs settings.hostGuardPolicy
+    settings.copy(host = "0.0.0.0").hostGuardPolicy.mode shouldBe HostGuard.Mode.Unprotected
+    settings.copy(dnsRebindingProtection = false).hostGuardPolicy.mode shouldBe
+      HostGuard.Mode.Disabled
+    // Not part of the case-class identity.
+    settings shouldBe McpServerSettings()
   }
 
   test("parseOrigin normalises scheme/host case and defaults the port per scheme") {

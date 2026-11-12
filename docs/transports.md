@@ -83,6 +83,60 @@ object MyHttpServer extends McpServerApp[Http, MyHttpServer.type]:
   @Tool(...) def hello(name: String): String = s"Hello, $name!"
 ```
 
+This binds `127.0.0.1:8090` with [Host / Origin validation](#host--origin-validation) on: a
+loopback bind gets it without any setting.
+
+### Host / Origin validation
+
+**Binding loopback alone does not protect against browser-originated requests.** A loopback bind
+keeps other machines out; a web page open in a browser on the same machine can still reach the
+port. What tells such a page apart is the `Host` (and `Origin`) it sends, so the HTTP transport
+checks both on every request — POST, GET and DELETE, before the body is read or any session state
+is touched — and answers **403** (`-32000`, `Host/Origin not allowed (DNS-rebinding protection)`)
+when the check fails.
+
+| `host` (bind address) | `allowedHosts` | Guard |
+|---|---|---|
+| loopback: `127.0.0.0/8`, `::1`, `localhost` (the default `127.0.0.1` included) | `None` (default) | **On, automatically.** `Host` must be `localhost`, `127.0.0.1`, `[::1]` or the bound address itself — on any port |
+| any | `Some(names)` | On, with exactly those names |
+| not loopback: `0.0.0.0`, `::`, a LAN address, a host name | `None`, and `allowedOrigins` unset | **Off — and a WARN is logged at startup.** The names clients use cannot be inferred |
+| any | `None`, with `dnsRebindingProtection = false` | Off, by explicit opt-out |
+
+The rules, identical on every backend (zio-http, the socket backend, `Bun.serve`):
+
+- **`Host`** must parse as one `host[:port]` authority whose hostname is an allowed name. The port
+  is not compared, so a forwarded port (`ssh -L 9000:127.0.0.1:8000`, an IDE port-forward) keeps
+  working. A request with no `Host` passes: that is not something a browser can do.
+- **`Origin`**, when present, must be the same origin as the request's `Host` (same host and
+  port), or be listed in `allowedOrigins`. A page on another loopback port
+  (`http://localhost:3000`), `Origin: null`, and malformed values are refused. A request with no
+  `Origin` (every non-browser client) passes.
+- A loopback bind address is recognised from the `host` string alone — `localhost`, a
+  `127.x.y.z` literal, `::1` in any spelling. A host name that merely resolves to loopback (an
+  `/etc/hosts` alias) is not: list it in `allowedHosts`.
+
+Deployments:
+
+- **Local development (the default).** Nothing to configure. MCP clients, `curl` and test
+  harnesses that reach the server as `localhost` / `127.0.0.1` / `[::1]` are unaffected.
+- **A browser front-end on another origin** (a dev server on `http://localhost:5173`): add
+  `allowedHosts = Some(Set("localhost", "127.0.0.1"))` and
+  `allowedOrigins = Some(Set("http://localhost:5173"))`. (With `allowedOrigins` alone, only the
+  listed origins pass.) You also need a CORS-terminating proxy; see below.
+- **A loopback listener behind a reverse proxy that forwards its own `Host`** (`Host:
+  mcp.example.com` arriving at `127.0.0.1:8000`): list the forwarded name —
+  `allowedHosts = Some(Set("mcp.example.com"))`. An explicit list replaces the automatic names,
+  so add `"localhost"` if local clients must keep working. This deployment worked without any
+  setting before 1.1.0 and now needs this one line.
+- **A non-loopback bind** (`host = "0.0.0.0"` in a container): set `allowedHosts` to the public
+  name(s) and `allowedOrigins` for browser front-ends, **and** put an authenticating proxy in
+  front. The guard is not authentication: a non-browser client can send any `Host` it likes.
+- **Opting out**: `dnsRebindingProtection = false` accepts every `Host` and `Origin` and silences
+  the startup warning. It is only valid with both allow-lists unset (`runHttp()` refuses the
+  contradictory combination at startup). Use it when a trusted proxy in front of the listener
+  already does this check and you cannot enumerate the names it forwards; otherwise prefer
+  `allowedHosts`.
+
 ### The modern path (MCP 2026-07-28)
 
 `runHttp()` accepts one stateless JSON-RPC message per `POST /mcp`. A request may receive a plain
@@ -106,7 +160,8 @@ Modern Streamable HTTP is identical on the JVM (ZIO HTTP) and Bun (`Bun.serve`).
 serve plaintext HTTP/1.1 only — there is no TLS setting by design; terminate TLS and authentication
 at a reverse proxy in front of the MCP endpoint. Neither backend adds CORS headers or answers an
 `OPTIONS` preflight: a browser-hosted client on another origin needs a CORS-terminating proxy in
-front of the endpoint (and, with `allowedHosts` on, its origin listed in `allowedOrigins`).
+front of the endpoint (and its origin listed in `allowedOrigins`; see
+[Host / Origin validation](#host--origin-validation)).
 
 ### Request requirements and error mapping
 
@@ -134,7 +189,7 @@ joined string.
 
 | Condition | HTTP | JSON-RPC code |
 |---|---|---|
-| `Host`/`Origin` refused by `allowedHosts` / `allowedOrigins` | 403 | `-32000` |
+| `Host`/`Origin` refused by the Host/Origin guard (automatic on a loopback bind, or `allowedHosts` / `allowedOrigins`) | 403 | `-32000` |
 | Missing or wrong `Content-Type` (any POST; a non-utf-8 `charset` counts as wrong) | 415 | `-32000` |
 | Body larger than `maxRequestBodyBytes` | 413 | `-32000` on first-party paths; netty and Bun answer an empty 413 when they refuse the body first |
 | Frame over `limits` (`maxFrameChars` / `maxDepth` / `maxObjectFields`) | 400 | `-32700` |
@@ -144,7 +199,7 @@ joined string.
 | Unknown request method | 404 | `-32601` |
 
 The admission gates run in a fixed order on every backend, on headers first and before any session
-state is touched: unknown path 404 → `allowedHosts`/`allowedOrigins` 403 → `Content-Type` 415 →
+state is touched: unknown path 404 → Host/Origin guard 403 → `Content-Type` 415 →
 declared `Content-Length` over `maxRequestBodyBytes` 413 → `Accept` 406 → body read (platform byte
 cap, then a first-party post-read check → 413) → frame limits (`-32700`, HTTP 400) → dispatch. A
 legacy `initialize` meets the session cap (`maxSessions`) only after it has succeeded — see
@@ -324,15 +379,16 @@ session as its own client, so only case 3 applies.
 
 | Setting | Default | Description |
 |---|---|---|
-| `host` | `127.0.0.1` | Bind address. Changed in 0.5.0 from `0.0.0.0` per the spec's bind-localhost guidance; set `"0.0.0.0"` explicitly for containers or external exposure. |
+| `host` | `127.0.0.1` | Bind address. Changed in 0.5.0 from `0.0.0.0` per the spec's bind-localhost guidance; set `"0.0.0.0"` explicitly for containers or external exposure — and then set `allowedHosts` / `allowedOrigins` too: a non-loopback bind is not guarded automatically, and startup logs a WARN until an allow-list is set. See [Host / Origin validation](#host--origin-validation). |
 | `port` | `8000` | Listen port. |
 | `httpEndpoint` | `/mcp` | JSON-RPC endpoint path. |
 | `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless. |
 | `disallowDelete` | `false` | Legacy adapter: answer 405 to HTTP DELETE instead of terminating the session. |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity. Live legacy GET streams are exempt from the periodic sweep but become evictable at the `maxSessions` cap once idle this long; `None` disables both. |
 | `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. The legacy GET stream heartbeats from the first byte. The reply to a POST waits for the handler's first frame for at most one interval: a call that is still silent then gets its SSE response opened with a heartbeat (since 1.1.0; see "The modern path"). With `None`, a 2026-07-28 reply waits for the first frame however long that takes, and a legacy reply opens its stream after one second. Neither listener closes a quiet stream on its own: the JVM has no idle timeout and Bun runs with `idleTimeout: 0` (its 10 s default used to cut a slow tool's reply). Heartbeats are also what lets the OS detect a GET peer that vanished without closing its connection (the socket is only probed when the server writes to it, and the OS gives up after its retransmission budget); without them such a stream stays live until the cap-time eviction described under `maxSessions`. |
-| `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` value must parse as one `host[:port]` authority and its hostname (or the verbatim `host:port`) must be listed — the port itself is not compared; a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, a `Host` or `Origin` sent more than once (seen as its `", "`-joined value), and malformed `Host`/`Origin` ports are refused (403), with or without the other header. IPv6 entries are written bracketed, exactly as they appear in the `Host` header: `Set("[::1]")`, not `Set("::1")`. |
-| `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted in addition to the request's own authority **when `allowedHosts` is also set**; with `allowedOrigins` alone only the listed origins pass (the request's own authority is then refused 403 too). Malformed entries fail `runHttp()` at startup. |
+| `allowedHosts` | `None` (automatic) | The `Host` names of the DNS-rebinding/CSRF guard ([Host / Origin validation](#host--origin-validation)). `None` is **automatic**: on a loopback bind the guard is on for `localhost`, `127.0.0.1`, `[::1]` and the bound address; on any other bind it is off and startup warns. `Some(names)` uses exactly those names on any bind address (`Some(Set.empty)` reads as `None`). With the guard on: the `Host` value must parse as one `host[:port]` authority and its hostname (or the verbatim `host:port`) must be listed — the port itself is not compared; a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, a `Host` or `Origin` sent more than once (seen as its `", "`-joined value), and malformed `Host`/`Origin` ports are refused (403), with or without the other header. IPv6 entries are written bracketed, exactly as they appear in the `Host` header: `Set("[::1]")`, not `Set("::1")`. |
+| `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted in addition to the request's own authority **when `allowedHosts` is also set**; with `allowedOrigins` alone only the listed origins pass (the request's own authority is then refused 403 too), and the `Host` is held to the automatic loopback names on a loopback bind and not checked on any other bind. Malformed entries fail `runHttp()` at startup. |
+| `dnsRebindingProtection` | `true` | The explicit opt-out of the Host/Origin guard (since 1.1.0). `false` accepts every `Host` and `Origin` and silences the non-loopback startup warning; it must not be combined with `allowedHosts` / `allowedOrigins` (`runHttp()` fails at startup). Prefer listing the proxied name in `allowedHosts`. |
 | `maxRequestBodyBytes` | `1 MiB` | Request body cap on every backend; larger bodies get 413 before decoding (empty 413 on the wire from netty/Bun, JSON-RPC `-32000` on first-party paths); must not exceed `limits.maxFrameChars`. This is the cap a large `sampling/createMessage` or elicitation *result* meets over HTTP (a legacy client then waits out its 60 s request timeout): raise it together with `limits.maxFrameChars` — see [Input limits](#input-limits). |
 | `maxSessions` | `Some(1000)` | Cap on stored legacy sessions. A session is stored only for an `initialize` that succeeded, and keeps at most 256 JSON values / 16 KiB of text from it, so the store's worst case is `maxSessions` × the per-session budget (about 100 MiB at the defaults). At the cap a client holding more sessions than the newcomer's gives one up; among clients holding their share, the longest-idle session without a live GET is evicted, else the longest-idle GET-holding session idle longer than `sessionIdleTimeout`; 503 only if nobody qualifies. Unauthenticated initializes can evict idle sessions — front non-loopback deployments with auth. `None` disables. See [The legacy session store](#the-legacy-session-store). |
 | `loggingEnabled` | `false` | Advertise logging; modern clients use per-request `_meta` levels, legacy clients `logging/setLevel`. |

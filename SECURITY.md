@@ -36,12 +36,30 @@ storage; deployments must put their own authorization in front of the MCP endpoi
 Hardening knobs worth knowing when you deploy over HTTP
 ([docs/transports.md](docs/transports.md)):
 
-- `host` defaults to `127.0.0.1`; opt in to external exposure explicitly.
-- `allowedHosts` enables the DNS-rebinding / browser-CSRF guard: the `Host` hostname must be
-  listed, and a present `Origin` is matched as a full origin (`scheme://host:port`) against the
-  request `Host` or the `allowedOrigins` allow-list; cross-port loopback origins, `null`, and
-  malformed ports are refused with 403. IPv6 literals are listed in bracket form (`"[::1]"`). It
-  guards against browser-driven attacks only; it is not authentication.
+- `host` defaults to `127.0.0.1`; opt in to external exposure explicitly. **Binding loopback
+  alone does not protect against browser-originated requests**: it keeps other machines out, not
+  a web page open in a browser on the same machine. That is the job of the Host/Origin guard in
+  the next item, which is why it is on by default for a loopback bind.
+- The DNS-rebinding / browser-CSRF guard checks every request's `Host` and `Origin` (403 on
+  refusal). The `Host` hostname must be an allowed name, and a present `Origin` is matched as a
+  full origin (`scheme://host:port`) against the request `Host` or the `allowedOrigins`
+  allow-list; cross-port loopback origins, `null`, and malformed ports are refused. Which names
+  are allowed:
+  - **loopback bind, nothing configured (the default): on automatically**, for `localhost`,
+    `127.0.0.1`, `[::1]` and the bound address, on any port;
+  - `allowedHosts = Some(names)`: exactly those names, on any bind address. IPv6 literals are
+    listed in bracket form (`"[::1]"`). This is what a loopback listener behind a reverse proxy
+    that forwards its own `Host` needs;
+  - **non-loopback bind (`0.0.0.0`, a LAN address) with no allow-list: OFF**, because the names
+    clients use cannot be inferred — startup logs a WARN. Such a deployment needs `allowedHosts`
+    (and `allowedOrigins` for browser front-ends on another origin) **and** an authenticating
+    proxy in front of it;
+  - `dnsRebindingProtection = false` is the explicit opt-out: every `Host` and `Origin` is
+    accepted. Use it only when a trusted proxy in front of the listener does this check and you
+    cannot enumerate the names it forwards.
+
+  The guard stops browser-driven attacks only; it is not authentication. A non-browser client can
+  send any `Host` it likes.
 - Every HTTP backend (zio-http, `Bun.serve`, the socket server) serves plaintext HTTP/1.1 only; there is no TLS setting by design. Terminate
   TLS and authentication at a reverse proxy in front of the MCP endpoint.
 - The socket HTTP backend (the default on Scala Native, opt-in on the JVM) serves each connection

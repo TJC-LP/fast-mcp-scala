@@ -298,6 +298,9 @@ For MCP 2026-07-28, `runHttp()` accepts one stateless JSON-RPC message per `POST
 | `host` | `127.0.0.1` | Bind address; set `"0.0.0.0"` for containers or external exposure |
 | `port` | `8000` | Listen port |
 | `stateless` | `false` | Disable the legacy session adapter; modern requests are always stateless |
+| `allowedHosts` | `None` (automatic) | `Host` names accepted by the Host/Origin guard; on a loopback bind the loopback names are allowed automatically |
+
+**Host / Origin validation.** The server above binds loopback, and binding loopback alone does not protect against browser-originated requests: a web page open on the same machine can still reach the port. So a loopback server checks every request with no configuration — a `Host` that is not `localhost` / `127.0.0.1` / `[::1]`, or an `Origin` that is not the server's own, is refused with 403. When you bind a non-loopback address (`host = "0.0.0.0"`) nothing can be inferred, so the guard is off and startup logs a warning: set `allowedHosts` (and `allowedOrigins` for browser front-ends on another origin) and put an authenticating proxy in front. A loopback listener behind a reverse proxy that forwards its own `Host` lists that name in `allowedHosts`; `dnsRebindingProtection = false` is the explicit opt-out. Details: [docs/transports.md](docs/transports.md#host--origin-validation).
 
 All settings, required request headers, error-code mapping, the legacy adapter, and lower-level construction without the sugar trait: [docs/transports.md](docs/transports.md).
 

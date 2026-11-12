@@ -46,6 +46,16 @@ import com.tjclp.fastmcp.*
   *     -d '{"jsonrpc":"2.0","id":3,"method":"ping"}'
   *   # HTTP/1.1 415 ...
   *   # {"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"Content-Type must be application/json"}}
+  *
+  *   # 4. A Host that is not a loopback name: refused with 403 (so is an Origin that is not this
+  *   #    server's own) — Host/Origin validation, see `settings` below
+  *   curl -s -i -X POST http://localhost:8090/mcp \
+  *     -H "Host: example.com" \
+  *     -H "Content-Type: application/json" \
+  *     -H "Accept: application/json, text/event-stream" \
+  *     -d '{"jsonrpc":"2.0","id":4,"method":"ping"}'
+  *   # HTTP/1.1 403 ...
+  *   # {"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"Host/Origin not allowed (DNS-rebinding protection)"}}
   * }}}
   *
   * Legacy 2025-11-25 adapter (also serves 2025-06-18 and earlier): `initialize` mints a session,
@@ -70,7 +80,20 @@ import com.tjclp.fastmcp.*
   */
 object HttpServer extends McpServerApp[Http, HttpServer.type]:
 
-  override def settings: McpServerSettings = McpServerSettings(port = 8090)
+  /** Binds `127.0.0.1` (the default `host`) with Host/Origin validation on.
+    *
+    * Binding loopback does not by itself keep a web page in a local browser away from the server;
+    * the `allowedHosts` guard does: a request whose `Host` is not one of these names, or whose
+    * `Origin` is not this server's own, is refused with 403. These three names are what a loopback
+    * bind gets when `allowedHosts` is left unset — they are spelled out here so that the guard
+    * stays on if you copy this and change `host`. To expose the server (`host = "0.0.0.0"`), list
+    * the name clients reach it by here (and browser front-ends in `allowedOrigins`), and put an
+    * authenticating proxy in front of it.
+    */
+  override def settings: McpServerSettings = McpServerSettings(
+    port = 8090,
+    allowedHosts = Some(Set("localhost", "127.0.0.1", "[::1]"))
+  )
 
   @Tool(
     name = Some("greet"),

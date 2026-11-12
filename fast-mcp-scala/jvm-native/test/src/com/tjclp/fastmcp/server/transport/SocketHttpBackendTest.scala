@@ -900,6 +900,28 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     }
   }
 
+  test("default settings on a loopback bind refuse a non-loopback Host and a foreign Origin (403)") {
+    // No allow-list configured: the guard is automatic for a loopback listener.
+    withServer() { port =>
+      request(port, post(initFrame, host = "evil.example")).status shouldBe 403
+      request(port, post(initFrame, host = s"evil.example:$port")).status shouldBe 403
+      val foreignOrigin = List("Origin" -> "http://evil.example")
+      request(
+        port,
+        post(initFrame, host = s"127.0.0.1:$port", extra = foreignOrigin)
+      ).status shouldBe 403
+      request(port, get(None, extra = foreignOrigin)).status shouldBe 403
+      // Loopback names, on the bound port or a forwarded one, and a same-origin page pass.
+      request(port, post(initFrame, host = s"127.0.0.1:$port")).status shouldBe 200
+      request(port, post(initFrame, host = "localhost:1234")).status shouldBe 200
+      val sameOrigin = List("Origin" -> s"http://localhost:$port")
+      request(
+        port,
+        post(initFrame, host = s"localhost:$port", extra = sameOrigin)
+      ).status shouldBe 200
+    }
+  }
+
   test("stateless mode answers with plain JSON and refuses GET") {
     withServer(baseSettings.copy(stateless = true)) { port =>
       val reply = request(port, post(initFrame, accept = "application/json"))

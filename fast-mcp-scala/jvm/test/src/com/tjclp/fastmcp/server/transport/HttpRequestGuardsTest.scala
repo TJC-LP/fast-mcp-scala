@@ -95,7 +95,14 @@ class HttpRequestGuardsTest extends AnyFunSuite with Matchers:
       "origin" -> "http://localhost:3000",
       "content-type" -> "application/json"
     )
-    HttpRequestGuards.postGate(crossPort, McpServerSettings(), requireSse = true) shouldBe None
+    HttpRequestGuards.postGate(
+      crossPort,
+      McpServerSettings(dnsRebindingProtection = false),
+      requireSse = true
+    ) shouldBe None
+    // Default settings bind loopback, so the guard is on without any allow-list.
+    HttpRequestGuards.postGate(crossPort, McpServerSettings(), requireSse = true).map(_.status) shouldBe
+      Some(403)
     HttpRequestGuards.postGate(crossPort, guarded, requireSse = true).map(_.status) shouldBe Some(
       403
     )
@@ -105,8 +112,58 @@ class HttpRequestGuardsTest extends AnyFunSuite with Matchers:
     HttpRequestGuards.hostGate(headers("host" -> "evil.example.com"), guarded) shouldBe
       Some(Rejection(403, "Host/Origin not allowed (DNS-rebinding protection)"))
     HttpRequestGuards.hostGate(headers("host" -> "127.0.0.1:8000"), guarded) shouldBe None
+    // Default settings: the automatic loopback guard refuses it too...
     HttpRequestGuards.hostGate(headers("host" -> "evil.example.com"), McpServerSettings()) shouldBe
-      None
+      Some(Rejection(403, "Host/Origin not allowed (DNS-rebinding protection)"))
+    HttpRequestGuards.hostGate(headers("host" -> "localhost:8000"), McpServerSettings()) shouldBe None
+    // ...and only the explicit opt-out lets it through.
+    HttpRequestGuards.hostGate(
+      headers("host" -> "evil.example.com"),
+      McpServerSettings(dnsRebindingProtection = false)
+    ) shouldBe None
+  }
+
+  test("startupWarnings: only a non-loopback bind with nothing listed and no opt-out warns") {
+    val warned = HttpRequestGuards.startupWarnings(McpServerSettings(host = "0.0.0.0"))
+    warned should have size 1
+    warned.head should include("'0.0.0.0'")
+    warned.head should include("allowedHosts")
+    warned.head should include("allowedOrigins")
+    warned.head should include("dnsRebindingProtection = false")
+    HttpRequestGuards.startupWarnings(McpServerSettings()) shouldBe Nil
+    HttpRequestGuards.startupWarnings(McpServerSettings(host = "localhost")) shouldBe Nil
+    HttpRequestGuards.startupWarnings(
+      McpServerSettings(host = "0.0.0.0", allowedHosts = Some(Set("mcp.example.com")))
+    ) shouldBe Nil
+    HttpRequestGuards.startupWarnings(
+      McpServerSettings(host = "0.0.0.0", allowedOrigins = Some(Set("https://app.example.com")))
+    ) shouldBe Nil
+    HttpRequestGuards.startupWarnings(
+      McpServerSettings(host = "0.0.0.0", dnsRebindingProtection = false)
+    ) shouldBe Nil
+  }
+
+  test("validateSettings: the opt-out is accepted alone and refused next to an allow-list") {
+    HttpRequestGuards.validateSettings(McpServerSettings(dnsRebindingProtection = false)) shouldBe
+      Right(())
+    HttpRequestGuards.validateSettings(
+      McpServerSettings(host = "0.0.0.0", dnsRebindingProtection = false)
+    ) shouldBe Right(())
+    // An empty list is "nothing listed": no contradiction.
+    HttpRequestGuards.validateSettings(
+      McpServerSettings(allowedHosts = Some(Set.empty), dnsRebindingProtection = false)
+    ) shouldBe Right(())
+    val withHosts = HttpRequestGuards.validateSettings(
+      McpServerSettings(allowedHosts = Some(Set("localhost")), dnsRebindingProtection = false)
+    )
+    withHosts shouldBe Left(HttpRequestGuards.OptOutWithAllowListMessage)
+    withHosts.left.getOrElse("") should include("dnsRebindingProtection")
+    HttpRequestGuards.validateSettings(
+      McpServerSettings(
+        allowedOrigins = Some(Set("https://app.example.com")),
+        dnsRebindingProtection = false
+      )
+    ) shouldBe Left(HttpRequestGuards.OptOutWithAllowListMessage)
   }
 
   test("isJsonContentType: application/json with parameters, case-insensitive, utf-8 charsets") {

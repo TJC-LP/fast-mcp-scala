@@ -277,7 +277,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     * [[BunHttpHandle]] whose `stop()` tears both down. Every entry — `serveHttp` / `runHttp()`,
     * `startStatefulHttp()`, `startStatelessHttp()` — goes through here, so `sessionIdleTimeout` and
     * `maxSessions` are honoured for the listener's whole lifetime. Fails fast with
-    * `IllegalArgumentException` when `HttpRequestGuards.validateSettings` rejects the settings.
+    * `IllegalArgumentException` when `HttpRequestGuards.validateSettings` rejects the settings, and
+    * logs `HttpRequestGuards.startupWarnings` at WARN.
     */
   private[fastmcp] def startBun[R](
       router: McpRouter[R],
@@ -290,6 +291,11 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       .validateSettings(settings)
       .left
       .foreach(msg => throw new IllegalArgumentException(s"Invalid HTTP settings: $msg"))
+    // Startup diagnostics (a non-loopback bind with no Host/Origin allow-list), through the app's
+    // ZIO logger like every other warning of this backend. Forked: see the sweeper note below.
+    HttpRequestGuards.startupWarnings(settings).foreach { msg =>
+      Unsafe.unsafe(implicit u => { val _ = runtime.unsafe.fork(ZIO.logWarning(msg)) })
+    }
     val server = Bun.serve(serveOptions(router, runtime, settings, store))
     // `unsafe.fork`, never `unsafe.run`: Runtime.unsafe.run throws on Scala.js when the effect
     // suspends ("Cannot block for result to be set in JavaScript").
