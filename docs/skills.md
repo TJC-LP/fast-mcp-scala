@@ -440,7 +440,7 @@ claims otherwise:
 |---|---|---|---|
 | Wire types, URI policy, frontmatter, snapshots, registry, router | ✅ | ✅ | ✅ |
 | `skills/list`, `skills/get`, `resources/directory/read` over stdio | ✅ | ✅ | ✅ |
-| … over HTTP (2026-07-28 stateless + legacy session adapter) | ✅ | ✅ | not available (no HTTP backend, by design) |
+| … over HTTP (2026-07-28 stateless + legacy session adapter) | ✅ | ✅ | served by the socket backend through the same shared handler; not separately tested on Native yet |
 | SHA-256 | `MessageDigest` | portable FIPS 180-4 | portable FIPS 180-4 |
 | `SkillDirectoryLoader` | ✅ | — (in-memory / provider only) | — (in-memory / provider only) |
 | Verification helpers | ✅ | ✅ | ✅ |

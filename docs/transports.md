@@ -262,13 +262,125 @@ tools. Compiling with `-Wnonunit-statement` flags exactly this mistake
 `McpServer.typed[R]("name")` builds a server whose handlers may require a ZIO environment `R`;
 provide the layer at the boundary with `.provide(...)` on `runStdio()` / `runHttp()`.
 
+### The socket backend
+
+Scala Native has no zio-http, so its `HttpTransportBackend` is a small HTTP/1.1 + SSE server over
+`java.net.ServerSocket`, written for MCP and nothing else (`SocketHttpServer`, compiled into both
+the JVM and Scala Native modules from `fast-mcp-scala/jvm-native/`). It renders the same shared
+`StreamableHttpHandler` as the zio-http backend, so every rule in this document — the gates and
+their order, the body and session caps, the legacy adapter, the 2026-07-28 stateless path — applies
+unchanged. On Scala Native it is the platform's HTTP backend (`NativeHttpBackend`) and is
+**experimental**; on the JVM it is an opt-in (`JvmSocketHttpBackend`) for netty-free deployments and
+GraalVM images.
+
+**Opting in on Scala Native.** `NativeHttpBackend` is marked `@experimental`, so a program that
+serves HTTP there — `McpServerApp[Http]`, or `runHttp()` — compiles only in experimental mode:
+
+```scala 3 raw
+//> using platform native
+//> using options -experimental
+
+object MyServer extends McpServerApp[Http, MyServer.type]:
+  @Tool() def add(a: Int, b: Int): Int = a + b
+```
+
+(`scalacOptions += "-experimental"` in sbt or Mill; or annotate the app object
+`@scala.annotation.experimental` instead of using the flag.) Without it the compiler refuses with
+a message that points here. Stdio programs on Scala Native never touch this backend and need
+nothing. The gate exists because of the runtime defect described under "Known limitation" below;
+it will be lifted when a Scala Native release contains the fix.
+
+**Opting in on the JVM.** Import the backend's given *by name* next to the root import:
+
+```scala 3 raw
+import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.server.transport.JvmSocketHttpBackend.httpInstance
+
+object MyServer extends McpServerApp[Http, MyServer.type]:
+  @Tool() def add(a: Int, b: Int): Int = a + b
+```
+
+The given has the same name as the default backend's on purpose: a named import outranks the root
+wildcard import and replaces the default everywhere in the file. Do not declare your own
+`given JvmSocketHttpBackend.type = JvmSocketHttpBackend` at the top level instead — inside any
+object the root import still wins and the server silently binds netty. For a single call,
+`server.runHttp()(using JvmSocketHttpBackend)` passes the backend explicitly. Excluding
+`dev.zio::zio-http` from the dependency then removes netty from the classpath.
+
+To change the connection cap or the timeouts, declare a configured backend in your file under the
+default's exact name (the name is what replaces the imported default everywhere in the file; under
+any other name the given loses to the import inside an object):
+
+```scala 3 raw
+import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.server.transport.{HttpTransportBackend, JvmSocketHttpBackend}
+
+given httpInstance: HttpTransportBackend = JvmSocketHttpBackend.withSettings(maxConnections = 1024)
+```
+
+**How it runs.** One thread per connection, taken from ZIO's blocking executor, owns the socket
+and does plain blocking I/O; it enters ZIO only to run the MCP handler. A reply whose frames are
+ready is written as a single packet (head, SSE frames and the chunked terminator together).
+
+| Aspect | Behaviour |
+|---|---|
+| Protocol | HTTP/1.1 keep-alive, requests served one at a time per connection; HTTP/1.0 and `Connection: close` get close-delimited replies. No HTTP/2, no TLS (terminate both at a proxy) |
+| Request bodies | `Content-Length` and `Transfer-Encoding: chunked`, bounded on the wire by `maxRequestBodyBytes` (413); `Expect: 100-continue` is answered only after the header gates pass |
+| Request head | at most 8 KiB (431) |
+| Connections | 256 concurrent by default; more wait in the kernel backlog. The cap is a hard limit, so three timeouts keep a client from holding a slot without making progress. All four are set with `JvmSocketHttpBackend.withSettings(maxConnections = n, ...)` on the JVM or `NativeHttpBackend.withSettings(...)` on Scala Native (experimental, like the backend itself); the backend class has no public constructor, so on Scala Native there is no way to build one outside the `-experimental` opt-in |
+| `idleTimeout` (60 s) | a keep-alive connection with no request activity is closed |
+| `requestReadTimeout` (60 s) | the allowance for a whole request, head and body, from its first byte (408 when it runs out). Every 4 KiB received extends it by one second, so a slow client that is still sending a large body gets the time it needs, while one sending a byte or a line at a time cannot keep the connection |
+| `writeStallTimeout` (30 s) | a write that makes no progress for this long — the client stopped reading a large reply or an event stream — closes the connection. Replies go out in 16 KiB slices and the clock restarts with each, so a slow client that is still reading is never cut off. Blocking sockets have no write timeout, so the accept thread sweeps for stalled writes once a second |
+| Refused requests | a reply that leaves request bytes unread (a body over the cap, a refused `Host`, a malformed head) is followed by a lingering close: the write side is shut down and the rest of the request discarded for up to 5 s, so the client reads the error reply instead of a connection reset |
+| Accept failures | a failed `accept` (out of file descriptors or threads, a connection reset before it was accepted) never stops the listener: it is retried with a pause that grows to 1 s for as long as it lasts, with a warning in the log on the first failure of a run and about once a minute after |
+| SSE | chunked transfer-encoding; `keepAliveInterval` pings are written by the connection thread when the stream has been quiet that long |
+| Vanished clients | while a reply or a GET stream is quiet, the read side is probed once a second; a closed peer interrupts the request and releases the session's GET slot. A request that finishes within a second is never probed |
+| Shutdown | closing the server's scope closes the listener and every connection. ZIO signal handlers are no-ops on Scala Native, so SIGTERM there ends the process by the OS default |
+| Diagnostics | `FASTMCP_HTTP_DEBUG=1` prints per-connection failures to stderr |
+
+**Known limitation on Scala Native (0.5.12).** Scala Native allocates objects of 8 KiB and up
+through a separate large-object allocator, and that allocator's slow path is not safe when several
+threads use it at once: it retries a single time after growing the heap by exactly one object, and
+a thread that loses the race receives a null pointer and the process aborts with `Unhandled signal
+11`. This is [scala-native#4916](https://github.com/scala-native/scala-native/issues/4916); it is
+fixed on Scala Native's main branch (#4935) but 0.5.12, the latest release, does not contain the
+fix. It reproduces with four threads allocating 8 KiB arrays in a loop, with no ZIO and no
+fast-mcp-scala code, under both the Immix and Commix collectors, on macOS and Linux, and it has no
+configuration switch; a larger `GC_INITIAL_HEAP_SIZE` makes it rarer but does not remove it. The request path of this server is kept below the threshold — per-connection buffers start at
+4 KiB and a small request allocates nothing that large — so ordinary small tool calls do not reach
+it. Concurrent requests or replies of 8 KiB and up do: in a stress test with 16 KiB request bodies
+on 16 connections the process aborted within seconds in most runs (6 of 10).
+
+**Memory on Scala Native (0.5.12).** Resident memory also grows slowly under sustained load and is
+not given back: roughly 10 to 30 bytes per request, which is 1 to 3 GiB per hour at 30,000
+requests per second. It is a real leak, not a heap settling — with `GC_MAXIMUM_HEAP_SIZE=128m` the server ran
+out of heap after about 3.7 million 2026-07-28 requests — and it is in the runtime: the same
+workload on the JVM holds a flat 9 MB live heap. Runtime-allocated weak references are the likely
+cause (zio-json's encoder pool allocates one after each collection, and 0.5.12 does not reclaim
+weak references under churn).
+
+**Both are fixed on Scala Native's main branch.** The same server built entirely against the
+nightly `0.5.13-20261107-69432d9-SNAPSHOT` survived the 16 KiB stress in 10 of 10 runs and held a
+flat 79 MB for a four-minute soak (9 million requests) under the 128 MiB cap that kills the 0.5.12
+build. Until a Scala Native release carries those fixes, treat Scala Native HTTP as suitable for
+small payloads and bounded uptime, run it under a supervisor that restarts it, and expect the
+`@experimental` gate to stay. fast-mcp-scala itself keeps building against the released 0.5.12: a
+published library cannot depend on a snapshot, and the runtime is linked by the application's own
+Scala Native version in any case — an application that accepts a nightly toolchain gets the fixes
+without a new fast-mcp-scala release. The JVM socket backend is not affected by either problem.
+
+Two more Scala Native specifics: request fibers are not registered in `Fiber.roots` (each
+registration allocates a `WeakReference`, which Scala Native does not reclaim at request rates —
+the heap grew by gigabytes per minute under load before this was switched off), and the listener
+is plaintext only because `javax.net.ssl` is absent from the Scala Native javalib.
+
 ## Platform notes
 
 | | JVM | Scala.js / Bun | Scala Native |
 |---|---|---|---|
 | stdio | `System.in` / `System.out` (`JvmTransportBackend`) | Node `process.stdin` / `stdout` (`JsTransportBackend`) | `System.in` / `System.out`, ids from `/dev/urandom` (`NativeTransportBackend`) |
-| HTTP | ZIO HTTP on netty (`JvmHttpBackend`); NIO inside GraalVM images, `-Dfastmcp.http.channelType` overrides | `Bun.serve` (`JsTransportBackend`) | none by design: zio-http has no Native artifacts, so `McpServerApp[Http]` does not compile ([#81](https://github.com/TJC-LP/fast-mcp-scala/issues/81) tracks a socket backend) |
-| Legacy GET push stream | ✅ | 405 | n/a |
+| HTTP | ZIO HTTP on netty (`JvmHttpBackend`); NIO inside GraalVM images, `-Dfastmcp.http.channelType` overrides. Opt-in: the socket server (`JvmSocketHttpBackend`) | `Bun.serve` (`JsTransportBackend`) | the socket server (`NativeHttpBackend`) — zio-http has no Native artifacts |
+| Legacy GET push stream | ✅ | 405 | ✅ |
 
 Node and Deno parity for the HTTP listener is a follow-up; only the `Bun.serve(...)` entry point is
 Bun-specific today. `httpEndpoint` is matched as an exact path on Bun; the JVM additionally accepts

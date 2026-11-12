@@ -135,7 +135,7 @@ class HostGuardTest extends AnyFunSuite with Matchers:
   }
 
   test("a multi-valued Host (the \", \"-joined duplicate header) is refused in either order") {
-    // JvmHttpBackend.gateHeader / Bun's Headers.get join repeated headers with ", ". The joined
+    // JvmHttpBackend.gateHeader / Http1.Head.headerJoined / Bun's Headers.get join repeated headers with ", ". The joined
     // value is one malformed authority, never matched on its first hostname (TJC-2354).
     allowed(Some("localhost:8000, evil.example.com"), None) shouldBe false
     allowed(Some("evil.example.com, localhost:8000"), None) shouldBe false

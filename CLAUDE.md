@@ -9,7 +9,7 @@ fast-mcp-scala is a high-level Scala 3 library for building Model Context Protoc
 
 Both paths converge on the same `McpServer` trait and support `@Param` metadata on parameters/fields.
 
-Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **Scala Native** (stdio only, EXPERIMENTAL — published as `fast-mcp-scala_native0.5_3`; zio-http has no Native artifacts, so `McpServerApp[Http]` fails to compile there by design).
+Three platforms: **JVM** (stdio + HTTP), **Scala.js/Bun** (stdio + HTTP), and **Scala Native** (stdio + HTTP, EXPERIMENTAL — published as `fast-mcp-scala_native0.5_3`; zio-http has no Native artifacts, so HTTP there is the built-in socket server, `NativeHttpBackend`, which is `@experimental`: a Native HTTP program needs `-experimental`, stdio does not).
 
 ## Build System
 
@@ -89,7 +89,10 @@ fast-mcp-scala/
 │   ├── js/                    # Scala.js code (Bun-first runtime)
 │   │   ├── src/               # JsTransportBackend (Bun.serve + Node stdio), facades, examples
 │   │   └── test/src/          # Conformance, HTTP, codec, contract surface tests
-│   └── native/                # Scala Native code (EXPERIMENTAL, stdio only)
+│   ├── jvm-native/            # Compiled by BOTH jvm and scalaNative: the socket HTTP server
+│   │   ├── src/               # SocketHttpBackend, http/SocketHttpServer (HTTP/1.1 + SSE), http/Http1
+│   │   └── test/src/          # Wire tests run on the JVM and inside the Native test binary
+│   └── native/                # Scala Native code (EXPERIMENTAL)
 │       ├── src/               # NativeTransportBackend (System.in/out + /dev/urandom)
 │       └── test/src/          # Surface, contract, and stdio-lifecycle canaries
 ```
@@ -201,6 +204,7 @@ server.tool(addTool) *> server.runStdio()
 
 - **Stdio** (`runStdio()`) — stdin/stdout, used by MCP clients. stdout is the wire: the stdio runner routes ZIO's default logger to stderr (`McpServerApp[Stdio]` via `TransportRunner.bootstrap`; `runStdio()` swaps ZIO's stock stdout logger when still installed — `shared/.../transport/StdioLogging.scala`), and `StdioLoop.writeLine` emits each frame in ONE `PrintStream` call so a foreign `println` can never split it. Custom logger: `override val bootstrap = ...` (a `val`, not a `def`)
 - **HTTP** (`runHttp()`) — MCP 2026-07-28 is stateless: one JSON-RPC message per `POST /mcp`, answered with JSON or a request-scoped SSE stream; no sessions, GET stream, or DELETE on the modern path. Older protocol versions are routed to the legacy initialize/session/GET/DELETE adapter, which is on by default; `stateless = true` disables only that adapter's session store. Binds `127.0.0.1` by default (set `host = "0.0.0.0"` for containers); idle legacy sessions evict after `sessionIdleTimeout`; `allowedHosts` enables the DNS-rebinding guard (`Origin` is matched as a full origin against the request `Host`; `allowedOrigins` extends the allow-list); all POSTs require `Content-Type: application/json` (415 otherwise); `maxRequestBodyBytes` (1 MiB) and `maxSessions` (`Some(1000)`) bound request size and the legacy session store; `limits: LimitSettings` bounds every inbound frame on every transport (frame size 4 MiB / depth 64 / object width 1024 → `-32700`; URI length 8192 / subscriptions 1024 → `-32602`); on Bun `startStatefulHttp()`/`startStatelessHttp()` return `BunHttpHandle`; `keepAliveInterval` enables SSE heartbeats. Full reference: `docs/transports.md`
+- **Socket HTTP backend** (`jvm-native/`) — `SocketHttpServer`: one thread per connection (ZIO's blocking executor) doing plain blocking I/O, entering ZIO only through `Runtime.unsafe.runOrFork` to run `StreamableHttpHandler`. The Scala Native HTTP backend (`NativeHttpBackend`, marked `@experimental` because of scala-native#4916 — keep the annotation until a Scala Native release contains #4935, and never add `-experimental` to the library's own scalacOptions: annotate the few native definitions that use it instead); JVM opt-in via the NAMED import `import com.tjclp.fastmcp.server.transport.JvmSocketHttpBackend.httpInstance` (a differently-named top-level given silently loses to the root import inside objects). Scala Native pitfalls it works around, do not regress them: no per-request `WeakReference` (request fibers run with `RuntimeFlag.FiberRoots` off, `McpRouter` uses `forkDaemon` — SN 0.5.12 does not reclaim weak refs at request rates), and no allocation of 8 KiB or more on the request path (SN's large-object allocator aborts the process when threads race on it; buffers start at 4 KiB, and `ZStream.fromIterable` is avoided for single elements because it allocates a 4096-slot builder). Details: `docs/transports.md` "The socket backend"
 
 ### Skills (`io.modelcontextprotocol/skills`, SEP-2640)
 
@@ -305,9 +309,10 @@ The codebase is split into three sibling trees under `fast-mcp-scala/`:
 - `shared/` — the entire native MCP core: annotations, wire types, JSON-RPC, ZIO JSON codecs, the router + built-in handlers + middleware, `McpServer[R]` + `McpServerCore`, typed contracts, and the `TransportBackend` seam
 - `jvm/` — the JVM `TransportBackend` (`System.in`/`System.out`), the `HttpTransportBackend` (ZIO HTTP), and JVM-only examples
 - `js/` — the Scala.js `TransportBackend` (`Bun.serve` + Node stdio), small JS facades, and the Bun HTTP example
-- `native/` — the Scala Native `TransportBackend` (stdio only, EXPERIMENTAL)
+- `jvm-native/` — the socket HTTP server (`java.net.ServerSocket`), compiled into both the JVM and Scala Native modules
+- `native/` — the Scala Native `TransportBackend` and `NativeHttpBackend` (EXPERIMENTAL)
 
-Every module reads exactly `shared/src/ + <platform>/src/`. Nothing reaches across platform trees: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/src/` plus any one platform tree compiles on its own (the shared examples need that platform's `given TransportBackend`); `shared/` never reaches across platform trees.
+Every module reads exactly `shared/src/ + <platform>/src/` (the JVM and Scala Native modules also read `jvm-native/src/`). Nothing reaches across platform trees: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/src/` plus any one platform tree compiles on its own (the shared examples need that platform's `given TransportBackend`); `shared/` never reaches across platform trees.
 
 ### Native MCP core (no vendored SDK)
 
@@ -318,7 +323,7 @@ As of 0.5.0 there is **no wrapped SDK** — the MCP protocol layer is pure Scala
 - `codec/` — `DefaultDecodeContext` + `McpDecoders` (one ZIO JSON decode path for both platforms)
 - `server/transport/` — `TransportBackend` (the platform seam) + `MessageLoop` (limit checks → parse → dispatch → encode)
 
-Each platform provides exactly one `given TransportBackend` (`JvmTransportBackend` / `JsTransportBackend` / `NativeTransportBackend`) and, where HTTP exists, an `HttpTransportBackend` (`JvmHttpBackend`; the JS backend provides both givens; Scala Native provides none, so `runHttp()` does not compile there); everything else is shared. The TypeScript `@modelcontextprotocol/sdk` is used only as a test-time conformance client.
+Each platform provides exactly one `given TransportBackend` (`JvmTransportBackend` / `JsTransportBackend` / `NativeTransportBackend`) and, where HTTP exists, an `HttpTransportBackend` (`JvmHttpBackend`; the JS backend provides both givens; `NativeHttpBackend` on Scala Native); everything else is shared — including the streamable-HTTP semantics, `server/transport/http/StreamableHttpHandler`, which the zio-http adapter and the socket server both render (Bun still has its own rendering). The TypeScript `@modelcontextprotocol/sdk` is used only as a test-time conformance client.
 
 ## Code Quality
 
@@ -341,6 +346,7 @@ Key test classes:
 - `JsonSchemaMacroTest` - Schema generation tests
 - `TypedContractsTest` - Typed contract mounting tests
 - `JvmHttpTransportTest` - HTTP transport integration (sessions, 400s, 409, keepalive, eviction)
+- `SocketHttpBackendTest` / `Http1ParserTest` / `StreamableHttpHandlerTest` (`jvm-native/test`, run on the JVM AND in the Scala Native test binary) - socket server wire contract, head parser, shared-handler contracts; `JvmSocketHttpOptInTest` / `JvmSocketHttpBackendSurfaceTest` - the by-name opt-in and the pitfall form
 - `TaskHttpTransportTest` - the full MCP Tasks lifecycle over streamable HTTP
 - `StdioLoopLifecycleTest` - stdin-EOF / interruption contracts for the stdio loop
 - `JsonRpcEnvelopeTest` / `McpErrorMappingTest` - envelope discrimination + wire error codes
@@ -360,7 +366,7 @@ Key test classes:
 ## CI/CD
 
 - **CI** (`.github/workflows/ci.yml`): Runs on PRs and main pushes, tests on the LTS JDKs 17, 21, 25
-- **Conformance** (`.github/workflows/conformance.yml`): official `@modelcontextprotocol/conformance` harness (pinned in `conformance/package.json` + `conformance/bun.lock`, currently `0.2.0-alpha.11`; frozen install, needs Bun ≥ 1.4) against the JVM and Bun servers in both `scripts/conformance.sh` modes on every PR — the active suite (73/73 checks, 31 scenarios, all at the 2025-11-25 wire) with expected-failure baselines at `conformance/baseline-{jvm,js}.yml` kept EMPTY (any regression fails the gate), and the 2026-07-28 requirements run (37/37 scored scenarios; the only lane that sends 2026-07-28 requests; extension/pending scenarios are reported but never scored). `native.yml` runs both against the GraalVM HTTP image (the 2026 run as a JVM-vs-native parity diff). Run locally via `scripts/conformance.sh {jvm|js|native} [port] [active|2026]`.
+- **Conformance** (`.github/workflows/conformance.yml`): official `@modelcontextprotocol/conformance` harness (pinned in `conformance/package.json` + `conformance/bun.lock`, currently `0.2.0-alpha.11`; frozen install, needs Bun ≥ 1.4) against the JVM, Bun and Scala Native (`scripts/conformance.sh scala-native`, held to `baseline-jvm.yml`) servers in both `scripts/conformance.sh` modes on every PR — the active suite (73/73 checks, 31 scenarios, all at the 2025-11-25 wire) with expected-failure baselines at `conformance/baseline-{jvm,js}.yml` kept EMPTY (any regression fails the gate), and the 2026-07-28 requirements run (37/37 scored scenarios; the only lane that sends 2026-07-28 requests; extension/pending scenarios are reported but never scored). `native.yml` runs both against the GraalVM HTTP image (the 2026 run as a JVM-vs-native parity diff). Run locally via `scripts/conformance.sh {jvm|js|native|scala-native} [port] [active|2026]`.
 - The harness is executed from `conformance/node_modules/.bin`. To bump: edit the version in `conformance/package.json`, run `"$(./mill --no-server show fast-mcp-scala.js.bunExecutable | tr -d '"')" install --cwd conformance`, remove `conformance/node_modules`, and review the `bun.lock` diff (it, not package.json, is what `--frozen-lockfile` enforces).
 - **Release** (`.github/workflows/release.yml`): Triggered by `v*` tags, publishes to Maven Central; `workflow_dispatch` with a `version` input is a maintainer-run dry run (tests + `publishLocal` of the three artifacts on the runner; the Sonatype step and the GitHub release run only on a tag push). Three jobs (verify → publish → github-release); no cache restore; every action is SHA-pinned; the Mill launcher distribution is verified against `.github/mill-dist.sha256` in every CI job — bumping `.mill-version` requires adding the new dists' SHA-256 lines there in the same PR (CI prints the exact line and the Maven Central `.sha1` cross-check recipe).
 - **OSV** (`.github/workflows/osv.yml`): weekly + on PRs touching `build.mill`/`fast-mcp-scala/package.mill`, `scripts/osv-scan.sh` queries OSV.dev for the production classpath of the three published modules (`fast-mcp-scala.{jvm,js,scalaNative}.resolvedMvnDeps`) and fails on any advisory >= MODERATE or of unknown severity; accepted advisories go in `.github/osv-ignore`.

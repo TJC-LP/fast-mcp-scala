@@ -26,7 +26,7 @@ class LimitsWiringTest extends AnyFunSuite with Matchers:
 
   test("every parseFrame call site outside MessageLoop passes router.limits") {
     val root = repoRoot.resolve("fast-mcp-scala")
-    val platforms = List("jvm", "js", "shared", "native")
+    val platforms = List("jvm", "js", "shared", "native", "jvm-native")
     val offenders = platforms.flatMap { platform =>
       val src = root.resolve(platform).resolve("src")
       if !Files.isDirectory(src) then Nil
@@ -52,14 +52,18 @@ class LimitsWiringTest extends AnyFunSuite with Matchers:
   }
 
   test("the transports actually reference parseFrame (the guard is not vacuous)") {
+    // The JVM (zio-http) and socket backends parse through the shared StreamableHttpHandler; the
+    // Bun backend has its own call sites.
     val root = repoRoot.resolve("fast-mcp-scala")
-    val hits = List("jvm", "js").flatMap { platform =>
-      Files
-        .walk(root.resolve(platform).resolve("src"))
-        .iterator()
-        .asScala
-        .filter(_.toString.endsWith(".scala"))
-        .count(f => Files.readString(f).contains("parseFrame(")) :: Nil
-    }
-    hits.sum should be >= 2
+    val handler = root.resolve(
+      "shared/src/com/tjclp/fastmcp/server/transport/http/StreamableHttpHandler.scala"
+    )
+    Files.readString(handler) should include("parseFrame(")
+    val jsHits = Files
+      .walk(root.resolve("js").resolve("src"))
+      .iterator()
+      .asScala
+      .filter(_.toString.endsWith(".scala"))
+      .count(f => Files.readString(f).contains("parseFrame("))
+    jsHits should be >= 1
   }
