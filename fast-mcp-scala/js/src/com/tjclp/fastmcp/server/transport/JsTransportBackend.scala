@@ -20,6 +20,7 @@ import com.tjclp.fastmcp.facades.runtime.{
 import com.tjclp.fastmcp.interop.ZioJsPromise
 import com.tjclp.fastmcp.server.McpServerSettings
 import com.tjclp.fastmcp.server.router.{McpRouter, RequestHeaders, Session}
+import com.tjclp.fastmcp.server.transport.http.StreamableHttpHandler
 
 /** Scala.js (Bun-first) [[TransportBackend]].
   *
@@ -482,18 +483,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   ): ZIO[R, Throwable, js.Dynamic] =
     message match
       case req: JsonRpcMessage.Request =>
-        for
-          reqQueue <- Queue.unbounded[JsonRpcMessage]
-          // `ensuring` offers the close sentinel when dispatch ends replyless (cancellation) so
-          // the SSE stream terminates; the bound fiber lets the stream's `cancel` hook interrupt
-          // the dispatch when the client disconnects mid-request.
-          fiber <- session
-            .runWithSink(reqQueue)(router.dispatch(session, req))
-            .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
-            .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
-            .forkDaemon
-          response <- sseResponse(reqQueue, req.id, session, isNew, fiber, settings, modern = false)
-        yield response
+        requestResponse(router, session, req, isNew, settings, modern = false)
       case other =>
         val extra =
           if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String]
@@ -502,6 +492,65 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
           case Some(reply) => jsonResponse(reply.toJson, extra, status = 400)
           case None => webResponse(202, "")
         }
+
+  /** Run a request's dispatch with its server→client messages routed to a per-request queue, and
+    * choose the HTTP shape of the reply from its FIRST frame (JVM twin:
+    * `StreamableHttpHandler.streamRequest` / `firstFrameReply`, which documents the rules):
+    *   - 2026-07-28 only: an error that maps to an HTTP status is plain JSON with that status;
+    *   - the final reply itself: one fixed-length `text/event-stream` body — a string `Response`,
+    *     no `ReadableStream`, no pull and no heartbeat fiber;
+    *   - anything else opens the SSE stream, which carries that frame and the rest.
+    *
+    * With `keepAliveInterval` the wait for the first frame is bounded by one interval: a timer
+    * OFFERS the heartbeat sentinel, and a reply that is still silent then opens its stream with a
+    * heartbeat. The wait itself stays one plain `take`, so the timer cannot discard a frame.
+    */
+  private def requestResponse[R](
+      router: McpRouter[R],
+      session: Session,
+      req: JsonRpcMessage.Request,
+      isNew: Boolean,
+      settings: McpServerSettings,
+      modern: Boolean
+  ): ZIO[R, Throwable, js.Dynamic] =
+    for
+      reqQueue <- Queue.unbounded[JsonRpcMessage]
+      // `ensuring` offers the close sentinel when dispatch ends replyless (cancellation) so a
+      // streamed reply terminates; the bound fiber lets the stream's `cancel` hook interrupt the
+      // dispatch when the client disconnects mid-request.
+      fiber <- session
+        .runWithSink(reqQueue)(router.dispatch(session, req))
+        .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
+        .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
+        .forkDaemon
+      timer <- settings.keepAliveInterval match
+        case None => ZIO.none
+        case Some(interval) =>
+          (ZIO.sleep(Duration.fromJava(interval)) *> reqQueue.offer(KeepAliveSentinel)).forkDaemon
+            .map(Some(_))
+      stopTimer = timer.fold(ZIO.unit)(StreamableHttpHandler.signalInterrupt)
+      first <- reqQueue.take.onInterrupt(stopTimer *> fiber.interrupt *> reqQueue.shutdown)
+      _ <- stopTimer
+      response <- (if modern then modernErrorStatus(first) else None) match
+        case Some(status) =>
+          (fiber.interrupt *> reqQueue.shutdown).as(jsonResponse(first.toJson, Map.empty, status))
+        // The dispatch fiber is past its last step: signal it, do not wait for its exit.
+        case None if isFinalReply(first, req.id) =>
+          (StreamableHttpHandler.signalInterrupt(fiber) *> reqQueue.shutdown).as(
+            webResponse(
+              200,
+              s"event: message\ndata: ${MessageLoop.encodeOutbound(first)}\n\n",
+              sseHeaders(session, isNew, modern)
+            )
+          )
+        case None =>
+          sseResponse(reqQueue, req.id, session, isNew, fiber, settings, modern, Some(first))
+    yield response
+
+  private def sseHeaders(session: Session, isNew: Boolean, modern: Boolean): Map[String, String] =
+    Map("content-type" -> "text/event-stream", "cache-control" -> "no-cache") ++
+      (if modern then Map("x-accel-buffering" -> "no") else Map.empty[String, String]) ++
+      (if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String])
 
   /** Heartbeat marker the keepalive fiber offers into a request's `reqQueue`; the pull turns it
     * into an SSE comment frame (`: ping`). Shared with the JVM handler, which uses it to open a
@@ -530,7 +579,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       dispatchFiber: Fiber.Runtime[?, ?],
       settings: McpServerSettings,
       modern: Boolean,
-      initial: Option[JsonRpcMessage] = None
+      initial: Option[JsonRpcMessage]
   ): UIO[js.Dynamic] =
     val heartbeat: UIO[Option[Fiber.Runtime[Nothing, Nothing]]] =
       settings.keepAliveInterval match
@@ -591,10 +640,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         )
       )
       val stream = js.Dynamic.newInstance(js.Dynamic.global.ReadableStream)(source)
-      val headers =
-        Map("content-type" -> "text/event-stream", "cache-control" -> "no-cache") ++
-          (if modern then Map("x-accel-buffering" -> "no") else Map.empty[String, String]) ++
-          (if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String])
+      val headers = sseHeaders(session, isNew, modern)
       val init = js.Dynamic.literal(status = 200, headers = js.Dictionary[String](headers.toSeq*))
       js.Dynamic.newInstance(js.Dynamic.global.Response)(stream, init)
     }
@@ -625,60 +671,11 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
               JsonRpcMessage.Failure(Some(rpc.id), error.toErrorObject)
             ZIO.succeed(jsonResponse(failure.toJson, Map.empty, status))
           case Right(_) =>
-            for
-              session <- Session.make(s"request-${rpc.id.toString}", clientKey = clientKey)
-              reqQueue <- Queue.unbounded[JsonRpcMessage]
-              fiber <- session
-                .runWithSink(reqQueue)(router.dispatch(session, rpc))
-                .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
-                .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
-                .forkDaemon
-              // With `keepAliveInterval`, the wait for the first frame is bounded by one interval:
-              // a timer OFFERS the heartbeat sentinel, and a reply that is still silent then opens
-              // its SSE stream with a heartbeat (JVM twin: `StreamableHttpHandler.modernReply`). A
-              // status-mapped error arriving after that is delivered in-band.
-              timer <- settings.keepAliveInterval match
-                case None => ZIO.none
-                case Some(interval) =>
-                  (ZIO.sleep(Duration.fromJava(interval)) *> reqQueue.offer(
-                    KeepAliveSentinel
-                  )).forkDaemon
-                    .map(Some(_))
-              stopTimer = timer.fold(ZIO.unit)(_.interruptFork)
-              first <- reqQueue.take.onInterrupt(stopTimer *> fiber.interrupt *> reqQueue.shutdown)
-              _ <- stopTimer
-              response <- modernErrorStatus(first) match
-                case Some(status) =>
-                  (fiber.interrupt *> reqQueue.shutdown).as(
-                    jsonResponse(first.toJson, Map.empty, status)
-                  )
-                // The first frame is the final reply: the whole body is known, so answer with a
-                // fixed-length SSE body instead of a `ReadableStream` (JVM twin:
-                // `HttpReply.SseComplete`). Same event bytes; no stream, pull or heartbeat fiber.
-                case None if isFinalReply(first, rpc.id) =>
-                  (ZIO.fiberIdWith(id => fiber.interruptAsFork(id)) *> reqQueue.shutdown).as(
-                    webResponse(
-                      200,
-                      s"event: message\ndata: ${MessageLoop.encodeOutbound(first)}\n\n",
-                      Map(
-                        "content-type" -> "text/event-stream",
-                        "cache-control" -> "no-cache",
-                        "x-accel-buffering" -> "no"
-                      )
-                    )
-                  )
-                case None =>
-                  sseResponse(
-                    reqQueue,
-                    rpc.id,
-                    session,
-                    isNew = false,
-                    fiber,
-                    settings,
-                    modern = true,
-                    initial = Some(first)
-                  )
-            yield response
+            Session
+              .make(s"request-${rpc.id.toString}", clientKey = clientKey)
+              .flatMap(session =>
+                requestResponse(router, session, rpc, isNew = false, settings, modern = true)
+              )
       case _: JsonRpcMessage.Invalid =>
         val failure: JsonRpcMessage =
           JsonRpcMessage.Failure(None, McpError.invalidRequest("Invalid Request").toErrorObject)

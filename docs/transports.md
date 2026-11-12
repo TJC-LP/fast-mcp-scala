@@ -91,7 +91,7 @@ its final response. Protocol sessions, `Mcp-Session-Id`, the standalone GET stre
 and HTTP DELETE are **not used** by the modern path. Closing a response stream interrupts its
 dispatch fiber; `subscriptions/listen` uses the same long-lived POST response.
 
-The shape of a modern reply is chosen from the request's first frame: an error that maps to an HTTP
+The shape of a reply is chosen from the request's first frame: an error that maps to an HTTP
 status is answered as plain JSON with that status (see the table below), anything else is answered
 as `text/event-stream`. When that first frame is already the final reply — a call that emitted no
 progress, log or sub-request first, which is most calls — the whole body is known, and it is sent
@@ -186,6 +186,12 @@ legacy stateless mode and stdio — for which `ctx.sessionId` still returns `req
 
 ### The legacy compatibility adapter
 
+The reply to a legacy POST request is shaped the same way as a modern one (see "The modern path"):
+a reply that is complete at its first frame is one fixed-length `text/event-stream` body, anything
+else is streamed, and with `keepAliveInterval` a silent call's stream opens on the first heartbeat.
+Before 1.1.0 a legacy reply was always a chunked stream whose response head was sent at once; the
+head now goes out with the first frame (or the first heartbeat).
+
 Requests that speak an older protocol version (`Protocol.LegacyProtocolVersions`) are routed to an
 initialization-based adapter: `initialize` mints an `Mcp-Session-Id`, the standalone GET stream
 pushes server→client messages (JVM; Bun answers 405 because per-request SSE already covers
@@ -230,7 +236,7 @@ clients share one session identity, which is why legacy task requests there are 
 | `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless. |
 | `disallowDelete` | `false` | Legacy adapter: answer 405 to HTTP DELETE instead of terminating the session. |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity. Live legacy GET streams are exempt from the periodic sweep but become evictable at the `maxSessions` cap once idle this long; `None` disables both. |
-| `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. Legacy POST/GET streams heartbeat from the first byte. A modern per-request reply waits for the handler's first frame for at most one interval: a call that is still silent then gets its SSE response opened with a heartbeat (since 1.1.0; see "The modern path"). With `None` a modern reply waits for the first frame however long that takes. Neither listener closes a quiet stream on its own: the JVM has no idle timeout and Bun runs with `idleTimeout: 0` (its 10 s default used to cut a slow tool's reply). Heartbeats are also what lets the OS detect a GET peer that vanished without closing its connection (the socket is only probed when the server writes to it, and the OS gives up after its retransmission budget); without them such a stream stays live until the cap-time eviction described under `maxSessions`. |
+| `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. The legacy GET stream heartbeats from the first byte. The reply to a POST, on either protocol path, waits for the handler's first frame for at most one interval: a call that is still silent then gets its SSE response opened with a heartbeat (since 1.1.0; see "The modern path"). With `None` the reply waits for the first frame however long that takes. Neither listener closes a quiet stream on its own: the JVM has no idle timeout and Bun runs with `idleTimeout: 0` (its 10 s default used to cut a slow tool's reply). Heartbeats are also what lets the OS detect a GET peer that vanished without closing its connection (the socket is only probed when the server writes to it, and the OS gives up after its retransmission budget); without them such a stream stays live until the cap-time eviction described under `maxSessions`. |
 | `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` value must parse as one `host[:port]` authority and its hostname (or the verbatim `host:port`) must be listed — the port itself is not compared; a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, a `Host` or `Origin` sent more than once (seen as its `", "`-joined value), and malformed `Host`/`Origin` ports are refused (403), with or without the other header. IPv6 entries are written bracketed, exactly as they appear in the `Host` header: `Set("[::1]")`, not `Set("::1")`. |
 | `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted in addition to the request's own authority **when `allowedHosts` is also set**; with `allowedOrigins` alone only the listed origins pass (the request's own authority is then refused 403 too). Malformed entries fail `runHttp()` at startup. |
 | `maxRequestBodyBytes` | `1 MiB` | Request body cap on every backend; larger bodies get 413 before decoding (empty 413 on the wire from netty/Bun, JSON-RPC `-32000` on first-party paths); must not exceed `limits.maxFrameChars`. This is the cap a large `sampling/createMessage` or elicitation *result* meets over HTTP (a legacy client then waits out its 60 s request timeout): raise it together with `limits.maxFrameChars` — see [Input limits](#input-limits). |

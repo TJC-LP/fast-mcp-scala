@@ -98,11 +98,18 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 ### Changed
 
 - **A reply that is complete at its first frame is sent as a fixed-length body** (TJC-5064), on
-  every HTTP backend. When a 2026-07-28 request's first frame is already its final reply — a call
-  that emitted no progress, log or sub-request first — the response is still `200
+  every HTTP backend and on both protocol paths. When a request's first frame is already its final
+  reply — a call that emitted no progress, log or sub-request first — the response is still `200
   text/event-stream` with the same single `message` event, but it carries a `Content-Length`
   instead of being a chunked stream, so no stream is built, pulled or finalized for it. Replies
   that do emit something first are streamed exactly as before.
+  - **Legacy sessions: the response head is no longer sent at once.** A legacy (pre-2026-07-28)
+    POST reply used to be a chunked stream whose `200` head went out immediately, before the
+    handler produced anything. It now goes out with the first frame, as it always has on the
+    2026-07-28 path — or, with `keepAliveInterval` set, with the first heartbeat when the handler
+    is still silent after one interval. A client that enforces a timeout on response *headers*
+    shorter than its slowest tool call should set `keepAliveInterval` (previously the same call
+    relied on that client's body timeout instead).
 - **A silent 2026-07-28 call opens its SSE reply on the first heartbeat** (#114 D3.4 / D4.8), on
   every HTTP backend. With `keepAliveInterval` set, a modern POST whose handler has produced
   nothing after one interval gets its `text/event-stream` response started with a heartbeat, and

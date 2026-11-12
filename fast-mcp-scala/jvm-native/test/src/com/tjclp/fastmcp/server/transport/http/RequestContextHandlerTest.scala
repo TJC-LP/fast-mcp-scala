@@ -414,12 +414,57 @@ class RequestContextHandlerTest extends AnyFunSuite with Matchers:
     all.last.data should include("progress-done")
   }
 
-  test("a legacy session call is still streamed (its response head is not held back)") {
+  test("a legacy session call whose first frame is its reply is one complete SSE body too") {
+    val handler = makeHandler(McpServerSettings())
+    // initialize: complete, and it carries the new session's id.
+    val init = runUnsafe(handler.post(post(Nil, InitFrame)))
+    val sid = init match
+      case HttpReply.SseComplete(headers, frame) =>
+        frame.data should include(""""protocolVersion":"2025-11-25"""")
+        headers
+          .collectFirst { case (name, value) if name.equalsIgnoreCase("mcp-session-id") => value }
+          .getOrElse(fail("initialize did not mint a session"))
+      case other => fail(s"expected a complete SSE reply, got $other")
+    runUnsafe(
+      handler.post(
+        post(
+          List("mcp-session-id" -> sid),
+          """{"jsonrpc":"2.0","method":"notifications/initialized"}"""
+        )
+      )
+    ).status shouldBe 202
+    runUnsafe(handler.post(post(List("mcp-session-id" -> sid), legacyCall(72, "whoami")))) match
+      case HttpReply.SseComplete(headers, frame) =>
+        // Not a 2026-07-28 reply and not a new session: no extra headers.
+        headers shouldBe Nil
+        frame.data should include(s"protocolSession=$sid;")
+      case other => fail(s"expected a complete SSE reply, got $other")
+  }
+
+  test("a legacy session call that emits a notification first still streams, in order") {
     val handler = makeHandler(McpServerSettings())
     val sid = initialize(handler)
-    runUnsafe(handler.post(post(List("mcp-session-id" -> sid), legacyCall(72, "whoami")))) match
+    val body =
+      """{"jsonrpc":"2.0","id":73,"method":"tools/call","params":{"name":"progress-then-done","arguments":{},"_meta":{"progressToken":"p2"}}}"""
+    val reply = runUnsafe(handler.post(post(List("mcp-session-id" -> sid), body)))
+    reply match
       case _: HttpReply.Sse => ()
       case other => fail(s"expected a streamed SSE reply, got $other")
+    val all = frames(reply)
+    all.size shouldBe 2
+    all.head.data should include("notifications/progress")
+    all.last.data should include("progress-done")
+  }
+
+  test("a silent legacy call opens its SSE reply at the first heartbeat too") {
+    val handler = makeHandler(heartbeat)
+    val sid = initialize(handler)
+    val (reply, elapsedMs) =
+      timedPost(handler, post(List("mcp-session-id" -> sid), legacyCall(74, "silent")))
+    elapsedMs should be < 1000L
+    val all = frames(reply)
+    all.headOption shouldBe Some(SseFrame.Ping)
+    all.lastOption.map(_.data).getOrElse("") should include("silent-done")
   }
 
   // --- stdio ------------------------------------------------------------------------------------
