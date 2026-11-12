@@ -26,7 +26,13 @@ RUN set -eu; \
     rm -rf /tmp/bun.zip "/tmp/${asset}"
 COPY stage/cjs/main.js stage/cjs/main.js.map /opt/app/
 COPY bun-entry.cjs /opt/app/entry.cjs
+# The instrumentor only treats a directory as an application when it (or an ancestor) holds a
+# `node_modules` directory; without one it logs "Couldn't find a node_modules in any ancestor
+# directory - skipping instrumentation" and leaves the bundle untouched (first attempt, run
+# 4ea61d2d86656b0595d50cb1ab8960e8-66-21). This bundle has no dependencies, so the directory is
+# empty.
 RUN printf '{"name":"fast-mcp-scala-sut-bun","version":"0.0.0","private":true,"main":"entry.cjs"}\n' > /opt/app/package.json \
+    && mkdir -p /opt/app/node_modules \
     && mkdir -p /opt/antithesis && ln -s /opt/app /opt/antithesis/catalog
 ENV SUT_PORT=8000
 CMD ["sh", "-c", "exec bun run /opt/app/entry.cjs \"$SUT_PORT\""]
