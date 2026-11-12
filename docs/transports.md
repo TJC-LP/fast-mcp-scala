@@ -83,6 +83,60 @@ object MyHttpServer extends McpServerApp[Http, MyHttpServer.type]:
   @Tool(...) def hello(name: String): String = s"Hello, $name!"
 ```
 
+This binds `127.0.0.1:8090` with [Host / Origin validation](#host--origin-validation) on: a
+loopback bind gets it without any setting.
+
+### Host / Origin validation
+
+**Binding loopback alone does not protect against browser-originated requests.** A loopback bind
+keeps other machines out; a web page open in a browser on the same machine can still reach the
+port. What tells such a page apart is the `Host` (and `Origin`) it sends, so the HTTP transport
+checks both on every request — POST, GET and DELETE, before the body is read or any session state
+is touched — and answers **403** (`-32000`, `Host/Origin not allowed (DNS-rebinding protection)`)
+when the check fails.
+
+| `host` (bind address) | `allowedHosts` | Guard |
+|---|---|---|
+| loopback: `127.0.0.0/8`, `::1`, `localhost` (the default `127.0.0.1` included) | `None` (default) | **On, automatically.** `Host` must be `localhost`, `127.0.0.1`, `[::1]` or the bound address itself — on any port |
+| any | `Some(names)` | On, with exactly those names |
+| not loopback: `0.0.0.0`, `::`, a LAN address, a host name | `None`, and `allowedOrigins` unset | **Off — and a WARN is logged at startup.** The names clients use cannot be inferred |
+| any | `None`, with `dnsRebindingProtection = false` | Off, by explicit opt-out |
+
+The rules, identical on every backend (zio-http, the socket backend, `Bun.serve`):
+
+- **`Host`** must parse as one `host[:port]` authority whose hostname is an allowed name. The port
+  is not compared, so a forwarded port (`ssh -L 9000:127.0.0.1:8000`, an IDE port-forward) keeps
+  working. A request with no `Host` passes: that is not something a browser can do.
+- **`Origin`**, when present, must be the same origin as the request's `Host` (same host and
+  port), or be listed in `allowedOrigins`. A page on another loopback port
+  (`http://localhost:3000`), `Origin: null`, and malformed values are refused. A request with no
+  `Origin` (every non-browser client) passes.
+- A loopback bind address is recognised from the `host` string alone — `localhost`, a
+  `127.x.y.z` literal, `::1` in any spelling. A host name that merely resolves to loopback (an
+  `/etc/hosts` alias) is not: list it in `allowedHosts`.
+
+Deployments:
+
+- **Local development (the default).** Nothing to configure. MCP clients, `curl` and test
+  harnesses that reach the server as `localhost` / `127.0.0.1` / `[::1]` are unaffected.
+- **A browser front-end on another origin** (a dev server on `http://localhost:5173`): add
+  `allowedHosts = Some(Set("localhost", "127.0.0.1"))` and
+  `allowedOrigins = Some(Set("http://localhost:5173"))`. (With `allowedOrigins` alone, only the
+  listed origins pass.) You also need a CORS-terminating proxy; see below.
+- **A loopback listener behind a reverse proxy that forwards its own `Host`** (`Host:
+  mcp.example.com` arriving at `127.0.0.1:8000`): list the forwarded name —
+  `allowedHosts = Some(Set("mcp.example.com"))`. An explicit list replaces the automatic names,
+  so add `"localhost"` if local clients must keep working. This deployment worked without any
+  setting before 1.1.0 and now needs this one line.
+- **A non-loopback bind** (`host = "0.0.0.0"` in a container): set `allowedHosts` to the public
+  name(s) and `allowedOrigins` for browser front-ends, **and** put an authenticating proxy in
+  front. The guard is not authentication: a non-browser client can send any `Host` it likes.
+- **Opting out**: `dnsRebindingProtection = false` accepts every `Host` and `Origin` and silences
+  the startup warning. It is only valid with both allow-lists unset (`runHttp()` refuses the
+  contradictory combination at startup). Use it when a trusted proxy in front of the listener
+  already does this check and you cannot enumerate the names it forwards; otherwise prefer
+  `allowedHosts`.
+
 ### The modern path (MCP 2026-07-28)
 
 `runHttp()` accepts one stateless JSON-RPC message per `POST /mcp`. A request may receive a plain
@@ -106,7 +160,8 @@ Modern Streamable HTTP is identical on the JVM (ZIO HTTP) and Bun (`Bun.serve`).
 serve plaintext HTTP/1.1 only — there is no TLS setting by design; terminate TLS and authentication
 at a reverse proxy in front of the MCP endpoint. Neither backend adds CORS headers or answers an
 `OPTIONS` preflight: a browser-hosted client on another origin needs a CORS-terminating proxy in
-front of the endpoint (and, with `allowedHosts` on, its origin listed in `allowedOrigins`).
+front of the endpoint (and its origin listed in `allowedOrigins`; see
+[Host / Origin validation](#host--origin-validation)).
 
 ### Request requirements and error mapping
 
@@ -122,22 +177,33 @@ additionally include:
 The protocol version and client capabilities are repeated in every request's `params._meta`.
 Schema-driven `Mcp-Param-*` values may be supplied through `x-mcp-header`.
 
+Each of `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and every `Mcp-Param-*` must appear
+**once**. A request that carries one of them more than once is refused as a header/body mismatch
+(400, `-32020`) on every backend, whatever the values and their order and even when they agree —
+the server never picks one occurrence. A repeated `MCP-Protocol-Version` is refused on any POST,
+legacy ones included. On Bun the runtime joins a repeated header into one `", "`-separated value
+before the server sees it, so the server cannot count field lines there: a joined
+`MCP-Protocol-Version` is refused as above, and a joined `Mcp-Method` / `Mcp-Name` / `Mcp-Param-*`
+is compared with the body as that one value — a mismatch unless the body's value is literally the
+joined string.
+
 | Condition | HTTP | JSON-RPC code |
 |---|---|---|
-| `Host`/`Origin` refused by `allowedHosts` / `allowedOrigins` | 403 | `-32000` |
+| `Host`/`Origin` refused by the Host/Origin guard (automatic on a loopback bind, or `allowedHosts` / `allowedOrigins`) | 403 | `-32000` |
 | Missing or wrong `Content-Type` (any POST; a non-utf-8 `charset` counts as wrong) | 415 | `-32000` |
 | Body larger than `maxRequestBodyBytes` | 413 | `-32000` on first-party paths; netty and Bun answer an empty 413 when they refuse the body first |
-| Frame over `limits` (`maxFrameChars` / `maxDepth` / `maxObjectFields`) | 400 | `-32700` |
-| Header/body mismatch | 400 | `-32020` |
+| Frame over `limits` (`maxFrameChars` / `maxDepth` / `maxObjectFields` / `maxArrayElements` / `maxValues` / `maxNumberDigits` / `maxNumberExponent`) | 400 | `-32700` |
+| Header/body mismatch, or a routing header sent more than once | 400 | `-32020` |
 | Missing required client capability | 400 | `-32021` |
 | Unsupported protocol version (answer carries `data.supported`) | 400 | `-32022` |
 | Unknown request method | 404 | `-32601` |
 
 The admission gates run in a fixed order on every backend, on headers first and before any session
-state is touched: unknown path 404 → `allowedHosts`/`allowedOrigins` 403 → `Content-Type` 415 →
+state is touched: unknown path 404 → Host/Origin guard 403 → `Content-Type` 415 →
 declared `Content-Length` over `maxRequestBodyBytes` 413 → `Accept` 406 → body read (platform byte
-cap, then a first-party post-read check → 413) → frame limits (`-32700`, HTTP 400) → dispatch. The
-legacy session cap (`maxSessions`) is applied when an `initialize` is dispatched. Any transport or
+cap, then a first-party post-read check → 413) → frame limits (`-32700`, HTTP 400) → dispatch. A
+legacy `initialize` meets the session cap (`maxSessions`) only after it has succeeded — see
+[The legacy session store](#the-legacy-session-store). Any transport or
 handler-construction defect on the way is answered by a fixed JSON-RPC 500 boundary
 (`Internal server error`) on both backends, with no exception text, stack trace, or path. A defect
 raised *inside* a tool handler (`ZIO.die`, an uncaught exception) is not on this path: the router
@@ -201,26 +267,32 @@ server→client traffic), and DELETE terminates the session (`disallowDelete = t
 instead). Legacy POSTs are subject to the same
 `Content-Type: application/json` gate (415) as modern ones. Only `initialize` mints a session; idle
 sessions are evicted after `sessionIdleTimeout`, and the store is capped by `maxSessions`
-(`Some(1000)` by default): at the cap the longest-idle session without a live GET stream is evicted
-to make room; when every stored session holds a live GET, the longest-idle of them is evicted
-instead — its GET stream is closed — provided it has been idle longer than `sessionIdleTimeout`
-(clients reopen their GET stream as usual); the `initialize` is refused with 503 only when no
-session qualifies under either rule. The periodic idle sweeper never evicts a session with a live
+(`Some(1000)` by default) — [The legacy session store](#the-legacy-session-store) below has the
+rules. The periodic idle sweeper never evicts a session with a live
 GET stream while capacity is free. DELETE, idle eviction, and cap eviction all go through
 `Session.terminate`: a request still in flight on that session is interrupted (no reply) and its
 running legacy tasks are released. Activity is stamped when a request arrives, not while it runs,
 so a call that outlasts `sessionIdleTimeout` on an otherwise quiet session can be evicted
 mid-flight and never answered (a `-32001` reply is tracked for 1.0.1) — keep the timeout above
 your longest call, or poll through Tasks. An empty `mcp-session-id` header counts as an unknown
-session on the JVM (404) and as a missing header on Bun (400). On Bun a legacy session has no GET
-channel, so a server→client message emitted outside a request (a future
-`notifications/resources/updated`) has no delivery path; nothing publishes such messages today.
+session on the JVM (404) and as a missing header on Bun (400).
+
+A GET stream's slot (one stream per session; a second GET is answered 409) is given back when the
+stream ends, when the client disconnects, and when the reply is never streamed at all — a client
+that closes its connection as the response head goes out, before the server has started the
+stream. The same holds for the reply to a POST: a request whose reply stream is never started is
+stopped rather than left running. The zio-http and socket backends do both as soon as they see
+the connection close, and in any case it happens within 5 seconds of the reply being built (the
+shared handler gives up on a streamed reply that nothing has started by then; such a reply, run
+later, is an empty stream).
+Removing a session and terminating it are one step, so a `DELETE` or an at-cap `initialize` whose
+client goes away mid-way cannot leave a session that is gone from the store but still running.
 
 A GET peer that disappears without closing its connection (NAT expiry, a suspended machine) leaves
 the stream "live" from the server's point of view: the OS only notices such a peer once the server
 writes to the socket — that is, with `keepAliveInterval` set — and only after its own TCP
 retransmission budget (zio-http 3.11.4 exposes no accepted-socket option, so the server does not
-set TCP keepalive itself). The cap-time rule above bounds the session store regardless.
+set TCP keepalive itself). The cap-time rules below bound the session store regardless.
 
 `stateless` controls **only** this adapter. Modern requests are stateless regardless of the flag.
 Leaving it `false` (the default) lets older clients fall back to the initialize/session/GET/DELETE
@@ -228,27 +300,124 @@ flow; setting it `true` disables that legacy session store. On the stateless leg
 clients share one session identity, which is why legacy task requests there are refused
 (see [tasks.md](./tasks.md)).
 
+#### The legacy session store
+
+**A session is stored only for an `initialize` that succeeded.** A header-less `initialize` is
+answered on a session that is not in the store yet. If it fails — params that do not decode, or a
+`clientInfo` / `capabilities` over the budget below — the reply carries the JSON-RPC error and no
+`Mcp-Session-Id`, and the store is exactly as it was: no slot is taken and nobody is evicted. Only a
+successful `initialize` meets the cap, and the cap check, the choice of the session that makes room
+and the insert are one atomic step, so the store never exceeds `maxSessions` however many
+initializes race. Because the session id travels in the response head, the reply to a header-less
+`initialize` is sent once the handler has finished (it is not opened early after the one-second
+grace other legacy replies have).
+
+**What a session keeps from its client is bounded.** A stored session holds the `clientInfo` and
+`capabilities` of its `initialize` for as long as it lives, and both have open members (`icons`,
+`experimental`, `extensions`, the per-capability objects). Together they may hold at most
+**256 JSON values** (every object, array, string, number, boolean and null in the two members) and
+**16 KiB of text** (16,384 UTF-16 code units of member names, string values and number digits). An
+`initialize` over either bound is refused with `-32602` on the legacy streamable adapter. The
+budget is a fixed constant: it does not grow with `maxRequestBodyBytes` or `limits.maxFrameChars`.
+An ordinary `initialize` uses a few dozen values and a few hundred characters; the one thing that
+can meet the bound in practice is an icon sent inline as a large `data:` URI. Stdio and the
+sessionless adapter (`stateless = true`) store no session and are not subject to the budget.
+
+**Sizing the heap.** The store's worst case is `maxSessions` multiplied by what one session may
+hold:
+
+| Per session | Bound | Worst case |
+| --- | --- | --- |
+| `clientInfo` + `capabilities` | 256 JSON values, 16 KiB of text | under 100 KiB of heap on the JVM: the text at up to two bytes a character (32 KiB) plus object overhead per value |
+| `resources/subscribe` URIs (only with `resourcesSubscribe = true`) | `limits.maxSubscriptionsPerSession` × `limits.maxUriChars` (1024 × 8192) | 8 Mi characters, about 16 MiB |
+| Legacy tasks (only with `tasks.enabled`) | `TaskSettings` caps, in entries and in bytes | see [tasks.md](tasks.md#memory-bounds) |
+| Messages buffered for the GET stream (JVM; server-emitted, not client-supplied) | `limits.maxOutboundMessages` messages (256); a count, not a byte bound | see [Messages outside a request](#messages-outside-a-request) |
+
+At the defaults (`maxSessions = Some(1000)`, subscriptions and tasks off) the client-supplied data
+the store can pin is therefore at most about **100 MiB**, and a few hundred kilobytes in normal
+use. The value and character bounds are exact; the heap figure is a rounded-up estimate of object
+overhead on top of them (sessions built to sit exactly at the budget measured between 5 and 50 KiB
+each on a 64-bit JVM, depending on the shape). `maxSessions = None` removes the bound on the number
+of sessions and with it any worst case. If you enable `resourcesSubscribe` for untrusted clients, lower
+`maxSubscriptionsPerSession`, `maxUriChars` or `maxSessions` so their product fits your heap.
+
+**Who makes room at the cap.** When a successful `initialize` finds the store full, one stored
+session is terminated to make room. Sessions are counted per client — the TCP peer address the
+backend reports for the `initialize` that opened them:
+
+1. If the newcomer's own client already holds as many sessions as any other client, it replaces
+   one of its own. A client at the top can only grow at its own expense.
+2. Otherwise, if some client holds at least two sessions more than the newcomer's client, the
+   client holding the most gives one up.
+3. Otherwise holdings are level and the idle rules decide over the whole store: the longest-idle
+   session without a live GET stream; failing that, the longest-idle session with a live GET that
+   has been idle longer than `sessionIdleTimeout`. If neither exists, the store is full of clients
+   that each hold their share, and the `initialize` is refused with 503.
+
+In cases 1 and 2 the session given up is that client's longest-idle one without a live GET stream,
+or else its longest-idle one outright: its GET stream is closed and the client reconnects (a later
+request on the evicted session answers 404, and a client then initializes again). Holding a GET
+stream open and touching a session keeps it out of the idle rules, but not out of cases 1 and 2,
+so one client cannot fill the store with exempt sessions and have every other client refused.
+
+Two limits of this accounting are worth knowing:
+
+- **Behind a reverse proxy every session carries the proxy's address**, so all clients count as
+  one: case 1 always applies and the store behaves as a least-recently-used cache (a full store
+  admits a newcomer by closing the longest-idle session, live GET or not, instead of answering
+  503). Per-client fairness then belongs in the proxy — authenticate there and limit sessions or
+  connections per principal.
+- **It counts addresses, not people.** Clients behind one NAT share a count, and a party that
+  controls many addresses holds one share per address. The cap is not a rate limiter: put one in
+  front of a server exposed to untrusted networks.
+
+A backend that reports no peer address (a custom backend, or an in-memory test) treats every
+session as its own client, so only case 3 applies.
+
+#### Messages outside a request
+
+Most server→client messages ride the response stream of the request that caused them. A message
+emitted when no such stream exists goes to the session's out-of-request channel instead. Today
+that is what a **legacy task** emits once its creating POST has been answered — the
+`notifications/tasks/status` of every terminal transition, and any log, progress or
+server→client request message of the task body — and, on stdio, every server-pushed message. The
+channel holds at most `limits.maxOutboundMessages` messages (default 256) per session, whether or
+not anything reads it:
+
+| Session | Reader | At the bound |
+|---|---|---|
+| stdio (every platform) | the stdout writer | back-pressure: the emitter waits for the writer, nothing is lost; after stdin EOF nothing is buffered |
+| legacy session, JVM | the standalone GET stream, when the client opens one | the oldest buffered message is dropped; the emitter is never blocked or interrupted. A GET opened later receives the newest messages still buffered |
+| legacy session, Bun | none (GET answers 405) | nothing is buffered: the message is discarded |
+| 2026-07-28 HTTP request, legacy stateless adapter | none | nothing is buffered: the message is discarded |
+
+So on Bun, and for a JVM client that never opens its GET stream, task status must be polled with
+`tasks/get`, and a server→client request issued by a task body after its POST was answered gets
+no reply (it fails with its timeout). A JVM client whose GET stream falls more than
+`maxOutboundMessages` behind loses the oldest messages, not the newest.
+
 ### `McpServerSettings` reference
 
 | Setting | Default | Description |
 |---|---|---|
-| `host` | `127.0.0.1` | Bind address. Changed in 0.5.0 from `0.0.0.0` per the spec's bind-localhost guidance; set `"0.0.0.0"` explicitly for containers or external exposure. |
+| `host` | `127.0.0.1` | Bind address. Changed in 0.5.0 from `0.0.0.0` per the spec's bind-localhost guidance; set `"0.0.0.0"` explicitly for containers or external exposure — and then set `allowedHosts` / `allowedOrigins` too: a non-loopback bind is not guarded automatically, and startup logs a WARN until an allow-list is set. See [Host / Origin validation](#host--origin-validation). |
 | `port` | `8000` | Listen port. |
 | `httpEndpoint` | `/mcp` | JSON-RPC endpoint path. |
 | `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless. |
 | `disallowDelete` | `false` | Legacy adapter: answer 405 to HTTP DELETE instead of terminating the session. |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity. Live legacy GET streams are exempt from the periodic sweep but become evictable at the `maxSessions` cap once idle this long; `None` disables both. |
 | `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. The legacy GET stream heartbeats from the first byte. The reply to a POST waits for the handler's first frame for at most one interval: a call that is still silent then gets its SSE response opened with a heartbeat (since 1.1.0; see "The modern path"). With `None`, a 2026-07-28 reply waits for the first frame however long that takes, and a legacy reply opens its stream after one second. Neither listener closes a quiet stream on its own: the JVM has no idle timeout and Bun runs with `idleTimeout: 0` (its 10 s default used to cut a slow tool's reply). Heartbeats are also what lets the OS detect a GET peer that vanished without closing its connection (the socket is only probed when the server writes to it, and the OS gives up after its retransmission budget); without them such a stream stays live until the cap-time eviction described under `maxSessions`. |
-| `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` value must parse as one `host[:port]` authority and its hostname (or the verbatim `host:port`) must be listed — the port itself is not compared; a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, a `Host` or `Origin` sent more than once (seen as its `", "`-joined value), and malformed `Host`/`Origin` ports are refused (403), with or without the other header. IPv6 entries are written bracketed, exactly as they appear in the `Host` header: `Set("[::1]")`, not `Set("::1")`. |
-| `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted in addition to the request's own authority **when `allowedHosts` is also set**; with `allowedOrigins` alone only the listed origins pass (the request's own authority is then refused 403 too). Malformed entries fail `runHttp()` at startup. |
+| `allowedHosts` | `None` (automatic) | The `Host` names of the DNS-rebinding/CSRF guard ([Host / Origin validation](#host--origin-validation)). `None` is **automatic**: on a loopback bind the guard is on for `localhost`, `127.0.0.1`, `[::1]` and the bound address; on any other bind it is off and startup warns. `Some(names)` uses exactly those names on any bind address (`Some(Set.empty)` reads as `None`). With the guard on: the `Host` value must parse as one `host[:port]` authority and its hostname (or the verbatim `host:port`) must be listed — the port itself is not compared; a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, a `Host` or `Origin` sent more than once (seen as its `", "`-joined value), and malformed `Host`/`Origin` ports are refused (403), with or without the other header. IPv6 entries are written bracketed, exactly as they appear in the `Host` header: `Set("[::1]")`, not `Set("::1")`. |
+| `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted in addition to the request's own authority **when `allowedHosts` is also set**; with `allowedOrigins` alone only the listed origins pass (the request's own authority is then refused 403 too), and the `Host` is held to the automatic loopback names on a loopback bind and not checked on any other bind. Malformed entries fail `runHttp()` at startup. |
+| `dnsRebindingProtection` | `true` | The explicit opt-out of the Host/Origin guard (since 1.1.0). `false` accepts every `Host` and `Origin` and silences the non-loopback startup warning; it must not be combined with `allowedHosts` / `allowedOrigins` (`runHttp()` fails at startup). Prefer listing the proxied name in `allowedHosts`. |
 | `maxRequestBodyBytes` | `1 MiB` | Request body cap on every backend; larger bodies get 413 before decoding (empty 413 on the wire from netty/Bun, JSON-RPC `-32000` on first-party paths); must not exceed `limits.maxFrameChars`. This is the cap a large `sampling/createMessage` or elicitation *result* meets over HTTP (a legacy client then waits out its 60 s request timeout): raise it together with `limits.maxFrameChars` — see [Input limits](#input-limits). |
-| `maxSessions` | `Some(1000)` | Cap on stored legacy sessions; at the cap the longest-idle session without a live GET is evicted, else the longest-idle GET-holding session that has been idle longer than `sessionIdleTimeout` (its GET stream is closed). Unauthenticated initializes can evict idle sessions — front non-loopback deployments with auth. 503 only if neither rule finds a victim; `None` disables. |
+| `maxSessions` | `Some(1000)` | Cap on stored legacy sessions. A session is stored only for an `initialize` that succeeded, and keeps at most 256 JSON values / 16 KiB of text from it, so the store's worst case is `maxSessions` × the per-session budget (about 100 MiB at the defaults). At the cap a client holding more sessions than the newcomer's gives one up; among clients holding their share, the longest-idle session without a live GET is evicted, else the longest-idle GET-holding session idle longer than `sessionIdleTimeout`; 503 only if nobody qualifies. Unauthenticated initializes can evict idle sessions — front non-loopback deployments with auth. `None` disables. See [The legacy session store](#the-legacy-session-store). |
 | `loggingEnabled` | `false` | Advertise logging; modern clients use per-request `_meta` levels, legacy clients `logging/setLevel`. |
 | `resourcesSubscribe` | `false` | Enable legacy `resources/subscribe`; modern clients use `subscriptions/listen`. |
 | `exposeTemplatesEndpoint` | `false` | List registered resource templates through `resources/templates/list`. `resources/list` never lists templates; with the default the templates endpoint answers an empty page (clients derive templates from `{}` URIs) and `resources/read` on a matching URI works either way. Applies on every transport. |
 | `contextHeaders` | `Set.empty` | HTTP request headers a handler may read through `McpContext.header` / `McpContext.headers`; nothing is exposed unless listed. See "Request headers in handlers". |
 | `tasks` | `TaskSettings()` | The Tasks extension, off by default (see [tasks.md](./tasks.md)). |
-| `limits` | `LimitSettings()` | Input bounds on every transport: `maxFrameChars` 4 MiB, `maxDepth` 64, `maxObjectFields` 1024 (`-32700` / HTTP 400 before dispatch), `maxUriChars` 8192 and `maxSubscriptionsPerSession` 1024 (`-32602`). See [Input limits](#input-limits). |
+| `limits` | `LimitSettings()` | Input bounds on every transport: `maxFrameChars` 4 MiB, `maxDepth` 64, `maxObjectFields` 1024, `maxArrayElements` 4096, `maxValues` 65536, `maxNumberDigits` 512, `maxNumberExponent` 512 (`-32700` / HTTP 400 before dispatch), `maxUriChars` 8192 and `maxSubscriptionsPerSession` 1024 (`-32602`); plus `maxOutboundMessages` 256, the per-session buffer for messages emitted outside a request. See [Input limits](#input-limits). |
 
 HTTP-specific fields are ignored under stdio; `limits`, `tasks` and `exposeTemplatesEndpoint` apply on every transport.
 
@@ -263,23 +432,83 @@ cannot be disabled, only moved; the constructor rejects out-of-range values at c
 | `maxFrameChars` | `4 * 1024 * 1024` | One decoded frame (one stdio line / one HTTP body), in UTF-16 chars. |
 | `maxDepth` | `64` | JSON nesting depth (the envelope object is depth 1; every nested `{` / `[` adds one). Hard ceiling `LimitSettings.MaxSupportedDepth`. |
 | `maxObjectFields` | `1024` | Members of any single JSON object anywhere in the frame. |
+| `maxArrayElements` | `4096` | Elements of any single JSON array anywhere in the frame. |
+| `maxValues` | `65536` | JSON values in the whole frame: every object, array, string, number, boolean and `null` counts once (member names do not). |
+| `maxNumberDigits` | `512` | Digits in the significand of a number as written (integer and fraction part, leading and trailing zeros included). Hard ceiling `LimitSettings.MaxSupportedNumberDigits` (4096). |
+| `maxNumberExponent` | `512` | Absolute value of a number's exponent (the part after `e` / `E`). Hard ceiling `LimitSettings.MaxSupportedNumberExponent` (4096). |
 | `maxUriChars` | `8192` | A client-supplied resource URI (`resources/read`, `resources/subscribe`, `resources/unsubscribe`, `subscriptions/listen` entries). |
 | `maxSubscriptionsPerSession` | `1024` | Distinct URIs one legacy session may hold via `resources/subscribe`. |
+| `maxOutboundMessages` | `256` | Server→client messages one session buffers outside a request's own response stream — see [Messages outside a request](#messages-outside-a-request). Applies to the stdio session (back-pressure at the bound) and to each legacy JVM HTTP session (oldest dropped at the bound); sessions with no reader buffer nothing. |
 
-A frame that violates `maxFrameChars`, `maxDepth`, or `maxObjectFields` is answered with JSON-RPC
-`-32700` (HTTP 400) by a linear pre-scan of the raw text, and never mints a session; `maxUriChars`
-and `maxSubscriptionsPerSession` violations answer `-32602`. On HTTP an oversized body meets
-`maxRequestBodyBytes` first (413), so keep that cap at or below `maxFrameChars` — `runHttp()`
-refuses to start otherwise; `maxFrameChars` is the transport-independent backstop. On stdio the
-line splitter itself is bounded at `maxFrameChars`: an over-long line is truncated, answered with
-`-32700`, and the rest of it discarded.
+A frame that violates `maxFrameChars`, `maxDepth`, `maxObjectFields`, `maxArrayElements`,
+`maxValues`, `maxNumberDigits` or `maxNumberExponent` is answered with JSON-RPC `-32700` (HTTP 400)
+by a linear pre-scan of the raw text — before the parser allocates anything — and never mints a
+session; the parsed tree is then re-checked against the same bounds. `maxUriChars` and
+`maxSubscriptionsPerSession` violations answer `-32602`. Text inside JSON strings is never
+interpreted: a base64 payload or a string full of digits and brackets is one value. The pre-scan is
+a single pass with no allocation per token; on the JVM it costs about a nanosecond per character of
+structured JSON and far less for long strings, a fraction of what parsing the same frame costs.
 
-`maxObjectFields` bounds the residual cost of building a `Map` from attacker-chosen, hash-colliding
-keys after the frame check: each object costs up to `maxObjectFields² / 2` string comparisons, so
-the per-frame constant grows quadratically with this knob (at the defaults about 0.4 s per 4 MiB
-frame on the JVM, several times that on single-threaded Bun). Operators exposing a Bun server to
-untrusted networks should lower it (for example to 256); the wire shapes never need more than a few
-dozen members per object.
+On HTTP an oversized body meets `maxRequestBodyBytes` first (413), so keep that cap at or below
+`maxFrameChars` — `runHttp()` refuses to start otherwise; `maxFrameChars` is the
+transport-independent backstop. On stdio the line splitter itself is bounded at `maxFrameChars`: an
+over-long line is truncated, answered with `-32700`, and the rest of it discarded.
+
+`maxValues`, `maxObjectFields` and `maxArrayElements` together bound what an accepted frame can
+cost, independently of its size in bytes:
+
+- **Memory.** The parsed tree has at most `maxValues` nodes, so it is bounded by the frame text
+  plus a fixed overhead per node (65 536 nodes at the defaults) — not by a multiple of
+  `maxRequestBodyBytes`. A megabyte of one-character array elements is refused; it is not parsed
+  into a tree tens of times its size.
+- **Hash collisions.** Building a `Map` from one object's attacker-chosen, hash-colliding keys
+  costs up to `maxObjectFields² / 2` string comparisons (about 5 × 10^5 at the default), and
+  building a `Set` (or any type containing one) from one array's colliding elements costs up to
+  `maxArrayElements² / 2` (about 8.4 × 10^6 at the default, a few tens of milliseconds on the
+  JVM). Because `maxValues` caps the members of all objects and arrays in a frame together, the
+  whole frame costs at most `maxValues × max(maxObjectFields, maxArrayElements) / 2` comparisons:
+  about 3.4 × 10^7 through `Map` sinks, which every server has, and about 1.3 × 10^8 — half a
+  second to a second on the JVM, several times that on single-threaded Bun — for a handler that
+  builds a `Set` from a client array.
+
+The array default is 4096 rather than 1024 so that an embedding vector of 1536 or 3072 numbers
+passes without configuration; the cost is the 16-fold larger per-array figure above. The per-frame
+constant grows linearly with each of `maxObjectFields` and `maxArrayElements`, so a server with no
+tool that takes long arrays — and any Bun server exposed to untrusted networks — should lower both
+(for example to 256); the wire shapes never need more than a few dozen members per object. The
+defaults hold sixteen 3072-number vectors, or a table of 4096 rows by 14 columns, in one frame.
+Raise `maxArrayElements` for tools that take longer arrays by design, and `maxValues` with it when
+a single call carries more than about 65 000 values:
+
+```scala 3 raw
+McpServerSettings(limits = LimitSettings(maxArrayElements = 16384, maxValues = 262144))
+```
+
+`maxNumberDigits` and `maxNumberExponent` bound the magnitude a client can write in a few bytes.
+The defaults admit the full `Long` range and every finite `Double` (whose shortest form has an
+exponent between -324 and 308) and refuse a number such as `1e999999999` from its text, with work
+that does not depend on the magnitude. A number inside the bounds expands to an integer of at most
+`maxNumberDigits + maxNumberExponent` decimal digits (1024 by default: at most 3402 bits), and a
+`BigDecimal` decoded from it has a scale within the same window, so a handler parameter typed
+`BigInt`, `java.math.BigInteger` or `BigDecimal` costs a small constant per number — at decode time
+and in whatever arithmetic the handler then does. That guarantee is checked again on the value
+itself in front of every argument decoder (at most `maxNumberDigits` significant digits, none of
+them outside `10^±(maxNumberDigits + maxNumberExponent)`), so it also holds for a value that did
+not arrive as a JSON number in a frame: an in-process call, a prompt or resource-template argument
+(always a string), or a number a client writes as a JSON string. `"1e999999999"` is an ordinary
+value for a `String` parameter and is refused when it decodes into a `BigDecimal` — `isError: true`
+on `tools/call`, an error reply on `prompts/get` and `resources/read`. (On `tools/call` the string
+only gets that far when the tool's `inputSchema` admits a string for the parameter or input
+validation is off: a schema derived from `BigDecimal` advertises `number`, and
+[input-schema validation](custom-types.md#what-the-server-enforces) refuses a string for it first,
+also with `isError: true`. Frame limits run before that validation, and the decoder check after
+it.) For string-encoded numbers
+the check looks inside case classes, tuples, `Option`, `Either`, arrays and standard collections; a
+`BigDecimal` that a custom decoder wraps in a class of its own is not seen. The parser
+independently refuses a significand over 256 bits (about 77 significant digits).
+
+JSON embedded in a string argument (`McpDecodeContext.parseJsonObject` / `parseJsonArray`) is held
+to the same depth, object, array, value-count and number bounds, answered with `-32602`.
 
 Frames carrying large payloads must fit: a `sampling/createMessage` result with base64 images over
 stdio may need a larger frame, e.g.
@@ -384,6 +613,8 @@ ready is written as a single packet (head, SSE frames and the chunked terminator
 | Protocol | HTTP/1.1 keep-alive, requests served one at a time per connection; HTTP/1.0 and `Connection: close` get close-delimited replies. No HTTP/2, no TLS (terminate both at a proxy) |
 | Request bodies | `Content-Length` and `Transfer-Encoding: chunked`, bounded on the wire by `maxRequestBodyBytes` (413); `Expect: 100-continue` is answered only after the header gates pass |
 | Request head | at most 8 KiB (431) |
+| Strict parsing | the server refuses what a proxy in front of it could read differently, with a `400` and a closed connection: a line of the request head not ending in CRLF (a bare LF or a bare CR, also before the request line), NUL / another control character / DEL anywhere in the head (HTAB is allowed inside a field value), a request line that is not `method SP target SP version` exactly, a method or field name with a character outside ASCII `tchar`, obsolete line folding. Only SP and HTAB are trimmed around a field value, and `Content-Length` is ASCII digits |
+| Chunked request bodies | read exactly as RFC 9112 §7.1 writes them: the chunk size is 1–7 hex digits from the first byte of its line, optionally followed by chunk extensions (ignored; control characters in them are refused); the size line, the chunk data and every trailer line end in CRLF; trailer lines must be field lines (their content is not used). Any other framing is a `400` and the connection is closed |
 | Connections | 256 concurrent by default; more wait in the kernel backlog. The cap is a hard limit, so three timeouts keep a client from holding a slot without making progress. All four are set with `JvmSocketHttpBackend.withSettings(maxConnections = n, ...)` on the JVM or `NativeHttpBackend.withSettings(...)` on Scala Native (experimental, like the backend itself); the backend class has no public constructor, so on Scala Native there is no way to build one outside the `-experimental` opt-in |
 | `idleTimeout` (60 s) | a keep-alive connection with no request activity is closed |
 | `requestReadTimeout` (60 s) | the allowance for a whole request, head and body, from its first byte (408 when it runs out). Every 4 KiB received extends it by one second, so a slow client that is still sending a large body gets the time it needs, while one sending a byte or a line at a time cannot keep the connection |
@@ -391,7 +622,7 @@ ready is written as a single packet (head, SSE frames and the chunked terminator
 | Refused requests | a reply that leaves request bytes unread (a body over the cap, a refused `Host`, a malformed head) is followed by a lingering close: the write side is shut down and the rest of the request discarded for up to 5 s, so the client reads the error reply instead of a connection reset |
 | Accept failures | a failed `accept` (out of file descriptors or threads, a connection reset before it was accepted) never stops the listener: it is retried with a pause that grows to 1 s for as long as it lasts, with a warning in the log on the first failure of a run and about once a minute after |
 | SSE | chunked transfer-encoding; `keepAliveInterval` pings are written by the connection thread when the stream has been quiet that long |
-| Vanished clients | while a reply or a GET stream is quiet, the read side is probed once a second; a closed peer interrupts the request and releases the session's GET slot. A request that finishes within a second is never probed |
+| Vanished clients | while a reply or a GET stream is quiet, the read side is probed once a second; a closed peer interrupts the request and releases the session's GET slot. A request that finishes within a second is never probed. A reply that cannot be delivered is released without being streamed; the shared handler's 5-second bound on an unstarted reply covers whatever is left |
 | Shutdown | closing the server's scope closes the listener and every connection. ZIO signal handlers are no-ops on Scala Native, so SIGTERM there ends the process by the OS default |
 | Diagnostics | `FASTMCP_HTTP_DEBUG=1` prints per-connection failures to stderr |
 

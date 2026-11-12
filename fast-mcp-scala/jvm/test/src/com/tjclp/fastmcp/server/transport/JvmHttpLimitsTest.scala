@@ -34,7 +34,8 @@ class JvmHttpLimitsTest extends AnyFunSuite with Matchers:
   private def runUnsafe[A](effect: ZIO[Any, Throwable, A]): A =
     Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(effect).getOrThrowFiberFailure())
 
-  private val limits = LimitSettings(maxObjectFields = 64, maxDepth = 16)
+  private val limits =
+    LimitSettings(maxObjectFields = 64, maxDepth = 16, maxArrayElements = 32, maxValues = 256)
 
   private def buildRoutes(stateless: Boolean): Routes[Any, Response] =
     val server = McpServer.typed[Any](
@@ -144,6 +145,54 @@ class JvmHttpLimitsTest extends AnyFunSuite with Matchers:
     val ping = post(routes, pingFrame)
     ping.status shouldBe Status.Ok
     bodyOf(ping) should include(""""result":{}""")
+  }
+
+  test("an over-long array, too many values or an extreme exponent is 400/-32700 on both adapters") {
+    val longArray = Seq.fill(33)("1").mkString("[", ",", "]")
+    val manyValues = Seq.fill(30)("[1,2,3,4,5,6,7,8,9]").mkString("[", ",", "]")
+    val cases = Seq(
+      s"""{"a":1,"b":2,"xs":$longArray}""" -> "maxArrayElements",
+      s"""{"a":1,"b":2,"xs":$manyValues}""" -> "maxValues",
+      """{"a":1e999999999,"b":2}""" -> "maxNumberExponent",
+      """{"a":1,"b":-1E-2147483647}""" -> "maxNumberExponent",
+      s"""{"a":${"1" * 600},"b":2}""" -> "maxNumberDigits"
+    )
+    Seq(true, false).foreach { stateless =>
+      val routes = buildRoutes(stateless)
+      val sid =
+        if stateless then None
+        else
+          val init = post(routes, initFrame)
+          val _ = bodyOf(init)
+          init.rawHeader(SessionIdHeader)
+      cases.foreach { (arguments, limit) =>
+        withClue(s"stateless=$stateless $limit: ") {
+          val frame =
+            s"""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"add","arguments":$arguments}}"""
+          val legacy = post(routes, frame, sid)
+          legacy.status shouldBe Status.BadRequest
+          val legacyBody = bodyOf(legacy)
+          legacyBody should include("-32700")
+          legacyBody should include(limit)
+
+          val modernFrame =
+            s"""{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"add","arguments":$arguments,"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+          val modern = modernPost(routes, modernFrame, "tools/call", Some("add"))
+          modern.status shouldBe Status.BadRequest
+          val modernBody = bodyOf(modern)
+          modernBody should include("-32700")
+          modernBody should include(limit)
+        }
+      }
+      // the server keeps answering, and an in-range call still works
+      val ok = post(
+        routes,
+        """{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"add","arguments":{"a":4e1,"b":2}}}""",
+        sid
+      )
+      ok.status shouldBe Status.Ok
+      bodyOf(ok) should include("42")
+    }
   }
 
   test(

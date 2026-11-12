@@ -121,16 +121,37 @@ object JvmHttpBackend extends HttpTransportBackend:
   ): Routes[Any, Response] =
     val ep = mcp.endpoint.stripPrefix("/")
     Routes(
-      Method.POST / ep -> handler { (request: Request) =>
-        guarded(mcp.post(toRequest(request)).map(toResponse)).provideEnvironment(env)
-      },
-      Method.GET / ep -> handler { (request: Request) =>
-        guarded(mcp.get(toRequest(request)).map(toResponse))
-      },
+      Method.POST / ep -> Handler.scoped[Any](handler { (request: Request) =>
+        guarded(mcp.post(toRequest(request)).provideEnvironment(env).flatMap(respond))
+      }),
+      Method.GET / ep -> Handler.scoped[Any](handler { (request: Request) =>
+        guarded(mcp.get(toRequest(request)).flatMap(respond))
+      }),
       Method.DELETE / ep -> handler { (request: Request) =>
         guarded(mcp.delete(toRequest(request)).map(toResponse))
       }
     )
+
+  /** Render a reply, tying a streamed one to the request it answers. zio-http gives every request a
+    * `Scope` that it closes when the request is over — after the response body has been written, or
+    * when the connection goes away first, in which case the fiber that would have run the body is
+    * interrupted and may never have started it. Closing the scope that way abandons the reply at
+    * once (`HttpReply.Sse.abandon`: a no-op for a stream that did start, whose own finalizers ran),
+    * so a session's GET slot or a request's dispatch is not kept for the handler's unstarted-reply
+    * bound. A scope that closes normally leaves the reply alone: the in-memory route tests close it
+    * before they read the body.
+    *
+    * The scope is looked up only for a streamed reply; every other reply is rendered directly.
+    */
+  private def respond(reply: HttpReply): URIO[Scope, Response] =
+    reply match
+      case sse: HttpReply.Sse =>
+        ZIO
+          .addFinalizerExit(exit => if exit.isSuccess then ZIO.unit else sse.abandon)
+          .as(toResponse(sse))
+          // Registered or not at all: once registered, the response is on its way out.
+          .uninterruptible
+      case other => ZIO.succeed(toResponse(other))
 
   /** First-party error boundary ([[StreamableHttpHandler.guardedWith]]) rendered as a zio-http
     * `Response`: any non-interrupt Cause becomes a JSON-RPC 500 with a fixed message; the full
@@ -153,7 +174,9 @@ object JvmHttpBackend extends HttpTransportBackend:
       gateHeader = gateHeader(request),
       body = request.body.asString,
       // The TCP peer address as seen by netty (`None` for in-memory `routes.runZIO` requests).
-      clientKey = request.remoteAddress.map(_.getHostAddress)
+      clientKey = request.remoteAddress.map(_.getHostAddress),
+      // One entry per field line: zio-http keeps a repeated header as separate entries.
+      headerNames = () => request.headers.iterator.map(_.headerName.toString)
     )
 
   /** Header lookup for the gates: a header sent more than once is seen as its `", "`-joined value

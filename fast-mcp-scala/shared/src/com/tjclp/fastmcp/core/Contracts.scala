@@ -203,7 +203,17 @@ object ToolSchemaProvider:
     new ToolSchemaProvider[A]:
       val inputSchema: ToolInputSchema = schema
 
-/** Custom JSON Schema for a nested domain type whose wire shape cannot be inferred. */
+/** Custom JSON Schema for a nested domain type whose wire shape cannot be inferred.
+  *
+  * Wherever the type appears in a tool's input, this schema becomes part of the advertised
+  * `inputSchema` and is ENFORCED on `tools/call` before the handler runs: a value that does not
+  * conform is rejected, and so is a value the type's decoder would have accepted but the schema
+  * does not describe. Keep the schema and the decoder in agreement (or use [[McpInputCodec]], which
+  * holds both). Enforcement covers the keyword subset documented on [[JsonSchemaValidator]];
+  * `pattern`, `format`, `multipleOf` and `uniqueItems` among others are advertised only, so a
+  * constraint expressed with them must be checked by the decoder or the handler. In an
+  * `outputSchema` the schema is descriptive: results are not validated.
+  */
 trait McpSchema[A]:
   def jsonSchema: String
 
@@ -219,6 +229,12 @@ object McpSchema:
   * Ordinary Scala types need no instance. Use this for a domain type whose wire representation is
   * not visible from its Scala shape; the same given participates in zio-json case-class derivation
   * and native MCP schema derivation, avoiding separate decoder and schema givens.
+  *
+  * Both halves are applied to a `tools/call`: the schema first (the server rejects a value that
+  * does not conform before the handler runs — see [[McpSchema]] for what is enforced), then the
+  * decoder. A constraint the validator does not enforce — a `pattern` or a `format` in particular —
+  * holds only if the DECODER checks it, so return `Left` from the decode function for anything the
+  * schema merely advertises.
   */
 trait McpInputCodec[A] extends McpSchema[A] with JsonDecoder[A]
 
@@ -509,7 +525,18 @@ object McpTool:
       )
     )
 
-  /** Factory that skips the `ToolSchemaProvider` summoning and uses a hand-written JSON schema. */
+  /** Factory that skips the `ToolSchemaProvider` summoning and uses a hand-written JSON schema.
+    *
+    * The schema is advertised on `tools/list` AND enforced on `tools/call`: arguments that do not
+    * conform are rejected with an `isError` result before the handler runs (register the tool with
+    * `ToolRegistrationOptions(validateInputSchema = false)`, or set
+    * `McpServerSettings(validateToolInput = false)`, to advertise without enforcing). Enforcement
+    * covers the keyword subset documented on [[JsonSchemaValidator]]; `pattern`, `format`,
+    * `multipleOf` and `uniqueItems` among others are NOT evaluated, so the handler must check
+    * whatever it relies on from those. `McpServer.toolInputValidation` reports, per tool, whether
+    * enforcement is on and which declared keywords it skips. The schema must describe what the `In`
+    * decoder accepts: a value the decoder would take but the schema does not allow is rejected.
+    */
   def withSchema[In, Out](
       name: String,
       inputSchema: ToolInputSchema,

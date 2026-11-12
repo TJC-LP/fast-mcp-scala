@@ -157,8 +157,9 @@ object RouterBuilder:
     val notificationHandlers: Map[String, NotificationHandler[R]] =
       Map(com.tjclp.fastmcp.core.wire.NotificationMethods.Initialized -> builtins.initialized)
 
-    // Chain order (head = outermost): validation runs first, then task augmentation, then the
-    // handler. ValidationMiddleware with the permissive default is a pass-through.
+    // Chain order (head = outermost): the unknown-tool check (plus any router-level validator)
+    // runs first, then task augmentation, then the handler. Input-schema enforcement itself is in
+    // ToolManager.callTool, so it covers every path that reaches a handler.
     val middlewares: List[Middleware[R]] =
       (new ValidationMiddleware[R](validator, toolManager) :: Nil) ++
         taskManager.filter(_ => tasksOn).map(tm => new TaskMiddleware[R](tm, toolManager)).toList ++

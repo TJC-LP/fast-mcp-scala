@@ -14,7 +14,8 @@ import zio.json.*
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.TaskSettings
-import com.tjclp.fastmcp.server.router.Session
+import com.tjclp.fastmcp.core.wire.Implementation
+import com.tjclp.fastmcp.server.router.{Middleware, RequestHandler, RouterBuilder, Session}
 import com.tjclp.fastmcp.server.transport.{
   BunHttpHandle,
   JsTransportBackend,
@@ -266,6 +267,41 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       yield
         resp.status.asInstanceOf[Int] shouldBe 400
         body should include("-32020")
+    }
+  }
+
+  it should "refuse a repeated routing header with -32020 (Headers.get joins the repeats)" in {
+    serverReady.flatMap { _ =>
+      val call =
+        """{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"needs-roots","arguments":{"msg":"x"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+      // Each header once, then one of them a second time: the server-side lookup returns the
+      // `", "`-joined value, which names neither a version, nor the method, nor the tool.
+      def send(repeat: (String, String)): Future[(Int, String)] =
+        val headers = js.Dynamic.newInstance(js.Dynamic.global.Headers)()
+        List(
+          "content-type" -> "application/json",
+          "accept" -> "application/json, text/event-stream",
+          "mcp-protocol-version" -> "2026-07-28",
+          "mcp-method" -> "tools/call",
+          "mcp-name" -> "needs-roots",
+          repeat
+        ).foreach { case (name, value) =>
+          val _ = headers.append(name, value)
+        }
+        for
+          resp <- httpFetch("/mcp", js.Dynamic.literal(method = "POST", headers = headers, body = call))
+          body <- text(resp)
+        yield (status(resp), body)
+      for
+        name <- send("mcp-name" -> "other")
+        sameName <- send("mcp-name" -> "needs-roots")
+        method <- send("mcp-method" -> "tools/list")
+        version <- send("mcp-protocol-version" -> "2026-07-28")
+        legacyVersion <- send("mcp-protocol-version" -> "2025-11-25")
+      yield
+        val replies = List(name, sameName, method, version, legacyVersion)
+        replies.map(_._1) shouldBe List.fill(replies.size)(400)
+        all(replies.map(_._2)) should include("-32020")
     }
   }
 
@@ -1533,6 +1569,67 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     checked.andThen { case _ => handle.stop() }
   }
 
+  // Bun twin of the legacy session-store tests in `StreamableHttpHandlerTest`: a session is stored
+  // only for an `initialize` that succeeded and passed the retention budget.
+  "a failed initialize on Bun" should "return no session id and leave the store unchanged at the cap" in {
+    val failPort = 38961
+    // One slot, taken by an idle session: the first candidate for eviction.
+    val handle = statefulServer("JsHttpFailedInitServer", failPort, _.copy(maxSessions = Some(1)))
+    def post(body: String, sid: Option[String] = None): Future[(Int, Option[String], String)] =
+      fetchAt(
+        failPort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders(sid.map("mcp-session-id" -> _).toSeq*),
+          body = body
+        )
+      ).flatMap(resp => text(resp).map(t => (status(resp), header(resp, "mcp-session-id"), t)))
+    def initWith(capabilities: String, clientInfo: String): String =
+      s"""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":$capabilities,"clientInfo":$clientInfo}}"""
+    val plainInfo = """{"name":"t","version":"1.0"}"""
+    val undecodable =
+      """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}"""
+    val tooManyValues =
+      initWith(s"""{"experimental":{"x":${List.fill(300)("0").mkString("[", ",", "]")}}}""", plainInfo)
+    val tooMuchText = initWith("{}", s"""{"name":"${"n" * (32 * 1024)}","version":"1.0"}""")
+    // A body just under the 1 MiB default cap whose capability member is one very long flat array.
+    val cap = McpServerSettings().maxRequestBodyBytes - 64
+    val head =
+      """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"t","version":"1.0"},"capabilities":{"experimental":{"x":[0"""
+    val tail = "]}}}}"
+    val capSized = head + ",0" * ((cap - head.length - tail.length) / 2) + tail
+
+    val checked = for
+      first <- post(legacyInitBody)
+      stored = first._2.getOrElse("")
+      refused <- Future.sequence(List(undecodable, tooManyValues, tooMuchText).map(post(_)))
+      afterRefused <- post(legacyListBody, Some(stored))
+      big <- post(capSized)
+      afterBig <- post(legacyListBody, Some(stored))
+      next <- post(legacyInitBody) // a successful initialize is what takes the slot
+      afterNext <- post(legacyListBody, Some(stored))
+    yield
+      first._1 shouldBe 200
+      stored should not be empty
+      refused.foreach { case (_, sid, body) =>
+        body should include("-32602")
+        body should not include "serverInfo"
+        sid shouldBe None
+      }
+      afterRefused._1 shouldBe 200 // nobody was evicted for a failed initialize
+      capSized.length should be <= cap
+      // -32602 from the retention budget; a frame-level bound on array length, where configured
+      // below this size, answers -32700 first. Either way: refused, nothing stored.
+      big._3 should (include("-32602") or include("-32700"))
+      big._3 should not include "serverInfo"
+      big._2 shouldBe None
+      afterBig._1 shouldBe 200
+      next._1 shouldBe 200
+      next._2 should not be empty
+      afterNext._1 shouldBe 404
+    checked.andThen { case _ => handle.stop() }
+  }
+
   // --- request context: allow-listed headers, protocolSessionId, reply opening on a heartbeat ---
   // Bun twin of `RequestContextHandlerTest` (the JVM / Scala Native handler test).
 
@@ -1819,4 +1916,72 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       )
       _ <- waitFor("the 2026-07-28 handler's interruption", 5000)(watchedInterrupted >= before + 2)
     yield watchedInterrupted shouldBe before + 2
+  }
+
+  // A header-less `initialize` is answered before a session is stored for it, so its dispatch does
+  // not go through the per-request queue the tests above exercise. The request's abort signal must
+  // own it all the same, and a client that left must not be given a slot in the store.
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private var initInterrupted = 0
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private var initDelayMs = 30000
+
+  "a client that goes away during a header-less initialize (Bun)" should "stop its dispatch and store no session" in {
+    val initPort = 38943
+    val settings = McpServerSettings(host = "127.0.0.1", port = initPort, httpEndpoint = "/mcp")
+    val server = com.tjclp.fastmcp.server.McpServer("JsHttpInitAbortServer", "0.1.0", settings)
+    // The handler chain parks before `initialize` answers, as a slow middleware would.
+    val slowInitialize = new Middleware[Any]:
+      def wrap(method: String, next: RequestHandler[Any]): RequestHandler[Any] =
+        if method != "initialize" then next
+        else
+          (session, params) =>
+            ZIO
+              .sleep(initDelayMs.millis)
+              .onInterrupt(ZIO.succeed { initInterrupted += 1 }) *> next(session, params)
+    val router = RouterBuilder.build[Any](
+      serverInfo = Implementation(name = "JsHttpInitAbortServer", version = "0.1.0"),
+      instructions = None,
+      toolManager = server.toolManager,
+      promptManager = server.promptManager,
+      resourceManager = server.resourceManager,
+      settings = settings,
+      extraMiddlewares = List(slowInitialize)
+    )
+    val store = js.Dictionary.empty[Session]
+    val handle = JsTransportBackend.startBun(router, Runtime.default, settings, store)
+    def initialize(signal: js.UndefOr[js.Dynamic]): Future[js.Dynamic] =
+      val init =
+        js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyInitBody)
+      signal.foreach(s => init.updateDynamic("signal")(s))
+      fetchAt(initPort, init)
+
+    val checked =
+      for
+        // Aborted 200 ms into an initialize that would take 30 s.
+        _ <- {
+          val controller = js.Dynamic.newInstance(js.Dynamic.global.AbortController)()
+          val call = initialize(controller.signal)
+          delay(200).flatMap { _ =>
+            val _ = controller.abort()
+            call.map(_ => ()).recover { case _ => () }
+          }
+        }
+        _ <- waitFor("the abandoned initialize's interruption", 5000)(initInterrupted >= 1)
+        // Let whatever follows the interruption on the server settle before looking at the store.
+        _ <- delay(100)
+        abandonedStored = store.size
+        // An initialize whose client stays is answered and stored as before.
+        _ = initDelayMs = 20
+        kept <- initialize(js.undefined)
+        _ <- text(kept)
+      yield
+        abandonedStored shouldBe 0
+        initInterrupted shouldBe 1
+        status(kept) shouldBe 200
+        header(kept, "mcp-session-id") should not be empty
+        store.size shouldBe 1
+    checked.andThen { case _ => handle.stop() }
   }

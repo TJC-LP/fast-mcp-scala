@@ -8,6 +8,7 @@ import zio.json.*
 import com.tjclp.fastmcp.{given, *}
 import com.tjclp.fastmcp.JsonTestSupport.*
 import com.tjclp.fastmcp.core.StructuredToolResult
+import com.tjclp.fastmcp.server.manager.ToolRegistrationOptions
 
 class TypedContractsTest extends AnyFunSuite with Matchers:
 
@@ -78,7 +79,9 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
     case Point
   object Shape:
     given McpSchema[Shape] = McpSchema.instance(
-      """{"oneOf":[{"type":"object","properties":{"Circle":{"type":"object"}}},{"type":"object","properties":{"Point":{"type":"object"}}}]}"""
+      // `required` on each alternative: the schema is enforced, and without it every object
+      // matches both alternatives, which `oneOf` (exactly one) rejects.
+      """{"oneOf":[{"type":"object","properties":{"Circle":{"type":"object"}},"required":["Circle"]},{"type":"object","properties":{"Point":{"type":"object"}},"required":["Point"]}]}"""
     )
   case class ShapeArgs(shape: Shape)
 
@@ -100,7 +103,7 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
   case class GErr[T](msg: String) extends GResult[T]
   object GResult:
     given McpInputCodec[GResult[Int]] = McpInputCodec.fromJsonDecoder(
-      """{"oneOf":[{"type":"object","properties":{"GOk":{"type":"object"}}},{"type":"object","properties":{"GErr":{"type":"object"}}}]}"""
+      """{"oneOf":[{"type":"object","properties":{"GOk":{"type":"object"}},"required":["GOk"]},{"type":"object","properties":{"GErr":{"type":"object"}},"required":["GErr"]}]}"""
     )(DeriveJsonDecoder.gen[GResult[Int]])
   case class GArgs(result: GResult[Int])
 
@@ -177,7 +180,8 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
       server.toolManager.callTool("describe-mood", Map("mood" -> "angry"), None).exit
     )
     invalid.isFailure shouldBe true
-    invalid.causeOption.get.prettyPrint should include("invalid enumeration value")
+    // Rejected against the advertised enum before the decoder is reached.
+    invalid.causeOption.get.prettyPrint should include("'mood' must be one of: happy, sad, mixed")
   }
 
   test("nested enum collections and custom input codecs stay zero-boilerplate") {
@@ -418,7 +422,8 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
       server.toolManager.callTool("mood-tool", Map("mood" -> "furious"), None).either
     )
     bad.isLeft shouldBe true
-    bad.left.toOption.get.getMessage should (include("mood") and include("invalid enumeration value"))
+    // Rejected against the advertised enum before the decoder is reached.
+    bad.left.toOption.get.getMessage should (include("'mood'") and include("happy, sad, mixed"))
   }
 
   test("enum nested one level deeper and behind Option decodes and schemas correctly (GH #78)") {
@@ -450,11 +455,15 @@ class TypedContractsTest extends AnyFunSuite with Matchers:
 
   test("a user-supplied companion JsonDecoder for an enum always wins (GH #78)") {
     val server = McpServer("EnumOverrideServer")
+    // The fixture's decoder reads lowercase names while the derived schema advertises the Scala
+    // case names, and the advertised schema is enforced — so this test, which is about decoder
+    // precedence only, opts the tool out. (A real tool supplies a matching McpSchema instead.)
     runUnsafe(
       server.tool(
         McpTool[ToneArgs, String](name = "tone-tool", description = Some("d")) { args =>
           args.tone.toString
-        }
+        },
+        ToolRegistrationOptions(validateInputSchema = false)
       )
     )
     val r = runUnsafe(server.toolManager.callTool("tone-tool", Map("tone" -> "formal"), None))

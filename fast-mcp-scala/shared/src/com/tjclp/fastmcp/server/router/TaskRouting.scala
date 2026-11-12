@@ -16,8 +16,14 @@ import com.tjclp.fastmcp.core.{
   Tasks
 }
 import com.tjclp.fastmcp.core.wire.EmptyResult
-import com.tjclp.fastmcp.jsonrpc.{JsonFields, JsonRpcMessage, McpError}
-import com.tjclp.fastmcp.server.manager.{TaskManager, TaskScope, TaskSnapshot, ToolManager}
+import com.tjclp.fastmcp.jsonrpc.{JsonFields, JsonRpcMessage, McpError, RequestId}
+import com.tjclp.fastmcp.server.manager.{
+  RetainedBytes,
+  TaskManager,
+  TaskScope,
+  TaskSnapshot,
+  ToolManager
+}
 
 private case class TaskIdParams(taskId: String)
 
@@ -45,6 +51,14 @@ private object TaskUpdateParams:
   * owner has a running cap (`-32602`); each pool (legacy vs bearer) has running and stored ceilings
   * (`-32003`), with completed results kept for at least `minResultRetentionMs` before a cap may
   * evict them.
+  *
+  * Memory: a task outlives the request that created it, and for as long as it runs it keeps that
+  * request — the handler closes over `params`, and on the 2026-07-28 path the task fiber inherits
+  * the request context ([[Session.runWithRequest]]: the client's `_meta`, `inputResponses`, decoded
+  * capabilities and request id) and any allow-listed HTTP headers ([[RequestHeaders]]), all of
+  * which a handler may read through `McpContext`. That is measured here ([[retainedBytes]]),
+  * refused above `TaskSettings.maxRequestBytes`, and charged to the owner's and the pool's byte
+  * budgets until the task is terminal; the store then keeps the result only.
   */
 final class TaskMiddleware[R](
     taskManager: TaskManager[R],
@@ -88,7 +102,8 @@ final class TaskMiddleware[R](
             )
           case (true, TaskSupport.Optional | TaskSupport.Required) =>
             // runWithoutSink: the task fiber (forked inside create) outlives this POST, whose
-            // sink queue is shut down when the SSE response ends — sends must go to outbound.
+            // sink queue is shut down when the SSE response ends — sends must go to outbound,
+            // which is bounded and, on a transport with no reader for it, keeps nothing.
             val scope = TaskScope.session(session.sessionId)
             // Session termination (DELETE / idle eviction) releases the session's tasks instead
             // of pinning entries nobody can see until their TTL. Keyed (idempotent), registered
@@ -96,26 +111,29 @@ final class TaskMiddleware[R](
             // task without its release hook, and again AFTER it: on a session terminated in the
             // meantime the late registration runs the release immediately.
             val release = session.addFinalizer("tasks")(taskManager.releaseScope(scope))
-            (release *>
-              session
-                .runWithoutSink(
-                  taskManager.create(
-                    scope = scope,
-                    requestedTtlMs = ttl,
-                    run = next(session, params),
-                    onStatusChange = task => session.send(statusNotification(task))
+            RequestHeaders.current.flatMap { headers =>
+              (release *>
+                session
+                  .runWithoutSink(
+                    taskManager.createSized(
+                      scope = scope,
+                      requestedTtlMs = ttl,
+                      requestBytes = retainedBytes(params, None, None, headers),
+                      run = next(session, params),
+                      onStatusChange = task => session.send(statusNotification(task))
+                    )
                   )
+                  .tap(_ => release))
+                // Everything here is non-blocking Ref/Promise work: keeping the whole branch
+                // uninterruptible shrinks the window in which a registered task's handle is lost
+                // to the dispatcher's continuation. `create` still detects a pending interrupt
+                // and rolls back before the mask ends.
+                .uninterruptible
+                .mapBoth(
+                  McpError.fromThrowable,
+                  created => created.toJsonAST.getOrElse(Json.Obj())
                 )
-                .tap(_ => release))
-              // Everything here is non-blocking Ref/Promise work: keeping the whole branch
-              // uninterruptible shrinks the window in which a registered task's handle is lost
-              // to the dispatcher's continuation. `create` still detects a pending interrupt and
-              // rolls back before the mask ends.
-              .uninterruptible
-              .mapBoth(
-                McpError.fromThrowable,
-                created => created.toJsonAST.getOrElse(Json.Obj())
-              )
+            }
           case (false, TaskSupport.Required) =>
             ZIO.fail(McpError.methodNotFound(s"Tool '$name' requires task augmentation"))
           case (true, TaskSupport.Forbidden) =>
@@ -156,18 +174,20 @@ final class TaskMiddleware[R](
               // `clientInfo` / `_meta` reach a Custom hook but are attacker-controlled.
               val ownerContext =
                 TaskOwnerContext(session.clientKey, context.clientInfo, context.meta)
-              // runWithoutSink for the same reason as the legacy branch: the ephemeral modern
-              // session's outbound is never drained, but an offer to a live unbounded queue is
-              // harmless and GC'd with the task — unlike an offer to a shutdown sink queue.
-              taskManager
-                .ownerKeyFor(ownerContext)
+              // runWithoutSink for the same reason as the legacy branch: an offer to this POST's
+              // sink queue after it shut down would interrupt the task. Over HTTP the request's
+              // own session has no reader for its outbound channel, so what the task sends from
+              // then on is discarded, not buffered; on stdio it reaches the client.
+              (taskManager.ownerKeyFor(ownerContext) <*> session.currentRequestId
+                <*> RequestHeaders.current)
                 .mapError(McpError.fromThrowable)
-                .flatMap { key =>
+                .flatMap { (key, requestId, headers) =>
                   session
                     .runWithoutSink(
-                      taskManager.create(
+                      taskManager.createSized(
                         scope = TaskScope.bearer(key),
                         requestedTtlMs = None,
+                        requestBytes = retainedBytes(params, Some(context), requestId, headers),
                         run = next(session, params),
                         onStatusChange = _ => ZIO.unit
                       )
@@ -182,6 +202,45 @@ final class TaskMiddleware[R](
                           .getOrElse(Json.Obj())
                     )
                 }
+
+  /** Estimate of what a task created from this request keeps reachable while it runs:
+    *
+    *   - the params (arguments, `_meta`, `inputResponses`, `requestState`), which the handler
+    *     closes over;
+    *   - on the 2026-07-28 path the request context the task fiber inherits: its lookup maps (they
+    *     share their JSON nodes with the params), the decoded client capabilities and client info
+    *     (copies of two `_meta` entries, so those entries are charged a second time), and the
+    *     request id (held by the fiber and by the request's own session id);
+    *   - the allow-listed HTTP headers the fiber inherits (`McpServerSettings.contextHeaders`).
+    *
+    * The walk stops once it passes the limit, so an oversized request costs no more than the limit
+    * to refuse.
+    */
+  private def retainedBytes(
+      params: Json,
+      context: Option[RequestContext],
+      requestId: Option[RequestId],
+      headers: Map[String, String]
+  ): Long =
+    val limit = taskManager.maxRequestBytes
+    val paramsBytes = RetainedBytes.ofJson(params, limit)
+    if paramsBytes > limit then paramsBytes
+    else
+      val contextBytes = context.fold(0L) { c =>
+        val decodedCopies =
+          List(RequestContext.ClientCapabilitiesKey, RequestContext.ClientInfoKey)
+            .flatMap(c.meta.get)
+            .foldLeft(0L)((sum, json) => sum + RetainedBytes.ofJson(json, limit))
+        RetainedBytes.MapEntry * (c.meta.size + c.inputResponses.size) + decodedCopies
+      }
+      val idBytes = requestId.fold(0L) {
+        case RequestId.StrId(value) => 2L * RetainedBytes.ofText(value)
+        case _ => 0L
+      }
+      val headerBytes = headers.foldLeft(0L) { case (sum, (name, value)) =>
+        sum + RetainedBytes.MapEntry + RetainedBytes.ofText(name) + RetainedBytes.ofText(value)
+      }
+      paramsBytes + contextBytes + idBytes + headerBytes
 
   private def decodeName(params: Json): Either[McpError, String] =
     params match

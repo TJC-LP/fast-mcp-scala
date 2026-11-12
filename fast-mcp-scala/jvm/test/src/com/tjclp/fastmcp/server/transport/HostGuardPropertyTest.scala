@@ -287,11 +287,31 @@ class HostGuardPropertyTest extends AnyFunSuite with Matchers:
   }
 
   test("postGate: with the guard off no Host/Origin combination is refused") {
+    // Off = the explicit opt-out, or a non-loopback bind with nothing listed (startup warns).
+    val optedOut = McpServerSettings(dnsRebindingProtection = false)
+    val unlistedWildcard = McpServerSettings(host = "0.0.0.0")
     check("guard off")(
       Prop.forAll(genHostPair, genPort, genAccept, Gen.oneOf(true, false)) {
         case ((h, f), p, _, requireSse) =>
           val h1 = gateHeaders(s"$f:$p", Some(s"http://$h:1"), Some("application/json"), None, None)
-          HttpRequestGuards.postGate(h1, McpServerSettings(), requireSse).forall(_.status != 403)
+          HttpRequestGuards.postGate(h1, optedOut, requireSse).forall(_.status != 403) &&
+          HttpRequestGuards.postGate(h1, unlistedWildcard, requireSse).forall(_.status != 403)
+      }
+    )
+  }
+
+  test("postGate: default settings (loopback bind, nothing listed) refuse every non-loopback Host") {
+    val defaults = McpServerSettings()
+    check("automatic guard")(
+      Prop.forAll(genHostPair, genPort, genContentType, genAccept, genContentLength, Gen.oneOf(true, false)) {
+        case ((_, f), p, ct, accept, cl, requireSse) =>
+          // Vacuous for the rare generated host that is itself a loopback name.
+          HostGuard.loopbackHostNames(f).isDefined || {
+            val foreignHost = gateHeaders(s"$f:$p", None, ct, accept, cl)
+            val foreignOrigin = gateHeaders(s"localhost:$p", Some(s"http://$f:$p"), ct, accept, cl)
+            HttpRequestGuards.postGate(foreignHost, defaults, requireSse).map(_.status).contains(403) &&
+            HttpRequestGuards.postGate(foreignOrigin, defaults, requireSse).map(_.status).contains(403)
+          }
       }
     )
   }

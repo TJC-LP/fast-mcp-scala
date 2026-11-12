@@ -29,6 +29,12 @@ import com.tjclp.fastmcp.server.transport.MessageLoop
   * @param clientKey
   *   the TCP peer address, when the backend knows it — the default owner key for bearer-task
   *   buckets (`TaskOwnerKey.Transport`). Never derived from request content
+  * @param headerNames
+  *   every header name of the request as received, in any case, one entry per field line — a header
+  *   sent twice appears twice. Read once per POST by
+  *   [[com.tjclp.fastmcp.server.transport.HttpHeaderValidation.repeatedHeader]], which refuses a
+  *   repeated routing header instead of letting `header` pick its first value. A backend that can
+  *   see repeats MUST supply it: the default (no names) disables that check
   */
 private[fastmcp] final case class HttpRequest(
     method: String,
@@ -36,8 +42,14 @@ private[fastmcp] final case class HttpRequest(
     header: String => Option[String],
     gateHeader: String => Option[String],
     body: IO[Throwable, String],
-    clientKey: Option[String] = None
+    clientKey: Option[String] = None,
+    headerNames: () => Iterator[String] = HttpRequest.NoHeaderNames
 )
+
+private[fastmcp] object HttpRequest:
+
+  /** For requests built without a wire behind them (tests driving the handler directly). */
+  val NoHeaderNames: () => Iterator[String] = () => Iterator.empty
 
 /** One server-sent event: an optional `event:` type and the `data:` payload. */
 private[fastmcp] final case class SseFrame(event: Option[String], data: String):
@@ -94,12 +106,28 @@ private[fastmcp] object HttpReply:
     * [[SseFrame.Ping]] whenever the stream has been quiet that long — a transport concern each
     * backend implements with what it has (a merged schedule on zio-http, the connection thread's
     * wait loop on the socket server), so no backend has to race a timer against the data stream.
+    *
+    * A streamed reply holds resources of the request it answers (its dispatch fiber and queue, a
+    * session's GET slot). They are released exactly once, by whichever comes first:
+    *   - `frames` ending or being interrupted, once a backend has started it (`frames` is run at
+    *     most once);
+    *   - `abandon`, which a backend that knows it will not run `frames` calls to release them at
+    *     once. It does nothing when the stream was started or the reply was already released, so it
+    *     is safe to call on every path that drops a reply;
+    *   - [[StreamableHttpHandler]]'s own bound on how long a reply may sit unstarted, which covers
+    *     every path that neither runs `frames` nor calls `abandon` (a request interrupted between
+    *     the handler and the backend, a backend that drops the reply).
+    * After a release by the last two, `frames` is an empty stream.
+    *
+    * `abandon` sits in its own parameter list: it is a handle on the reply's resources, not part of
+    * the reply's value, and pattern matches on the reply stay as they were.
     */
   final case class Sse(
       headers: List[(String, String)],
       frames: ZStream[Any, Nothing, SseFrame],
       keepAlive: Option[Duration] = None
-  ) extends HttpReply:
+  )(val abandon: UIO[Unit])
+      extends HttpReply:
     def status: Int = 200
 
   /** A `200 text/event-stream` response whose whole body is known before it starts: the reply to a

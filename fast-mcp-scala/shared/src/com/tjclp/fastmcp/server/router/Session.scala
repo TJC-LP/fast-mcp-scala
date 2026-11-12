@@ -14,8 +14,18 @@ import com.tjclp.fastmcp.jsonrpc.{JsonRpcErrorObject, JsonRpcMessage, McpError, 
   * whose modern request data remains fiber-local. The legacy HTTP adapter keeps one instance per
   * `mcp-session-id`. It also owns compatibility handshake state and the in-flight fiber registry.
   *
-  * `outbound` is the channel the transport drains for request-scoped notifications and subscription
-  * acknowledgements; the legacy adapter also carries server-initiated requests.
+  * `outbound` is the channel a transport drains for messages emitted outside a request's own
+  * response stream: everything on stdio, and on a legacy streamable-HTTP session whatever a task
+  * emits after its creating POST has answered (the standalone GET stream delivers it). It is
+  * bounded — see [[outboundCapacity]] — and what happens at the bound depends on the transport:
+  *
+  *   - a stdio session ([[Session.makeDrained]]) applies back-pressure: the emitter waits for the
+  *     writer, so nothing is lost;
+  *   - a legacy streamable-HTTP session ([[Session.makeProtocolSession]]) and a session built with
+  *     [[Session.make]] drop the OLDEST buffered message, so an emitter is never blocked by a
+  *     client that does not read;
+  *   - a session with no reader at all ([[Session.makeRequestScoped]], a Bun HTTP session) buffers
+  *     nothing.
   */
 final class Session private (
     val sessionId: String,
@@ -25,14 +35,22 @@ final class Session private (
       */
     val supportsTasks: Boolean,
     /** Transport-supplied client identity (peer address on the shipped HTTP backends), used to
-      * bucket modern bearer tasks per client. `None` when the transport cannot tell clients apart;
-      * never derived from request content.
+      * bucket modern bearer tasks per client and, on a durable legacy session, to count the
+      * sessions one client holds when the store is full. `None` when the transport cannot tell
+      * clients apart; never derived from request content.
       */
     val clientKey: Option[String],
     /** True only for a durable legacy streamable-HTTP session — the one case where [[sessionId]] is
       * a protocol session id (the `Mcp-Session-Id` value) rather than a stand-in.
       */
     val isProtocolSession: Boolean,
+    /** How many messages [[outbound]] buffers (`LimitSettings.maxOutboundMessages`): the channel
+      * holds at most this many, whether or not anything reads it. `0` marks a session whose
+      * transport has no reader for the channel (a 2026-07-28 HTTP request, the legacy stateless
+      * adapter, any Bun HTTP session): [[send]] then discards a message that has no per-request
+      * sink instead of buffering it.
+      */
+    val outboundCapacity: Int,
     private val protocolVersionRef: Ref[String],
     private val logLevelRef: Ref[Option[LoggingLevel]],
     private val initializedRef: Ref[Boolean],
@@ -53,6 +71,13 @@ final class Session private (
     private val finalizersRef: Ref[Option[Map[String, UIO[Unit]]]]
 ):
 
+  /** Set once the transport's reader of [[outbound]] is gone for good ([[closeOutbound]]). A plain
+    * field rather than a `Ref`: a request-scoped session is built on every 2026-07-28 request and
+    * never needs it.
+    */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  @volatile private var outboundClosed: Boolean = false
+
   /** Millis timestamp of the last client activity (transports touch on every request). Drives idle
     * eviction of abandoned streamable sessions.
     */
@@ -70,9 +95,12 @@ final class Session private (
 
   /** At most one standalone GET SSE stream may drain `outbound` — two would round-robin-steal
     * messages. `tryAcquireGet` is an atomic test-and-set (false = a stream is already live, answer
-    * 409); the stream's finalizer must call [[releaseGet]]. Sessions with a live GET are exempt
-    * from the periodic idle sweep (push-only consumers may never POST); at the `maxSessions` cap a
-    * GET holder idle past `sessionIdleTimeout` may still be evicted, which closes its stream.
+    * 409). Whoever acquires the slot must hand it, in the same uninterruptible step, to something
+    * that calls [[releaseGet]] whether or not a stream is ever run — a stream's finalizer alone is
+    * not enough, since it does nothing for a stream nobody starts (the streamable-HTTP handler's
+    * `ownedSse`). Sessions with a live GET are exempt from the periodic idle sweep (push-only
+    * consumers may never POST); at the `maxSessions` cap a GET holder idle past
+    * `sessionIdleTimeout` may still be evicted, which closes its stream.
     */
   def tryAcquireGet: UIO[Boolean] = ZIO.succeed(activeGetRef.compareAndSet(false, true))
   def releaseGet: UIO[Unit] = ZIO.succeed(activeGetRef.set(false))
@@ -84,7 +112,9 @@ final class Session private (
   def logLevel: UIO[Option[LoggingLevel]] = logLevelRef.get
   def setLogLevel(level: LoggingLevel): UIO[Unit] = logLevelRef.set(Some(level))
 
-  /** Client identity + capabilities, captured from the `initialize` request. */
+  /** Client identity + capabilities, captured from the `initialize` request. On a durable legacy
+    * session their size is bounded by [[ClientRetention]] before they are stored.
+    */
   def clientInfo: UIO[Option[Implementation]] = clientInfoRef.get
   def clientCapabilities: UIO[Option[ClientCapabilities]] = clientCapabilitiesRef.get
 
@@ -153,13 +183,31 @@ final class Session private (
 
   /** Push a message to the client. Routed to the current request's per-POST SSE sink when one is
     * active (see [[runWithSink]]), else to the shared outbound channel drained by the GET SSE
-    * stream.
+    * stream or the stdio writer.
+    *
+    * The shared channel never grows past [[outboundCapacity]]. On a legacy streamable-HTTP session
+    * it is a sliding buffer: a send to a full one drops the oldest undelivered message and returns
+    * at once, so the emitter (a task fiber, typically) is neither blocked nor interrupted by a
+    * client that never opens its GET stream. On a stdio session the emitter waits for the writer
+    * instead, so no message is lost. On a session whose transport has no reader for the channel —
+    * or whose reader is gone ([[closeOutbound]]) — the message is discarded here rather than kept
+    * for nobody.
     */
   def send(message: JsonRpcMessage): UIO[Unit] =
     sinkRef.get.flatMap {
       case Some(q) => q.offer(message).unit
-      case None => outbound.offer(message).unit
+      case None =>
+        if outboundCapacity > 0 && !outboundClosed then outbound.offer(message).unit else ZIO.unit
     }
+
+  /** The transport's reader of [[outbound]] is gone for good (stdin reached EOF): from now on a
+    * message with no per-request sink is discarded instead of buffered, and the channel is shut
+    * down, which releases any emitter still waiting on a full back-pressured buffer (it is
+    * interrupted, like any fiber parked on a queue that shuts down). Without this a handler or a
+    * task that outlives the read loop would wait for a writer that no longer exists. Idempotent.
+    */
+  private[fastmcp] def closeOutbound: UIO[Unit] =
+    ZIO.succeed { outboundClosed = true } *> outbound.shutdown
 
   /** Route server→client messages emitted by `zio` (and its forked children) to `q` instead of the
     * shared outbound channel. Lets the streamable POST handler stream a request's notifications and
@@ -269,33 +317,122 @@ final class Session private (
 
 object Session:
 
+  /** [[Session.outboundCapacity]] of a session built without a `LimitSettings` at hand (tests,
+    * embedders): the default of `LimitSettings.maxOutboundMessages`.
+    */
+  val DefaultOutboundCapacity: Int = 256
+
+  /** What [[Session.outbound]] does with a message offered to a full buffer. */
+  private enum AtBound:
+    /** Drop the oldest buffered message; the emitter never waits. */
+    case DropOldest
+
+    /** The emitter waits until the reader has made room; nothing is dropped. */
+    case BackPressure
+
+  /** A session whose [[Session.outbound]] buffers at most [[DefaultOutboundCapacity]] messages and
+    * drops the oldest at the bound — safe whether or not the caller ever drains it. The shipped
+    * transports use the purpose-built constructors below instead.
+    */
   def make(
       sessionId: String,
       supportsTasks: Boolean = true,
       clientKey: Option[String] = None
   ): UIO[Session] =
-    build(sessionId, supportsTasks, clientKey, isProtocolSession = false)
+    build(
+      sessionId,
+      supportsTasks,
+      clientKey,
+      isProtocolSession = false,
+      DefaultOutboundCapacity,
+      AtBound.DropOldest
+    )
 
-  /** A durable legacy streamable-HTTP session, whose id is the client's `Mcp-Session-Id`. */
-  private[fastmcp] def makeProtocolSession(sessionId: String): UIO[Session] =
-    build(sessionId, supportsTasks = true, clientKey = None, isProtocolSession = true)
+  /** The session of a transport that drains [[Session.outbound]] for its whole life (stdio). The
+    * channel buffers at most `outboundCapacity` undelivered messages and applies back-pressure at
+    * the bound: an emitter waits for the writer rather than lose a message. The transport calls
+    * [[Session.closeOutbound]] when its writer stops for good.
+    */
+  private[fastmcp] def makeDrained(sessionId: String, outboundCapacity: Int): UIO[Session] =
+    build(
+      sessionId,
+      supportsTasks = true,
+      clientKey = None,
+      isProtocolSession = false,
+      outboundCapacity,
+      AtBound.BackPressure
+    )
+
+  /** A session nothing will ever read [[Session.outbound]] of: one 2026-07-28 HTTP request, a
+    * notification, a legacy stateless request. Messages emitted outside the request's own response
+    * stream have no delivery path there, so they are discarded instead of buffered.
+    */
+  private[fastmcp] def makeRequestScoped(
+      sessionId: String,
+      supportsTasks: Boolean = true,
+      clientKey: Option[String] = None
+  ): UIO[Session] =
+    build(
+      sessionId,
+      supportsTasks,
+      clientKey,
+      isProtocolSession = false,
+      outboundCapacity = 0,
+      AtBound.DropOldest
+    )
+
+  /** A durable legacy streamable-HTTP session, whose id is the client's `Mcp-Session-Id`.
+    * `clientKey` is the peer address of the `initialize` that opened it, when the backend knows it:
+    * it counts the sessions one client holds when the store is full. `outboundCapacity` is
+    * `LimitSettings.maxOutboundMessages` on a backend with a standalone GET stream (the JVM) and
+    * `0` on one without (Bun answers that GET with 405). The client decides whether and how fast
+    * that stream is read, so at the bound the oldest message is dropped.
+    */
+  private[fastmcp] def makeProtocolSession(
+      sessionId: String,
+      clientKey: Option[String] = None,
+      outboundCapacity: Int = DefaultOutboundCapacity
+  ): UIO[Session] =
+    build(
+      sessionId,
+      supportsTasks = true,
+      clientKey,
+      isProtocolSession = true,
+      outboundCapacity,
+      AtBound.DropOldest
+    )
 
   private def build(
       sessionId: String,
       supportsTasks: Boolean,
       clientKey: Option[String],
-      isProtocolSession: Boolean
+      isProtocolSession: Boolean,
+      outboundCapacity: Int,
+      atBound: AtBound
   ): UIO[Session] =
     // One effect for the queue, then a single synchronous step for everything else: a 2026-07-28
     // request builds a Session of its own, so a dozen chained `Ref.make`s here are a dozen
     // interpreter steps on every request.
-    Queue.unbounded[JsonRpcMessage].map { outbound =>
+    //
+    // A bounded queue pre-allocates its ring (`outboundCapacity` slots), so only a session whose
+    // channel something may drain pays for one. A request-scoped session never offers to its
+    // channel ([[Session.send]]); it gets a one-slot placeholder (no ring at all), which costs no
+    // more than the unbounded queue this used to be and cannot grow even if something offers to
+    // it directly.
+    val channel =
+      if outboundCapacity <= 0 then Queue.dropping[JsonRpcMessage](1)
+      else
+        atBound match
+          case AtBound.DropOldest => Queue.sliding[JsonRpcMessage](outboundCapacity)
+          case AtBound.BackPressure => Queue.bounded[JsonRpcMessage](outboundCapacity)
+    channel.map { outbound =>
       Unsafe.unsafe { implicit u =>
         new Session(
           sessionId,
           supportsTasks,
           clientKey,
           isProtocolSession,
+          outboundCapacity,
           Ref.unsafe.make(""),
           Ref.unsafe.make(Option.empty[LoggingLevel]),
           Ref.unsafe.make(false),

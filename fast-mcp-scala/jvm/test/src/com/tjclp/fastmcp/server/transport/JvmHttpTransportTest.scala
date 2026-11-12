@@ -150,13 +150,19 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val _ = bodyOf(resp)
     resp.rawHeader(SessionIdHeader).getOrElse(fail("no session id"))
 
-  /** Open — and never drain — the session's standalone GET SSE channel, so the session holds a live
-    * GET for the rest of the test (in-memory, the SSE body is never run, so `releaseGet` never
-    * fires: exactly the shape of a peer that vanished without closing its stream).
+  /** Open the session's standalone GET SSE channel and keep reading it for the rest of the test,
+    * so the session holds a live GET: the shape of a peer that vanished without closing its
+    * stream. The body has to be read — a GET reply whose stream nobody starts gives its slot back
+    * after the handler's unstarted-reply bound. The reading fiber ends when the session is
+    * terminated (its queue shuts down).
     */
   private def openGet(routes: Routes[Any, Response], sid: String): Unit =
-    run(routes, Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid)))
-      .status shouldBe Status.Ok
+    val resp = run(
+      routes,
+      Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid))
+    )
+    resp.status shouldBe Status.Ok
+    val _ = runUnsafe(resp.body.asStream.runDrain.ignore.forkDaemon)
 
   test("streamable: initialize mints a session id, reused for tools/call, then deleted") {
     val routes = buildRoutes(stateless = false)
@@ -254,7 +260,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val routes = buildRoutes(stateless = false)
     val sid = initSid(routes)
     val get = Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid))
-    run(routes, get).status shouldBe Status.Ok
+    openGet(routes, sid) // a stream that is being read
     run(routes, get).status shouldBe Status.Conflict
   }
 
@@ -637,10 +643,8 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val routes = buildRoutes(stateless = false, maxSessions = Some(2))
     val sid1 = initSid(routes)
     val sid2 = initSid(routes)
-    for sid <- List(sid1, sid2) do
-      // Open (and never drain) the GET SSE channel: the session now has a live GET.
-      run(routes, Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid)))
-        .status shouldBe Status.Ok
+    // Open the GET SSE channel and keep it open: the session now has a live GET.
+    for sid <- List(sid1, sid2) do openGet(routes, sid)
 
     val refused = post(routes, initFrame, None)
     refused.status.code shouldBe 503
@@ -728,6 +732,60 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val alive = (idle ++ minted).count(sid => post(routes, listFrame, Some(sid)).status == Status.Ok)
     alive shouldBe 2
     idle.foreach(sid => post(routes, listFrame, Some(sid)).status shouldBe Status.NotFound)
+  }
+
+  /** A legacy POST as netty delivers it from a given TCP peer (`Request.remoteAddress`). */
+  private def postFrom(
+      routes: Routes[Any, Response],
+      body: String,
+      sid: Option[String],
+      peer: String
+  ): Response =
+    val base = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(body))
+      .addHeader(Header.Custom("content-type", "application/json"))
+      .addHeader(Header.Custom("accept", "application/json, text/event-stream"))
+      .copy(remoteAddress = Some(java.net.InetAddress.getByName(peer)))
+    run(routes, sid.fold(base)(s => base.addHeader(Header.Custom(SessionIdHeader, s))))
+
+  test("maxSessions: one peer holding every slot with live, freshly touched GET streams cannot lock another peer out") {
+    val cap = 3
+    // No idle timeout: nothing becomes evictable through idleness, the state that used to be 503.
+    val routes = buildRoutes(stateless = false, maxSessions = Some(cap), sessionIdleTimeout = None)
+    val hog = "203.0.113.7"
+    def initFrom(peer: String): String =
+      val resp = postFrom(routes, initFrame, None, peer)
+      val body = bodyOf(resp)
+      withClue(s"initialize from $peer: ${resp.status} $body ") { resp.status shouldBe Status.Ok }
+      resp.rawHeader(SessionIdHeader).getOrElse(fail(s"initialize from $peer minted nothing"))
+    def alive(sid: String): Boolean = post(routes, listFrame, Some(sid)).status == Status.Ok
+
+    val hogged = List.fill(cap)(initFrom(hog))
+    hogged.foreach(openGet(routes, _))
+    hogged.foreach(sid => postFrom(routes, listFrame, Some(sid), hog).status shouldBe Status.Ok)
+
+    val newcomer = initFrom("198.51.100.20")
+    alive(newcomer) shouldBe true
+    hogged.count(alive) shouldBe cap - 1 // the store did not grow: one of the hog's made room
+
+    // The hog initializing again displaces its own session, not the newcomer's.
+    val again = initFrom(hog)
+    alive(newcomer) shouldBe true
+    (again :: hogged).count(alive) shouldBe cap - 1
+  }
+
+  test("maxSessions: a failed initialize returns no session id and evicts nobody") {
+    val routes = buildRoutes(stateless = false, maxSessions = Some(1))
+    val stored = initSid(routes)
+    val overBudget =
+      s"""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"experimental":{"x":${List.fill(300)("0").mkString("[", ",", "]")}}},"clientInfo":{"name":"t","version":"1.0"}}}"""
+    val undecodable =
+      """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"""
+    for body <- List(overBudget, undecodable) do
+      val resp = post(routes, body, None)
+      bodyOf(resp) should include("-32602")
+      resp.rawHeader(SessionIdHeader) shouldBe None
+      post(routes, listFrame, Some(stored)).status shouldBe Status.Ok
   }
 
   test("maxSessions = None disables the cap") {
@@ -831,6 +889,80 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val valid = modernPost(routes, modernCallFrame, "tools/call", Some("add"))
     valid.status shouldBe Status.Ok
     bodyOf(valid) should include("42")
+  }
+
+  test("modern POST: a repeated routing header is a header mismatch (400, -32020), whatever the order") {
+    val routes = buildRoutes(stateless = false)
+    val version = "mcp-protocol-version" -> "2026-07-28"
+    val legacy = "mcp-protocol-version" -> "2025-11-25"
+    val method = "mcp-method" -> "tools/call"
+    val name = "mcp-name" -> "add"
+    def send(body: String, headers: (String, String)*): Response =
+      rawPost(routes, body, (JsonHeaders ++ headers)*)
+    def mismatch(body: String, headers: (String, String)*): Unit =
+      withClue(s"headers $headers: ") {
+        val response = send(body, headers*)
+        response.status shouldBe Status.BadRequest
+        bodyOf(response) should include(""""code":-32020""")
+      }
+
+    // One occurrence of each: served as before.
+    val single = send(modernCallFrame, version, method, name)
+    single.status shouldBe Status.Ok
+    bodyOf(single) should include("42")
+
+    // Two different Mcp-Name values are refused whichever of them matches the body.
+    mismatch(modernCallFrame, version, method, name, "mcp-name" -> "slow")
+    mismatch(modernCallFrame, version, method, "mcp-name" -> "slow", name)
+    mismatch(modernCallFrame, version, method, name, "Mcp-Name" -> "add")
+    mismatch(modernCallFrame, version, method, "mcp-method" -> "tools/list", name)
+    mismatch(modernCallFrame, version, "mcp-method" -> "tools/list", method, name)
+    mismatch(modernCallFrame, version, method, name, method)
+    mismatch(modernCallFrame, version, method, name, "mcp-param-x" -> "1", "MCP-Param-X" -> "2")
+    mismatch(modernCallFrame, version, version, method, name)
+    mismatch(modernCallFrame, version, legacy, method, name)
+    mismatch(modernCallFrame, legacy, version, method, name)
+    // A body without the 2026-07-28 metadata: the first value must not pick the legacy path
+    // while a later one says 2026-07-28.
+    mismatch(initFrame, legacy, version)
+    mismatch(initFrame, version, legacy)
+    mismatch(initFrame, legacy, legacy)
+    send(initFrame, legacy).status shouldBe Status.Ok
+
+    // Notifications carry Mcp-Method too.
+    val cancelled =
+      """{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":99}}"""
+    val cancelMethod = "mcp-method" -> "notifications/cancelled"
+    send(cancelled, version, cancelMethod).status shouldBe Status.Accepted
+    mismatch(cancelled, version, cancelMethod, method)
+    mismatch(cancelled, version, method, cancelMethod)
+  }
+
+  test("modern POST: an MCP-Protocol-Version value joined from repeats is a header mismatch, not a version") {
+    val routes = buildRoutes(stateless = false)
+    def send(body: String, headers: (String, String)*): Response =
+      rawPost(routes, body, (JsonHeaders ++ headers)*)
+    // What a backend whose header lookup joins repeats (Bun's `Headers.get`), or a proxy that
+    // merges field lines, presents for a version header sent twice.
+    List("2026-07-28, 2026-07-28", "2025-11-25, 2026-07-28", "2026-07-28,2025-11-25").foreach { joined =>
+      withClue(s"version '$joined': ") {
+        val call = send(
+          modernCallFrame,
+          "mcp-protocol-version" -> joined,
+          "mcp-method" -> "tools/call",
+          "mcp-name" -> "add"
+        )
+        call.status shouldBe Status.BadRequest
+        bodyOf(call) should include(""""code":-32020""")
+        val notification = send(
+          """{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":99}}""",
+          "mcp-protocol-version" -> joined,
+          "mcp-method" -> "notifications/cancelled"
+        )
+        notification.status shouldBe Status.BadRequest
+        bodyOf(notification) should include(""""code":-32020""")
+      }
+    }
   }
 
   test("streamable endpoint returns 405 for a modern-style GET without a legacy session") {

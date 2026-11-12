@@ -22,16 +22,48 @@ import com.tjclp.fastmcp.core.McpDecodeContext
   * contexts/decoders and, on the JVM, converts a `StackOverflowError` into an
   * `IllegalArgumentException` (-32602) instead of letting a fatal error reach the fiber.
   *
+  * Numbers get a second, independent check here: [[DefaultDecodeContext.decodeRaw]] refuses any
+  * number outside the window `maxNumberDigits` / `maxNumberExponent` imply before a decoder sees
+  * it. zio-json's `BigInt` / `BigInteger` decoders expand a `Json.Num` to an integer with no cap of
+  * their own, and its `BigDecimal` decoders hand the raw scale to the handler, so without this a
+  * value that never crossed the frame check as a JSON number (an in-process call, a raw Scala
+  * `BigDecimal`, a prompt or resource-template argument, a number written as a string) could cost
+  * time and memory proportional to `10^exponent`.
+  *
   * @param maxDepth
   *   nesting bound for JSON embedded in STRING arguments parsed via [[parseJsonObject]] /
   *   [[parseJsonArray]] — invisible to the frame-level limits, so bounded here
   * @param maxObjectFields
   *   per-object member bound for the same embedded JSON
+  * @param maxArrayElements
+  *   per-array element bound for the same embedded JSON
+  * @param maxValues
+  *   total value count bound for one embedded JSON document
+  * @param maxNumberDigits
+  *   significand digit bound for numbers in embedded JSON and in every decoded argument (1 to
+  *   `LimitSettings.MaxSupportedNumberDigits`)
+  * @param maxNumberExponent
+  *   exponent bound for the same numbers (1 to `LimitSettings.MaxSupportedNumberExponent`). On an
+  *   argument value, where the text of a number is gone, the two bound its magnitude together: no
+  *   digit outside `10^±(maxNumberDigits + maxNumberExponent)`
   */
 final class DefaultDecodeContext(
     val maxDepth: Int = JsonLimits.DefaultMaxDepth,
-    val maxObjectFields: Int = JsonLimits.DefaultMaxObjectFields
+    val maxObjectFields: Int = JsonLimits.DefaultMaxObjectFields,
+    val maxArrayElements: Int = JsonLimits.DefaultMaxArrayElements,
+    val maxValues: Int = JsonLimits.DefaultMaxValues,
+    val maxNumberDigits: Int = JsonLimits.DefaultMaxNumberDigits,
+    val maxNumberExponent: Int = JsonLimits.DefaultMaxNumberExponent
 ) extends McpDecodeContext:
+
+  private[fastmcp] val bounds: JsonLimits.Bounds = JsonLimits.Bounds(
+    maxDepth,
+    maxObjectFields,
+    maxArrayElements,
+    maxValues,
+    maxNumberDigits,
+    maxNumberExponent
+  )
 
   /** Best-effort cast — callers are almost always other decoders, not user code. */
   override def convertValue[T: ClassTag](name: String, rawValue: Any): T =
@@ -59,20 +91,21 @@ final class DefaultDecodeContext(
           s"Expected JSON object for '$name', got: ${JsonLimits.typeName(other)}"
         )
 
-  /** Bound the raw text BEFORE zio-json's recursive parser sees it (`JsonLimits.preScan`, linear,
-    * never recurses — the same guard the transport choke point uses, so a multi-MB `[[[[…` string
-    * argument cannot drive the parser into a stack overflow, which Scala Native does not deliver as
-    * a catchable error), then parse and re-check the AST iteratively before any recursive walk over
-    * it — `fromJsonAst` recurses per level. A violation is bad input: `IllegalArgumentException`
-    * maps to -32602 via `McpError.fromThrowable`.
+  /** Bound the raw text BEFORE zio-json's recursive parser sees it — depth, object width, array
+    * length, value count and number digits / exponent, the same bounds as a frame
+    * (`JsonLimits.preScan`, linear, never recurses — the same guard the transport choke point uses,
+    * so a multi-MB `[[[[…` string argument cannot drive the parser into a stack overflow, which
+    * Scala Native does not deliver as a catchable error), then parse and re-check the AST
+    * iteratively before any recursive walk over it — `fromJsonAst` recurses per level. A violation
+    * is bad input: `IllegalArgumentException` maps to -32602 via `McpError.fromThrowable`.
     */
   private def parseBounded(name: String, rawJson: String, kind: String): Json =
     def reject(violation: JsonLimits.Violation): Nothing =
       throw new IllegalArgumentException(s"JSON $kind for '$name' rejected: ${violation.message}")
-    JsonLimits.preScan(rawJson, Int.MaxValue, maxDepth, maxObjectFields).foreach(reject)
+    JsonLimits.preScan(rawJson, Int.MaxValue, bounds).foreach(reject)
     rawJson.fromJson[Json] match
       case Right(json) =>
-        JsonLimits.validate(json, maxDepth, maxObjectFields).foreach(reject)
+        JsonLimits.validate(json, bounds).foreach(reject)
         json
       case Left(err) =>
         throw new RuntimeException(s"Failed to parse JSON $kind for '$name': $err")
@@ -105,6 +138,19 @@ object DefaultDecodeContext:
     * wire `Json` nodes and a shallow `Json.Obj` for the typed-contract `Map[String, Any]`. Custom
     * [[McpDecodeContext]] implementations keep the legacy `writeValueAsString` + `decodeJson` path.
     *
+    * Every number in the value is checked first against the window the context's `maxNumberDigits`
+    * / `maxNumberExponent` imply — at most `maxNumberDigits` significant digits, none of them
+    * outside `10^±(maxNumberDigits + maxNumberExponent)` — and refused outside it
+    * (`IllegalArgumentException`, -32602): one type test for a scalar argument, one iterative walk
+    * for a container. That is what bounds decoding into `BigInt`, `BigInteger` and `BigDecimal` by
+    * the size of the request instead of by the magnitude written in it, including for values that
+    * did not come through the frame check. A JSON string written as a number outside the bounds is
+    * not refused on sight (it may be bound for a `String`); the decoded value is checked instead,
+    * and refused if a `BigDecimal` outside the window came out of it — inside case classes, tuples,
+    * `Option`, `Either`, arrays and standard collections; a class of its own that a custom decoder
+    * builds around a `BigDecimal` is not opened. The legacy path of a custom context is not checked
+    * here: the server itself always decodes with a [[DefaultDecodeContext]].
+    *
     * PUBLIC and stable: it is the target of the inline `derivedZioJsonDecoder` given and of the
     * macro-generated per-parameter decoders, so it is spliced into user compilation units.
     */
@@ -115,10 +161,21 @@ object DefaultDecodeContext:
       decoder: JsonDecoder[T]
   ): T =
     context match
-      case _: DefaultDecodeContext =>
+      case default: DefaultDecodeContext =>
         val ast = guardDepth(toJsonAst(rawValue))
+        // Before ANY decoder: zio-json's BigInt / BigInteger decoders expand the number, and its
+        // BigDecimal decoders pass the raw scale on. Bad input, so -32602.
+        val scan = JsonLimits.scanNumbers(ast, default.bounds)
+        scan.violation.foreach(rejectNumber(name, _))
         decoder.fromJsonAST(ast) match
-          case Right(value) => value
+          case Right(value) =>
+            // A JSON string written as an out-of-range number is fine as a String and refused
+            // only if it became a number. Never taken for an ordinary request.
+            if scan.numericString then
+              JsonLimits
+                .decodedNumberViolation(value, default.bounds)
+                .foreach(rejectNumber(name, _))
+            value
           case Left(err) =>
             throw new RuntimeException(
               s"Failed to decode parameter '$name' from JSON: $err. Value: ${preview(ast)}"
@@ -133,6 +190,9 @@ object DefaultDecodeContext:
             throw new RuntimeException(
               s"Failed to decode parameter '$name' from JSON: $err. Value: $json"
             )
+
+  private def rejectNumber(name: String, violation: JsonLimits.Violation): Nothing =
+    throw new IllegalArgumentException(s"Parameter '$name' rejected: ${violation.message}")
 
   /** Render a failing value for the error message — guarded and truncated, so an error body never
     * amplifies the offending input.

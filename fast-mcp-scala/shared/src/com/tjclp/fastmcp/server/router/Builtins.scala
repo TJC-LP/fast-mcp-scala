@@ -81,6 +81,14 @@ final class Builtins[R](
 
   val initialize: RequestHandler[R] = (session, params) =>
     for
+      // A durable session keeps `clientInfo` and `capabilities` for its whole life, so their size
+      // is bounded before anything is decoded or stored (see [[ClientRetention]]). Stdio and the
+      // sessionless legacy adapter hold one client or nothing at all, and are left alone.
+      _ <- ZIO
+        .foreachDiscard(ClientRetention.overBudget(params)) { reason =>
+          ZIO.fail(McpError.invalidParams(s"initialize: $reason"))
+        }
+        .when(session.isProtocolSession)
       req <- decodeParams[InitializeRequestParams](params, "initialize")
       negotiated = negotiateVersion(req.protocolVersion)
       _ <- session.setProtocolVersion(negotiated)

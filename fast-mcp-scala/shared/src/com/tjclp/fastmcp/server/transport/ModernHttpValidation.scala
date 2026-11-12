@@ -52,6 +52,19 @@ private[fastmcp] object ModernHttpValidation:
   ): Option[String] =
     header("mcp-protocol-version").orElse(bodyDeclaredVersion(message))
 
+  /** A protocol version never contains a comma, so one in the header value means the header was
+    * sent more than once and joined on the way (Bun's `Headers.get` joins repeats with `", "`; so
+    * may a proxy) or was written as a list. Either way it does not name one version: refused as a
+    * header mismatch, the same verdict a backend that sees the separate field lines gives through
+    * [[HttpHeaderValidation.repeatedHeader]].
+    */
+  private def singleVersionHeader(header: String => Option[String]): Either[(Int, McpError), Unit] =
+    Either.cond(
+      !header("mcp-protocol-version").exists(_.indexOf(',') >= 0),
+      (),
+      400 -> HttpHeaderValidation.repeatedHeaderError(HttpHeaderValidation.ProtocolVersionHeader)
+    )
+
   /** Classify the requested version BEFORE decoding `_meta`, so a request that only reached the
     * modern path through an unknown version fails `-32022` with `data.supported` instead of a
     * misleading `-32602` about a missing `_meta` object.
@@ -95,6 +108,7 @@ private[fastmcp] object ModernHttpValidation:
           "Accept must include application/json and text/event-stream"
         )
       )
+      _ <- singleVersionHeader(header)
       version <- header("mcp-protocol-version").toRight(
         400 -> McpError.headerMismatch("Missing required MCP-Protocol-Version header")
       )
@@ -131,6 +145,7 @@ private[fastmcp] object ModernHttpValidation:
           "Accept must include application/json and text/event-stream"
         )
       )
+      _ <- singleVersionHeader(header)
       _ <- supportedVersion(header, rpc)
       context <- RequestContext
         .decode(rpc.params.getOrElse(Json.Null))
