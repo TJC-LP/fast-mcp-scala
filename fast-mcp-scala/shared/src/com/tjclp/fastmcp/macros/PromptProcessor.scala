@@ -37,14 +37,18 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
 
     val (finalName, finalDesc) = nameAndDescription(promptAnnot, methodSym)
 
+    // The parameters whose Scala default the generated handler applies when the client omits them.
+    val appliedDefaults: Set[String] = MacroUtils.appliedDefaultGetters(methodSym).keySet
+
     val argExprs: List[Expr[PromptArgument]] =
       methodSym.paramSymss.headOption.getOrElse(Nil).map { pSym =>
-        // `Option` arguments are optional unless `@Param(required = true)` says otherwise; the
-        // generated handler applies a Scala default (or `None`) when the client omits them.
+        // An `Option` argument and an argument with an applied Scala default are optional unless
+        // `@Param(required = true)` says otherwise: the generated handler supplies `None` or the
+        // default when the client omits them.
         val isOptionType = pSym.termRef.widenTermRefByName <:< TypeRepr.of[Option[?]]
         val (descOpt, required) = MacroUtils.parsePromptParamArgs(
           MacroUtils.extractParamAnnotation(pSym),
-          isOptionType
+          isOptionType || appliedDefaults.contains(pSym.name)
         )
         '{ PromptArgument(${ Expr(pSym.name) }, ${ Expr(descOpt) }, ${ Expr(required) }) }
       }

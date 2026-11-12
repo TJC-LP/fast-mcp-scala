@@ -114,14 +114,23 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
     val paramsWithDefaults: Set[String] =
       params.filter(_.flags.is(Flags.HasDefault)).map(_.name).toSet
 
+    // The subset whose default the generated handler really applies on omission — the list
+    // `MapToFunctionMacro` builds the handler from. Only these may be advertised as optional.
+    val appliedDefaults: Set[String] = MacroUtils.appliedDefaultGetters(methodSym).keySet
+
+    // One entry per parameter whose schema differs from what `schemaForFunctionArgs` derives from
+    // the type alone: every `@Param`-annotated parameter, plus every un-annotated non-`Option`
+    // parameter with an applied default (the function type does not carry defaults, so the raw
+    // schema lists it in `required`; the entry takes it out). A defaulted parameter is required
+    // only when `@Param(required = true)` is written (TJC-5117).
     val paramMetadata: List[(String, ParamMetadata)] =
       params.flatMap { pSym =>
-        MacroUtils
-          .extractParamAnnotation(pSym)
-          .map { annotTerm =>
-            val isOptionType = pSym.termRef.widenTermRefByName <:< TypeRepr.of[Option[?]]
+        val isOptionType = pSym.termRef.widenTermRefByName <:< TypeRepr.of[Option[?]]
+        val hasAppliedDefault = appliedDefaults.contains(pSym.name)
+        MacroUtils.extractParamAnnotation(pSym) match
+          case Some(annotTerm) =>
             val (desc, examples, required, schema) =
-              MacroUtils.parseToolParam(Some(annotTerm), isOptionType)
+              MacroUtils.parseToolParam(Some(annotTerm), isOptionType || hasAppliedDefault)
 
             if !required then
               val hasDefault = paramsWithDefaults.contains(pSym.name)
@@ -133,8 +142,10 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
                     s"Use Option[${pSym.termRef.widenTermRefByName.show}] or provide a default value."
                 )
 
-            pSym.name -> ParamMetadata(desc, examples, required, schema)
-          }
+            Some(pSym.name -> ParamMetadata(desc, examples, required, schema))
+          case None if hasAppliedDefault && !isOptionType =>
+            Some(pSym.name -> ParamMetadata(required = false))
+          case None => None
       }
 
     val schemaWithMetadata: Expr[zio.json.ast.Json] =

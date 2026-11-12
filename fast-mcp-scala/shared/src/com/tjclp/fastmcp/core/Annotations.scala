@@ -91,11 +91,14 @@ class Tool(
   * @param examples
   *   List of example values for the parameter (follows JSON Schema specification)
   * @param required
-  *   Whether the parameter is required. When not written, a non-`Option` parameter is required and
-  *   an `Option[T]` parameter is optional (the same rule the derived schema applies without
-  *   `@Param`); an explicit `required = true` re-requires an `Option`, and `required = false` is
-  *   accepted only on an `Option` or on a parameter with a default value — an omitted argument then
-  *   takes the Scala default (or `None`) when the tool or prompt is called
+  *   Whether the parameter is required. When not written, an `Option[T]` parameter and a parameter
+  *   (or input case-class field) with a Scala default are optional, and every other parameter is
+  *   required — the same rule the derived schema applies without `@Param`. An omitted optional
+  *   argument takes `None` or the Scala default when the tool or prompt is called. An explicit
+  *   `required = true` requires an `Option` or defaulted parameter anyway. `required = false` is
+  *   accepted only on an `Option` or on a parameter with a default value, where it states what is
+  *   already the case. On a field of a tool's OUTPUT type a default changes nothing: the field is
+  *   always written, so it stays required unless `required = false` is written
   * @param schema
   *   Optional JSON schema override for the parameter type. Literal values only (`Some("...")` /
   *   `None` / a `final val`); a non-literal argument is a compile-time error. The override is

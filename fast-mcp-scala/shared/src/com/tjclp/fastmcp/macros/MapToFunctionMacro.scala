@@ -113,31 +113,16 @@ object MapToFunctionMacro:
         case _ => None
 
     /** Scala default arguments of the denoted method's first parameter list, by parameter name: a
-      * reference to the compiler-generated `<method>$default$N` getter (`N` is the 1-based
-      * parameter position; the getter is declared next to the method, in the same class). Only
-      * parameters flagged `HasDefault` on the method's OWN symbol qualify (never a same-named
-      * sibling's getter), and only when the getter is nullary — a default in a FIRST parameter list
-      * cannot depend on other parameters, so a getter with parameters means the method is
-      * polymorphic and is left to the runtime "missing argument" failure.
+      * reference to the compiler-generated `<method>$default$N` getter. Which parameters qualify is
+      * decided by [[MacroUtils.appliedDefaultGetters]] — the same list the `@Tool` / `@Prompt`
+      * processors use to drop a defaulted parameter from the advertised `required`, so the schema
+      * and this handler agree by construction.
       */
     def defaultGetters(methodSym: Symbol): Map[String, Expr[Any]] =
-      val owner = methodSym.owner
-      // Only object members: that is the sole shape `scanAnnotations` registers, and it gives the
-      // getter a stable qualifier (`Ref(module)`, `Outer.this.module` for a class-nested object).
-      if !(owner.isClassDef && owner.flags.is(Flags.Module)) then Map.empty
-      else
-        methodSym.paramSymss.headOption
-          .getOrElse(Nil)
-          .zipWithIndex
-          .flatMap {
-            case (pSym, idx) if pSym.flags.is(Flags.HasDefault) =>
-              owner.declaredMethod(s"${methodSym.name}$$default$$${idx + 1}") match
-                case getter :: Nil if getter.paramSymss.isEmpty =>
-                  Some(pSym.name -> Select(Ref(owner.companionModule), getter).asExprOf[Any])
-                case _ => None
-            case _ => None
-          }
-          .toMap
+      val module = methodSym.owner.companionModule
+      MacroUtils.appliedDefaultGetters(methodSym).map { case (name, getter) =>
+        name -> Select(Ref(module), getter).asExprOf[Any]
+      }
 
     def jsonDecoderToMcpDecoder[T: Type](jsonDecoderExpr: Expr[JsonDecoder[T]])(using
         Quotes
