@@ -111,7 +111,8 @@ def search(
 
 - `description` populates the schema's `description` field
 - `examples` populates the JSON Schema `examples` array (clients can show suggestions)
-- `required = false`, combined with `Option[...]` or a default value, marks the field optional; a bare `Option[...]` parameter is optional without it, but a default value alone does not remove the field from `required` — and `required` is enforced, so write `required = false` to let clients omit the argument (the default is then applied)
+- `required` is derived from the parameter: an `Option[...]` parameter and a parameter with a default value are optional, every other parameter is required. A client may omit an optional argument; the method then gets `None` or the default. The same holds for the fields of a case class used as an argument, at any depth. Write `required = true` to require an `Option` or defaulted parameter anyway. `required = false` is accepted only on an `Option` or defaulted parameter, where it states what is already the case
+- `required` lists the parameters in declaration order, the order of `properties`
 - `schema` is a raw JSON Schema fragment that overrides the derived schema entirely — repeat the `description` inside the fragment, since the derived property (description and examples included) is replaced wholesale
 
 The advertised `inputSchema` is enforced: a `tools/call` whose arguments do not conform (a value outside an `enum`, a number outside its bounds, a missing `required` member, a wrong type) is answered with an `isError` result before the method runs. `pattern` and `format` are among the keywords that are advertised but not evaluated; the full list, the opt-outs (`McpServerSettings(validateToolInput = false)`, per-tool `ToolRegistrationOptions(validateInputSchema = false)`) and `server.toolInputValidation` are in [docs/custom-types.md](docs/custom-types.md#what-the-server-enforces).
@@ -214,12 +215,12 @@ Return a `List[Message]`; fast-mcp-scala handles the MCP framing:
 @Prompt(name = Some("greeting"), description = Some("Personalized greeting"))
 def greeting(
     @Param("Name of the person") name: String,
-    @Param("Optional title", required = false) title: String = ""
+    @Param("Optional title") title: String = ""
 ): List[Message] =
   List(Message(Role.User, TextContent(s"Generate a warm greeting for $title $name.")))
 ```
 
-A prompt that returns a single `String` is automatically wrapped into a `User` message.
+A prompt that returns a single `String` is automatically wrapped into a `User` message. An argument with a default value (`title` above) or of type `Option[...]` is advertised as optional; the others are required.
 
 ## Context (`McpContext`)
 

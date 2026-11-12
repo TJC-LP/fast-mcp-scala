@@ -112,9 +112,16 @@ With enforcement off a schema is documentation, and every handler must check wha
 
 Because the advertised schema is now the contract, it has to describe what the tool really accepts:
 
-- A parameter or field with a Scala default stays in `required` unless it is marked
-  `@Param(..., required = false)`; a call that omits a `required` member is rejected, so mark
-  defaulted members optional when clients may leave them out.
+- A call that omits a `required` member is rejected. A parameter or input field is `required`
+  unless it is an `Option` or has a Scala default: a client may omit those, and the handler gets
+  `None` or the default. `@Param(..., required = true)` puts an `Option` or defaulted member back
+  in `required`. This applies to `@Tool` parameters, to the fields of a typed tool's `In`, and to
+  case classes nested inside either.
+- The default is applied by the derived decoder. If a type has a hand-written `JsonDecoder` that
+  does not fill in the default, mark the field `@Param(..., required = true)` or give the type a
+  `McpSchema` / `McpInputCodec`, so that the schema does not promise what the decoder refuses.
+- An `outputSchema` (`.withOutputSchema`) is different: a field of `Out` with a default stays in
+  `required`, because the encoder always writes it.
 - A hand-written schema that is stricter than, or simply different from, what the decoder reads
   (a custom `JsonDecoder` for an enum with its own spelling, say) now rejects what the schema does
   not describe. Supply a matching `McpSchema` / `McpInputCodec`.
