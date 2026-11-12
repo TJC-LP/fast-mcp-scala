@@ -116,12 +116,14 @@ private[fastmcp] object SocketHttpServer:
   /** How often the accept thread looks for connections stuck in a blocked write. */
   private val StallSweepIntervalNanos = 1_000_000_000L
 
-  /** A failed `accept` is retried after a pause that doubles from the first value to the second;
-    * this many failures in a row (about a minute) are taken as a broken listener and end the loop.
+  /** A failed `accept` is retried after a pause that doubles from the first value to the second.
+    * The loop never gives up on its own — see `Listener.acceptLoop` — and says so through the ZIO
+    * logger on the first failure of a run and then every [[AcceptWarnEvery]]th (about once a minute
+    * at the longest pause).
     */
   private val AcceptRetryMinMs = 10L
   private val AcceptRetryMaxMs = 1_000L
-  private val AcceptMaxConsecutiveFailures = 70
+  private val AcceptWarnEvery = 60
 
   /** A reply that leaves request bytes unread is followed by a lingering close: the write side is
     * shut down and input discarded until the peer closes, goes quiet for [[LingerQuietMs]], or
@@ -140,8 +142,9 @@ private[fastmcp] object SocketHttpServer:
 
   final case class Bound(host: String, port: Int)
 
-  /** A running server: its address and the accept-loop fiber (join it to serve "forever" — the loop
-    * only ends by failing, which must surface rather than leave a listener that never answers).
+  /** A running server: its address and the accept-loop fiber. Join it to serve "forever": the loop
+    * ends only when the server is shut down (accept failures are retried, never fatal), or on a
+    * fatal JVM error, which must surface rather than leave a listener that never answers.
     */
   final case class Started(bound: Bound, loop: Fiber.Runtime[Throwable, Nothing])
 
@@ -229,11 +232,15 @@ private[fastmcp] object SocketHttpServer:
 
     /** Accept until shut down. Runs on one blocking thread; never returns normally.
       *
-      * A failed `accept` is not fatal on its own: running out of file descriptors (`EMFILE` /
-      * `ENFILE`), buffers, or a connection reset before it was accepted are all transient, and
-      * ending the loop on one of them would take the server away from every client. They are logged
-      * and retried with a growing pause; only an unbroken run of failures (a listener that really
-      * is broken) ends the loop, so that case still surfaces instead of leaving a deaf server.
+      * A failed `accept` — or a failure to hand the connection to a thread — never ends the loop;
+      * only shutdown does. Running out of file descriptors (`EMFILE` / `ENFILE`), buffers or
+      * threads, or a connection reset before it was accepted, are conditions that pass, and they
+      * can last as long as the connections that caused them (a process at its descriptor limit with
+      * long-lived event streams open stays there for minutes). Ending the loop on any of them, even
+      * after many in a row, would take the server away from every client, including the ones it is
+      * still serving. Each failure is retried after a growing pause, capped at
+      * [[AcceptRetryMaxMs]], and a persistent run is reported through the ZIO logger so it does not
+      * pass unnoticed.
       */
     @SuppressWarnings(Array("org.wartremover.warts.Var"))
     def acceptLoop(): Nothing =
@@ -261,10 +268,15 @@ private[fastmcp] object SocketHttpServer:
                 connection.closeSocket()
           catch
             case _: SocketTimeoutException => ()
-            case e: IOException if !closed.get =>
+            case NonFatal(e) if !closed.get =>
               failures += 1
-              if failures >= AcceptMaxConsecutiveFailures then throw e
               debugLog(s"accept failed ($failures in a row), retrying: $e")
+              if failures % AcceptWarnEvery == 1 then
+                val _ = runSync(
+                  ZIO.logWarning(
+                    s"HTTP listener on port $port cannot accept connections ($failures failures in a row, still retrying): $e"
+                  )
+                )
               Thread.sleep(math.min(AcceptRetryMaxMs, AcceptRetryMinMs << math.min(failures, 7)))
           finally if !handedOff then gate.release()
       throw new SocketException("listener closed")
