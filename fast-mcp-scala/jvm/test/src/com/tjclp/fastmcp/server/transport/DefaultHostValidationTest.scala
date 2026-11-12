@@ -265,6 +265,19 @@ class DefaultHostValidationTest extends AnyFunSuite with Matchers:
     withClue(offenders.mkString("\n"))(offenders shouldBe empty)
   }
 
+  test("README, transports.md and SECURITY.md say loopback binding alone is not the protection") {
+    for doc <- List("README.md", "docs/transports.md", "SECURITY.md") do
+      withClue(s"$doc: ") {
+        val text = textOf(doc).toLowerCase
+        mentions(text, "binding loopback alone does not protect against browser-originated requests")
+        // ...and what a non-loopback bind needs instead.
+        mentions(text, "allowedhosts")
+        mentions(text, "allowedorigins")
+        mentions(text, "authenticating proxy")
+        mentions(text, "dnsrebindingprotection = false")
+      }
+  }
+
   // ---- startup warning on a non-loopback bind without an allow-list ----
 
   /** Run the startup validation every JVM / Native backend runs, capturing what it logs. */

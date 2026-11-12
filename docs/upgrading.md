@@ -375,6 +375,13 @@ the same placeholder shape (`users://{id}` vs `users://{userId}`) log a warning.
 - **Default bind is `127.0.0.1`** (since 0.5.0; was `0.0.0.0`). Containers and externally
   reachable deployments set `McpServerSettings(host = "0.0.0.0")` explicitly and pair it with
   `allowedHosts` / `allowedOrigins` behind an authenticating proxy.
+- **Host / Origin validation is on by default for a loopback bind** (since 1.1.0; it used to
+  need `allowedHosts`). A request whose `Host` is not `localhost` / `127.0.0.1` / `[::1]` / the
+  bound address, or whose `Origin` is not the server's own, gets 403. If a reverse proxy forwards
+  its own `Host` to a loopback listener, list that name: `allowedHosts =
+  Some(Set("mcp.example.com"))`; `dnsRebindingProtection = false` is the explicit opt-out. A
+  non-loopback bind with no allow-list is not guarded and now logs a WARN at startup. See
+  [transports.md](./transports.md#host--origin-validation).
 - **`stateless` governs only the legacy adapter.** Every MCP 2026-07-28 request is stateless
   and answers on a per-request SSE stream regardless; `stateless = true` selects the JSON-reply
   shape for 2025-11-25 clients. Enabling `tasks` together with `stateless` no longer fails at
