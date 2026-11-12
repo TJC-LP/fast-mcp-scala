@@ -269,6 +269,41 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     }
   }
 
+  it should "refuse a repeated routing header with -32020 (Headers.get joins the repeats)" in {
+    serverReady.flatMap { _ =>
+      val call =
+        """{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"needs-roots","arguments":{"msg":"x"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+      // Each header once, then one of them a second time: the server-side lookup returns the
+      // `", "`-joined value, which names neither a version, nor the method, nor the tool.
+      def send(repeat: (String, String)): Future[(Int, String)] =
+        val headers = js.Dynamic.newInstance(js.Dynamic.global.Headers)()
+        List(
+          "content-type" -> "application/json",
+          "accept" -> "application/json, text/event-stream",
+          "mcp-protocol-version" -> "2026-07-28",
+          "mcp-method" -> "tools/call",
+          "mcp-name" -> "needs-roots",
+          repeat
+        ).foreach { case (name, value) =>
+          val _ = headers.append(name, value)
+        }
+        for
+          resp <- httpFetch("/mcp", js.Dynamic.literal(method = "POST", headers = headers, body = call))
+          body <- text(resp)
+        yield (status(resp), body)
+      for
+        name <- send("mcp-name" -> "other")
+        sameName <- send("mcp-name" -> "needs-roots")
+        method <- send("mcp-method" -> "tools/list")
+        version <- send("mcp-protocol-version" -> "2026-07-28")
+        legacyVersion <- send("mcp-protocol-version" -> "2025-11-25")
+      yield List(name, sameName, method, version, legacyVersion).foreach { case (code, body) =>
+        code shouldBe 400
+        body should include("-32020")
+      }
+    }
+  }
+
   it should "return HTTP 400 for a missing required client capability" in {
     serverReady.flatMap { _ =>
       val init = js.Dynamic.literal(

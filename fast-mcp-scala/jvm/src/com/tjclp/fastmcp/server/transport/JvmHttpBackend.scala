@@ -153,7 +153,9 @@ object JvmHttpBackend extends HttpTransportBackend:
       gateHeader = gateHeader(request),
       body = request.body.asString,
       // The TCP peer address as seen by netty (`None` for in-memory `routes.runZIO` requests).
-      clientKey = request.remoteAddress.map(_.getHostAddress)
+      clientKey = request.remoteAddress.map(_.getHostAddress),
+      // One entry per field line: zio-http keeps a repeated header as separate entries.
+      headerNames = () => request.headers.iterator.map(_.headerName.toString)
     )
 
   /** Header lookup for the gates: a header sent more than once is seen as its `", "`-joined value

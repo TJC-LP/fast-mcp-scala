@@ -9,7 +9,12 @@ import com.tjclp.fastmcp.core.{ErrorCodes, Protocol}
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError, RequestId}
 import com.tjclp.fastmcp.server.McpServerSettings
 import com.tjclp.fastmcp.server.router.{McpRouter, RequestContext, RequestHeaders, Session}
-import com.tjclp.fastmcp.server.transport.{HttpRequestGuards, MessageLoop, ModernHttpValidation}
+import com.tjclp.fastmcp.server.transport.{
+  HttpHeaderValidation,
+  HttpRequestGuards,
+  MessageLoop,
+  ModernHttpValidation
+}
 
 /** The streamable-HTTP MCP semantics, written once against the platform-neutral [[HttpRequest]] /
   * [[HttpReply]] model: the legacy session store with its cap, eviction and idle sweeper, the rule
@@ -119,12 +124,21 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
                 // sent and a proxy then appended to shows up as one combined value, not as the
                 // client's.
                 RequestHeaders.scoped(contextHeaders, req.gateHeader) {
-                  if ModernHttpValidation.isModern(req.header, message) then
-                    modernPost(req, message)
-                  else
-                    store match
-                      case None => legacyStatelessDispatch(message)
-                      case Some(sessions) => legacySessionDispatch(sessions, req, message)
+                  val modern = ModernHttpValidation.isModern(req.header, message)
+                  // `req.header` returns one occurrence of a header. A routing header sent twice
+                  // is refused before any of them is read: always for the version header (its
+                  // first value must not pick this request's path while another says otherwise),
+                  // and for the 2026-07-28 header/body checks' other inputs on that path.
+                  HttpHeaderValidation.repeatedHeader(req.headerNames()) match
+                    case Some(name)
+                        if modern || name == HttpHeaderValidation.ProtocolVersionHeader =>
+                      ZIO.succeed(repeatedHeaderReply(message, name))
+                    case _ =>
+                      if modern then modernPost(req, message)
+                      else
+                        store match
+                          case None => legacyStatelessDispatch(message)
+                          case Some(sessions) => legacySessionDispatch(sessions, req, message)
                 }
         }
 
@@ -410,6 +424,16 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         // are forked under Session.runWithoutSink (TaskRouting), so they never hold this queue.
         .ensuring(dispatchFiber.interrupt *> reqQueue.shutdown)
     HttpReply.Sse(headers, frames, keepAlive)
+
+  /** `400` with the header-mismatch error (`-32020`), addressed to the request when it has an id.
+    */
+  private def repeatedHeaderReply(message: JsonRpcMessage, header: String): HttpReply =
+    val id = message match
+      case rpc: JsonRpcMessage.Request => Some(rpc.id)
+      case _ => None
+    val failure: JsonRpcMessage =
+      JsonRpcMessage.Failure(id, HttpHeaderValidation.repeatedHeaderError(header).toErrorObject)
+    HttpReply.Json(400, failure.toJson)
 
   /** Dispatch a 2026-07-28 request without consulting or mutating the legacy session store. */
   private def modernPost(req: HttpRequest, message: JsonRpcMessage): URIO[R, HttpReply] =

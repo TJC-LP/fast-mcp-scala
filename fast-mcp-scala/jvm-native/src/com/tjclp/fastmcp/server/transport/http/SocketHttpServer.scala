@@ -557,7 +557,15 @@ private[fastmcp] object SocketHttpServer:
         case Left(rejection) => reject(rejection)
         case Right(framing) =>
           val request =
-            HttpRequest(head.method, head.path, head.header, head.headerJoined, NoBody, peer)
+            HttpRequest(
+              head.method,
+              head.path,
+              head.header,
+              head.headerJoined,
+              NoBody,
+              peer,
+              () => head.headerNames
+            )
           admit(request) match
             case Some(reply) =>
               // Answered on the head alone. A declared body that was never read leaves unknown

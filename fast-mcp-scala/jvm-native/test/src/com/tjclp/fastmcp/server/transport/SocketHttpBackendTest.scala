@@ -64,6 +64,18 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       "x" * (args.megabytes * 1024 * 1024)
     }
 
+  case class RegionArgs(region: String)
+  given JsonDecoder[RegionArgs] = DeriveJsonDecoder.gen[RegionArgs]
+
+  /** A tool whose `region` argument is mirrored in the `Mcp-Param-Region` header. */
+  private val regionTool = McpTool.withSchema[RegionArgs, String](
+    name = "region",
+    inputSchema = ToolInputSchema.unsafeFromJsonString(
+      """{"type":"object","properties":{"region":{"type":"string","x-mcp-header":"Region"}},"required":["region"]}"""
+    ),
+    description = Some("Echoes its header-backed argument")
+  )(args => args.region)
+
   private def baseSettings: McpServerSettings =
     McpServerSettings(
       host = "127.0.0.1",
@@ -82,7 +94,10 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       blockingExecutor: Option[Executor] = None
   )(body: Int => A): A =
     val server = McpServer.typed[Any]("SocketT", "0.1.0", settings)
-    runUnsafe(server.tool(addTool) *> server.tool(chattyTool) *> server.tool(bigTool))
+    runUnsafe(
+      server.tool(addTool) *> server.tool(chattyTool) *> server.tool(bigTool) *>
+        server.tool(regionTool)
+    )
     runUnsafe(
       ZIO
         .scoped {
@@ -287,6 +302,27 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
 
   /** `initFrame` is ASCII, so its length in chars is its length in bytes. */
   private val initHex = Integer.toHexString(initFrame.length)
+
+  private val modernMeta =
+    """"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}"""
+
+  private val modernAddFrame =
+    s"""{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":40},$modernMeta}}"""
+
+  private val modernRegionFrame =
+    s"""{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"region","arguments":{"region":"eu"},$modernMeta}}"""
+
+  private val modernVersion = "MCP-Protocol-Version" -> "2026-07-28"
+  private val callMethod = "Mcp-Method" -> "tools/call"
+
+  /** The reply must be the header-mismatch error: HTTP 400 carrying JSON-RPC `-32020`. */
+  private def headerMismatch(port: Int, body: String, headers: List[(String, String)]): Unit =
+    withClue(s"headers $headers: ") {
+      val reply = request(port, post(body, extra = headers))
+      reply.status shouldBe 400
+      reply.header("content-type") shouldBe Some("application/json")
+      reply.body should include(""""code":-32020""")
+    }
 
   // --- tests --------------------------------------------------------------------------------------
 
@@ -683,6 +719,97 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       refused(port, chunkedHead + body + "not a field line\r\n\r\n")
       refused(port, chunkedHead + body + "X-Trailer: v\r\n folded\r\n\r\n")
       refused(port, chunkedHead + body + "X-Trailer: a\u0000b\r\n\r\n")
+    }
+  }
+
+  // --- repeated routing headers on a 2026-07-28 POST ----------------------------------------------
+
+  test("2026-07-28 POST: single routing headers are served as before") {
+    withServer() { port =>
+      val add = request(
+        port,
+        post(modernAddFrame, extra = List(modernVersion, callMethod, "Mcp-Name" -> "add"))
+      )
+      add.status shouldBe 200
+      add.body should include("""{\"sum\":42}""")
+      val region = request(
+        port,
+        post(
+          modernRegionFrame,
+          extra = List(modernVersion, callMethod, "Mcp-Name" -> "region", "Mcp-Param-Region" -> "eu")
+        )
+      )
+      region.status shouldBe 200
+      region.body should include("eu")
+    }
+  }
+
+  test("2026-07-28 POST: a repeated Mcp-Name or Mcp-Method is a header mismatch, whatever the order") {
+    withServer() { port =>
+      val name = "Mcp-Name" -> "add"
+      // Two different names are refused whichever of them matches the body.
+      headerMismatch(port, modernAddFrame, List(modernVersion, callMethod, name, "Mcp-Name" -> "big"))
+      headerMismatch(port, modernAddFrame, List(modernVersion, callMethod, "Mcp-Name" -> "big", name))
+      headerMismatch(port, modernAddFrame, List(modernVersion, name, callMethod, "mcp-name" -> "big"))
+      // More than one occurrence is refused even when they agree.
+      headerMismatch(port, modernAddFrame, List(modernVersion, callMethod, name, name))
+      headerMismatch(port, modernAddFrame, List(modernVersion, callMethod, name, "MCP-NAME" -> "add"))
+
+      val list = "Mcp-Method" -> "tools/list"
+      headerMismatch(port, modernAddFrame, List(modernVersion, callMethod, list, name))
+      headerMismatch(port, modernAddFrame, List(modernVersion, list, callMethod, name))
+      headerMismatch(port, modernAddFrame, List(modernVersion, callMethod, name, callMethod))
+    }
+  }
+
+  test("2026-07-28 POST: a repeated Mcp-Param-* header is a header mismatch, whatever the order") {
+    withServer() { port =>
+      val base = List(modernVersion, callMethod, "Mcp-Name" -> "region")
+      val eu = "Mcp-Param-Region" -> "eu"
+      headerMismatch(port, modernRegionFrame, base ++ List(eu, "Mcp-Param-Region" -> "us"))
+      headerMismatch(port, modernRegionFrame, base ++ List("Mcp-Param-Region" -> "us", eu))
+      headerMismatch(port, modernRegionFrame, base ++ List(eu, "mcp-param-region" -> "eu"))
+      headerMismatch(port, modernRegionFrame, ("MCP-PARAM-REGION" -> "us") :: base ++ List(eu))
+      // Also for a parameter header the called tool does not declare.
+      headerMismatch(
+        port,
+        modernAddFrame,
+        List(modernVersion, callMethod, "Mcp-Name" -> "add", "Mcp-Param-X" -> "1", "Mcp-Param-X" -> "2")
+      )
+      // Different parameter headers are not a repeat.
+      val distinct = request(
+        port,
+        post(modernRegionFrame, extra = base ++ List(eu, "Mcp-Param-Other" -> "x"))
+      )
+      distinct.status shouldBe 200
+    }
+  }
+
+  test("a repeated MCP-Protocol-Version is a header mismatch, whatever the order and the body") {
+    withServer() { port =>
+      val routing = List(callMethod, "Mcp-Name" -> "add")
+      val legacy = "Mcp-Protocol-Version" -> "2025-11-25"
+      headerMismatch(port, modernAddFrame, modernVersion :: modernVersion :: routing)
+      headerMismatch(port, modernAddFrame, modernVersion :: legacy :: routing)
+      headerMismatch(port, modernAddFrame, legacy :: modernVersion :: routing)
+      // A body without the 2026-07-28 metadata: the first value must not pick the legacy path
+      // while a later one says 2026-07-28 (nor the other way round).
+      headerMismatch(port, initFrame, List(legacy, modernVersion))
+      headerMismatch(port, initFrame, List(modernVersion, legacy))
+      headerMismatch(port, initFrame, List(legacy, legacy))
+      // One legacy version header is an ordinary legacy request.
+      request(port, post(initFrame, extra = List(legacy))).status shouldBe 200
+    }
+  }
+
+  test("2026-07-28 notification: a repeated Mcp-Method is a header mismatch") {
+    withServer() { port =>
+      val cancelled =
+        """{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":99}}"""
+      val method = "Mcp-Method" -> "notifications/cancelled"
+      request(port, post(cancelled, extra = List(modernVersion, method))).status shouldBe 202
+      headerMismatch(port, cancelled, List(modernVersion, method, "Mcp-Method" -> "tools/call"))
+      headerMismatch(port, cancelled, List(modernVersion, "Mcp-Method" -> "tools/call", method))
     }
   }
 

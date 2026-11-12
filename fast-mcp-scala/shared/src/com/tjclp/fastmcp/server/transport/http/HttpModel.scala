@@ -29,6 +29,12 @@ import com.tjclp.fastmcp.server.transport.MessageLoop
   * @param clientKey
   *   the TCP peer address, when the backend knows it — the default owner key for bearer-task
   *   buckets (`TaskOwnerKey.Transport`). Never derived from request content
+  * @param headerNames
+  *   every header name of the request as received, in any case, one entry per field line — a header
+  *   sent twice appears twice. Read once per POST by
+  *   [[com.tjclp.fastmcp.server.transport.HttpHeaderValidation.repeatedHeader]], which refuses a
+  *   repeated routing header instead of letting `header` pick its first value. A backend that can
+  *   see repeats MUST supply it: the default (no names) disables that check
   */
 private[fastmcp] final case class HttpRequest(
     method: String,
@@ -36,8 +42,14 @@ private[fastmcp] final case class HttpRequest(
     header: String => Option[String],
     gateHeader: String => Option[String],
     body: IO[Throwable, String],
-    clientKey: Option[String] = None
+    clientKey: Option[String] = None,
+    headerNames: () => Iterator[String] = HttpRequest.NoHeaderNames
 )
+
+private[fastmcp] object HttpRequest:
+
+  /** For requests built without a wire behind them (tests driving the handler directly). */
+  val NoHeaderNames: () => Iterator[String] = () => Iterator.empty
 
 /** One server-sent event: an optional `event:` type and the `data:` payload. */
 private[fastmcp] final case class SseFrame(event: Option[String], data: String):

@@ -75,6 +75,58 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
     second.status shouldBe 200
   }
 
+  test("a POST whose header names show a repeated routing header is a header mismatch (400, -32020)") {
+    val handler = makeHandler()
+    val discover =
+      """{"jsonrpc":"2.0","id":7,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+    val headers = Map(
+      "accept" -> "application/json, text/event-stream",
+      "content-type" -> "application/json",
+      "mcp-protocol-version" -> "2026-07-28",
+      "mcp-method" -> "server/discover"
+    )
+    def post(body: String, lookup: Map[String, String], names: List[String]): HttpReply =
+      runUnsafe(
+        handler.post(
+          HttpRequest(
+            "POST",
+            "/mcp",
+            name => lookup.get(name.toLowerCase),
+            name => lookup.get(name.toLowerCase),
+            ZIO.succeed(body),
+            None,
+            () => names.iterator
+          )
+        )
+      )
+    def mismatch(reply: HttpReply): Unit =
+      reply match
+        case HttpReply.Json(status, body, _) =>
+          status shouldBe 400
+          body should include(""""code":-32020""")
+          body should include(""""id":7""")
+        case other => fail(s"expected a JSON error reply, got $other")
+
+    // The lookups see one value (whichever the backend picks); the names show the repeat.
+    post(discover, headers, headers.keys.toList).status shouldBe 200
+    mismatch(post(discover, headers, "Mcp-Method" :: headers.keys.toList))
+    mismatch(post(discover, headers, headers.keys.toList :+ "MCP-Protocol-Version"))
+    // A request built without names (no wire behind it) is judged on its lookups alone.
+    runUnsafe(handler.post(request("POST", headers, discover))).status shouldBe 200
+
+    // A repeated version header is refused on a legacy-looking request too: its first value must
+    // not choose the path while another one says otherwise.
+    val legacy = headers - "mcp-method" + ("mcp-protocol-version" -> "2025-11-25")
+    post(initFrame, legacy, legacy.keys.toList).status shouldBe 200
+    post(initFrame, legacy, "mcp-protocol-version" :: legacy.keys.toList) match
+      case HttpReply.Json(status, body, _) =>
+        status shouldBe 400
+        body should include(""""code":-32020""")
+      case other => fail(s"expected a JSON error reply, got $other")
+    // The other routing headers mean nothing to a legacy request and are left alone there.
+    post(initFrame, legacy, "mcp-name" :: "mcp-name" :: legacy.keys.toList).status shouldBe 200
+  }
+
   test("a request that never forces its body is answered without the body being read") {
     val handler = makeHandler()
     val touched = new java.util.concurrent.atomic.AtomicBoolean(false)
