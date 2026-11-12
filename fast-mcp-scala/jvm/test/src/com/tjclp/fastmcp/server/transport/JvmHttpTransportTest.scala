@@ -734,6 +734,60 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     idle.foreach(sid => post(routes, listFrame, Some(sid)).status shouldBe Status.NotFound)
   }
 
+  /** A legacy POST as netty delivers it from a given TCP peer (`Request.remoteAddress`). */
+  private def postFrom(
+      routes: Routes[Any, Response],
+      body: String,
+      sid: Option[String],
+      peer: String
+  ): Response =
+    val base = Request
+      .post(URL(Path.root / "mcp"), Body.fromString(body))
+      .addHeader(Header.Custom("content-type", "application/json"))
+      .addHeader(Header.Custom("accept", "application/json, text/event-stream"))
+      .copy(remoteAddress = Some(java.net.InetAddress.getByName(peer)))
+    run(routes, sid.fold(base)(s => base.addHeader(Header.Custom(SessionIdHeader, s))))
+
+  test("maxSessions: one peer holding every slot with live, freshly touched GET streams cannot lock another peer out") {
+    val cap = 3
+    // No idle timeout: nothing becomes evictable through idleness, the state that used to be 503.
+    val routes = buildRoutes(stateless = false, maxSessions = Some(cap), sessionIdleTimeout = None)
+    val hog = "203.0.113.7"
+    def initFrom(peer: String): String =
+      val resp = postFrom(routes, initFrame, None, peer)
+      val body = bodyOf(resp)
+      withClue(s"initialize from $peer: ${resp.status} $body ") { resp.status shouldBe Status.Ok }
+      resp.rawHeader(SessionIdHeader).getOrElse(fail(s"initialize from $peer minted nothing"))
+    def alive(sid: String): Boolean = post(routes, listFrame, Some(sid)).status == Status.Ok
+
+    val hogged = List.fill(cap)(initFrom(hog))
+    hogged.foreach(openGet(routes, _))
+    hogged.foreach(sid => postFrom(routes, listFrame, Some(sid), hog).status shouldBe Status.Ok)
+
+    val newcomer = initFrom("198.51.100.20")
+    alive(newcomer) shouldBe true
+    hogged.count(alive) shouldBe cap - 1 // the store did not grow: one of the hog's made room
+
+    // The hog initializing again displaces its own session, not the newcomer's.
+    val again = initFrom(hog)
+    alive(newcomer) shouldBe true
+    (again :: hogged).count(alive) shouldBe cap - 1
+  }
+
+  test("maxSessions: a failed initialize returns no session id and evicts nobody") {
+    val routes = buildRoutes(stateless = false, maxSessions = Some(1))
+    val stored = initSid(routes)
+    val overBudget =
+      s"""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"experimental":{"x":${List.fill(300)("0").mkString("[", ",", "]")}}},"clientInfo":{"name":"t","version":"1.0"}}}"""
+    val undecodable =
+      """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"""
+    for body <- List(overBudget, undecodable) do
+      val resp = post(routes, body, None)
+      bodyOf(resp) should include("-32602")
+      resp.rawHeader(SessionIdHeader) shouldBe None
+      post(routes, listFrame, Some(stored)).status shouldBe Status.Ok
+  }
+
   test("maxSessions = None disables the cap") {
     val routes = buildRoutes(stateless = false, maxSessions = None)
     val sids = (1 to 5).map(_ => initSid(routes))

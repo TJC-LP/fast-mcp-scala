@@ -11,6 +11,34 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Security
 
+- **The socket HTTP backend parses requests strictly** (TJC-5087). It is the default on Scala
+  Native and opt-in on the JVM, and it usually sits behind a reverse proxy, so a request the two
+  could read differently is now refused instead of repaired. Each refusal is a `400` JSON-RPC
+  transport error followed by `Connection: close`; nothing else on that connection is served.
+  - Request head: every line ends in CRLF. A bare LF, a bare CR, NUL, any other control character
+    except HTAB inside a field value, or DEL is refused as soon as it is read — also in the empty
+    lines allowed before the request line. `LF LF` and `LF CRLF` no longer end a head.
+  - Only SP and HTAB are removed around a field value (it used to be every character up to
+    U+0020), so `Content-Length` / `Transfer-Encoding` values padded with control characters are
+    refused rather than recognised. `Content-Length` is ASCII digits only.
+  - Methods and field names are ASCII `tchar` only. The request line is
+    `method SP target SP version` exactly: repeated, leading or trailing spaces and HTAB are refused.
+  - Chunked request bodies: a chunk-size line is hex digits from its first byte (at most 7),
+    optionally followed by chunk extensions, and ends in CRLF; chunk data is followed by exactly
+    CRLF; trailer lines are field lines ending in CRLF. Padded sizes, a bare LF or CR anywhere in
+    the framing, control characters in a chunk extension and trailer lines that are not field lines
+    are refused. Well-formed chunked bodies, extensions and trailers decode as before.
+- **A repeated routing header on a POST is refused** (TJC-5087): `MCP-Protocol-Version`,
+  `Mcp-Method`, `Mcp-Name` and every `Mcp-Param-*` carry one value, and the header/body checks
+  read one occurrence. A 2026-07-28 POST that carries any of them more than once is now answered
+  `400` with the header-mismatch error (`-32020`), whatever the values and their order — also when
+  the occurrences agree. Before, the zio-http and socket backends compared the first occurrence
+  only. A repeated `MCP-Protocol-Version` is refused on every POST, so its first value cannot
+  select the legacy path while a later one says `2026-07-28`. On Bun the runtime joins a repeated
+  header into one value before the server sees it: a joined `MCP-Protocol-Version` was already
+  refused there and now gets `-32020` instead of `-32022`, and the other headers are compared with
+  the body as the joined value, as before. Requests that send each of these headers once are
+  unaffected.
 - **A request's resources are released even when its reply is never streamed** (TJC-5087): on the
   streamable-HTTP transport a request's dispatch and its message queue — and, for a legacy
   session, the GET stream slot — were released by the response stream's finalizer alone, which
@@ -38,6 +66,41 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - No new setting and no wire change for a reply that is delivered. Replies that are complete at
     their first frame are unaffected and gain no fiber or timer; a streamed reply carries one
     sleeping watchdog fiber until its stream's first pull.
+- **The legacy session store is bounded in what each session holds, not only in how many there
+  are.** Applies to the legacy (pre-2026-07-28) streamable-HTTP adapter on the JVM, Bun and Scala
+  Native; 2026-07-28 requests never store a session.
+  - **A session is stored only for an `initialize` that succeeded.** A header-less `initialize` is
+    answered on a session that is not in the store. One that fails — params that do not decode, or
+    a `clientInfo` / `capabilities` over the budget below — returns the JSON-RPC error with no
+    `Mcp-Session-Id`, takes no slot and evicts nobody. The cap check, the choice of the session
+    that makes room and the insert remain one atomic step.
+  - **What a stored session keeps from `initialize` has a fixed budget**: `clientInfo` and
+    `capabilities` together may hold at most 256 JSON values and 16 KiB of text (member names,
+    strings, number digits). Over either bound the `initialize` is refused with `-32602`. The
+    budget does not grow with `maxRequestBodyBytes` or `limits.maxFrameChars`. Stdio and the
+    sessionless adapter (`stateless = true`) store nothing and are not budgeted.
+  - **One client can no longer fill the store and have every other client refused.** At the
+    `maxSessions` cap, sessions are counted per client (the peer address the backend reports). A
+    client that already holds as many sessions as any other replaces one of its own; otherwise a
+    client holding at least two more than the newcomer's gives one up — its longest-idle session,
+    a live and recently used GET stream included. Only when holdings are level do the previous
+    rules decide (longest-idle session without a live GET, else the longest-idle GET holder idle
+    past `sessionIdleTimeout`, else 503).
+  - `docs/transports.md` ("The legacy session store") states the resulting worst case:
+    `maxSessions` × the per-session budget, about 100 MiB of heap at the defaults, plus the
+    subscription and task terms when those features are enabled.
+
+  What changes for a deployment:
+  - A client whose `initialize` carries more than the budget (in practice: an icon inlined as a
+    large `data:` URI, or a very large `experimental` / `extensions` object) is refused with
+    `-32602` on the legacy streamable adapter, where it used to be accepted.
+  - A failed header-less `initialize` no longer returns an `Mcp-Session-Id`; a successful one
+    returns it as before. Its reply is sent when the handler has finished rather than being opened
+    after the one-second legacy grace.
+  - Behind a reverse proxy all clients share the proxy's address, so a full store now admits a
+    newcomer by closing the longest-idle session — live GET or not — where it answered 503 when
+    every session held a live, recently used GET stream. Limit sessions per principal in the proxy.
+  - A backend that reports no peer address keeps the previous cap rules unchanged.
 
 ### Added
 
@@ -181,37 +244,6 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   stream carried its first message through `ZStream.fromIterable`, which sizes a builder for a full
   4096-element chunk; it is now a single-element stream. Affects every HTTP backend built on the
   shared handler.
-
-### Security
-
-- **The socket HTTP backend parses requests strictly** (TJC-5087). It is the default on Scala
-  Native and opt-in on the JVM, and it usually sits behind a reverse proxy, so a request the two
-  could read differently is now refused instead of repaired. Each refusal is a `400` JSON-RPC
-  transport error followed by `Connection: close`; nothing else on that connection is served.
-  - Request head: every line ends in CRLF. A bare LF, a bare CR, NUL, any other control character
-    except HTAB inside a field value, or DEL is refused as soon as it is read — also in the empty
-    lines allowed before the request line. `LF LF` and `LF CRLF` no longer end a head.
-  - Only SP and HTAB are removed around a field value (it used to be every character up to
-    U+0020), so `Content-Length` / `Transfer-Encoding` values padded with control characters are
-    refused rather than recognised. `Content-Length` is ASCII digits only.
-  - Methods and field names are ASCII `tchar` only. The request line is
-    `method SP target SP version` exactly: repeated, leading or trailing spaces and HTAB are refused.
-  - Chunked request bodies: a chunk-size line is hex digits from its first byte (at most 7),
-    optionally followed by chunk extensions, and ends in CRLF; chunk data is followed by exactly
-    CRLF; trailer lines are field lines ending in CRLF. Padded sizes, a bare LF or CR anywhere in
-    the framing, control characters in a chunk extension and trailer lines that are not field lines
-    are refused. Well-formed chunked bodies, extensions and trailers decode as before.
-- **A repeated routing header on a POST is refused** (TJC-5087): `MCP-Protocol-Version`,
-  `Mcp-Method`, `Mcp-Name` and every `Mcp-Param-*` carry one value, and the header/body checks
-  read one occurrence. A 2026-07-28 POST that carries any of them more than once is now answered
-  `400` with the header-mismatch error (`-32020`), whatever the values and their order — also when
-  the occurrences agree. Before, the zio-http and socket backends compared the first occurrence
-  only. A repeated `MCP-Protocol-Version` is refused on every POST, so its first value cannot
-  select the legacy path while a later one says `2026-07-28`. On Bun the runtime joins a repeated
-  header into one value before the server sees it: a joined `MCP-Protocol-Version` was already
-  refused there and now gets `-32020` instead of `-32022`, and the other headers are compared with
-  the body as the joined value, as before. Requests that send each of these headers once are
-  unaffected.
 
 ## [1.0.1] - 2026-09-18
 

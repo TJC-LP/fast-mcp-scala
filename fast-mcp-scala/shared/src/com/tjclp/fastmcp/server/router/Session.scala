@@ -25,8 +25,9 @@ final class Session private (
       */
     val supportsTasks: Boolean,
     /** Transport-supplied client identity (peer address on the shipped HTTP backends), used to
-      * bucket modern bearer tasks per client. `None` when the transport cannot tell clients apart;
-      * never derived from request content.
+      * bucket modern bearer tasks per client and, on a durable legacy session, to count the
+      * sessions one client holds when the store is full. `None` when the transport cannot tell
+      * clients apart; never derived from request content.
       */
     val clientKey: Option[String],
     /** True only for a durable legacy streamable-HTTP session — the one case where [[sessionId]] is
@@ -87,7 +88,9 @@ final class Session private (
   def logLevel: UIO[Option[LoggingLevel]] = logLevelRef.get
   def setLogLevel(level: LoggingLevel): UIO[Unit] = logLevelRef.set(Some(level))
 
-  /** Client identity + capabilities, captured from the `initialize` request. */
+  /** Client identity + capabilities, captured from the `initialize` request. On a durable legacy
+    * session their size is bounded by [[ClientRetention]] before they are stored.
+    */
   def clientInfo: UIO[Option[Implementation]] = clientInfoRef.get
   def clientCapabilities: UIO[Option[ClientCapabilities]] = clientCapabilitiesRef.get
 
@@ -279,9 +282,14 @@ object Session:
   ): UIO[Session] =
     build(sessionId, supportsTasks, clientKey, isProtocolSession = false)
 
-  /** A durable legacy streamable-HTTP session, whose id is the client's `Mcp-Session-Id`. */
-  private[fastmcp] def makeProtocolSession(sessionId: String): UIO[Session] =
-    build(sessionId, supportsTasks = true, clientKey = None, isProtocolSession = true)
+  /** A durable legacy streamable-HTTP session, whose id is the client's `Mcp-Session-Id`.
+    * `clientKey` is the peer address of the `initialize` that opened it, when the backend knows it.
+    */
+  private[fastmcp] def makeProtocolSession(
+      sessionId: String,
+      clientKey: Option[String] = None
+  ): UIO[Session] =
+    build(sessionId, supportsTasks = true, clientKey, isProtocolSession = true)
 
   private def build(
       sessionId: String,

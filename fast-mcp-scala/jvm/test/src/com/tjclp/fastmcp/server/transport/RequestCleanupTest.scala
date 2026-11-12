@@ -135,7 +135,7 @@ class RequestCleanupTest extends AnyFunSuite with Matchers:
           spans: List[LogSpan],
           annotations: Map[String, String]
       ): Unit =
-        if message().contains("evicted idle session") then
+        if message().contains("evicted session") then
           target.get.foreach { fiber =>
             Unsafe.unsafe(implicit u => fiber.unsafe.interrupt(Cause.interrupt(FiberId.None)))
           }
