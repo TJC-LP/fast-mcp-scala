@@ -27,15 +27,27 @@ class ConformanceGapsTest extends AnyFunSuite with Matchers:
 
   test("HostGuard allows loopback and rejects foreign Host/Origin when an allowlist is set") {
     val allowed = Set("127.0.0.1", "localhost", "[::1]")
-    HostGuard.isAllowed(Some("127.0.0.1:8077"), None, allowed) shouldBe true
-    HostGuard.isAllowed(Some("localhost:8077"), Some("http://localhost:8077"), allowed) shouldBe true
-    HostGuard.isAllowed(None, None, allowed) shouldBe true // absent Host is not the rebinding threat
-    HostGuard.isAllowed(Some("evil.example.com"), None, allowed) shouldBe false
-    HostGuard.isAllowed(Some("127.0.0.1:8077"), Some("http://evil.example.com"), allowed) shouldBe false
+    HostGuard.isAllowed(Some("127.0.0.1:8077"), None, allowed, Set.empty) shouldBe true
+    HostGuard.isAllowed(Some("localhost:8077"), Some("http://localhost:8077"), allowed, Set.empty) shouldBe true
+    HostGuard.isAllowed(None, None, allowed, Set.empty) shouldBe true // absent Host is not the rebinding threat
+    HostGuard.isAllowed(Some("evil.example.com"), None, allowed, Set.empty) shouldBe false
+    HostGuard.isAllowed(Some("127.0.0.1:8077"), Some("http://evil.example.com"), allowed, Set.empty) shouldBe false
   }
 
-  test("HostGuard is disabled (always allows) when the allowlist is empty") {
-    HostGuard.isAllowed(Some("evil.example.com"), Some("http://evil.example.com"), Set.empty) shouldBe true
+  test("HostGuard matches Origin as a full origin: cross-port / scheme / null / bad-port loopback pages are refused") {
+    val allowed = Set("127.0.0.1", "localhost", "[::1]")
+    val host = Some("localhost:8077")
+    HostGuard.isAllowed(host, Some("http://localhost:3000"), allowed, Set.empty) shouldBe false
+    HostGuard.isAllowed(host, Some("https://localhost"), allowed, Set.empty) shouldBe false
+    HostGuard.isAllowed(host, Some("http://127.0.0.1:1"), allowed, Set.empty) shouldBe false
+    HostGuard.isAllowed(host, Some("null"), allowed, Set.empty) shouldBe false
+    HostGuard.isAllowed(host, Some("http://localhost:99999"), allowed, Set.empty) shouldBe false
+    // An explicit allowedOrigins entry admits a cross-port front-end.
+    HostGuard.isAllowed(host, Some("http://localhost:3000"), allowed, Set("http://localhost:3000")) shouldBe true
+  }
+
+  test("HostGuard is disabled (always allows) when both allowlists are empty") {
+    HostGuard.isAllowed(Some("evil.example.com"), Some("http://evil.example.com"), Set.empty, Set.empty) shouldBe true
   }
 
   // ---- inbound progress token (gap 3) ----

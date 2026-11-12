@@ -6,6 +6,8 @@ import org.scalatest.matchers.should.Matchers
 import zio.*
 import zio.stream.*
 
+import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.router.Session
 import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
@@ -72,4 +74,68 @@ class StdioLoopLifecycleTest extends AnyFunSuite with Matchers:
       )
     )
     exit.isInterrupted shouldBe true
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // TJC-2353: every request gets a response, tasks/result for a cancelled task included. Over
+  // stdio there is no stream to close, so the symptom was simply a request id that never came
+  // back (the D6 stdio driver's id 7 stayed unanswered until stdin EOF).
+  // ---------------------------------------------------------------------------------------------
+
+  object StdioTaskServer:
+
+    @Tool(name = Some("blocky"), description = Some("Long-running"), taskSupport = Some("optional"))
+    def blocky(): ZIO[Any, Throwable, String] = ZIO.sleep(30.seconds).as("blocky")
+
+  private val TaskIdPattern = """"taskId":"([^"]+)"""".r
+
+  /** Take frames until one carries the given request id (notifications carry none). */
+  private def replyTo(outQ: Queue[String], id: Int): UIO[String] =
+    outQ.take.repeatUntil(_.contains(s""""id":$id,"""))
+
+  test("tasks/result for a cancelled task is answered over stdio (request id never left dangling)") {
+    val program =
+      for
+        server <- ZIO.succeed(
+          McpServer.typed[Any](
+            "StdioTasks",
+            "0.1.0",
+            McpServerSettings(tasks = TaskSettings(enabled = true, pollIntervalMs = 50))
+          )
+        )
+        _ <- ZIO.attempt(server.scanAnnotations[StdioTaskServer.type])
+        router <- server.buildRouter
+        session <- Session.make("stdio-tasks")
+        inQ <- Queue.unbounded[String]
+        outQ <- Queue.unbounded[String]
+        loop <- StdioLoop.run(router, session, ZStream.fromQueue(inQ), s => outQ.offer(s).unit).fork
+        _ <- inQ.offer(initFrame)
+        _ <- replyTo(outQ, 1)
+        _ <- inQ.offer("""{"jsonrpc":"2.0","method":"notifications/initialized"}""")
+        _ <- inQ.offer(
+          """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"blocky","arguments":{},"task":{"ttl":60000}}}"""
+        )
+        created <- replyTo(outQ, 2)
+        taskId <- ZIO
+          .fromOption(TaskIdPattern.findFirstMatchIn(created).map(_.group(1)))
+          .orElseFail(new RuntimeException(s"no taskId in: $created"))
+        _ <- inQ.offer(
+          s"""{"jsonrpc":"2.0","id":3,"method":"tasks/cancel","params":{"taskId":"$taskId"}}"""
+        )
+        cancelled <- replyTo(outQ, 3)
+        _ <- inQ.offer(
+          s"""{"jsonrpc":"2.0","id":4,"method":"tasks/result","params":{"taskId":"$taskId"}}"""
+        )
+        answer <- replyTo(outQ, 4).timeoutFail(
+          new RuntimeException("tasks/result (id 4) for a cancelled task was never answered")
+        )(5.seconds)
+        _ <- loop.interrupt
+      yield (cancelled, answer, taskId)
+
+    val (cancelled, answer, taskId) = runUnsafe(
+      program.timeoutFail(new RuntimeException("stdio task lifecycle did not complete"))(20.seconds)
+    )
+    cancelled should include(""""status":"cancelled"""")
+    answer should include(""""code":-32602""")
+    answer should include(s"Task $taskId was cancelled")
   }

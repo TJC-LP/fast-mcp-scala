@@ -46,8 +46,6 @@ object ErrorCodes:
   // Reserved by older revisions; modern resource misses use InvalidParams.
   val LegacyResourceNotFound: Int = -32002
 
-  @deprecated("Resource misses use InvalidParams (-32602) as of MCP 2026-07-28", "1.0.0-RC1")
-  val ResourceNotFound: Int = InvalidParams
   val UrlElicitationRequired: Int = -32042
 
   val HeaderMismatch: Int = -32020
@@ -58,6 +56,12 @@ object ErrorCodes:
   // HTTP-layer rejections that never reach the router).
   val TransportError: Int = -32000
   val SessionNotFound: Int = -32001
+
+  /** Server-side capacity exhausted (task pool running ceiling, owner/pool stored-entry caps with
+    * nothing evictable). A server condition rather than a request fault, so clients may retry
+    * later; distinct from `InvalidParams`, which stays the caller's own per-owner cap.
+    */
+  val CapacityExceeded: Int = -32003
 
 /** Opaque pagination cursor. Wire shape is a string; treating it as opaque keeps cursor
   * production/consumption sites from leaking encoding choices.

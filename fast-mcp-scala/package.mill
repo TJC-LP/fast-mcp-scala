@@ -12,7 +12,7 @@ import mill.scalajslib.api._
 import mill.scalajslib.bun._
 import mill.scalanativelib._
 import build.{BuildConfig, CrossPlatformTests, FastMCPModule, FastMCPPublishingBase,
-  FastMCPTestModule, Versions, scala3Version}
+  FastMCPTestModule, ScalaJSTestDepsFix, Versions, scala3Version}
 
 // Namespace module. Aggregate tasks at this level fan out to all three platform children so
 // `./mill fast-mcp-scala.compile` and `./mill fast-mcp-scala.test` cover the whole project
@@ -30,7 +30,7 @@ object `package` extends Module {
   /** Run the JVM test suite, the Scala.js/Bun conformance tests, and the Scala Native tests. */
   def test: T[Unit] = Task {
     jvm.test.testForked()()
-    js.test.bunTest(mill.api.Args())()
+    js.test.testForked()()
     scalaNative.test.testForked()()
     ()
   }
@@ -66,8 +66,31 @@ object `package` extends Module {
       // ZIO Core
       mvn"dev.zio::zio:${Versions.zio}",
       mvn"dev.zio::zio-json:${Versions.zioJson}",
-      // ZIO HTTP for HTTP transports (stateless + streamable)
-      mvn"dev.zio::zio-http:${Versions.zioHttp}"
+      // ZIO HTTP for HTTP transports (stateless + streamable). Netty is deliberately NOT declared
+      // here: zio-http 3.11.4 brings netty 4.2.17.Final itself, so the io.netty tree is a
+      // transitive dependency again and a stdio-only consumer sheds it by excluding
+      // `dev.zio:zio-http_3` alone (docs/native-image.md). The TJC-2327 direct pins that overrode
+      // zio-http 3.4.0's 4.2.3.Final are gone with the bump.
+      mvn"dev.zio::zio-http:${Versions.zioHttp}",
+      // SKILL.md frontmatter parsing for the Skills extension (see Versions.scalaYaml).
+      mvn"org.virtuslab::scala-yaml:${Versions.scalaYaml}"
+    )
+
+    // The netty BOM lands in the published POM as an `import`-scoped `pom` entry — the one place
+    // this build speaks about netty's version. A consumer whose resolver honours it (coursier: Mill,
+    // sbt, scala-cli) keeps every io.netty module zio-http requests on `Versions.netty`, including
+    // the classified native artifacts (`linux-x86_64`, `osx-aarch_64`, ...) that a plain
+    // `groupId:artifactId` pin cannot address under Maven's per-classifier mediation; and it is the
+    // switch to flip if a netty advisory lands before zio-http moves. A BOM import pulls in no
+    // artifact of its own, so excluding zio-http still removes netty from the classpath.
+    override def bomMvnDeps = Seq(mvn"io.netty:netty-bom:${Versions.netty}")
+
+    // Managed (not direct) versions for the org.bouncycastle modules netty-pkitesting drags in —
+    // see Versions.bouncyCastle for the advisories. Lands in the POM as dependencyManagement.
+    override def depManagement = Seq(
+      mvn"org.bouncycastle:bcprov-jdk18on:${Versions.bouncyCastle}",
+      mvn"org.bouncycastle:bcpkix-jdk18on:${Versions.bouncyCastle}",
+      mvn"org.bouncycastle:bcutil-jdk18on:${Versions.bouncyCastle}"
     )
 
     // jvm/test/src plus the socket-HTTP tests in jvm-native/test/src (CrossPlatformTests), which the
@@ -89,6 +112,7 @@ object `package` extends Module {
   object js extends BunScalaJSModule with BunPublishModule with ScalafmtModule
       with FastMCPPublishingBase {
     def scalaVersion = scala3Version
+    def scalaJSVersion = Versions.scalaJs
 
     override def moduleKind = Task { ModuleKind.ESModule }
 
@@ -99,21 +123,24 @@ object `package` extends Module {
     // Shared deps needed by shared/ sources and the JS macro/schema derivation path.
     override def mvnDeps = Seq(
       mvn"dev.zio::zio::${Versions.zio}",
-      mvn"dev.zio::zio-json::${Versions.zioJson}"
+      mvn"dev.zio::zio-json::${Versions.zioJson}",
+      mvn"org.virtuslab::scala-yaml::${Versions.scalaYaml}"
     )
 
     // WartRemover is a JVM-only compiler plugin, so this platform takes the cross-platform flags
     // without the wart traversers.
     override def scalacOptions = BuildConfig.crossScalacOptions
 
-    override def bunDeps = Task {
-      // The TS MCP SDK is NOT a production dependency — no production source `@JSImport`s it and
-      // the published Maven artifact is unaffected. It is declared (pinned) here because the bun
-      // test workspace links this module's node_modules (the plugin has no test-scoped deps yet):
-      // `js.test`'s conformance client resolves `@modelcontextprotocol/sdk` from it. Without the
-      // pin, Bun's runtime auto-install fetched *latest at test time* — a CI time bomb now that
-      // post-2026-07-28 SDK releases change initialize semantics. Production boundary = the
-      // import graph, enforced by RootImportSurface tests, not node_modules.
+    override def bunDevDeps = Task {
+      // The TS MCP SDK is NOT a production dependency — no production source `@JSImport`s it, and
+      // as a dev dependency it stays out of the published bun dependency manifest (mill-bun 0.3
+      // schema v2). It is declared (pinned) here because the bun test workspace links this
+      // module's node_modules: `js.test`'s conformance client resolves `@modelcontextprotocol/sdk`
+      // from it. Without the pin, Bun's runtime auto-install fetched *latest at test time* — a CI
+      // time bomb now that post-2026-07-28 SDK releases change initialize semantics. Resolution is
+      // frozen by the committed `js/bun.lock` (regenerate with `./mill fast-mcp-scala.js.bunLock`).
+      // Production boundary = the import graph, enforced by RootImportSurface tests, not
+      // node_modules.
       Seq("@modelcontextprotocol/sdk@1.29.0")
     }
 
@@ -135,7 +162,8 @@ object `package` extends Module {
       )
     }
 
-    object test extends BunScalaJSTests with TestModule.ScalaTest {
+    // ScalaJSTestDepsFix: see build.mill — keeps the Scala 2.13 stdlib out of the test link.
+    object test extends BunScalaJSTests with TestModule.ScalaTest with ScalaJSTestDepsFix {
       override def mvnDeps = Seq(
         mvn"org.scalatest::scalatest::${Versions.scalaTest}"
       )
@@ -178,7 +206,8 @@ object `package` extends Module {
     // defaults in the shared McpServerSettings.
     override def mvnDeps = Seq(
       mvn"dev.zio::zio::${Versions.zio}",
-      mvn"dev.zio::zio-json::${Versions.zioJson}"
+      mvn"dev.zio::zio-json::${Versions.zioJson}",
+      mvn"org.virtuslab::scala-yaml::${Versions.scalaYaml}"
     )
 
     // Deterministic main for `nativeLink`: shared/ carries several example mains, and this is the
@@ -274,9 +303,10 @@ object `package` extends Module {
 
       // Netty-scoped counter to the stale GraalVM-metadata-repo entries: the repo marks netty
       // `override: true` but its newest netty configs are 4.1.x-era (predating netty 4.2's
-      // module renames). With the latest-config fallback off, the untested 4.2.3 gets no repo
-      // config and no `--exclude-config` stripping of its own (correct) in-jar metadata — while
-      // every other dependency keeps Mill's default repo-metadata behavior.
+      // module renames). With the latest-config fallback off, the 4.2.x version in use
+      // (`Versions.netty`, untested by the repo) gets no repo config and no `--exclude-config`
+      // stripping of its own (correct) in-jar metadata — while every other dependency keeps
+      // Mill's default repo-metadata behavior.
       override def nativeUseLatestConfigWhenVersionIsUntested = Task { false }
 
       override def nativeImageOptions = Task {

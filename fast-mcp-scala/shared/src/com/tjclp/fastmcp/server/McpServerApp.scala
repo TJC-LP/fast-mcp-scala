@@ -4,7 +4,9 @@ package server
 import zio.*
 
 import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.core.skills.McpSkill
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
+import com.tjclp.fastmcp.server.skills.SkillProvider
 
 /** Runtime-scan capture of annotated methods on a specific singleton type. The `inline given` in
   * the companion expands at the subclass's *instantiation* site — where `Self` is concrete — so the
@@ -39,6 +41,15 @@ object SelfScan:
   * don't depend on a ZIO environment. For layer-aware servers, build an `McpServer.typed[R]`
   * directly and call `runHttp().provide(...)`.
   *
+  * The ZIO `bootstrap` layer defaults to the transport's ([[TransportRunner.bootstrap]]): on stdio,
+  * ZIO's default logger is replaced by the same format on stderr, because stdout is the wire
+  * ([[transport.StdioLogging]]). To install your own logger, override it — as a `val`, which is how
+  * `ZIOAppDefault` declares it:
+  * {{{
+  *   override val bootstrap: ZLayer[ZIOAppArgs, Any, Any] =
+  *     Runtime.removeDefaultLoggers ++ Runtime.addLogger(myLogger)
+  * }}}
+  *
   * @tparam T
   *   transport marker ([[Transport.Stdio]] or [[Transport.Http]])
   * @tparam Self
@@ -60,6 +71,19 @@ trait McpServerApp[T <: Transport, Self <: Singleton](using
   def staticResources: List[McpStaticResource] = Nil
   def templateResources: List[McpTemplateResource[?]] = Nil
 
+  /** Skills to publish (Skills extension). Published as one atomic batch after the resources, so a
+    * skill file colliding with a static resource fails startup instead of shadowing it.
+    */
+  def skills: List[McpSkill] = Nil
+
+  /** Generated / remote / authorization-scoped skill catalogs (Skills extension). */
+  def skillProviders: List[SkillProvider[Any]] = Nil
+
+  /** Transport-provided runtime layer (stdio: ZIO logs to stderr, see [[transport.StdioLogging]]).
+    * Override with your own `val` to install a different logger.
+    */
+  override val bootstrap: ZLayer[ZIOAppArgs, Any, Any] = runner.bootstrap
+
   final def buildCore: ZIO[Any, Throwable, McpServerCore[Any]] =
     val core = factory.build(name, version, settings)
     val _ = selfScan(core)
@@ -68,6 +92,8 @@ trait McpServerApp[T <: Transport, Self <: Singleton](using
       _ <- ZIO.foreachDiscard(prompts)(core.prompt(_))
       _ <- ZIO.foreachDiscard(staticResources)(core.resource(_))
       _ <- ZIO.foreachDiscard(templateResources)(core.resource(_))
+      _ <- ZIO.when(skills.nonEmpty)(core.skills(skills))
+      _ <- ZIO.foreachDiscard(skillProviders)(core.skillProvider(_))
     yield core
 
   override final def run: ZIO[Any, Throwable, Unit] =

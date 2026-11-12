@@ -8,6 +8,7 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.wire.*
 import com.tjclp.fastmcp.jsonrpc.*
 import com.tjclp.fastmcp.jsonrpc.JsonRpcMessage.*
+import com.tjclp.fastmcp.server.LimitSettings
 import com.tjclp.fastmcp.server.transport.HttpHeaderValidation
 
 /** Canonical MCP request method names. */
@@ -27,6 +28,10 @@ object Methods:
   val CompletionComplete = "completion/complete"
   val LoggingSetLevel = "logging/setLevel"
   val SubscriptionsListen = "subscriptions/listen"
+  // Skills extension (io.modelcontextprotocol/skills, SEP-2640)
+  val SkillsList = Skills.MethodSkillsList
+  val SkillsGet = Skills.MethodSkillsGet
+  val ResourcesDirectoryRead = Skills.MethodResourcesDirectoryRead
 
 /** The MCP dispatcher — the native-Scala replacement for the Java SDK's `McpAsyncServer` and the TS
   * SDK's `Server`.
@@ -54,6 +59,9 @@ object Methods:
   *   advertise legacy `resources.subscribe`
   * @param listChanged
   *   advertise `listChanged` on tools/resources/prompts
+  * @param limits
+  *   inbound input limits; transports read `router.limits` and hand it to `MessageLoop.parseFrame`
+  *   so every frame on every transport is bounded by the server's settings
   */
 final class McpRouter[R](
     serverInfo: Implementation,
@@ -64,7 +72,8 @@ final class McpRouter[R](
     toolInputSchemas: Map[String, Json],
     tasksEnabled: Boolean,
     resourcesSubscribe: Boolean,
-    listChanged: Boolean
+    listChanged: Boolean,
+    val limits: LimitSettings = LimitSettings()
 ):
 
   /** Capabilities derived from the registered handler set. Issue #56 dies here: a capability is
@@ -186,26 +195,54 @@ final class McpRouter[R](
   ): URIO[R, Option[JsonRpcMessage]] =
     RequestContext.decode(params) match
       case Left(err) => ZIO.some(Failure(Some(id), err.toErrorObject))
-      case Right(context) if context.protocolVersion != Protocol.LatestProtocolVersion =>
-        ZIO.some(
-          Failure(
-            Some(id),
-            McpError
-              .unsupportedProtocolVersion(
-                context.protocolVersion,
-                List(Protocol.LatestProtocolVersion)
-              )
-              .toErrorObject
-          )
+      case Right(context) => dispatchModern(session, id, method, params, context)
+
+  /** Dispatch a 2026-07-28 request whose [[RequestContext]] the transport has ALREADY decoded (via
+    * `ModernHttpValidation.validateRequestContext`), skipping the second `RequestContext.decode`
+    * that [[dispatch]] would otherwise perform. Same checks and semantics as the modern arm of
+    * [[dispatch]]: version gate, methods removed from the stateless path, then the fiber-local
+    * request context around the handler.
+    */
+  def dispatchModern(
+      session: Session,
+      request: JsonRpcMessage.Request,
+      context: RequestContext
+  ): URIO[R, Option[JsonRpcMessage]] =
+    dispatchModern(
+      session,
+      request.id,
+      request.method,
+      request.params.getOrElse(Json.Null),
+      context
+    )
+
+  private def dispatchModern(
+      session: Session,
+      id: RequestId,
+      method: String,
+      params: Json,
+      context: RequestContext
+  ): URIO[R, Option[JsonRpcMessage]] =
+    if context.protocolVersion != Protocol.LatestProtocolVersion then
+      ZIO.some(
+        Failure(
+          Some(id),
+          McpError
+            .unsupportedProtocolVersion(
+              context.protocolVersion,
+              List(Protocol.LatestProtocolVersion)
+            )
+            .toErrorObject
         )
-      case Right(_) if removedFromStateless.contains(method) =>
-        ZIO.some(Failure(Some(id), McpError.methodNotFound(method).toErrorObject))
-      case Right(context) =>
-        val effectiveContext =
-          if modernCapabilities.logging.isDefined then context else context.copy(logLevel = None)
-        session.runWithRequest(id, effectiveContext)(
-          dispatchInitialized(session, id, method, params, modern = true)
-        )
+      )
+    else if removedFromStateless.contains(method) then
+      ZIO.some(Failure(Some(id), McpError.methodNotFound(method).toErrorObject))
+    else
+      val effectiveContext =
+        if modernCapabilities.logging.isDefined then context else context.copy(logLevel = None)
+      session.runWithRequest(id, effectiveContext)(
+        dispatchInitialized(session, id, method, params, modern = true)
+      )
 
   private def dispatchInitialized(
       session: Session,
@@ -298,8 +335,18 @@ object McpRouter:
         else capabilities.extensions
     )
 
+  /** The `io.modelcontextprotocol/skills` extension settings object: `{}` declares the extension
+    * with no optional features; `{"directoryRead": true}` additionally commits the server to
+    * `resources/directory/read`. Settings sit inline under the identifier (SEP-2133), never in an
+    * envelope.
+    */
+  def skillsExtension(directoryRead: Boolean): Json =
+    if directoryRead then Json.Obj("directoryRead" -> Json.Bool(true)) else Json.Obj()
+
   /** Derive the compatibility capability superset from registered methods plus settings. Modern
-    * discovery transforms removed fields into their extension-era representation.
+    * discovery transforms removed fields into their extension-era representation. The Skills
+    * extension is declared (in BOTH eras — an older base revision does not disable it) exactly when
+    * its methods are registered, with `directoryRead` mirroring `resources/directory/read`.
     */
   def deriveCapabilities(
       methods: Set[String],
@@ -308,7 +355,14 @@ object McpRouter:
       listChanged: Boolean
   ): ServerCapabilities =
     val lc = Option.when(listChanged)(true)
+    val skills: Option[Map[String, Json]] =
+      Option.when(methods.contains(Methods.SkillsList) && methods.contains(Methods.SkillsGet))(
+        Map(
+          Skills.ExtensionId -> skillsExtension(methods.contains(Methods.ResourcesDirectoryRead))
+        )
+      )
     ServerCapabilities(
+      extensions = skills,
       tools = Option.when(methods.contains(Methods.ToolsList))(ToolsCapability(listChanged = lc)),
       resources = Option.when(methods.contains(Methods.ResourcesList))(
         ResourcesCapability(subscribe = Option.when(resourcesSubscribe)(true), listChanged = lc)

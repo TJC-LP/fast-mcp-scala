@@ -380,7 +380,7 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
 
       val client = new RawClient(port)
       client.send(
-        s"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: ${SocketHttpServer.MaxBodyBytes + 1}\r\n\r\n"
+        s"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: ${baseSettings.maxRequestBodyBytes + 1}\r\n\r\n"
       )
       val reply = client.readReply()
       reply.status shouldBe 413
@@ -462,7 +462,8 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       client.send(
         "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" +
           "Accept: application/json, text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n" +
-          "1000001\r\n" // 16 MiB + 1, no data follows
+          // maxRequestBodyBytes + 1, no data follows
+          s"${Integer.toHexString(baseSettings.maxRequestBodyBytes + 1)}\r\n"
       )
       val reply = client.readReply()
       reply.status shouldBe 413

@@ -109,11 +109,15 @@ private[fastmcp] object ModernHttpValidation:
       _ <- router.validateHttpMethod(notification.method, header).left.map(400 -> _)
     yield ()
 
-  def validateRequest[R](
+  /** Same checks as [[validateRequest]], returning the decoded [[RequestContext]] so the transport
+    * can hand it to `McpRouter.dispatchModern` and skip the second `RequestContext.decode`. Frames
+    * reaching this point have already passed the input limits in `MessageLoop.parseFrame`.
+    */
+  def validateRequestContext[R](
       router: McpRouter[R],
       rpc: JsonRpcMessage.Request,
       header: String => Option[String]
-  ): Either[(Int, McpError), Unit] =
+  ): Either[(Int, McpError), RequestContext] =
     for
       _ <- Either.cond(
         contentTypeOk(header),
@@ -156,4 +160,14 @@ private[fastmcp] object ModernHttpValidation:
         (),
         404 -> McpError.methodNotFound(rpc.method)
       )
-    yield ()
+    yield context
+
+  /** Signature-stable form of [[validateRequestContext]] (both platform backends declare
+    * `Either[(Int, McpError), Unit]` return types around it).
+    */
+  def validateRequest[R](
+      router: McpRouter[R],
+      rpc: JsonRpcMessage.Request,
+      header: String => Option[String]
+  ): Either[(Int, McpError), Unit] =
+    validateRequestContext(router, rpc, header).map(_ => ())

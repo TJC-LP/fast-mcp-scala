@@ -38,9 +38,6 @@ private[fastmcp] object SocketHttpServer:
   /** Request line + headers cap; larger heads are rejected with `431`. */
   val MaxHeadBytes: Int = 8 * 1024
 
-  /** Request body cap (declared or chunked); larger bodies are rejected with `413`. */
-  val MaxBodyBytes: Int = 16 * 1024 * 1024
-
   /** Concurrent connection cap — one blocking thread each while idle. Extra connections wait in the
     * kernel backlog.
     */
@@ -88,7 +85,7 @@ private[fastmcp] object SocketHttpServer:
     * listener, and — through fiber supervision — every connection fiber, each of which closes its
     * socket.
     */
-  def start[R](host: String, port: Int)(
+  def start[R](host: String, port: Int, maxBodyBytes: Int)(
       handle: HttpRequest => URIO[R, HttpReply]
   ): ZIO[R & Scope, Throwable, Started] =
     for
@@ -102,7 +99,7 @@ private[fastmcp] object SocketHttpServer:
         }
       )(s => ZIO.attemptBlocking(s.close()).ignore)
       gate <- TSemaphore.make(MaxConnections.toLong).commit
-      loop <- acceptLoop(server, gate, handle)
+      loop <- acceptLoop(server, gate, maxBodyBytes, handle)
         .tapErrorCause(cause => debugLog(s"accept loop failed: ${cause.prettyPrint}"))
         .forkScoped
     yield Started(Bound(host, server.getLocalPort), loop)
@@ -110,6 +107,7 @@ private[fastmcp] object SocketHttpServer:
   private def acceptLoop[R](
       server: ServerSocket,
       gate: TSemaphore,
+      maxBodyBytes: Int,
       handle: HttpRequest => URIO[R, HttpReply]
   ): ZIO[R, Throwable, Nothing] =
     val acceptOne: IO[Throwable, Option[Socket]] =
@@ -126,13 +124,14 @@ private[fastmcp] object SocketHttpServer:
             // Plain `fork`: connections are children of the accept loop, so ending the loop
             // (scope close) interrupts them all; per-connection `forkScoped` would pile up
             // finalizers in the server scope for the life of the process.
-            serveConnection(socket, handle).ensuring(gate.release.commit).fork.unit
+            serveConnection(socket, maxBodyBytes, handle).ensuring(gate.release.commit).fork.unit
         }
       )
     step.forever
 
   private def serveConnection[R](
       socket: Socket,
+      maxBodyBytes: Int,
       handle: HttpRequest => URIO[R, HttpReply]
   ): URIO[R, Unit] =
     ZIO
@@ -142,7 +141,7 @@ private[fastmcp] object SocketHttpServer:
             ZIO.attempt {
               socket.setTcpNoDelay(true)
               socket.setSoTimeout(IdleReadTimeoutMs)
-              new Connection(socket)
+              new Connection(socket, maxBodyBytes)
             }
           )(_.close)
           .flatMap(_.run(handle))
@@ -158,7 +157,11 @@ private[fastmcp] object SocketHttpServer:
 
   /** One accepted socket: the request loop, framing, and response writing. */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private final class Connection(socket: Socket):
+  private final class Connection(socket: Socket, maxBodyBytes: Int):
+
+    /** The TCP peer address — the default owner key for bearer-task buckets. */
+    private val peer: Option[String] = Option(socket.getInetAddress).map(_.getHostAddress)
+
     private val input = new ConnectionInput(socket.getInputStream)
     private val out: OutputStream = new BufferedOutputStream(socket.getOutputStream, 16 * 1024)
 
@@ -191,7 +194,7 @@ private[fastmcp] object SocketHttpServer:
         head: Head,
         handle: HttpRequest => URIO[R, HttpReply]
     ): ZIO[R, Throwable, Boolean] =
-      head.bodyFraming(MaxBodyBytes) match
+      head.bodyFraming(maxBodyBytes) match
         case Left(rejection) => reject(rejection).as(false)
         case Right(framing) =>
           // The body is read lazily: the shared handler forces `request.body` only after its
@@ -203,7 +206,9 @@ private[fastmcp] object SocketHttpServer:
           val failed = new AtomicReference[Option[Rejection]](None)
           for
             body <- deferredBody(head, framing, consumed, failed).memoize
-            reply <- handle(HttpRequest(head.method, head.path, head.header, body))
+            reply <- handle(
+              HttpRequest(head.method, head.path, head.header, head.headerJoined, body, peer)
+            )
             // A body read that failed mid-way keeps its own status (413 for an over-cap chunked
             // body, 400 for truncation) rather than the handler's generic 400.
             finalReply = failed.get.fold(reply)(r =>
@@ -247,7 +252,7 @@ private[fastmcp] object SocketHttpServer:
             case None => Left(Rejection(400, "Request body ended prematurely"))
           }
         case Framing.Chunked =>
-          blocking(input.readChunked(MaxBodyBytes))
+          blocking(input.readChunked(maxBodyBytes))
             .map(_.map(bytes => new String(bytes, StandardCharsets.UTF_8)))
 
     /** Transport-level rejection: the same JSON-RPC error body the MCP layer uses, then close. */

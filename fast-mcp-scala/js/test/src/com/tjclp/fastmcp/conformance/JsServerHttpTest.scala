@@ -13,9 +13,14 @@ import zio.*
 import zio.json.*
 
 import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.facades.runtime.BunServer
 import com.tjclp.fastmcp.server.TaskSettings
-import com.tjclp.fastmcp.server.transport.{startStatefulHttp, startStatelessHttp}
+import com.tjclp.fastmcp.server.router.Session
+import com.tjclp.fastmcp.server.transport.{
+  BunHttpHandle,
+  JsTransportBackend,
+  startStatefulHttp,
+  startStatelessHttp
+}
 
 /** Exercises the shared `McpServer` over `JsTransportBackend`'s Bun HTTP listener (stateless +
   * stateful) using the global `fetch` API. No TS SDK client involvement — just a raw HTTP wire
@@ -51,7 +56,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   private val port = 38917
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
-  private var bunServer: BunServer = scala.compiletime.uninitialized
+  private var bunServer: BunHttpHandle = scala.compiletime.uninitialized
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private var fiber: Fiber.Runtime[Throwable, Unit] = scala.compiletime.uninitialized
@@ -81,7 +86,67 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
 
   override def afterAll(): Unit =
     if bunServer != null then bunServer.stop()
+    keepAliveHandle.foreach(_.stop())
+    idleTimeoutHandle.foreach(_.stop())
     super.afterAll()
+
+  private def delay(ms: Int): Future[Unit] =
+    val promise = Promise[Unit]()
+    val _ = js.timers.setTimeout(ms.toDouble)(promise.success(()))
+    promise.future
+
+  /** Fail `f` with a clear message instead of hanging the suite when a stream never closes. */
+  private def withTimeout[A](f: Future[A], ms: Int, what: String): Future[A] =
+    val promise = Promise[A]()
+    val timer = js.timers.setTimeout(ms.toDouble) {
+      val _ = promise.tryFailure(
+        new java.util.concurrent.TimeoutException(s"$what did not complete within ${ms}ms")
+      )
+    }
+    f.onComplete { result =>
+      js.timers.clearTimeout(timer)
+      val _ = promise.tryComplete(result)
+    }
+    promise.future
+
+  private def text(resp: js.Dynamic): Future[String] =
+    fromJsPromise(resp.text().asInstanceOf[js.Promise[String]])
+
+  private def status(resp: js.Dynamic): Int = resp.status.asInstanceOf[Int]
+
+  private def header(resp: js.Dynamic, name: String): Option[String] =
+    Option(resp.headers.get(name).asInstanceOf[String])
+
+  private def fetchAt(port: Int, init: js.Dynamic, path: String = "/mcp"): Future[js.Dynamic] =
+    fromJsPromise(
+      js.Dynamic.global
+        .fetch(s"http://127.0.0.1:$port$path", init)
+        .asInstanceOf[js.Promise[js.Dynamic]]
+    )
+
+  private val legacyInitBody =
+    """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1.0"}}}"""
+  private val legacyListBody = """{"jsonrpc":"2.0","id":2,"method":"tools/list"}"""
+
+  private def jsonHeaders(extra: (String, String)*): js.Dictionary[String] =
+    val headers = js.Dictionary[String](
+      "content-type" -> "application/json",
+      "accept" -> "application/json, text/event-stream"
+    )
+    extra.foreach { case (k, v) => headers(k) = v }
+    headers
+
+  private def statefulServer(name: String, port: Int, tweak: McpServerSettings => McpServerSettings)
+      : BunHttpHandle =
+    com.tjclp.fastmcp.server
+      .McpServer(
+        name,
+        "0.1.0",
+        tweak(
+          McpServerSettings(host = "127.0.0.1", port = port, httpEndpoint = "/mcp", stateless = false)
+        )
+      )
+      .startStatefulHttp()
 
   private def setupStatelessServer(): Future[Unit] =
     val server = com.tjclp.fastmcp.server.McpServer(
@@ -238,11 +303,286 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
         "/mcp",
         js.Dynamic.literal(
           method = "POST",
-          headers = js.Dictionary("accept" -> "text/plain"),
+          headers = js.Dictionary("content-type" -> "application/json", "accept" -> "text/plain"),
           body = "{}"
         )
       ).map(resp => resp.status.asInstanceOf[Int] shouldBe 406)
     }
+  }
+
+  // ---- F5 §2: Content-Type gate, before body read or minting ----
+
+  it should "reject a text/plain legacy POST with 415 and no session header (stateless)" in {
+    serverReady.flatMap { _ =>
+      // A string body with no explicit content-type: Bun's fetch sends text/plain;charset=UTF-8 —
+      // exactly the CORS-simple request a cross-site page can fire without a preflight.
+      val init = js.Dynamic.literal(
+        method = "POST",
+        headers = js.Dictionary("accept" -> "application/json, text/event-stream"),
+        body = legacyInitBody
+      )
+      for
+        resp <- httpFetch("/mcp", init)
+        body <- text(resp)
+      yield
+        status(resp) shouldBe 415
+        header(resp, "mcp-session-id") shouldBe None
+        body should include("-32000")
+        body should include("application/json")
+    }
+  }
+
+  it should "reject a Content-Type-less Blob legacy tools/call with 415 (stateless)" in {
+    serverReady.flatMap { _ =>
+      val callBody =
+        """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ping","arguments":{"msg":"csrf"}}}"""
+      val blob = js.Dynamic.newInstance(js.Dynamic.global.Blob)(js.Array(callBody))
+      val init = js.Dynamic.literal(method = "POST", body = blob)
+      for
+        resp <- httpFetch("/mcp", init)
+        body <- text(resp)
+      yield
+        status(resp) shouldBe 415
+        body should not include "csrf"
+    }
+  }
+
+  it should "accept application/json with a charset parameter" in {
+    serverReady.flatMap { _ =>
+      httpFetch(
+        "/mcp",
+        js.Dynamic.literal(
+          method = "POST",
+          headers = js.Dictionary(
+            "content-type" -> "application/json; charset=utf-8",
+            "accept" -> "application/json, text/event-stream"
+          ),
+          body = legacyListBody
+        )
+      ).map(resp => status(resp) shouldBe 200)
+    }
+  }
+
+  // ---- F10: header sentinel + error boundary ----
+
+  it should "answer `Mcp-Name: =?base64?=` with a small JSON -32020, never a trace or a debug page" in {
+    serverReady.flatMap { _ =>
+      val init = js.Dynamic.literal(
+        method = "POST",
+        headers = jsonHeaders(
+          "mcp-protocol-version" -> "2026-07-28",
+          "mcp-method" -> "tools/call",
+          "mcp-name" -> "=?base64?="
+        ),
+        body =
+          """{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+      )
+      for
+        resp <- httpFetch("/mcp", init)
+        body <- text(resp)
+      yield
+        status(resp) shouldBe 400
+        header(resp, "content-type").getOrElse("") should include("application/json")
+        body should include("-32020")
+        body should include("Malformed Base64 header sentinel")
+        body should not include "Exception"
+        body should not include "StringIndexOutOfBounds"
+        body should not include "main.js"
+        body should not include "    at "
+        body should not include "<html"
+        body.length should be < 512
+    }
+  }
+
+  it should "answer `Mcp-Name: =?base64??=` (empty payload) with -32020 as well" in {
+    serverReady.flatMap { _ =>
+      val init = js.Dynamic.literal(
+        method = "POST",
+        headers = jsonHeaders(
+          "mcp-protocol-version" -> "2026-07-28",
+          "mcp-method" -> "tools/call",
+          "mcp-name" -> "=?base64??="
+        ),
+        body =
+          """{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+      )
+      for
+        resp <- httpFetch("/mcp", init)
+        body <- text(resp)
+      yield
+        status(resp) shouldBe 400
+        body should include("-32020")
+        body should not include "Exception"
+    }
+  }
+
+  "Bun.serve options" should "run with development=false, an error callback, the body cap and idleTimeout 0 (NODE_ENV-independent)" in {
+    val settings = McpServerSettings(
+      host = "127.0.0.1",
+      port = 1, // never bound: serveOptions does not call Bun.serve
+      stateless = true,
+      maxRequestBodyBytes = 4096
+    )
+    val server = com.tjclp.fastmcp.server.McpServer("JsHttpOptionsServer", "0.1.0", settings)
+    runZio(server.tool(pingTool) *> server.buildRouter).flatMap { router =>
+      val opts =
+        JsTransportBackend.serveOptions(router, Runtime.default, settings, js.Dictionary.empty[Session])
+      opts.development.getOrElse(true) shouldBe false
+      opts.maxRequestBodySize.getOrElse(0) shouldBe 4096
+      opts.port.getOrElse(0) shouldBe 1
+      opts.error.isDefined shouldBe true
+      // 0 disables Bun's runtime idle close (its 10 s default cut quiet SSE streams, D6 8.15).
+      opts.idleTimeout.getOrElse(-1) shouldBe 0
+      // Bun calls fetch(request, server): the closure must take both.
+      opts.fetch.asInstanceOf[js.Dynamic].length.asInstanceOf[Int] shouldBe 2
+
+      val errorResponse = opts.error.map(_(js.Dynamic.literal(message = "kaboom"))).getOrElse(fail())
+      // Fake Web Requests drive handleFetch below Bun's own network layer, so the FIRST-PARTY
+      // gates (postGate 413 on Content-Length, post-read bodyTooLarge 413) are what answers.
+      def fakeRequest(headers: Map[String, String], body: String): js.Dynamic =
+        js.Dynamic.literal(
+          url = "http://127.0.0.1:1/mcp",
+          method = "POST",
+          headers = js.Dynamic.newInstance(js.Dynamic.global.Headers)(js.Dictionary(headers.toSeq*)),
+          text = js.Any.fromFunction0(() => js.Promise.resolve[String](body))
+        )
+      val json = Map("content-type" -> "application/json", "accept" -> "application/json")
+      def call(req: js.Dynamic): Future[(Int, String)] =
+        fromJsPromise(opts.fetch(req, js.undefined.asInstanceOf[js.Dynamic]))
+          .flatMap(resp => text(resp).map(body => (status(resp), body)))
+      for
+        errorBody <- text(errorResponse)
+        // First-party boundary: a request object that makes handleFetch throw synchronously
+        // (`new URL("not a url")`) must resolve — not reject — to a JSON-RPC 500.
+        boundaryResponse <- fromJsPromise(
+          opts.fetch(
+            js.Dynamic.literal(url = "not a url", method = "POST"),
+            js.undefined.asInstanceOf[js.Dynamic]
+          )
+        )
+        boundaryBody <- text(boundaryResponse)
+        declared <- call(fakeRequest(json + ("content-length" -> "9999"), legacyListBody))
+        oversized <- call(fakeRequest(json, "x" * 5000))
+        fine <- call(fakeRequest(json, legacyListBody))
+        // A body read that fails is a controlled 400, never a rejected promise.
+        brokenRead <- call(
+          js.Dynamic.literal(
+            url = "http://127.0.0.1:1/mcp",
+            method = "POST",
+            headers = js.Dynamic.newInstance(js.Dynamic.global.Headers)(js.Dictionary(json.toSeq*)),
+            text = js.Any.fromFunction0(() => js.Promise.reject(js.Error("socket reset")).asInstanceOf[js.Promise[String]])
+          )
+        )
+      yield
+        declared._1 shouldBe 413
+        declared._2 should include("-32000")
+        declared._2 should include("4096 bytes")
+        oversized._1 shouldBe 413
+        oversized._2 should include("-32000")
+        oversized._2 should not include "-32700"
+        fine._1 shouldBe 200
+        fine._2 should include("\"tools\"")
+        brokenRead._1 shouldBe 400
+        brokenRead._2 should include("-32000")
+        brokenRead._2 should not include "socket reset"
+        status(errorResponse) shouldBe 500
+        errorBody should include("-32000")
+        errorBody should include("Internal server error")
+        errorBody should not include "kaboom"
+        status(boundaryResponse) shouldBe 500
+        header(boundaryResponse, "content-type").getOrElse("") should include("application/json")
+        boundaryBody should include("-32000")
+        boundaryBody should include("Internal server error")
+        boundaryBody should not include "Exception"
+        boundaryBody should not include "    at "
+        boundaryBody should not include "not a url"
+    }
+  }
+
+  "a dying tool on Bun" should "be answered in-band as JSON (router boundary), never a raw 500 or HTML" in {
+    val boomPort = 38927
+    val boomTool = McpTool
+      .withSchema[PingArgs, String](
+        name = "boom",
+        inputSchema = pingSchema,
+        description = Some("Dies with a defect")
+      )
+      .contextual((_, _) => ZIO.die(new IllegalStateException("boom: secret handler state")))
+    val server = com.tjclp.fastmcp.server.McpServer(
+      "JsHttpBoomServer",
+      "0.1.0",
+      McpServerSettings(host = "127.0.0.1", port = boomPort, httpEndpoint = "/mcp", stateless = true)
+    )
+    runZio(server.tool(boomTool).unit).flatMap { _ =>
+      val handle = server.startStatelessHttp()
+      val checked = for
+        resp <- fetchAt(
+          boomPort,
+          js.Dynamic.literal(
+            method = "POST",
+            headers = jsonHeaders(),
+            body =
+              """{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"boom","arguments":{"msg":"x"}}}"""
+          )
+        )
+        body <- text(resp)
+      yield
+        status(resp) shouldBe 200
+        header(resp, "content-type").getOrElse("") should include("application/json")
+        body should include("\"jsonrpc\"")
+        body should not include "<html"
+        body should not include "    at "
+      checked.andThen { case _ => handle.stop() }
+    }
+  }
+
+  // ---- F1 §2: body cap ----
+
+  "maxRequestBodyBytes on Bun" should "answer 413 for a declared oversize body and never 200/500 for a streamed one" in {
+    val capPort = 38926
+    val handle = statefulServer(
+      "JsHttpBodyCapServer",
+      capPort,
+      _.copy(stateless = true, maxRequestBodyBytes = 64)
+    )
+    val big = "a" * 200
+    val declared = fetchAt(
+      capPort,
+      js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = big)
+    ).flatMap(resp => text(resp).map(body => (status(resp), body)))
+
+    val encoder = js.Dynamic.newInstance(js.Dynamic.global.TextEncoder)()
+    val source = js.Dynamic.literal(
+      start = js.Any.fromFunction1((controller: js.Dynamic) =>
+        val _ = controller.enqueue(encoder.encode(big))
+        val _ = controller.close()
+      )
+    )
+    val stream = js.Dynamic.newInstance(js.Dynamic.global.ReadableStream)(source)
+    val streamed: Future[Option[Int]] = fetchAt(
+      capPort,
+      js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = stream, duplex = "half")
+    ).map(resp => Some(status(resp))).recover { case _: Throwable => None }
+
+    val small = fetchAt(
+      capPort,
+      js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyListBody)
+    ).map(status)
+
+    val checked = for
+      (declaredStatus, declaredBody) <- declared
+      streamedStatus <- streamed
+      smallStatus <- small
+    yield
+      // Bun enforces `maxRequestBodySize` itself first (an empty 413 for a declared oversize body,
+      // an errored body read for a streamed one — which `guarded` maps to a JSON 413); the
+      // first-party gates behind it are proven on fake requests in the "Bun.serve options" test.
+      // Never 200 (parsed) and never 500 (escaped as a defect).
+      declaredStatus shouldBe 413
+      if declaredBody.nonEmpty then declaredBody should include("-32000")
+      streamedStatus.foreach(st => st shouldBe 413)
+      smallStatus shouldBe 200
+    checked.andThen { case _ => handle.stop() }
   }
 
   it should "return 404 for unknown paths" in {
@@ -273,7 +613,99 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     }
   }
 
-  "HostGuard on Bun" should "reject a foreign Origin with 403 when allowedHosts is set" in {
+  "HostGuard on Bun" should "match Origin as a full origin: cross-port/scheme/null are 403, same authority 200" in {
+    val originPort = 38924
+    val handle = statefulServer(
+      "JsHttpOriginServer",
+      originPort,
+      _.copy(stateless = true, allowedHosts = Some(Set("127.0.0.1", "localhost")))
+    )
+    def withOrigin(origin: String): Future[(String, Int, Option[String])] =
+      fetchAt(
+        originPort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("origin" -> origin),
+          body = legacyListBody
+        )
+      ).map(resp => (origin, status(resp), header(resp, "mcp-session-id")))
+
+    val refused = List(
+      "http://localhost:3000",
+      "https://localhost",
+      "http://127.0.0.1:1",
+      "null",
+      "http://localhost:99999",
+      "http://evil.example.com",
+      s"http://localhost:$originPort" // listed hostname, right port, but not this request's Host
+    )
+    val checked = for
+      refusedResults <- Future.sequence(refused.map(withOrigin))
+      same <- withOrigin(s"http://127.0.0.1:$originPort")
+      sameUpper <- withOrigin(s"HTTP://127.0.0.1:$originPort")
+      none <- fetchAt(
+        originPort,
+        js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyListBody)
+      ).map(status)
+    yield
+      refusedResults.foreach { case (origin, st, sid) =>
+        withClue(s"Origin: $origin") {
+          st shouldBe 403
+          sid shouldBe None
+        }
+      }
+      same._2 shouldBe 200
+      sameUpper._2 shouldBe 200
+      none shouldBe 200
+    checked.andThen { case _ => handle.stop() }
+  }
+
+  it should "admit an explicitly listed allowedOrigins entry" in {
+    val listedPort = 38930
+    val handle = statefulServer(
+      "JsHttpAllowedOriginsServer",
+      listedPort,
+      _.copy(
+        stateless = true,
+        allowedHosts = Some(Set("127.0.0.1", "localhost")),
+        allowedOrigins = Some(Set("http://localhost:3000"))
+      )
+    )
+    def withOrigin(origin: String): Future[Int] =
+      fetchAt(
+        listedPort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("origin" -> origin),
+          body = legacyListBody
+        )
+      ).map(status)
+    val checked = for
+      listed <- withOrigin("http://localhost:3000")
+      other <- withOrigin("http://localhost:3001")
+    yield
+      listed shouldBe 200
+      other shouldBe 403
+    checked.andThen { case _ => handle.stop() }
+  }
+
+  it should "refuse to start on an unparseable allowedOrigins entry" in {
+    val server = com.tjclp.fastmcp.server.McpServer(
+      "JsHttpBadOriginsServer",
+      "0.1.0",
+      McpServerSettings(
+        host = "127.0.0.1",
+        port = 38931,
+        stateless = true,
+        allowedOrigins = Some(Set("app.example.com"))
+      )
+    )
+    val thrown = intercept[IllegalArgumentException](server.startStatelessHttp())
+    thrown.getMessage should include("allowedOrigins")
+    Future.successful(succeed)
+  }
+
+  it should "reject a foreign Origin with 403 when allowedHosts is set" in {
     val guardPort = 38920
     val guardServer = com.tjclp.fastmcp.server.McpServer(
       "JsHttpGuardServer",
@@ -394,6 +826,150 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     done.andThen { case _ => mintBunServer.stop() }
   }
 
+  "runHttp (streamable gates)" should "415 a text/plain or Blob initialize and mint nothing" in {
+    val gatePort = 38925
+    val handle = statefulServer("JsHttpGateServer", gatePort, identity)
+    val textPlain = fetchAt(
+      gatePort,
+      js.Dynamic.literal(
+        method = "POST",
+        headers = js.Dictionary("accept" -> "application/json, text/event-stream"),
+        body = legacyInitBody
+      )
+    )
+    val blob = js.Dynamic.newInstance(js.Dynamic.global.Blob)(js.Array(legacyInitBody))
+    val blobPost = fetchAt(gatePort, js.Dynamic.literal(method = "POST", body = blob))
+    val checked = for
+      tp <- textPlain
+      tpBody <- text(tp)
+      bl <- blobPost
+      guessed <- fetchAt(
+        gatePort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("mcp-session-id" -> "guessed-session-id"),
+          body = legacyListBody
+        )
+      )
+    yield
+      status(tp) shouldBe 415
+      header(tp, "mcp-session-id") shouldBe None
+      tpBody should include("-32000")
+      status(bl) shouldBe 415
+      header(bl, "mcp-session-id") shouldBe None
+      status(guessed) shouldBe 404 // nothing was minted by the refused POSTs
+    checked.andThen { case _ => handle.stop() }
+  }
+
+  // ---- F12: sweeper on every entry + bounded store ----
+
+  // Regression net: the sweeper used `repeat(Schedule.spaced(..))`, whose driver reads
+  // `Clock.currentDateTime` → scala-java-time `ZoneId.systemDefault()` → `ZoneRulesException` on
+  // Scala.js without tzdb — the fiber died silently after its first tick and never evicted.
+  "evictIdleSessions on Bun" should "drop an idle session from the dictionary when forked via unsafe.fork" in {
+    val settings = McpServerSettings(sessionIdleTimeout = Some(java.time.Duration.ofMillis(100)))
+    runZio(Session.make("idle-unit")).flatMap { session =>
+      val store = js.Dictionary[Session]("idle-unit" -> session)
+      val sweeper = Unsafe.unsafe(implicit u =>
+        Runtime.default.unsafe.fork(JsTransportBackend.evictIdleSessions(store, settings))
+      )
+      def poll(remaining: Int): Future[Boolean] =
+        if store.isEmpty then Future.successful(true)
+        else if remaining <= 0 then Future.successful(false)
+        else delay(200).flatMap(_ => poll(remaining - 1))
+      poll(remaining = 25).map { evicted =>
+        val _ = Unsafe.unsafe(implicit u => Runtime.default.unsafe.fork(sweeper.interrupt))
+        evicted shouldBe true
+      }
+    }
+  }
+
+  "startStatefulHttp" should "run the idle-session sweeper: a session idle past sessionIdleTimeout 404s" in {
+    val idlePort = 38928
+    val handle = statefulServer(
+      "JsHttpIdleServer",
+      idlePort,
+      _.copy(sessionIdleTimeout = Some(java.time.Duration.ofMillis(200)))
+    )
+    def listWith(sid: String): Future[Int] =
+      fetchAt(
+        idlePort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("mcp-session-id" -> sid),
+          body = legacyListBody
+        )
+      ).map(status)
+    // The sweep interval floors at 1 s; each poll `touch`es the session, so wait out the first
+    // sweep untouched, then allow a few more sweeps before giving up (5 s deadline).
+    def pollUntil404(sid: String, remaining: Int): Future[Int] =
+      listWith(sid).flatMap { st =>
+        if st == 404 || remaining <= 0 then Future.successful(st)
+        else delay(1100).flatMap(_ => pollUntil404(sid, remaining - 1))
+      }
+    val checked = for
+      initResp <- fetchAt(
+        idlePort,
+        js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyInitBody)
+      )
+      _ <- text(initResp)
+      sid = initResp.headers.get("mcp-session-id").asInstanceOf[String]
+      live <- listWith(sid)
+      _ <- delay(1600)
+      afterIdle <- pollUntil404(sid, remaining = 3)
+    yield
+      status(initResp) shouldBe 200
+      live shouldBe 200
+      afterIdle shouldBe 404
+    checked.andThen { case _ => handle.stop() }
+  }
+
+  "maxSessions on Bun" should "evict the longest-idle session at the cap instead of growing the store" in {
+    val capPort = 38929
+    val handle = statefulServer("JsHttpSessionCapServer", capPort, _.copy(maxSessions = Some(2)))
+    def init(): Future[String] =
+      fetchAt(
+        capPort,
+        js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyInitBody)
+      ).flatMap { resp =>
+        text(resp).map { _ =>
+          status(resp) shouldBe 200
+          resp.headers.get("mcp-session-id").asInstanceOf[String]
+        }
+      }
+    def listWith(sid: String): Future[Int] =
+      fetchAt(
+        capPort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("mcp-session-id" -> sid),
+          body = legacyListBody
+        )
+      ).map(status)
+    val checked = for
+      sid1 <- init()
+      _ <- delay(10)
+      sid2 <- init()
+      _ <- delay(10)
+      touched2 <- listWith(sid2) // sid1 is now unambiguously the longest-idle session
+      sid3 <- init() // at the cap: evicts sid1, admits sid3
+      after1 <- listWith(sid1)
+      after2 <- listWith(sid2)
+      after3 <- listWith(sid3)
+      sid4 <- init() // still capped at 2: evicts the next-oldest idle (sid2)
+      after2b <- listWith(sid2)
+      after4 <- listWith(sid4)
+    yield
+      touched2 shouldBe 200
+      after1 shouldBe 404
+      after2 shouldBe 200
+      after3 shouldBe 200
+      after2b shouldBe 404
+      after4 shouldBe 200
+      Option(sid3) should not be None
+    checked.andThen { case _ => handle.stop() }
+  }
+
   "runHttp (stateful tasks)" should "handle tasks/list without params" in {
     val taskPort = 38918
     val taskServer = com.tjclp.fastmcp.server.McpServer(
@@ -444,31 +1020,143 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     done.andThen { case _ => taskBunServer.stop() }
   }
 
-  "runHttp (stateless keepalive)" should "emit pings on a quiet modern POST SSE stream" in {
-    val kaPort = 38923
+  // TJC-2353 twin of TaskHttpTransportTest: a legacy tasks/result for a cancelled task must be
+  // answered with an error frame on Bun too (the stream used to be closed with nothing in it).
+  it should "answer tasks/result for a cancelled task with -32602 instead of closing the stream" in {
+    val cancelPort = 38937
     val server = com.tjclp.fastmcp.server.McpServer(
-      "JsHttpKeepaliveServer",
+      "JsHttpCancelledResultServer",
       "0.1.0",
       McpServerSettings(
         host = "127.0.0.1",
-        port = kaPort,
+        port = cancelPort,
         httpEndpoint = "/mcp",
-        stateless = true,
-        keepAliveInterval = Some(java.time.Duration.ofMillis(50))
+        stateless = false,
+        tasks = TaskSettings(enabled = true, pollIntervalMs = 50)
       )
     )
-    val slowProgressTool = McpTool
-      .withSchema[PingArgs, String](
-        name = "slow-progress",
+    val slowTaskTool = McpTool
+      .withSchema[PingArgs, PingResult](
+        name = "slow-task",
         inputSchema = pingSchema,
-        description = Some("Reports progress, then sleeps")
+        description = Some("Sleeps long enough to be cancelled")
       )
-      .contextual { (_, ctx) =>
-        // The early notification opens the SSE stream; the sleep leaves it quiet for pings.
-        ZIO.foreachDiscard(ctx.get.progressToken)(t => ctx.get.sendProgress(t, 0.5)) *>
-          ZIO.sleep(30.seconds).as("done")
-      }
+      .contextual((args, _) => ZIO.sleep(30.seconds).as(PingResult(args.msg)))
+      .withTaskSupport(TaskSupport.Optional)
+    val taskIdPattern = """"taskId":"([^"]+)"""".r
 
+    def post(body: String, sid: Option[String]): Future[js.Dynamic] =
+      fetchAt(
+        cancelPort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders(sid.toList.map("mcp-session-id" -> _)*),
+          body = body
+        )
+      )
+
+    runZio(server.tool(slowTaskTool).unit).flatMap { _ =>
+      val bun = server.startStatefulHttp()
+      val checked = for
+        initResp <- post(legacyInitBody, None)
+        _ <- text(initResp)
+        sid = header(initResp, "mcp-session-id").getOrElse(fail("no session id"))
+        created <- post(
+          """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow-task","arguments":{"msg":"hi"},"task":{"ttl":60000}}}""",
+          Some(sid)
+        ).flatMap(text)
+        taskId = taskIdPattern
+          .findFirstMatchIn(created)
+          .map(_.group(1))
+          .getOrElse(fail(s"no taskId in: $created"))
+        cancelled <- post(
+          s"""{"jsonrpc":"2.0","id":3,"method":"tasks/cancel","params":{"taskId":"$taskId"}}""",
+          Some(sid)
+        ).flatMap(text)
+        result <- post(
+          s"""{"jsonrpc":"2.0","id":4,"method":"tasks/result","params":{"taskId":"$taskId"}}""",
+          Some(sid)
+        ).flatMap(text)
+      yield
+        cancelled should include(""""status":"cancelled"""")
+        withClue(s"tasks/result body after cancel: <$result> ") {
+          result should include(""""id":4""")
+          result should include(""""code":-32602""")
+          result should include(s"Task $taskId was cancelled")
+        }
+      checked.andThen { case _ => bun.stop() }
+    }
+  }
+
+  // --- keepalive: one stateful server (legacy sessions AND modern POSTs) shared by the tests below ---
+
+  case class SleepArgs(millis: Int)
+  given JsonDecoder[SleepArgs] = DeriveJsonDecoder.gen[SleepArgs]
+
+  private val sleepSchema = ToolInputSchema.unsafeFromJsonString(
+    """{"type":"object","properties":{"millis":{"type":"integer"}},"required":["millis"]}"""
+  )
+
+  /** Sleeps exactly `millis`, then replies. Shared by the keepalive server (called with a multiple
+    * of `keepAliveMs`, so the reply is offered in the same tick as a heartbeat) and the
+    * keepalive-less idle-timeout server below. Given a progress token it first emits a
+    * notification, which makes the reply the stream's SECOND frame — the only shape in which a
+    * modern POST (whose first frame is taken before the SSE response exists) is exposed to the
+    * keepalive path.
+    */
+  private val sleepTool = McpTool
+    .withSchema[SleepArgs, String](
+      name = "sleep",
+      inputSchema = sleepSchema,
+      description = Some("Sleeps for millis, then replies")
+    )
+    .contextual { (args, ctx) =>
+      ZIO.foreachDiscard(ctx.get.progressToken)(t => ctx.get.sendProgress(t, 0.0)) *>
+        ZIO.sleep(args.millis.millis).as(s"slept ${args.millis}")
+    }
+
+  /** Heartbeat period of the shared keepalive server. The `sleep` tool below is called with N and
+    * 3N so its reply lands ON a heartbeat tick.
+    */
+  private val keepAliveMs = 150
+  private val keepAlivePort = 38923
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private var keepAliveHandle: Option[BunHttpHandle] = None
+
+  private def keepAliveServer(): Future[BunHttpHandle] =
+    keepAliveHandle match
+      case Some(handle) => Future.successful(handle)
+      case None =>
+        val server = com.tjclp.fastmcp.server.McpServer(
+          "JsHttpKeepaliveServer",
+          "0.1.0",
+          McpServerSettings(
+            host = "127.0.0.1",
+            port = keepAlivePort,
+            httpEndpoint = "/mcp",
+            stateless = false,
+            keepAliveInterval = Some(java.time.Duration.ofMillis(keepAliveMs.toLong))
+          )
+        )
+        val slowProgressTool = McpTool
+          .withSchema[PingArgs, String](
+            name = "slow-progress",
+            inputSchema = pingSchema,
+            description = Some("Reports progress, then sleeps")
+          )
+          .contextual { (_, ctx) =>
+            // The early notification opens the SSE stream; the sleep leaves it quiet for pings.
+            ZIO.foreachDiscard(ctx.get.progressToken)(t => ctx.get.sendProgress(t, 0.5)) *>
+              ZIO.sleep(30.seconds).as("done")
+          }
+        runZio(server.tool(slowProgressTool) *> server.tool(sleepTool).unit).map { _ =>
+          val handle = server.startStatefulHttp()
+          keepAliveHandle = Some(handle)
+          handle
+        }
+
+  "runHttp (keepalive)" should "emit pings on a quiet modern POST SSE stream" in {
     def readUntilPing(reader: js.Dynamic, acc: String, remaining: Int): Future[String] =
       if acc.contains("ping") || remaining <= 0 then Future.successful(acc)
       else
@@ -482,35 +1170,202 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
             readUntilPing(reader, acc + piece, remaining - 1)
         }
 
-    runZio(server.tool(slowProgressTool).unit).flatMap { _ =>
-      val bun = server.startStatelessHttp()
-      val checked = for
-        resp <- fromJsPromise(
-          js.Dynamic.global
-            .fetch(
-              s"http://127.0.0.1:$kaPort/mcp",
-              js.Dynamic.literal(
-                method = "POST",
-                headers = js.Dictionary(
-                  "content-type" -> "application/json",
-                  "accept" -> "application/json, text/event-stream",
-                  "mcp-protocol-version" -> "2026-07-28",
-                  "mcp-method" -> "tools/call",
-                  "mcp-name" -> "slow-progress"
-                ),
-                body =
-                  """{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow-progress","arguments":{"msg":"hi"},"_meta":{"progressToken":"kp","io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
-              )
-            )
-            .asInstanceOf[js.Promise[js.Dynamic]]
+    keepAliveServer().flatMap { _ =>
+      for
+        resp <- fetchAt(
+          keepAlivePort,
+          js.Dynamic.literal(
+            method = "POST",
+            headers = jsonHeaders(
+              "mcp-protocol-version" -> "2026-07-28",
+              "mcp-method" -> "tools/call",
+              "mcp-name" -> "slow-progress"
+            ),
+            body =
+              """{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow-progress","arguments":{"msg":"hi"},"_meta":{"progressToken":"kp","io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+          )
         )
         reader = resp.body.getReader()
         seen <- readUntilPing(reader, "", remaining = 40)
       yield
         val _ = reader.cancel()
         seen should include("ping")
-      checked.andThen { case _ => bun.stop() }
     }
+  }
+
+  // TJC-2337: a `take.timeout(interval)` keepalive interrupted a take whose promise already held the
+  // reply; the next pull then took the close sentinel and the stream ended as pings-only, HTTP 200.
+  it should "deliver the reply when the tool completes on a heartbeat tick (legacy + modern, N and 3N)" in {
+    val callTimeoutMs = 10 * keepAliveMs + 5000
+
+    // Legacy: plain per-request SSE, the reply is frame 1 (the D4 dogfood repro shape).
+    def legacyCall(sid: String, id: Int, millis: Int): Future[String] =
+      fetchAt(
+        keepAlivePort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("mcp-session-id" -> sid),
+          body =
+            s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"sleep","arguments":{"millis":$millis}}}"""
+        )
+      ).flatMap(text)
+
+    // Modern: the progress token makes the reply frame 2, i.e. taken under the keepalive path.
+    def modernCall(id: Int, millis: Int): Future[String] =
+      fetchAt(
+        keepAlivePort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders(
+            "mcp-protocol-version" -> "2026-07-28",
+            "mcp-method" -> "tools/call",
+            "mcp-name" -> "sleep"
+          ),
+          body =
+            s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"sleep","arguments":{"millis":$millis},"_meta":{"progressToken":"tick-$id","io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+        )
+      ).flatMap(text)
+
+    // One stream at a time per lane, like a client awaiting a slow tool; legacy and modern lanes
+    // run side by side.
+    def lane(label: String, n: Int)(call: Int => Future[String]): Future[List[String]] =
+      (1 to n).foldLeft(Future.successful(List.empty[String])) { (acc, i) =>
+        acc.flatMap(bodies =>
+          withTimeout(call(i), callTimeoutMs, s"$label call $i").map(bodies :+ _)
+        )
+      }
+
+    def delivered(label: String, bodies: List[String]): String =
+      val ok = bodies.count(b => b.contains("event: message") && b.contains("\"slept "))
+      s"$label: $ok/${bodies.size} replies delivered"
+
+    val labels = List(
+      s"legacy sleep ${keepAliveMs}ms",
+      s"modern sleep ${keepAliveMs}ms",
+      s"legacy sleep ${3 * keepAliveMs}ms",
+      s"modern sleep ${3 * keepAliveMs}ms"
+    )
+
+    val checked = for
+      _ <- keepAliveServer()
+      initResp <- fetchAt(
+        keepAlivePort,
+        js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyInitBody)
+      )
+      sid = header(initResp, "mcp-session-id").getOrElse("")
+      _ <- text(initResp)
+      initialized <- fetchAt(
+        keepAlivePort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("mcp-session-id" -> sid),
+          body = """{"jsonrpc":"2.0","method":"notifications/initialized"}"""
+        )
+      )
+      onTick <- lane(labels(0), 20)(i => legacyCall(sid, 100 + i, keepAliveMs))
+        .zip(lane(labels(1), 20)(i => modernCall(200 + i, keepAliveMs)))
+      thirdTick <- lane(labels(2), 20)(i => legacyCall(sid, 300 + i, 3 * keepAliveMs))
+        .zip(lane(labels(3), 20)(i => modernCall(400 + i, 3 * keepAliveMs)))
+    yield
+      status(initResp) shouldBe 200
+      status(initialized) shouldBe 202
+      val streams = List(onTick._1, onTick._2, thirdTick._1, thirdTick._2)
+      val summary = labels.zip(streams).map(delivered)
+      val firstLost = streams.flatten.find(b => !b.contains("event: message"))
+      withClue(s"first reply-less stream: ${firstLost.map(_.replace("\n", "\\n"))}\n") {
+        summary shouldBe labels.map(l => s"$l: 20/20 replies delivered")
+      }
+    checked
+  }
+
+  // --- Bun idleTimeout: a slow reply must survive with the documented default keepAliveInterval = None ---
+
+  /** Port of the keepalive-less server, and how long its one `sleep` call takes: past `Bun.serve`'s
+    * default 10 s `idleTimeout` (measured ~12 s on Bun 1.4.1), so a quiet per-request SSE response
+    * is exposed to the runtime's own idle close. One call, once — the whole suite pays these
+    * seconds exactly one time.
+    *
+    * The port must be unique across every Bun test suite in this module (they share one process):
+    * 38932 is `JsServerLimitsTest`'s stateful port, and sharing it made this test fail with
+    * "Failed to start server. Is port 38932 in use?" whenever the suites interleaved that way.
+    */
+  private val idleTimeoutPort = 38938
+  private val slowReplyMs = 14000
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private var idleTimeoutHandle: Option[BunHttpHandle] = None
+
+  private def idleTimeoutServer(): Future[BunHttpHandle] =
+    idleTimeoutHandle match
+      case Some(handle) => Future.successful(handle)
+      case None =>
+        // `keepAliveInterval` deliberately left at its default (None): nothing but the reply is
+        // ever written to the stream, exactly the shape a slow tool has out of the box.
+        val server = com.tjclp.fastmcp.server.McpServer(
+          "JsHttpIdleTimeoutServer",
+          "0.1.0",
+          McpServerSettings(
+            host = "127.0.0.1",
+            port = idleTimeoutPort,
+            httpEndpoint = "/mcp",
+            stateless = false
+          )
+        )
+        runZio(server.tool(sleepTool).unit).map { _ =>
+          val handle = server.startStatefulHttp()
+          idleTimeoutHandle = Some(handle)
+          handle
+        }
+
+  // D6 8.15 (TJC-2337 follow-up): `Bun.serve` closes any connection with no bytes in either
+  // direction after its default 10 s `idleTimeout` — a per-request SSE response waiting on a slow
+  // tool included. With `keepAliveInterval = None` a tools/call longer than that lost its reply:
+  // the stream ended replyless, HTTP 200, and the client saw only its own request timeout.
+  "Bun idleTimeout" should "not cut a quiet legacy POST SSE stream before a 14 s tool reply (keepAliveInterval None)" in {
+    val checked = for
+      _ <- idleTimeoutServer()
+      initResp <- fetchAt(
+        idleTimeoutPort,
+        js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyInitBody)
+      )
+      sid = header(initResp, "mcp-session-id").getOrElse("")
+      _ <- text(initResp)
+      initialized <- fetchAt(
+        idleTimeoutPort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("mcp-session-id" -> sid),
+          body = """{"jsonrpc":"2.0","method":"notifications/initialized"}"""
+        )
+      )
+      started = java.lang.System.currentTimeMillis()
+      body <- withTimeout(
+        fetchAt(
+          idleTimeoutPort,
+          js.Dynamic.literal(
+            method = "POST",
+            headers = jsonHeaders("mcp-session-id" -> sid),
+            body =
+              s"""{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"sleep","arguments":{"millis":$slowReplyMs}}}"""
+          )
+        ).flatMap(text)
+          // Bun's idle close cuts the socket mid-chunked-body, so the client's `text()` rejects
+          // rather than ending cleanly: fold that into the body so the clue below reports WHEN.
+          .recover { case e => s"<stream failed: ${e.getMessage}>" },
+        slowReplyMs + 10000,
+        s"legacy sleep ${slowReplyMs}ms"
+      )
+      elapsedMs = java.lang.System.currentTimeMillis() - started
+    yield
+      status(initResp) shouldBe 200
+      status(initialized) shouldBe 202
+      withClue(
+        s"stream ended after ${elapsedMs}ms with body: ${body.replace("\n", "\\n")}\n"
+      ) {
+        body should include("event: message")
+        body should include(s"\"slept $slowReplyMs\"")
+      }
+    checked
   }
 
   "runHttp (stateless tasks)" should "refuse legacy task augmentation on the shared stateless session" in {
@@ -559,4 +1414,101 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
         body should include("stateless")
       checked.andThen { case _ => bun.stop() }
     }
+  }
+
+  "bearer tasks on Bun" should "be bucketed per peer address: two peers get independent caps (F9 wiring)" in {
+    // Dual-stack listener: an IPv4 client arrives as `::ffff:127.0.0.1`, an IPv6 one as `::1` — two
+    // distinct `server.requestIP` addresses on real sockets, hence two `Session.clientKey`s.
+    val peerPort = 38935
+    val settings = McpServerSettings(
+      host = "::",
+      port = peerPort,
+      httpEndpoint = "/mcp",
+      stateless = true,
+      tasks = TaskSettings(enabled = true, maxConcurrentPerSession = 1)
+    )
+    val server = com.tjclp.fastmcp.server.McpServer("JsHttpPeerBucketServer", "0.1.0", settings)
+    val blocky = McpTool
+      .withSchema[PingArgs, String](
+        name = "blocky",
+        inputSchema = pingSchema,
+        description = Some("Never completes; holds its owner's single running slot")
+      )
+      .contextual((_, _) => ZIO.never.as("done"))
+      .withTaskSupport(TaskSupport.Optional)
+    val taskMeta =
+      s""""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"extensions":{"${Tasks.ExtensionId}":{}}}}"""
+    def create(hostPart: String, id: Int): Future[String] =
+      fromJsPromise(
+        js.Dynamic.global
+          .fetch(
+            s"http://$hostPart:$peerPort/mcp",
+            js.Dynamic.literal(
+              method = "POST",
+              headers = js.Dictionary(
+                "content-type" -> "application/json",
+                "accept" -> "application/json, text/event-stream",
+                "mcp-protocol-version" -> "2026-07-28",
+                "mcp-method" -> "tools/call",
+                "mcp-name" -> "blocky"
+              ),
+              body =
+                s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"blocky","arguments":{"msg":"x"},$taskMeta}}"""
+            )
+          )
+          .asInstanceOf[js.Promise[js.Dynamic]]
+      ).flatMap(text)
+
+    runZio(server.tool(blocky) *> server.buildRouterWithTasks).flatMap { (router, taskManager) =>
+      val tm = taskManager.getOrElse(fail("tasks enabled but no TaskManager"))
+      val handle = JsTransportBackend.startBun(router, Runtime.default, settings, onStop = tm.shutdown)
+      val checked = for
+        a1 <- create("127.0.0.1", 1) // peer A fills its single slot
+        a2 <- create("127.0.0.1", 2) // peer A again: per-owner cap
+        b1 <- create("[::1]", 3) // peer B: its own bucket, admitted
+        stats <- runZio(tm.stats)
+      yield
+        a1 should include(""""taskId"""")
+        a2 should include(""""code":-32602""")
+        a2 should include("concurrency limit")
+        b1 should include(""""taskId"""")
+        // Both buckets are keyed on a transport client key — nothing landed in the anonymous one.
+        val owners = stats.perOwner.keySet
+        owners.size shouldBe 2
+        owners should not contain None
+        owners.flatten.filter(_.startsWith("client:")).size shouldBe 2
+      checked.andThen { case _ => handle.stop() }
+    }
+  }
+
+  "maxSessions on Bun" should "admit concurrent header-less initializes at the cap while idle sessions exist" in {
+    val racePort = 38936
+    val handle = statefulServer("JsHttpSessionCapRaceServer", racePort, _.copy(maxSessions = Some(2)))
+    def init(): Future[(Int, String)] =
+      fetchAt(
+        racePort,
+        js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyInitBody)
+      ).flatMap(resp => text(resp).map(_ => (status(resp), header(resp, "mcp-session-id").getOrElse(""))))
+    def listWith(sid: String): Future[Int] =
+      fetchAt(
+        racePort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("mcp-session-id" -> sid),
+          body = legacyListBody
+        )
+      ).map(status)
+    val checked = for
+      idle <- Future.sequence(List(init(), init()))
+      _ <- delay(10)
+      // 16 initializes race for the two slots: snapshot + decision + insert are one synchronous
+      // step, so nobody is refused (503) while an idle, GET-less session exists.
+      raced <- Future.sequence((1 to 16).toList.map(_ => init()))
+      alive <- Future.sequence((idle ++ raced).map(_._2).map(listWith))
+    yield
+      idle.map(_._1).distinct shouldBe List(200)
+      raced.map(_._1).distinct shouldBe List(200)
+      raced.map(_._2).distinct.size shouldBe 16
+      alive.count(_ == 200) shouldBe 2 // the cap held
+    checked.andThen { case _ => handle.stop() }
   }

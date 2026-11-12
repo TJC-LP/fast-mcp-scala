@@ -6,9 +6,11 @@ import zio.*
 import com.tjclp.fastmcp.codec.DefaultDecodeContext
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.wire.{CompleteRequestParams, Completion, Implementation}
+import com.tjclp.fastmcp.core.skills.{McpSkill, SkillError}
 import com.tjclp.fastmcp.server.manager.*
 import com.tjclp.fastmcp.server.router.{McpRouter, RouterBuilder}
-import com.tjclp.fastmcp.server.transport.{HttpTransportBackend, TransportBackend}
+import com.tjclp.fastmcp.server.skills.{SkillProvider, SkillRegistry}
+import com.tjclp.fastmcp.server.transport.{HttpTransportBackend, StdioLogging, TransportBackend}
 
 /** A completion provider for `completion/complete` (argument autocompletion): given the request
   * (ref + argument + optional context), return candidate values. Registered via
@@ -38,13 +40,22 @@ final class McpServer[R](
 )(using backend: TransportBackend)
     extends McpServerCore[R]:
 
-  val dependencies: List[String] = settings.dependencies
-
-  protected val decodeContext: McpDecodeContext = DefaultDecodeContext.default
+  // Embedded-JSON bounds (objects/arrays inside string arguments) follow the server's own limits.
+  protected val decodeContext: McpDecodeContext =
+    new DefaultDecodeContext(settings.limits.maxDepth, settings.limits.maxObjectFields)
 
   val toolManager: ToolManager[R] = new ToolManager[R]()
   val resourceManager: ResourceManager[R] = new ResourceManager[R]()
   val promptManager: PromptManager[R] = new PromptManager[R]()
+
+  /** The Skills extension catalog. Mounted into the resource manager so skill files are ordinary
+    * resources; consulted by the router for `skills/list`, `skills/get` and
+    * `resources/directory/read`. Digests come from the platform backend (`MessageDigest` on the
+    * JVM, the portable SHA-256 elsewhere).
+    */
+  val skillRegistry: SkillRegistry[R] =
+    SkillRegistry.make[R](settings.skills, backend.sha256, resourceManager.describeConflict)
+  resourceManager.addSource(skillRegistry)
 
   // Optional argument-completion provider; when set, `completion/complete` is wired and the
   // `completions` capability is advertised. (Single handler, so a plain atomic holder, not a manager.)
@@ -111,34 +122,70 @@ final class McpServer[R](
       this
     }
 
+  // --- Skills (io.modelcontextprotocol/skills) ---
+
+  override def skills(skills: List[McpSkill]): ZIO[Any, Throwable, McpServerCore[R]] =
+    skillRegistry.publish(skills).mapError(e => new SkillError.Exception(e)).as(this)
+
+  override def removeSkills(rootUris: List[String]): ZIO[Any, Throwable, McpServerCore[R]] =
+    skillRegistry.remove(rootUris).as(this)
+
+  override def skillProvider[R1 >: R](
+      provider: SkillProvider[R1]
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    skillRegistry
+      .addProvider(provider.asInstanceOf[SkillProvider[R]])
+      .mapError(e => new SkillError.Exception(e))
+      .as(this)
+
   // --- Lifecycle ---
 
   /** Build the immutable router from the (now-populated) managers + settings. Allocates a
     * [[TaskManager]] only when tasks are enabled.
     */
   private[fastmcp] def buildRouter: IO[Throwable, McpRouter[R]] =
+    buildRouterWithTasks.map(_._1)
+
+  /** [[buildRouter]] that also hands back the [[TaskManager]] (when tasks are enabled) so the serve
+    * loops (and the JS `startStatefulHttp()` / `startStatelessHttp()` handles) can stop its sweeper
+    * and interrupt running tasks on shutdown.
+    */
+  private[fastmcp] def buildRouterWithTasks: IO[Throwable, (McpRouter[R], Option[TaskManager[R]])] =
     val taskMgr: UIO[Option[TaskManager[R]]] =
       if settings.tasks.enabled then
         TaskManager.make[R](settings.tasks, backend.randomId()).map(Some(_))
       else ZIO.none
     taskMgr.map { tm =>
-      RouterBuilder.build[R](
+      val router = RouterBuilder.build[R](
         serverInfo = Implementation(name = name, version = version),
-        instructions = None,
+        instructions = settings.instructions,
         toolManager = toolManager,
         promptManager = promptManager,
         resourceManager = resourceManager,
         settings = settings,
         taskManager = tm,
-        completionHandler = completionRef.get()
+        completionHandler = completionRef.get(),
+        skillRegistry = Some(skillRegistry)
       )
+      (router, tm)
     }
 
+  /** stdout is the wire: if ZIO's stock stdout logger is still installed (a `ZIOAppDefault` that
+    * calls `runStdio()` directly, without `McpServerApp`'s `bootstrap`), it is swapped for the same
+    * format on stderr for the loop's lifetime; user-installed loggers are left alone
+    * ([[transport.StdioLogging]]).
+    */
   override def runStdio(): ZIO[R, Throwable, Unit] =
-    buildRouter.flatMap(backend.serveStdio(_, settings))
+    StdioLogging.redirectDefaultLoggers {
+      buildRouterWithTasks.flatMap { (router, tm) =>
+        backend.serveStdio(router, settings).ensuring(tm.fold(ZIO.unit)(_.shutdown))
+      }
+    }
 
   override def runHttp()(using http: HttpTransportBackend): ZIO[R, Throwable, Unit] =
-    buildRouter.flatMap(http.serveHttp(_, settings))
+    buildRouterWithTasks.flatMap { (router, tm) =>
+      http.serveHttp(router, settings).ensuring(tm.fold(ZIO.unit)(_.shutdown))
+    }
 
 /** The public `McpServer` factory — one definition for both platforms (replaces the per-platform
   * `McpServerBuilders`). Each platform need only provide a `given TransportBackend` in scope.

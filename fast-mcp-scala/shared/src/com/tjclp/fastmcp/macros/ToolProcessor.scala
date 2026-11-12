@@ -16,6 +16,16 @@ import com.tjclp.fastmcp.server.manager.*
   */
 private[macros] object ToolProcessor extends AnnotationProcessorBase:
 
+  /** The name this method registers under — identical to what [[processToolAnnotation]] uses, so
+    * the compile-time collision check in [[RegistrationMacro]] can never diverge from it.
+    */
+  def registeredName(using Quotes)(methodSym: quotes.reflect.Symbol): String =
+    import quotes.reflect.*
+    val annot = findAnnotation[Tool](methodSym).getOrElse(
+      report.errorAndAbort(s"No @Tool annotation found on method '${methodSym.name}'")
+    )
+    nameAndDescription(annot, methodSym)._1
+
   def processToolAnnotation[R: Type](using Quotes)(
       server: Expr[McpServerCore[R]],
       ownerSym: quotes.reflect.Symbol,
@@ -28,6 +38,8 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
     val toolAnnot = findAnnotation[Tool](methodSym).getOrElse {
       report.errorAndAbort(s"No @Tool annotation found on method '$methodName'")
     }
+
+    requireRegistrableShape("@Tool", methodSym)
 
     val (finalName, finalDesc) = nameAndDescription(toolAnnot, methodSym)
 
@@ -80,7 +92,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
     val methodRefExpr = methodRef(ownerSym, methodSym)
 
     val ctxParamPresent = methodSym.paramSymss.headOption.exists(_.exists { p =>
-      p.name == "ctx" && p.info <:< TypeRepr.of[McpContext]
+      p.name == "ctx" && p.termRef.widenTermRefByName <:< TypeRepr.of[McpContext]
     })
 
     val ctxParamPresentExpr = Expr(ctxParamPresent)
@@ -96,33 +108,29 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
 
     val params = methodSym.paramSymss.headOption.getOrElse(Nil)
 
-    val defaultMethodOwner =
-      if ownerSym.flags.is(Flags.Module) then ownerSym
-      else ownerSym.companionModule
-
-    val paramsWithDefaults: Set[String] = params.zipWithIndex.collect {
-      case (pSym, idx)
-          if defaultMethodOwner != Symbol.noSymbol &&
-            defaultMethodOwner.declaredMethod(s"${methodSym.name}$$default$$${idx + 1}").nonEmpty =>
-        pSym.name
-    }.toSet
+    // `HasDefault` is set on the annotated method's OWN parameter symbols (pickled, so it survives
+    // separate compilation), so an overloaded sibling's `f$default$N` getters — which are name +
+    // index based — can no longer be attributed to this method.
+    val paramsWithDefaults: Set[String] =
+      params.filter(_.flags.is(Flags.HasDefault)).map(_.name).toSet
 
     val paramMetadata: List[(String, ParamMetadata)] =
       params.flatMap { pSym =>
         MacroUtils
           .extractParamAnnotation(pSym)
           .map { annotTerm =>
-            val (desc, examples, required, schema) = MacroUtils.parseToolParam(Some(annotTerm))
+            val isOptionType = pSym.termRef.widenTermRefByName <:< TypeRepr.of[Option[?]]
+            val (desc, examples, required, schema) =
+              MacroUtils.parseToolParam(Some(annotTerm), isOptionType)
 
             if !required then
-              val isOptionType = pSym.info <:< TypeRepr.of[Option[?]]
               val hasDefault = paramsWithDefaults.contains(pSym.name)
 
               if !isOptionType && !hasDefault then
                 report.errorAndAbort(
                   s"Parameter '${pSym.name}' in method '$methodName' is marked as required=false " +
                     s"but is not an Option type and has no default value. " +
-                    s"Use Option[${pSym.info.show}] or provide a default value."
+                    s"Use Option[${pSym.termRef.widenTermRefByName.show}] or provide a default value."
                 )
 
             pSym.name -> ParamMetadata(desc, examples, required, schema)

@@ -33,10 +33,17 @@ type Http = Transport.Http
 trait TransportRunner[T <: Transport]:
   def run(core: McpServerCore[Any]): ZIO[Any, Throwable, Unit]
 
+  /** The ZIO runtime layer `McpServerApp` installs as its `bootstrap` for this transport. Stdio
+    * routes ZIO's default logger to stderr, because stdout is the wire
+    * ([[transport.StdioLogging]]); HTTP needs nothing (`ZLayer.empty`).
+    */
+  def bootstrap: ZLayer[ZIOAppArgs, Any, Any] = ZLayer.empty
+
 object TransportRunner:
 
   given stdio: TransportRunner[Stdio] with
     def run(core: McpServerCore[Any]): ZIO[Any, Throwable, Unit] = core.runStdio()
+    override def bootstrap: ZLayer[ZIOAppArgs, Any, Any] = transport.StdioLogging.bootstrap
 
   /** Conditional on the platform [[transport.HttpTransportBackend]]: the instance is only
     * constructed where one is summoned, so an `McpServerApp[Stdio, ...]` has no reachable path into

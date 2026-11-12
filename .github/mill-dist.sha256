@@ -1,0 +1,9 @@
+# SHA-256 of the Mill distributions the ./mill launcher downloads (keyed by URL basename).
+# Verified by .github/scripts/install-mill.sh in every CI job before the first ./mill.
+# Provenance: computed 2026-09-04 from repo1.maven.org downloads whose SHA-1 matched the published .sha1
+# (amd64 e3b9ec419f3895c46f8d531613c34a79ab8f52ef, aarch64 ee249579afe8fd6077e6cfd40383652e74bc41f9,
+# jvm 1e9f6f6f7279e6bc20f43b2a929481df4cb85b32). Maven Central publishes no .sha256 for these artifacts.
+# After bumping .mill-version, CI prints the exact line to add here.
+ba60d03577380a906c2273cca7656828705e25fef519a1e927656ae167e8f644  mill-dist-native-linux-amd64-1.1.8.exe
+773206f1b3b4bd6b42ffbf7c2c8d168c6210e4f075ae06089ddcf6e0fe5d7db8  mill-dist-native-linux-aarch64-1.1.8.exe
+19d92383f50b373502d94ceb9b1f14280224ee508632641157aad5f4fa66866d  mill-dist-1.1.8.exe

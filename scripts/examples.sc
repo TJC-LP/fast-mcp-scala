@@ -1,6 +1,6 @@
-//> using scala 3.8.3
-//> using dep com.tjclp::fast-mcp-scala:0.3.0-rc4
-//> using options "-Xcheck-macros" "-experimental"
+//> using scala 3.9.0
+//> using dep com.tjclp::fast-mcp-scala:1.0.1
+//> using options "-Wconf:id=E230:s"
 
 // Launcher for fast-mcp-scala example servers. Point `scala-cli` at this file and
 // pick a main class:
@@ -15,12 +15,15 @@
 //     Typed contracts — macro-free, testable, cross-platform-shareable.
 //
 // scala-cli examples.sc --main-class com.tjclp.fastmcp.examples.TaskManagerServer
-//     Realistic domain server with custom JacksonConverters and tool hints.
+//     Realistic domain server with custom decoders and tool hints across a CRUD-style surface.
 //
 // scala-cli examples.sc --main-class com.tjclp.fastmcp.examples.ContextEchoServer
 //     McpContext introspection from inside a tool handler.
 //
 // scala-cli examples.sc --main-class com.tjclp.fastmcp.examples.HttpServer
-//     HTTP transport: Streamable (default) and Stateless (flag).
+//     HTTP transport: modern stateless POST + request-scoped SSE, with the legacy session adapter on by default.
 //
-// stdout is redirected to stderr inside each server so the stdio transport stays clean.
+// Servers write only JSON-RPC frames to stdout. The stdio runner routes ZIO's logger to stderr
+// (TJC-2338), but nothing redirects System.out itself: anything a handler prints there corrupts the
+// frame stream, so write diagnostics with ZIO.log* or to stderr (docs/transports.md, "stdout is the
+// wire"). The library's own registration warnings already go to stderr.

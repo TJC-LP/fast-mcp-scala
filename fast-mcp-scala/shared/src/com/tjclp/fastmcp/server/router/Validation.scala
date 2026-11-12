@@ -4,7 +4,7 @@ import zio.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.core.ToolInputSchema
-import com.tjclp.fastmcp.jsonrpc.McpError
+import com.tjclp.fastmcp.jsonrpc.{JsonFields, McpError}
 import com.tjclp.fastmcp.server.manager.ToolManager
 
 /** Pluggable JSON Schema validator for `tools/call` arguments.
@@ -39,7 +39,7 @@ final class ValidationMiddleware[R](
           for
             name <- params match
               case Json.Obj(fields) =>
-                fields.toMap.get("name") match
+                JsonFields.get(fields, "name") match
                   case Some(Json.Str(n)) => Right(n)
                   case _ => Left(McpError.invalidParams("tools/call: missing `name`"))
               case _ => Left(McpError.invalidParams("tools/call: params must be an object"))
@@ -47,9 +47,7 @@ final class ValidationMiddleware[R](
               .getToolDefinition(name)
               .map(_.inputSchema)
               .toRight(McpError.invalidParams(s"Unknown tool: $name"))
-            args = params match
-              case Json.Obj(fields) => fields.toMap.getOrElse("arguments", Json.Obj())
-              case _ => Json.Obj()
+            args = JsonFields.get(params, "arguments").getOrElse(Json.Obj())
             _ <- validator.validate(schema, args).left.map(McpError.invalidParams)
           yield ()
         ZIO.fromEither(check) *> next(session, params)

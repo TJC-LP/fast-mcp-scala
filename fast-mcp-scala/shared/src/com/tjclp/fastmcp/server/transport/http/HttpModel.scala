@@ -18,14 +18,25 @@ import com.tjclp.fastmcp.server.transport.MessageLoop
   * @param header
   *   case-insensitive header lookup by name, first value wins (the same seam
   *   [[com.tjclp.fastmcp.server.transport.ModernHttpValidation]] already uses)
+  * @param gateHeader
+  *   header lookup for the admission gates
+  *   ([[com.tjclp.fastmcp.server.transport.HttpRequestGuards]]): a header sent more than once is
+  *   seen as its `", "`-joined value, so a duplicated `Host` / `Origin` fails the origin parser
+  *   closed (403) instead of only its first value being checked
   * @param body
-  *   reads the request body as UTF-8 text; failures surface as a `400` transport error
+  *   reads the request body as UTF-8 text; failures surface as a `400` transport error. Backends
+  *   make this lazy so a request the header gates reject never costs the read
+  * @param clientKey
+  *   the TCP peer address, when the backend knows it — the default owner key for bearer-task
+  *   buckets (`TaskOwnerKey.Transport`). Never derived from request content
   */
 private[fastmcp] final case class HttpRequest(
     method: String,
     path: String,
     header: String => Option[String],
-    body: IO[Throwable, String]
+    gateHeader: String => Option[String],
+    body: IO[Throwable, String],
+    clientKey: Option[String] = None
 )
 
 /** One server-sent event: an optional `event:` type and the `data:` payload. */
@@ -36,11 +47,15 @@ private[fastmcp] final case class SseFrame(event: Option[String], data: String):
     * so the socket and Netty backends emit identical bytes.
     */
   def encode: String =
-    val sb = new StringBuilder
+    val sb = new java.lang.StringBuilder(data.length + 32)
     event.foreach(e => sb.append("event: ").append(e).append('\n'))
-    // `linesIterator` yields nothing for "", so an empty payload produces no data line — exactly
-    // what zio-http emits for its keepalive ping.
-    data.linesIterator.foreach(line => sb.append("data: ").append(line).append('\n'))
+    // An empty payload produces no data line — exactly what zio-http emits for its keepalive ping.
+    // JSON-RPC payloads are single-line (the encoder never emits a raw newline), so the common case
+    // is one append with no line splitting.
+    if data.nonEmpty then
+      if data.indexOf('\n') < 0 && data.indexOf('\r') < 0 then
+        sb.append("data: ").append(data).append('\n')
+      else data.linesIterator.foreach(line => sb.append("data: ").append(line).append('\n'))
     sb.append('\n')
     sb.toString
 

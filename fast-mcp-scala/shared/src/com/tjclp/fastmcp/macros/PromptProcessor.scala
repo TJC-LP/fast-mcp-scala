@@ -12,6 +12,14 @@ import com.tjclp.fastmcp.server.manager.PromptHandler
 /** Cross-platform `@Prompt` annotation processor. Emits registration against [[McpServerCore]]. */
 private[macros] object PromptProcessor extends AnnotationProcessorBase:
 
+  /** The name this method registers under — identical to what [[processPromptAnnotation]] uses. */
+  def registeredName(using Quotes)(methodSym: quotes.reflect.Symbol): String =
+    import quotes.reflect.*
+    val annot = findAnnotation[Prompt](methodSym).getOrElse(
+      report.errorAndAbort(s"No @Prompt annotation found on method '${methodSym.name}'")
+    )
+    nameAndDescription(annot, methodSym)._1
+
   def processPromptAnnotation[R: Type](using Quotes)(
       server: Expr[McpServerCore[R]],
       ownerSym: quotes.reflect.Symbol,
@@ -25,12 +33,18 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
       report.errorAndAbort(s"No @Prompt annotation found on method '$methodName'")
     }
 
+    requireRegistrableShape("@Prompt", methodSym)
+
     val (finalName, finalDesc) = nameAndDescription(promptAnnot, methodSym)
 
     val argExprs: List[Expr[PromptArgument]] =
       methodSym.paramSymss.headOption.getOrElse(Nil).map { pSym =>
+        // `Option` arguments are optional unless `@Param(required = true)` says otherwise; the
+        // generated handler applies a Scala default (or `None`) when the client omits them.
+        val isOptionType = pSym.termRef.widenTermRefByName <:< TypeRepr.of[Option[?]]
         val (descOpt, required) = MacroUtils.parsePromptParamArgs(
-          MacroUtils.extractParamAnnotation(pSym)
+          MacroUtils.extractParamAnnotation(pSym),
+          isOptionType
         )
         '{ PromptArgument(${ Expr(pSym.name) }, ${ Expr(descOpt) }, ${ Expr(required) }) }
       }

@@ -3,7 +3,6 @@ package com.tjclp.fastmcp.server.manager
 import java.util.concurrent.ConcurrentHashMap
 
 import scala.jdk.CollectionConverters.*
-import scala.util.matching.Regex
 
 import zio.*
 
@@ -23,8 +22,11 @@ type ResourceTemplateHandler[R] = Map[String, String] => ZIO[R, Throwable, Strin
 
 /** Manager for MCP resources.
   *
-  * Since we assume scheme-based URIs such as `users://{id}/profile`, template match patterns are
-  * anchored with `^` and `$` so only exact matches pass.
+  * Templates such as `users://{id}/profile` are compiled ONCE at registration into a
+  * [[ResourceTemplatePattern]] — a regex-free, linear-time matcher where literal text is matched
+  * verbatim and each placeholder matches one non-empty path segment (no `/`); a URI matches only as
+  * a whole. Client URIs are bounded upstream (`limits.maxUriChars`, enforced in the built-in
+  * handlers) before they reach [[findMatchingTemplate]].
   *
   * @tparam R
   *   the ZIO environment all stored handlers may require; supplied by the server at `runHttp[R]()`
@@ -36,7 +38,34 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
     new ConcurrentHashMap[String, (ResourceDefinition, ResourceHandler[R])]()
 
   private val templateResources =
-    new ConcurrentHashMap[String, (ResourceDefinition, ResourceTemplateHandler[R])]()
+    new ConcurrentHashMap[
+      String,
+      (ResourceTemplatePattern, ResourceDefinition, ResourceTemplateHandler[R])
+    ]()
+
+  // Mounted read-only trees (the Skills registry). Resolved after the static map and before the
+  // templates; see [[ResourceSource]].
+  private val sources =
+    new java.util.concurrent.atomic.AtomicReference[Vector[ResourceSource[R]]](Vector.empty)
+
+  /** Mount a [[ResourceSource]]. Its URIs become ordinary resources for listing and reading, and
+    * later static/template registrations that would collide with them are refused.
+    */
+  def addSource(source: ResourceSource[R]): Unit =
+    val _ = sources.updateAndGet(_ :+ source)
+
+  /** Why `uri` is already taken by this manager (a static resource, or a template that matches it),
+    * if it is — consulted by the Skills registry before it publishes a skill.
+    */
+  def describeConflict(uri: String): Option[String] =
+    if staticResources.containsKey(uri) then Some("already registered as a static resource")
+    else
+      findMatchingTemplate(uri).map { case (pattern, _, _, _) =>
+        s"matched by the resource template '${pattern.pattern}'"
+      }
+
+  private def sourceOwning(uri: String): Option[ResourceSource[R]] =
+    sources.get().find(_.owns(uri))
 
   def addStaticResource(
       uri: String,
@@ -46,6 +75,10 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
     ZIO
       .attempt {
         val staticDefinition = definition.copy(isTemplate = false, arguments = None)
+        if sourceOwning(uri).isDefined then
+          throw new IllegalArgumentException(
+            s"URI '$uri' is served by a mounted resource source (a published skill); it cannot be re-registered as a static resource"
+          )
         if staticResources.containsKey(uri) then
           java.lang.System.err.println(
             s"[ResourceManager] Warning: Static resource with URI '$uri' already exists. Overwriting."
@@ -81,12 +114,36 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
               s"that don't have corresponding arguments in the definition"
           )
 
+        // A template that matches a URI a mounted source serves would look like a second owner of
+        // that URI. Sources win at read time regardless; refusing here keeps the registration
+        // honest instead of silently dead for those URIs.
+        sources.get().iterator.flatMap(_.ownedUris).find(pattern.matches(_).isDefined).foreach {
+          owned =>
+            throw new IllegalArgumentException(
+              s"Template URI pattern '$uriPattern' matches '$owned', which is served by a mounted resource source (a published skill)"
+            )
+        }
+
         val templateDefinition = definition.copy(isTemplate = true)
         if templateResources.containsKey(uriPattern) then
           java.lang.System.err.println(
             s"[ResourceManager] Warning: Resource template with pattern '$uriPattern' already exists. Overwriting."
           )
-        templateResources.put(uriPattern, (templateDefinition, handler))
+        else
+          // Same shape under different placeholder names (`users://{id}` vs `users://{userId}`)
+          // matches the same URIs; whichever the map iterates first wins at read time.
+          val shape = ResourceManager.placeholderShape(uriPattern)
+          templateResources
+            .keySet()
+            .asScala
+            .find(ResourceManager.placeholderShape(_) == shape)
+            .foreach { existing =>
+              java.lang.System.err.println(
+                s"[ResourceManager] Warning: Resource template '$uriPattern' matches the same URIs as " +
+                  s"already-registered '$existing'."
+              )
+            }
+        templateResources.put(uriPattern, (pattern, templateDefinition, handler))
         ()
       }
       .mapError(e =>
@@ -106,13 +163,14 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
 
   override def listDefinitions(): List[ResourceDefinition] =
     (staticResources.values().asScala.map(_._1) ++
-      templateResources.values().asScala.map(_._1)).toList
+      sources.get().flatMap(_.listDefinitions()) ++
+      templateResources.values().asScala.map(_._2)).toList
 
   def listStaticResources(): List[ResourceDefinition] =
     staticResources.values().asScala.map(_._1).toList
 
   def listTemplateResources(): List[ResourceDefinition] =
-    templateResources.values().asScala.map(_._1).toList
+    templateResources.values().asScala.map(_._2).toList
 
   def getStaticResourceHandler(uri: String): Option[ResourceHandler[R]] =
     Option(staticResources.get(uri)).map(_._2)
@@ -121,85 +179,106 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
   def getResourceHandler(uri: String): Option[ResourceHandler[R]] = getStaticResourceHandler(uri)
 
   def getTemplateResourceHandler(uriPattern: String): Option[ResourceTemplateHandler[R]] =
-    Option(templateResources.get(uriPattern)).map(_._2)
+    Option(templateResources.get(uriPattern)).map(_._3)
 
   def getResourceDefinition(uri: String): Option[ResourceDefinition] =
-    Option(staticResources.get(uri)).map(_._1)
+    Option(staticResources.get(uri))
+      .map(_._1)
+      .orElse(sources.get().iterator.flatMap(_.definition(uri)).nextOption())
 
   def listTemplateDefinitions(): List[ResourceDefinition] = listTemplateResources()
 
-  /** Extract parameters from a URI matching a template pattern */
+  /** Extract parameters from a URI matching a template pattern (convenience / test API — compiles
+    * the template on every call; registered templates are compiled once and stored).
+    */
   def extractTemplateParams(
       template: String,
       uri: String
   ): Option[Map[String, String]] =
-    val pattern = ResourceTemplatePattern(template)
-    pattern.matches(uri).map(pattern.extractParams(uri, _))
+    ResourceTemplatePattern.parse(template).toOption.flatMap(_.matches(uri))
 
+  /** Find the registered template matching `uri`, using the patterns compiled at registration. */
   def findMatchingTemplate(uri: String): Option[
     (ResourceTemplatePattern, ResourceDefinition, ResourceTemplateHandler[R], Map[String, String])
   ] =
     templateResources
-      .entrySet()
+      .values()
       .asScala
       .iterator
-      .map { entry =>
-        val patternString = entry.getKey
-        val pattern = ResourceTemplatePattern(patternString)
-        val (definition, handler) = entry.getValue
-        pattern
-          .matches(uri)
-          .map(regexMatch => (pattern, definition, handler, pattern.extractParams(uri, regexMatch)))
+      .map { case (pattern, definition, handler) =>
+        pattern.matches(uri).map(params => (pattern, definition, handler, params))
       }
       .collectFirst { case Some(result) => result }
 
-  @scala.annotation.nowarn("msg=unused explicit parameter")
   def readResource(
       uri: String,
       context: Option[McpContext]
   ): ZIO[R, Throwable, String | Array[Byte]] =
+    readResourceWithMime(uri, context).map(_._2)
+
+  /** [[readResource]] plus the served body's mime type — the registered definition's for static and
+    * templated resources, the source's own for mounted trees (whose files may have no definition
+    * until they are read). Resolution order: static → sources → templates.
+    */
+  def readResourceWithMime(
+      uri: String,
+      context: Option[McpContext]
+  ): ZIO[R, Throwable, (Option[String], String | Array[Byte])] =
     Option(staticResources.get(uri)) match
-      case Some((_, handler)) =>
+      case Some((definition, handler)) =>
         handler()
-          .mapError(e =>
-            new ResourceAccessError(s"Error accessing static resource '$uri'", Some(e))
+          .mapBoth(
+            e => new ResourceAccessError(s"Error accessing static resource '$uri'", Some(e)),
+            body => (definition.mimeType, body)
           )
       case None =>
-        findMatchingTemplate(uri) match
-          case Some((_, _, handler, params)) =>
-            handler(params)
-              .mapError(e =>
-                new ResourceAccessError(
-                  s"Error accessing templated resource '$uri' with params $params",
-                  Some(e)
-                )
-              )
+        val fromSources: ZIO[R, Throwable, Option[(Option[String], String | Array[Byte])]] =
+          ZIO
+            .foldLeft(sources.get())(Option.empty[(Option[String], String | Array[Byte])]) {
+              case (found @ Some(_), _) => ZIO.succeed(found)
+              case (None, source) if source.owns(uri) =>
+                source
+                  .read(uri, context)
+                  .mapError(e =>
+                    new ResourceAccessError(s"Error accessing resource '$uri'", Some(e))
+                  )
+              case (None, _) => ZIO.none
+            }
+        fromSources.flatMap {
+          case Some(result) => ZIO.succeed(result)
           case None =>
-            ZIO.fail(new ResourceNotFoundError(uri))
+            findMatchingTemplate(uri) match
+              case Some((_, _, handler, params)) =>
+                // Templated reads carry no declared mime type on the wire (pre-existing behaviour:
+                // `getResourceDefinition` never matched a templated URI), kept unchanged here.
+                handler(params)
+                  .mapBoth(
+                    e =>
+                      new ResourceAccessError(
+                        s"Error accessing templated resource '$uri' with params $params",
+                        Some(e)
+                      ),
+                    body => (None, body)
+                  )
+              case None =>
+                ZIO.fail(new ResourceNotFoundError(uri))
+        }
 
 end ResourceManager
 
-/** Represents a URI pattern with placeholders. */
-case class ResourceTemplatePattern(pattern: String):
-  private val paramRegex = """\{([^{}]+)\}""".r
-  val paramNames = paramRegex.findAllMatchIn(pattern).map(_.group(1)).toList
+object ResourceManager:
 
-  private val matchRegex = {
-    val regexString = paramRegex.replaceAllIn(pattern, _ => "([^/]+)")
-    new Regex("^" + regexString + "$")
-  }
-
-  @scala.annotation.nowarn("msg=unused explicit parameter")
-  def extractParams(
-      uri: String,
-      regexMatch: Regex.Match
-  ): Map[String, String] =
-    paramNames.zipWithIndex.map { case (name, idx) =>
-      name -> regexMatch.group(idx + 1)
-    }.toMap
-
-  def matches(uri: String): Option[Regex.Match] =
-    matchRegex.findFirstMatchIn(uri)
+  /** `users://{userId}/x` → `users://{}/x`: the URI shape independent of placeholder names. */
+  private[fastmcp] def placeholderShape(pattern: String): String =
+    ResourceTemplatePattern.parse(pattern) match
+      case Right(compiled) =>
+        compiled.segments
+          .map(_.map {
+            case ResourceTemplatePattern.Part.Literal(t) => t
+            case ResourceTemplatePattern.Part.Variable(_) => "{}"
+          }.mkString)
+          .mkString("/")
+      case Left(_) => pattern
 
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
 class ResourceError(message: String, cause: Option[Throwable] = None)

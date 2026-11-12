@@ -9,32 +9,375 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Skills extension (`io.modelcontextprotocol/skills`, SEP-2640)** as a native part of the shared
+  core on JVM, Scala.js/Bun and Scala Native, over stdio and (where available) HTTP, in both the
+  2026-07-28 stateless path and the initialize/session adapter. Implements the stable extension page
+  (`ext-skills` commit `167da6c0`, blob `824c66ba`, re-verified 2026-10-10) including the optional
+  `resources/directory/read`: `skills/list` (paginated, `resultType: "complete"`, `ttlMs`,
+  `cacheScope` on 2026-07-28), `skills/get` (`{skill}`, unlisted skills resolve, unknown → `-32602`),
+  `resources/directory/read` (direct children, `inode/directory`, unknown/file → `-32602`), skill
+  files served through ordinary `resources/read` / `resources/list`, and the capability declared
+  inline (`{"directoryRead": true}` or `{}`) alongside `resources`.
+  - Authoring: `McpSkill.fromMarkdown` / `parse` (+ byte forms), `SkillFile.text` / `binary`, empty
+    directories, `unlisted`, `nestedSkill`; `McpServerApp.skills` / `skillProviders`;
+    `McpServerCore.skill` / `skills` / `removeSkills` / `skillProvider` (atomic publish/replace/remove,
+    conflicts with static resources and templates refused both ways).
+  - `SkillProvider[R]` for generated / remote / authorization-scoped catalogs (`resources: "dynamic"`
+    supported); `SkillSettings` (`enabled`, `directoryRead`, page sizes, `ttlMs`/`cacheScope`,
+    per-skill limits defaulting to the spec's 512 entries / 16 MiB).
+  - `SkillUri`: one literal URI policy (no percent-decoding, segment-aware containment,
+    filesystem-style relative resolution, lowercase authority); strict-UTF-8 `SKILL.md` reader with
+    YAML → verbatim JSON frontmatter (duplicate keys, anchors, aliases, tags and bombs rejected).
+  - Host-side helpers `SkillVerifier`, `HeldEntry`, `SkillIdentity`, `VerificationOutcome`.
+  - JVM-only `SkillDirectoryLoader` (regular files only, symlinks/special files refused, bounded
+    reads, explicit selection policy).
+  - `TransportBackend.sha256` (default: portable FIPS 180-4 `core.skills.Sha256`, pinned to the NIST
+    vectors on every platform; the JVM overrides with `MessageDigest`).
+  - Examples `SkillsServer` (shared), `SkillsHttpServer` and `SkillDirectoryServer` (JVM); docs
+    `docs/skills.md` and `docs/skills-conformance.md`.
+- New production dependency `org.virtuslab::scala-yaml:0.3.3` (JVM, Scala.js, Scala Native) for
+  `SKILL.md` frontmatter, driven at the event level (see `DEPENDENCY_POLICY.md` rationale in
+  `docs/skills-conformance.md`).
+
+### Changed
+
+- `ResourceManager` gains mounted `ResourceSource`s (resolved after static resources and before
+  templates) and `readResourceWithMime`; registering a static resource or a template that collides
+  with a URI a mounted source serves now fails instead of overwriting.
+- `McpServerCore` declares the four skills registration methods (abstract; implemented by
+  `McpServer`). Third-party implementations of the trait must add them.
+- `McpRouter.deriveCapabilities` declares the skills extension when its methods are registered;
+  `RouterBuilder.build` and `Builtins` take an optional `SkillRegistry`.
+
+## [1.0.1] - 2026-09-18
+
+### Security
+
+- Bouncy Castle 1.85 (managed version on the JVM artifact): `bcprov-jdk18on` 1.84, which reaches the
+  classpath through `io.netty:netty-pkitesting` via zio-http, carries GHSA-9pwp-9qqc-pr26 (critical,
+  CVE-2026-8763) and GHSA-qp49-qgx5-5m26 (high, CVE-2026-13506). Pinned through `depManagement`, so it
+  stays transitive and excluding zio-http still removes it.
+
+### Added
+
+- `McpServerSettings.instructions`: server-level usage guidance returned as `instructions` in the
+  `initialize` result and in `server/discover`. The field was plumbed through `RouterBuilder` and
+  `Builtins` but `McpServer` hard-coded `None`, so no server built on the library could set it.
+
+## [1.0.0] - 2026-09-09
+
+Highlights since 0.4.0, the last published stable release (the `[0.5.0]` section
+below was never tagged or published; its changes first shipped in 1.0.0-RC1):
+**MCP 2026-07-28** is the primary protocol (stateless requests,
+`server/discover`, MRTR for roots/sampling/elicitation, `subscriptions/listen`,
+the Tasks extension) with an initialization-based compatibility adapter for
+2025-11-25 and earlier (RC1); `Option` parameter decoding via zio-json (RC2);
+**GraalVM native images** for stdio and HTTP servers on a split transport seam
+(RC3); and, new in this final release, the **Scala Native target**
+(`com.tjclp:fast-mcp-scala_native0.5_3`, published for the first time with
+1.0.0), native JSON Schema derivation replacing Tapir, zero-boilerplate enum
+support, **Scala 3.9.0 LTS**, the modularized build, and the
+**security-hardening wave** (TJC-2294; 12 findings in five arcs, PRs #87–#92):
+every inbound frame is bounded by `LimitSettings` (4 MiB frames, depth 64, 1024
+object members) on every transport; the HTTP `HostGuard` matches `Origin` as a
+full origin and gains `allowedOrigins`; every POST passes the `Content-Type`
+(415) and `maxRequestBodyBytes` (413) gates; `maxSessions` caps the legacy
+session store; the Tasks store is bounded per owner and per pool under a single
+monotonic sweeper; the annotation macros bind to the exact annotated overload
+and turn duplicate or non-literal registrations into compile-time errors; and
+the CI/release pipeline runs on SHA-pinned actions, a frozen conformance harness
+and a split verify → publish → github-release workflow. The wave also carries
+deliberate pre-1.0 behaviour changes (verbatim template literals, the 415/413
+gates, `BunHttpHandle`, compile-time duplicate registrations), listed under
+*Changed* and summarised under *Upgrading*. See the `[1.0.0-RC1]`–`[1.0.0-RC3]`
+sections below for the cumulative RC changes rolled into this release.
+
+### Upgrading
+
+The error-by-error migration guide for 0.x and release-candidate projects is
+[docs/upgrading.md](docs/upgrading.md); the protocol-side changes are in
+[docs/2026-07-28-upgrade.md](docs/2026-07-28-upgrade.md).
+
+- **Consumer compiler floor: Scala 3.9.0 or newer.** 1.0.0 is compiled with Scala 3.9.0 LTS and
+  emits TASTy 28.9, which 3.8 and older compilers cannot read; `1.0.0-RC3` (Scala 3.8.3, TASTy
+  28.8) is the last release a Scala 3.8 project can consume. A 3.8 compiler fails first on the
+  Scala 3.9.0 standard library the POM pulls in transitively (`TASTy file scala/language.tasty
+  could not be read ... version 28.9`), then on the library's own `Exports$package.tasty`; every
+  `Not found: type ...` after that is a cascade. A 3.9.0 module may depend on your remaining 3.8
+  modules, never the reverse. WartRemover users: the `org.wartremover:::wartremover` coordinate
+  has no 3.9.0 build below 3.6.1. Scala.js consumers also need a Scala.js 1.22+ linker, and that
+  failure is link-time only — `compile` passes because the compiler never reads dependency IR,
+  then `fastLinkJS` / `bundle` / `package --js` fails with `IRVersionNotSupportedException ...
+  compiled with Scala.js 1.22 (supported up to: 1.21)`. Mill: mill-bun 0.3.1 with an explicit
+  `scalaJSVersion` (Mill 1.1.x's bundled linker stops at IR 1.20); the plugin bump makes
+  `scalaJSVersion` abstract on every `BunScalaJSModule`, freezes installs (`Missing
+  <module>/bun.lock` until `./mill <module>.bunLock` is run and the lockfile committed; a module
+  whose only Bun-side dependency is fast-mcp-scala needs none) and writes the bundle to
+  `out/<module>/bundle.dest/` instead of `bunBundle.dest/`. scala-cli: `//> using jsVersion
+  1.22.0` plus `--js-version 1.22.0` on `package --js`. Scala Native consumers use 0.5.12.
+- **`-experimental` is no longer required.** The release candidates were compiled with
+  `-experimental`, which stamped every public definition `@experimental` and forced the flag onto
+  every consumer on both registration paths and all three platforms; 1.0.0 is not (TJC-2335), so
+  remove `-experimental` from your build. The annotation macros use only stable reflect API
+  (details under *Changed*).
+- **`import com.tjclp.fastmcp.{*, given}` — the `given` selector is mandatory.** The platform
+  `TransportBackend` and the `McpServerCoreFactory` are `given` instances re-exported from the
+  package object; a plain `import com.tjclp.fastmcp.*` (the 0.3.x idiom, even with the old
+  `McpServer.given` / `TransportRunner.given` lines next to it) no longer compiles for
+  `McpServerApp` users: `[E172] No given instance of type McpServerCoreFactory ... Note: given
+  instance instance in package com.tjclp.fastmcp was not considered because it was not imported
+  with import given`. The root import also exports, since 1.0.0, `TaskSettings`,
+  `LimitSettings`, `TaskSupport`, `TaskOwnerKey`, `LoggingLevel`, `ProgressToken` and the
+  `ResourceContents` / `TextResourceContents` / `BlobResourceContents` payloads (TJC-2336), so
+  every documented fence compiles with the root import alone; the release candidates needed them
+  imported by name (`com.tjclp.fastmcp.server.{TaskSettings, LimitSettings}`,
+  `core.{TaskSupport, TaskOwnerKey}`, `core.wire.{TextResourceContents, BlobResourceContents}`)
+  and those imports stay valid.
+- **stdio servers log to stderr.** The stdio runner now swaps ZIO's stock stdout logger for the
+  same format on stderr (TJC-2338), because stdout is the wire; a project that relied on ZIO log
+  lines reaching stdout must override `bootstrap` (`override val`) with a logger of its own. Loggers
+  you install yourself are never touched (details under *Changed*).
+- **First Scala Native publish.** `com.tjclp:fast-mcp-scala_native0.5_3` (stdio only,
+  experimental) is on Maven Central for the first time; `%%%` / `::` coordinates resolve it.
+- **Client-facing codes changed by the security wave.** Every POST without
+  `Content-Type: application/json` is refused **415**; bodies over `maxRequestBodyBytes` (1 MiB)
+  are refused **413** (an empty 413 from netty/Bun when they refuse the body first, a JSON-RPC
+  `-32000` body on first-party paths); frames over `limits` answer **`-32700`** (HTTP 400)
+  before dispatch; with `allowedHosts` set, a browser page on another loopback port or scheme
+  is refused **403** unless its origin is listed in the new `allowedOrigins`. Over HTTP a large
+  `sampling/createMessage` or elicitation result meets `maxRequestBodyBytes` first: raise it
+  together with `limits.maxFrameChars` (it must stay ≤ `maxFrameChars`).
+- **Resource template literals are matched verbatim** — `.` is a dot, not a wildcard — and
+  adjacent placeholders (`{a}{b}`), duplicate placeholder names, unbalanced braces and `/`
+  inside a placeholder are rejected at registration (the server fails to start).
+- **Duplicate registrations are compile-time errors.** Two annotated methods on one object that
+  register the same tool/prompt name, static URI or template pattern fail `scanAnnotations` at
+  compile time (previously last-writer-wins with a warning); non-literal annotation `Option`
+  arguments are compile-time errors too.
+- **New compile-time guards on both registration paths** (TJC-2331). Shapes that compiled but
+  were broken on the wire or crashed the macro now fail at expansion with a message naming the
+  member and the fix: an annotated method with no parameter list, more than one parameter list
+  (curried, or a `using` clause), type parameters, or more than 22 parameters; an annotated
+  member the declared-only scan skips (inherited from a trait or class, a `val`, a nested
+  object's method); a typed `McpTool` whose `In` does not derive an object schema (`String`,
+  `Int`, `Option`, a collection, `Either`, an enum — use a case class, `case class NoArgs()` for
+  no arguments); and `.withOutputSchema` on a non-object `Out` (wrap it in a case class). Nothing
+  that produced a correct `tools/list` entry and a callable tool is rejected (details under
+  *Changed*).
+- **Bun HTTP API.** `startStatefulHttp()` / `startStatelessHttp()` return a `BunHttpHandle`
+  (`port`, `hostname`, `url`, `server`, `stop()`) instead of a `BunServer`, and
+  `BunServeOptions.apply` changed shape (details under *Changed*). There is no public
+  per-request handler to wrap: 0.x Bun servers that built their own `Bun.serve(fetch = ...)`
+  around the SDK transport to add CORS headers, an `OPTIONS` preflight or a `/health` route
+  cannot reproduce that shape — `runHttp()` owns the listener and non-endpoint paths answer 404.
+  Put those concerns on a reverse proxy in front of the server; a composable fetch handler /
+  route hook is tracked for 1.1.0.
+- **Removed members.** The RC1 deprecations (`ErrorCodes.ResourceNotFound`,
+  `ElicitRequestUrlParams.requiredError`) and the RC4-cycle
+  `HostGuard.isAllowed(host, origin, Set[String])` overload are gone (see *Removed*), as are the
+  six never-read `McpServerSettings` fields (`debug`, `logLevel`, `warnOnDuplicate*`,
+  `dependencies`) and `McpServer.dependencies` (TJC-2336, see *Changed*) — construct settings by
+  name. Coming
+  from 0.4.0: the removals listed under `[0.5.0] ### Removed` (`FastMcpServer`, `JsMcpServer`,
+  `JacksonConverter`, `EmbeddedResourceContent`) and below apply too. Coming from 0.2.x or
+  earlier: `@ToolParam` / `@ResourceParam` / `@PromptParam` were removed in 0.3.0 in favour of
+  `@Param` (see `[0.3.0] ### Removed`).
+- **`Content` and `ResourceContents` ADTs (coming from 0.4.0).** `EmbeddedResourceContent`
+  became the sealed `ResourceContents` with `TextResourceContents(uri, text, mimeType, _meta)` /
+  `BlobResourceContents(uri, blob, mimeType, _meta)` in `core.wire` (root-exported since 1.0.0);
+  `mimeType` is `Option[String]` and `text` / `blob` are plain `String`.
+  `EmbeddedResource.resource` exposes only `uri`, `mimeType` and `_meta`, so `resource.text` /
+  `resource.blob` no longer compile — match on the two cases instead. `Content` gained
+  `AudioContent` and `ResourceLink` in 0.5.0: an exhaustive match written against the 0.4.0 shape
+  (`TextContent` / `ImageContent` / `EmbeddedResource`) now warns `match may not be exhaustive`
+  and fails under `-Werror`; add the two cases (both root-exported) or a wildcard.
+- **Compatibility scope.** The 1.x compatibility promise
+  ([DEPENDENCY_POLICY.md](DEPENDENCY_POLICY.md)) covers the public API of `fast-mcp-scala_3`
+  except `com.tjclp.fastmcp.examples.*` and `com.tjclp.fastmcp.macros.*`, which ship for the
+  example servers and the annotation macros' own use and may change in minor releases. The MiMa
+  baseline for 1.1.0 is 1.0.0; the RCs are not baselines.
+
+### Security
+
+Security-hardening wave (TJC-2294; findings F1–F12 of the 2026-09-04 scan). Umbrella for TJC-2295 (core input limits), TJC-2296 (HTTP transport), TJC-2297 (tasks), TJC-2298 (macro binding) and TJC-2299 (CI supply chain).
+
+- **Core input limits** (TJC-2295): inbound frames are bounded on every transport (JVM, Scala.js/Bun,
+  Scala Native; stdio and HTTP) by the new `McpServerSettings.limits: LimitSettings` —
+  `maxFrameChars` (4 MiB of UTF-16 chars per frame), `maxDepth` (64; hard ceiling
+  `LimitSettings.MaxSupportedDepth = 256`), `maxObjectFields` (1024 members per JSON object),
+  `maxUriChars` (8192) and `maxSubscriptionsPerSession` (1024). Frame violations answer JSON-RPC
+  `-32700` (HTTP 400) before any dispatch work and never mint a session; the check is a linear,
+  string-aware pre-scan of the raw text followed by an iterative AST re-check, so a 100 000-deep or
+  2^17-key frame costs one character scan. The JSON-RPC envelope decoder, request-context and
+  validation middleware and the header-validation / task-routing single-key lookups no longer
+  build a `HashMap` from client-chosen keys just to read one field (`JsonFields.get`); the maps
+  that remain (`_meta`, `inputResponses`, header-parameter paths) are built only from objects
+  already bounded by `limits.maxObjectFields`, which turns the unbounded hash-collision DoS on Bun
+  into a bounded per-object constant (see the `LimitSettings.maxObjectFields` scaladoc), and
+  parse-error bodies name the offending JSON type instead of echoing the value (fixes response
+  amplification). Numeric JSON-RPC ids must fit a 64-bit integer — an out-of-range or fractional id
+  is rejected with `-32600` instead of being silently wrapped and echoed back as a different id.
+  Resource URI templates are matched by a regex-free, linear-time matcher compiled once at
+  registration (`ResourceTemplatePattern`; fixes ReDoS on templates such as `{name}.{ext}`); client
+  URIs longer than `limits.maxUriChars` are rejected with `-32602` on `resources/read`,
+  `resources/subscribe` and `resources/unsubscribe` and dropped from `subscriptions/listen`; a
+  legacy session may hold at most `limits.maxSubscriptionsPerSession` distinct subscriptions
+  (`-32602` beyond that; re-subscribing a held URI is free). Subscription admission is atomic,
+  so concurrent requests obey the same cap. Tool/prompt/resource argument decoding
+  goes through zio-json's guarded `fromJsonAST` instead of an unguarded re-serialisation;
+  `DefaultDecodeContext` (now constructed from `settings.limits`) bounds the depth and width of JSON
+  embedded in string arguments with a linear pre-scan BEFORE the parser runs — so the bound also
+  holds on Scala Native, where a parser stack overflow is not catchable — and converts a JVM
+  `StackOverflowError` into `-32602`; a deeply nested `tools/call` can no longer terminate the JVM
+  or Native process. All stdio backends bound the line buffer at `limits.maxFrameChars` (JVM/Native:
+  `BoundedLines`; Bun: the stdin accumulator): overflow is checked before whitespace filtering
+  (including all-whitespace lines), so discarded input can never turn into a valid request. An
+  over-long line is truncated, answered with `-32700`, and the remainder discarded; `maxFrameChars = Int.MaxValue` is a valid "unbounded"
+  setting.
+- **HTTP transport hardening** (TJC-2296): `Origin` is now matched as a full origin
+  (`scheme://host[:port]`, default port per scheme, fail-closed parsing) against the request's
+  `Host` authority or the new `allowedOrigins` allow-list; port-stripped hostname matching of
+  `Origin` is gone, so a page on another loopback port (`http://localhost:3000`, `https://localhost`,
+  `http://127.0.0.1:1`, `null`) is refused with 403 when `allowedHosts` is set, and a `Host` header
+  with a malformed port (`h:99999`, `h:abc`) refuses every Origin instead of degrading to the
+  port-less rule. Unparseable `allowedOrigins` entries fail `runHttp()` at startup (F5). Every POST
+  — legacy and modern — must carry `Content-Type: application/json` (media-type parameters are
+  allowed, but a `charset` other than utf-8 is refused); anything else is refused 415 before the
+  body is read or a session is minted; gate order 403 → 415 → 413 → 406 (F5). New `maxRequestBodyBytes` (default 1 MiB; must not
+  exceed `limits.maxFrameChars`, checked at startup) bounds request bodies on every backend —
+  zio-http `disableRequestStreaming`, `Bun.serve` `maxRequestBodySize`, plus first-party
+  `Content-Length` and post-read checks → 413 (over TCP netty and Bun answer an empty 413;
+  first-party paths answer a JSON-RPC `-32000` body) (F1). `Bun.serve` now runs with
+  `development: false`, an `error` callback and a first-party `catchAllCause` boundary around the
+  fetch handler, so failures and defects answer a fixed JSON-RPC error (400/413/500) with no
+  exception text, trace or path regardless of `NODE_ENV`; the JVM answers the same JSON-RPC 500 for
+  non-interrupt defects, including a synchronous throw while the handler is built (tool-handler
+  defects are still answered in-band by the router as `-32603` with the handler's message) (F10).
+  A `Host` or `Origin` header sent more than once is evaluated as its `", "`-joined value on both
+  backends (the JVM used to check only the first), so the fail-closed parsers refuse it with 403
+  (the `Host` side since TJC-2354 — see *Fixed*); a request whose URL cannot be parsed on Bun
+  (e.g. `Host: 127.0.0.1:99999`) answers the host gate's 403 when the guard is on, otherwise a
+  JSON-RPC 400 (`Malformed request URL`), instead of a 500 defect. The Bun session mint takes its
+  idle/live snapshot in the same synchronous step as the eviction and insert, so concurrent
+  header-less initializes at `maxSessions` are never refused while an evictable session exists
+  (JVM parity, F12). The Bun stdio dispatch bridge gained the same `catchAllCause` boundary as the
+  HTTP handler, so a defect can no longer surface as an unhandled promise rejection (which
+  terminates the Bun process).
+  `HttpHeaderValidation`: sentinel-shaped header values shorter than `=?base64?` + `?=` yield
+  `-32020 Malformed Base64 header sentinel` instead of throwing (F10). New `maxSessions` (default
+  `Some(1000)`, `None` disables) caps the legacy streamable session store on both platforms: at the
+  cap the longest-idle session without a live GET is evicted (on the JVM the admission is one
+  serialised `Ref.Synchronized.modifyZIO`, so concurrent initializes never get a spurious 503), and
+  503 `Session limit reached; retry later` only when every stored session holds a live GET. Trade-off:
+  an unauthenticated flood of initializes at the cap evicts idle legitimate sessions — on Bun (no GET
+  channel) every stored session is evictable — so front non-loopback deployments with
+  `allowedHosts`/`allowedOrigins` and an authenticating proxy (F12). On Bun the idle-session sweeper
+  no longer dies after its first tick (`Schedule.spaced` needed tzdb on Scala.js), so
+  `sessionIdleTimeout` now actually evicts on Bun, including under `runHttp()`.
+- **Tasks hardening** (TJC-2297): the task store is bounded independently of client behaviour. New
+  `TaskSettings.maxStoredPerOwner` (256) and `maxStoredTotal` (4096, per pool) count terminal
+  entries too: at a cap the oldest completed entry older than `minResultRetentionMs` (30 s) is
+  evicted — the pool cap charges the creating owner's own stale results first, then the owner
+  holding the most stale results, never an owner whose results are all inside the grace — and when
+  nothing is evictable the create is rejected with the new error `-32003 Task capacity exceeded
+  (<kind>, limit N)` (`kind` in running | stored-per-owner | stored; `ErrorCodes.CapacityExceeded`).
+  `maxConcurrentTotal` (1024) is a running ceiling applied separately to the legacy-session pool and
+  the modern-bearer pool, so a flood of freely minted legacy sessions can never starve bearer
+  clients (and vice versa); `maxConcurrentPerSession` (64) is now the per-OWNER running cap and
+  still answers `-32602`. Modern bearer tasks are bucketed per client through
+  `TaskSettings.ownerKey`: `TaskOwnerKey.Transport` (default) uses the transport-supplied
+  `Session.clientKey` — the TCP peer address on both shipped HTTP backends (zio-http
+  `remoteAddress`, Bun `server.requestIP`) — and `TaskOwnerKey.Custom(f)` lets operators behind an
+  authenticating reverse proxy (where every peer collapses to one address) derive a key; keyless
+  requests share one anonymous bucket bounded by the per-owner cap; `_meta` / `clientInfo` are
+  attacker-controlled and must never be used as a key unless the proxy rewrites them (F9). The
+  pool ceilings are a documented residual: a client controlling >= `maxConcurrentTotal /
+  maxConcurrentPerSession` distinct peer addresses (16 at the defaults) can still fill a pool and
+  cause `-32003` for everyone else — pair the peer-address key with edge rate limiting, or use
+  `TaskOwnerKey.Custom` with an authenticated principal. Per-task
+  TTL eviction fibers were replaced by a single lazily started, self-terminating sweeper
+  (`sweepIntervalMs`, 1 s); expiry, the retention grace and eviction order are measured on the
+  monotonic clock, so an NTP step or VM resume neither cuts running tasks short nor extends
+  retention (F8). `TaskManager.create` is atomic under interruption: a client abort or
+  `notifications/cancelled` landing mid-create leaves no entry and no parked fiber behind, and the
+  legacy task branch registers its session release hook before the create (F11). `Session.terminate`
+  — now used by DELETE, idle eviction and session-cap eviction on both backends — is a latch that
+  interrupts the session's in-flight requests, runs the registered finalizers once (releasing,
+  i.e. interrupting, that session's tasks) and shuts the outbound queue; `McpServer.runStdio` /
+  `runHttp` stop the sweeper and running tasks on shutdown (the Bun `BunHttpHandle.stop()` too);
+  should the sweeper fiber ever die with a defect, it releases its claim and logs, so the next
+  create starts a fresh one instead of TTL expiry silently stopping. Additive API:
+  `Session.clientKey`,
+  `Session.addFinalizer`, `Session.terminate`, `Session.isTerminated`, `Session.subscriptionCount`,
+  `TaskScope`, `TaskManager.create(scope, ...)`, `TaskManager.releaseScope`, `TaskManager.shutdown`,
+  `TaskManager.ownerKeyFor`, `TaskOwnerContext`, `TaskOwnerKey`, `TaskCapacityExceeded`,
+  `ErrorCodes.CapacityExceeded`; `TaskManager`'s primary constructor is no longer public (use
+  `TaskManager.make`); `TaskSettings(...)` throws `IllegalArgumentException` when
+  `maxConcurrentPerSession`, `maxStoredPerOwner`, `maxStoredTotal` or `sweepIntervalMs` is < 1,
+  `minResultRetentionMs` is negative, or `maxConcurrentTotal` < `maxConcurrentPerSession`.
+- **Annotation macros bind to the exact annotated overload** (TJC-2298, F4 / CWE-706) — see
+  *Fixed* below; duplicate registrations and non-literal annotation arguments within a scanned
+  object are now compile-time errors — see *Changed*.
+- **Supply-chain hardening of the CI/release pipeline** (TJC-2299): the MCP conformance harness
+  (`@modelcontextprotocol/conformance@0.2.0-alpha.11`) is now resolved only from the committed,
+  integrity-hashed `conformance/bun.lock` (`conformance/package.json` pins the exact version) with
+  `bun install --frozen-lockfile --ignore-scripts` into a fresh per-run install cache, and
+  `scripts/conformance.sh` executes the installed `node_modules/.bin/conformance` directly (never
+  `bunx`, never a `bun run` PATH fallback) — a run whose resolution differs from the lock fails
+  before the suite starts; the script requires Bun ≥ 1.4 and prefers the Mill-managed 1.4.1
+  (`FAST_MCP_BUN` overrides; a non-executable override is an error). Every GitHub Action is pinned
+  to a full-length commit SHA (`# vX.Y.Z` comments) with Dependabot (weekly, 7-day cooldown;
+  workflows and the `setup-build` composite) keeping pins current. The release workflow is split
+  into `verify` → `publish` (`contents: read`, `persist-credentials: false`, no cache restore, the
+  Sonatype publish is the last step) → `github-release` (the only `contents: write` grant;
+  `gh release create --verify-tag --generate-notes`, no third-party action;
+  `softprops/action-gh-release` removed). The Mill launcher distribution is verified against pinned
+  SHA-256s (`.github/mill-dist.sha256`, `.github/scripts/install-mill.sh`) in every CI job before
+  the first `./mill` (Mill's own jars still come from coursier: SHA-1-checked on download,
+  cache-trusted only in non-release jobs); setup-bun's executable cache is disabled and
+  harness-running jobs restore the shared Mill/coursier cache read-only. `ci.yml` no longer exports
+  `GITHUB_TOKEN` workflow-wide: it is scoped to the Mill steps that need it (as `native.yml`
+  already did), so the third-party setup actions never see it.
+- **Netty 4.2.17.Final** (TJC-2327, TJC-2357): zio-http 3.4.0 declared netty 4.2.3.Final, whose
+  16 modules carried 27 OSV advisories (12 HIGH / 13 MODERATE / 2 LOW), 7 of them reachable from
+  the default JVM HTTP path — CVE-2026-33870 (HIGH, request smuggling), CVE-2026-42577 (HIGH,
+  epoll DoS on every Linux JVM), CVE-2026-42585, CVE-2026-42580, CVE-2026-42581, CVE-2026-50020
+  and CVE-2025-58056 — plus 20 in code paths this library never installs (TLS, compression,
+  WebSocket, proxy, IP filtering): CVE-2025-58057, CVE-2025-67735, CVE-2026-41417,
+  CVE-2026-42578, CVE-2026-42583, CVE-2026-42584, CVE-2026-42587, CVE-2026-44249,
+  CVE-2026-45416, CVE-2026-45536, CVE-2026-50010, CVE-2026-55831, CVE-2026-55833,
+  CVE-2026-56745, CVE-2026-56746, CVE-2026-59898, CVE-2026-59899, CVE-2026-59901,
+  CVE-2026-59903, CVE-2026-59921. The 1.0.0 classpath resolves netty 4.2.17.Final, which clears
+  all 27; the version now comes from zio-http 3.11.4 itself (the ZIO stack bump under *Changed*),
+  and the JVM module imports `io.netty:netty-bom` at the same version (`Versions.netty`) into the
+  published POM, so a consumer's resolution sees a single netty version
+  — the classified native artifacts included — and a future netty advisory can be answered by
+  moving that one constant ahead of zio-http. The interim direct pins of all 16 `io.netty` modules
+  (in place while zio-http stayed at 3.4.0) are gone with the bump, so netty is a transitive
+  dependency again and a stdio-only GraalVM build sheds it by excluding `dev.zio:zio-http_3` alone
+  (see [docs/native-image.md](docs/native-image.md)). The OSV audit of the resolved 1.0.0
+  classpath reports 0 advisories.
+
+### Added
+
+- **Project governance for 1.0** (TJC-2277, #86): `CONTRIBUTING.md`,
+  `SECURITY.md` (private vulnerability reporting enabled), `CODE_OF_CONDUCT.md`
+  (Contributor Covenant 2.1), `DEPENDENCY_POLICY.md`, `ROADMAP.md`, issue
+  templates, and the MCP SDK-tiering triage labels. The README is slimmed to a
+  quickstart plus index; transports, Tasks, custom types, platforms, spec
+  coverage, and examples each have a page under `docs/`.
+
 - **Scala Native target (experimental)** (TJC-2188, #82):
   `com.tjclp:fast-mcp-scala_native0.5_3` — stdio MCP servers compiled to
   standalone binaries via Scala Native 0.5.12 (21MB debug links in
-  seconds). Streamable HTTP followed in the same cycle over the socket
-  backend below (zio-http has no Native artifacts). Session/task ids come from
+  seconds). HTTP is excluded by design (zio-http has no Native
+  artifacts): the platform provides only the `TransportBackend` given,
+  so `McpServerApp[Http]` fails at compile time while
+  `McpServerApp[Stdio]` works unchanged. Session/task ids come from
   `/dev/urandom` (javalib `UUID.randomUUID` doesn't link on SN); stdin
   reads via `ZStream.fromReader`. CI links the `AnnotatedServer` demo
   binary and drives it with the same stdio smoke script that gates the
   GraalVM images.
-
-- **Streamable HTTP on Scala Native + netty-free JVM opt-in** (TJC-2223,
-  #81): a hand-rolled HTTP/1.1 + SSE server over `java.net.ServerSocket`
-  (`fast-mcp-scala/jvm-native/`, compiled by both the JVM and Scala Native
-  modules) now backs `McpServerApp[Http]` / `runHttp()` on Scala Native
-  (`NativeHttpBackend`, exported by default) and ships on the JVM as the
-  explicit opt-in `JvmSocketHttpBackend` — the `JdkHttpBackend` scoped in
-  TJC-2114. Opt in with `given JvmSocketHttpBackend.type =
-  JvmSocketHttpBackend` and exclude `zio-http` to drop Netty. Keep-alive,
-  `Content-Length` and chunked request bodies, `Expect: 100-continue`,
-  HTTP/1.0 clients, chunked SSE with a reader-side disconnect watch; caps:
-  8 KiB head (431), 16 MiB body (413), 256 concurrent connections, 60 s
-  idle; plaintext only (no `javax.net.ssl` on Native). Held to the same
-  EMPTY conformance baseline as the JVM via the new
-  `scripts/conformance.sh scala-native` lane (73/0 locally, 2026-07-28
-  scenario set identical to the JVM's). `FASTMCP_HTTP_DEBUG=1` prints
-  per-connection failures to stderr.
 
 - **Mirror-based `McpEncoder` fallback**: `Out` case classes without any
   `JsonEncoder` in scope now encode (text + `structuredContent`)
@@ -44,22 +387,192 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single customization point that supplies both the zio-json decoder used
   inside typed request case classes and the JSON Schema advertised for a
   custom wire type.
+- **OSV advisory gate** (TJC-2329): `.github/workflows/osv.yml` queries [OSV.dev](https://osv.dev)
+  for every coordinate on the production classpath of the three published modules
+  (`fast-mcp-scala.{jvm,js,scalaNative}.resolvedMvnDeps` — the same coursier resolution Mill puts
+  on the classpath, netty included) weekly, on every pull request that touches `build.mill`,
+  `fast-mcp-scala/package.mill`, the workflow or the script, and on demand. The job fails on any
+  advisory rated MODERATE or higher (GitHub Advisory Database label, else the CVSS v3 base score)
+  or of unknown severity; LOW advisories are reported only, and an accepted advisory is recorded in
+  `.github/osv-ignore`. Run locally with `scripts/osv-scan.sh`. GitHub's dependency graph cannot
+  see Mill-resolved Maven dependencies, so this is the published classpath's CVE feed.
+- **Root-import surface** (TJC-2336): `import com.tjclp.fastmcp.{*, given}` now also exports the
+  settings sub-records `TaskSettings` and `LimitSettings`, the per-tool task policy `TaskSupport`
+  and `TaskOwnerKey`, and the `resources/read` payload ADT `ResourceContents` /
+  `TextResourceContents` / `BlobResourceContents`, so every documented fence compiles with the root
+  import alone (`RootImportExportsTest` type-checks the `docs/tasks.md` and `docs/transports.md`
+  fences in a root-import-only scope). It also exports every shape a handler must name to call
+  the public `McpContext` / `McpServer` surface: the server→client request params and results
+  (`CreateMessageRequestParams` / `CreateMessageResult` with `SamplingMessage`,
+  `ModelPreferences`, `ModelHint`, `ToolChoice`; `ElicitRequestParams` /
+  `ElicitRequestUrlParams` / `ElicitResult`; `ListRootsResult` / `Root`), the client identity
+  snapshots `Implementation` / `ClientCapabilities`, the notification arguments `LoggingLevel` /
+  `ProgressToken`, and the `completion/complete` provider types (`CompleteRequestParams`,
+  `CompletionReference` with `PromptReference` / `ResourceTemplateReference`,
+  `CompletionArgument`, `CompletionContext`, `Completion`). `core.wire.Tool` (the sampling
+  `tools` element) is deliberately not exported — it would collide with the `@Tool` annotation —
+  so a sampling request that passes tools still needs `import com.tjclp.fastmcp.core.wire.Tool`.
+  Additive: an export alias and its `server.*` / `core.*` / `core.wire.*` target resolve as one
+  reference, so files that already import both are unaffected.
 
 ### Changed
 
-- **`JvmHttpBackend` is now a zio-http adapter** over the shared
-  `StreamableHttpHandler` (`shared/.../server/transport/http/`), which owns
-  every streamable-HTTP MCP decision exactly once — session store and idle
-  sweeper, only-`initialize`-mints, request→SSE with the per-request sink
-  and close sentinel, the 2026-07-28 stateless path, GET push channel
-  (409 on a second stream), DELETE, keepalive, JSON-RPC transport errors
-  (TJC-2223, #81). Wire behaviour is unchanged: every HTTP test and the
-  conformance suite pass unmodified. The Scala.js backend still carries
-  its own rendering (follow-up). Keepalive pings are now emitted when a
-  stream has been quiet for `keepAliveInterval` (a queue-fed timed pull)
-  rather than merged in on a fixed schedule — the merge's halt path
-  overflowed a Scala Native thread stack.
-
+- **ZIO stack bump** (TJC-2357): ZIO 2.1.20 → 2.1.26, zio-json 0.7.44 → 0.10.0 (JVM, Scala.js and
+  Scala Native artifacts alike) and zio-http 3.4.0 → 3.11.4 (JVM). zio-http 3.11.4 declares netty
+  4.2.17.Final itself, so the 16 direct `io.netty` pins the TJC-2327 override added to the JVM
+  module are removed again: netty is a transitive dependency of zio-http, the published
+  `fast-mcp-scala_3` POM lists only `zio`, `zio-json`, `zio-http` and the Scala 3 library as
+  dependencies plus the `import`-scoped `io.netty:netty-bom` entry (kept at `Versions.netty`,
+  equal to what zio-http declares, as the single switch for a future advisory),
+  and a stdio-only consumer sheds the HTTP stack by excluding `dev.zio:zio-http_3` alone (the
+  two-exclusion form stays valid). Two zio-http behaviour deltas reach the wire, neither on a
+  first-party path: a request netty's decoder rejects is now answered with zio-http's own status
+  mapping — 431 for an over-long header block, 414 for an over-long request line, 413 for a body
+  over the aggregator cap, 400 for any other decoder failure — where 3.4.0 routed every decoder
+  failure through its generic 500 error-response path (this library's 413 / `-32000` body-cap
+  replies and the aggregator's empty 413 are unchanged); and the channel's auto-read is paused
+  while a streamed SSE body is being written, so a pipelined follow-up request is no longer read
+  interleaved with it. Resolved-tree side effects: zio-schema 1.7.4 → 1.8.6, zio-prelude RC41 →
+  RC48, magnolia 1.3.18 → 1.3.23, izumi-reflect 3.0.5 → 3.0.9, scala-collection-compat 2.13.0 →
+  2.14.0, scala-java-time 2.6.0 → 2.7.0 (Scala.js / Scala Native). No source change was needed;
+  the three platforms' test suites, the official conformance suite (both revisions, JVM, Bun and
+  the GraalVM HTTP image) and the OSV audit (0 advisories) gate the pairing.
+- **Misplaced annotations are a compile error** (TJC-2331, C2.8): the scan still registers only
+  members declared directly on the scanned object (inherited members would break default-argument
+  getter lookup and exact-overload binding), but an annotated member it skips — inherited from a
+  trait or class, on a `val`, or in a nested object — is now reported by name with the rule and the
+  remedy instead of silently producing an empty `tools/list` (`McpServerApp`'s quiet scan included).
+  A nested annotated object next to declared members is a warning, since it may be scanned
+  separately; `private` / `protected` declared members are registered as before.
+- **Annotated method shapes are checked at expansion** (TJC-2331, C2.7; rejects shapes that were
+  silently broken or crashed): a `@Tool` / `@Prompt` / `@Resource` method with no parameter list
+  (`def m: String`), more than one parameter list (curried, or a `using` / implicit clause), type
+  parameters, or more than 22 parameters is now a compile error positioned at the method, naming it
+  and the fix. Before: a curried method registered its first list only and put a
+  `Function1.toString` on the wire; a generic method crashed the macro ("partially applied Term"); a
+  `using` clause failed with a raw `?=>` type mismatch at the object header; a no-parens method failed
+  naming only its return type; a 23-parameter method registered and every call died at the
+  `RefResolver` arity guard.
+- **`.withOutputSchema` requires an object `Out`** (TJC-2331, C2.5; rejects a shape that was silently
+  broken): `Out = String`, `Option[_]`, a collection or an enum advertised a non-object
+  `outputSchema` and emitted no `structuredContent` (the spec says a tool with `outputSchema` MUST
+  return a conforming one). The derived `ToolOutputSchemaProvider` now aborts at compile time naming
+  the type and the remedy (wrap the result in a case class, or drop `.withOutputSchema`). Case
+  classes, `Map[String, V]` and `Unit` are unaffected.
+- **`McpTool` `In` must derive an object schema** (TJC-2331, C2.4; rejects a shape that was silently
+  broken): `McpTool[String, _]`, `McpTool[Int, _]`, a collection, `Option`, `Either`, an enum or a
+  sealed trait as `In` used to compile and advertise a non-object `inputSchema` that no MCP
+  `arguments` object could ever satisfy — the tool could not be called. The derived
+  `ToolSchemaProvider` now aborts at compile time: `McpTool In must be a case class (use `case class
+  NoArgs()` for no arguments)`. Case classes, `Map[String, V]`, `Unit` and types with a user
+  `McpSchema` / `McpInputCodec` are unaffected.
+- **CI gates the 2026-07-28 requirements run on every PR** (TJC-2356): `conformance.yml` now runs
+  both `scripts/conformance.sh` modes per platform — the active suite (31 scenarios / 73 checks,
+  every one at the 2025-11-25 wire, empty baselines) and `--requirements 2026-07-28` (37 scored
+  scenarios) — on the JVM and Bun. Until now only the active suite was gated, so no workflow sent a
+  2026-07-28 request as a pass/fail check; `native.yml`'s JVM-vs-native 2026 parity step ran the
+  mode, but as a diff whose `grep` filter masked the harness verdict. That step now runs under
+  `pipefail` (a harness failure fails the job) and rejects an empty normalized result instead of
+  diffing two empty files.
+- **Legacy HTTP session cap: idle GET holders become evictable** (TJC-2355): at `maxSessions` the
+  JVM adapter still evicts the longest-idle session without a live GET stream first; when every
+  stored session holds a live GET, it now evicts the longest-idle of them once it has been idle
+  longer than `sessionIdleTimeout` (its GET stream is closed by `Session.terminate`; clients reopen
+  it as usual) instead of refusing the `initialize` with 503. The 503 remains only when no session
+  qualifies under either rule, and `sessionIdleTimeout = None` keeps GET holders exempt. The
+  periodic idle sweeper is unchanged (live GET streams stay exempt while capacity is free). Bun is
+  unaffected (no standalone GET channel). zio-http 3.11.4 exposes no accepted-socket option, so TCP
+  keepalive is not set by the server; `docs/transports.md` describes how a vanished GET peer is
+  detected.
+- **stdio servers log to stderr by default** (TJC-2338): on the stdio transport stdout is the wire,
+  but ZIO's default logger prints there (`println` on the JVM and Scala Native, `console.log` on
+  Scala.js/Bun for every level below Error), so a `ZIO.logInfo` inside a tool put a non-JSON line on
+  the channel and, under load, spliced it into a reply the client could never parse. The stdio
+  runner now installs the same log format on stderr: `McpServerApp[Stdio]` gets
+  `Runtime.removeDefaultLoggers ++ Runtime.addLogger(StdioLogging.stderrLogger)` as its ZIO
+  `bootstrap` (new `TransportRunner.bootstrap`; `McpServerApp[Http]` keeps `ZLayer.empty`), and
+  `McpServer.runStdio()` makes the same swap for a plain `ZIOAppDefault` while ZIO's stock logger is
+  still installed. Loggers you install yourself are never touched. Anyone who relied on ZIO log
+  lines appearing on stdout must override `bootstrap` (`override val`, not `def`) — see
+  docs/transports.md "stdout is the wire".
+- **Behaviour changes from the security wave (pre-1.0)** (TJC-2294):
+  - Resource template literal text is matched verbatim — a `.` in `file://{name}.txt` is a dot, not
+    a regex wildcard. Placeholders in one path segment must be separated by literal text (`{a}{b}`
+    is rejected at registration, as are duplicate placeholder names, unbalanced or nested braces,
+    and `/` inside a placeholder name). Results are otherwise identical to the former greedy regex:
+    within a segment each separator binds to its last occurrence, so `{name}.{ext}` on
+    `archive.tar.gz` yields `name = archive.tar`, `ext = gz`. Registering a template with the same
+    placeholder shape as an existing one (`users://{id}` vs `users://{userId}`) logs a warning.
+  - `ResourceTemplatePattern` is now a `final class` (not a case class — no `unapply`/`copy`);
+    `matches` returns `Option[Map[String, String]]`; `extractParams(uri, Regex.Match)` was removed;
+    `ResourceManager.findMatchingTemplate` keeps its tuple shape.
+  - Frames larger than 4 MiB (any transport) are refused unless `limits.maxFrameChars` is raised —
+    sampling/createMessage results carrying large base64 images over stdio may need
+    `McpServerSettings(limits = LimitSettings(maxFrameChars = 8 * 1024 * 1024))`; over HTTP the
+    same result meets `maxRequestBodyBytes` (1 MiB, 413) first, so raise that in step (it must
+    stay ≤ `maxFrameChars`). `LimitSettings`
+    validates its values at construction (`IllegalArgumentException`). `DefaultDecodeContext` gained
+    constructor parameters `(maxDepth, maxObjectFields)`; `DefaultDecodeContext.default` is
+    unchanged for callers. JSON-RPC ids such as `1e30` or `1.5` are now `-32600` (`id: null`).
+  - Every HTTP POST needs `Content-Type: application/json` (415 otherwise). With `allowedHosts` set,
+    browser pages on another port/scheme than the listener need `allowedOrigins`. `maxSessions` is
+    an `Option[Int]` (`Some(1000)` default, `None` disables). Request bodies over
+    `maxRequestBodyBytes` (1 MiB) get 413.
+  - Bun: `startStatefulHttp()` / `startStatelessHttp()` return a `BunHttpHandle` (`port`,
+    `hostname`, `url`, `server`, `stop()`) instead of a `BunServer` and run the idle-session
+    sweeper for the listener's lifetime; `startBun` is internal; `BunServeOptions.apply` now takes
+    `fetch: js.Function2[js.Dynamic, js.Dynamic, js.Promise[js.Dynamic]]` (Bun calls
+    `fetch(request, server)`), `maxRequestBodySize: Int`, `development: Boolean` and
+    `error: js.Function1[js.Dynamic, js.Dynamic]` (source-breaking for the JS helpers and the
+    facade). `startStatefulHttp()` / `startStatelessHttp()` are aliases (the mode comes from
+    `settings.stateless`); their handle's `stop()` also shuts the `TaskManager` down.
+  - HTTP `DELETE` and idle/session-cap eviction now call `Session.terminate`: a request still in
+    flight on that session is interrupted (no reply) and its running legacy tasks are released
+    (interrupted); previously tasks survived eviction until their own TTL.
+  - `scanAnnotations` now fails at compile time when two annotated methods on the same object
+    register the same tool name, prompt name, static resource URI, or resource template pattern
+    (templates that differ only in placeholder names — `users://{id}` vs `users://{userId}` — count
+    as the same pattern; a static URI and a template are never compared with each other).
+    Previously this was last-writer-wins with a stderr warning, or nondeterministic template
+    selection. The error names every colliding method as `name(param: Type, ...)` with its
+    file:line (for objects compiled in the same run) and is also reported at the `scanAnnotations`
+    call site. Fix: give one of them an explicit `name = Some(...)` / a distinct `uri`, or remove
+    its annotation. `scanAnnotations[T]` also now fails at compile time when `T` is not an object's
+    singleton type. The check is per scanned object: duplicates across objects, or between
+    annotations and typed contracts mounted on the same server, remain a runtime overwrite
+    (ToolManager, ResourceManager and now PromptManager warn on stderr).
+  - Annotation `Option` arguments must be literals: `@Tool(name = Some(someVal))` (or any
+    non-literal `description` / `title` / `taskSupport` / `mimeType` / `schema` / hint) is now a
+    compile-time error — `@Tool(name) must be a literal Option[String] — Some(<literal>),
+    Option(<literal>) or None — but was ...` — instead of being silently dropped. `final val`
+    string/boolean constants are accepted.
+  - `@Tool(description = Some(...))` / `@Prompt(description = Some(...))` without `name` now
+    registers under the method name with that description (previously the description text became
+    the registered name).
+- **No more `-experimental`** (TJC-2335): fast-mcp-scala is no longer compiled with
+  `-experimental`; consumers may drop the flag (annotation and typed-contract paths, all three
+  platforms). The annotation macros use only stable reflect API: the five `Symbol.info` uses
+  (the only `@experimental` reflect member the macros touched) became
+  `Symbol.termRef.widenTermRefByName`. The Scaladoc-as-description fallback (`Symbol.docstring`,
+  stable) is unchanged.
+- **Scala 3.9.0 LTS** (TJC-2273): all three platforms now build with Scala 3.9.0
+  (LTS, released 2026-09-03), up from 3.8.3. Companion bumps: WartRemover
+  3.5.6 → 3.6.1 (first release for the 3.9.0 compiler) and the Scala.js
+  linker to 1.22.0 (Scala 3.9.0 emits 1.22 IR); Scala Native stays on 0.5.12.
+  CI now tests LTS JDKs only (17, 21, 25 — the non-LTS 24 is dropped).
+- **mill-bun-plugin 0.2.1 → 0.3.1** (TJC-2274): Mill 1.1.x's bundled Scala.js
+  linker stops at IR 1.20 and cannot link Scala 3.9 output, so the js module
+  now pins `scalaJSVersion` explicitly (1.22.0) through the plugin's 0.3
+  `ScalaJSModule` path. With it: `fast-mcp-scala/js/bun.lock` is committed
+  and installs are frozen (regenerate via `./mill fast-mcp-scala.js.bunLock`);
+  the test-only TS SDK moved from `bunDeps` to `bunDevDeps`, so the published
+  `_sjs1_3` JAR no longer advertises it in a bun dependency manifest; the
+  plugin manages Bun 1.4.1 itself (CI's system Bun moves to 1.4.1 to match);
+  `js.test.bunTest` is replaced by the inherited `js.test` (`testForked`).
+  The js test module also drops the Scala 2.13 `scalajs-scalalib` that Mill's
+  isolated test-bridge resolution prepends to the test link on Scala 3.8+ —
+  it shadowed the 3.9.0 stdlib and made the linker report the new
+  `Option.orNull()` as non-existent.
 - **Build and source layout modularized** (TJC-2198): Mill 1.1.5 → 1.1.8;
   module definitions moved out of the monolithic `build.mill` into
   `fast-mcp-scala/package.mill`, next to the code they build (task paths such
@@ -77,9 +590,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON Schema derivation is now a native Scala 3 macro that emits `zio-json`
   AST values directly on JVM and Scala.js. Typed contracts no longer require
   `sttp.tapir.generic.auto.*` at call sites.
+- **Release workflow dry run** (TJC-2329): `release.yml` accepts `workflow_dispatch` with a
+  `version` input. A dispatch runs the full test suite and then `publishLocal` of all three
+  artifacts at that version on the runner (everything the release does except PGP signing and the
+  Sonatype upload) and asserts the three artifact directories exist; the Sonatype step and the
+  GitHub-release job run only on a `v*` tag push, so no publishing secret is reachable from a
+  dispatch. The pre-publish version check now asserts all three modules' `publishVersion` (the
+  former `show a b c` form printed only the JVM module's). Every CI checkout sets
+  `persist-credentials: false`.
+- **Never-read `McpServerSettings` fields removed** (TJC-2336): `debug`, `logLevel`,
+  `warnOnDuplicateResources`, `warnOnDuplicateTools`, `warnOnDuplicatePrompts` and `dependencies`
+  were accepted and silently ignored (nothing read them; duplicate registrations always warn on
+  stderr), as was the `McpServer.dependencies` copy. Construct settings by name — every shipped
+  example and test already does; a positional construction that passed these fields no longer
+  compiles. Removed rather than deprecated while still pre-1.0: a knob that does nothing must not
+  be frozen into the 1.x line.
+
+### Deprecated
+
+- The six inert `@Tool` parameters `examples`, `version`, `deprecated`, `deprecationMessage`,
+  `tags` and `timeoutMillis`, the matching `ToolDefinition` fields and `ToolExample` (TJC-2336):
+  `@deprecated("metadata only; not emitted on the wire; removed in 2.0.0", "1.0.0")`.
+  `scanAnnotations` never read them and no wire shape carries them; they stay accepted through 1.x
+  and are removed in 2.0.0. `@Param(examples = ...)` is unaffected (it populates the schema's
+  `examples` array). The dead `MacroUtils.parseToolParams` helper is gone.
 
 ### Fixed
 
+- **`Out = Unit` with `.withOutputSchema` emits `structuredContent: {}`** (TJC-2331, C2.5): the
+  tool advertised the empty-object `outputSchema` but emitted no `structuredContent` at all (the
+  spec requires a conforming one whenever `outputSchema` is declared);
+  `McpEncoder[Unit].encodeStructured` is now `Some(Json.Obj())`.
+- **`Either[A, B]` parameters decode the shape their schema advertises** (TJC-2331, C2.3): when a
+  side needed derivation (`Either[Color, String]`), the Mirror sum fallback produced a decoder
+  wanting `{"Left":{"value":"Red"}}` while the schema advertises zio-json's `{"Left":"Red"}` — every
+  schema-conforming call was rejected, bare or inside `Option` / `List` / `Map[String, _]`. An
+  `Either` arm now derives both sides and summons zio-json's `Either` instance, so the annotation
+  path matches the typed path and the docs' "collections derive with no givens" promise holds for
+  `List`, `Vector`, `Set`, `Seq`, `Array`, `Map[String, V]` and `Either`.
+- **`Set[T]` parameters derive a decoder like `List[T]`** (TJC-2331, C2.2): `Set[T]` of a derived
+  element type advertised a `uniqueItems` array schema but decoder synthesis aborted with `No
+  McpDecoder or derivable JsonDecoder found for type: Set[...]` (no `Set` arm; `Set` is not a
+  `Seq`), while the typed path decoded it. Every decoder abort on the annotation path now names the
+  parameter and states the remedy (`given JsonDecoder[T]` or `McpInputCodec[T]`) and lists what
+  derives automatically.
+- **`Vector[T]` parameters of derived element types no longer crash the macro** (TJC-2331, C2.1):
+  an annotated `Vector[T]` parameter whose `T` needs derivation (an enum, a case class, an `Option`
+  or `Either` of one) aborted expansion with an `ExprCastException` and a compiler stack trace — the
+  `Seq[a]` decoder arm matched `Vector` by conformance, built a `JsonDecoder[Seq[T]]` and cast it to
+  the invariant `JsonDecoder[Vector[T]]`. A dedicated `Vector` arm now derives the element decoder
+  and summons zio-json's `Vector` instance (the shape the schema already advertised), and a derived
+  decoder that does not fit its parameter's type (e.g. `IndexedSeq[T]`) is a compile error naming
+  the parameter and the `given JsonDecoder[T]` / `McpInputCodec[T]` remedy instead of a crash.
+- **`allowedHosts` parses the `Host` header fail-closed** (TJC-2354): the `Host` value must be one
+  `host[:port]` authority. A value containing a comma — the `", "`-joined form of a `Host` sent
+  more than once, or any second authority — is refused with 403 in either order instead of being
+  matched on its first hostname, and an explicit port that is not 1..65535 decimal digits refuses
+  the request whether or not an `Origin` is present (it used to be admitted as "port-less" when no
+  `Origin` was sent; the `Origin` side was already fail-closed). Bracketed IPv6 authorities
+  (`[::1]:8080`) are unchanged, and `allowedHosts` IPv6 entries must be written bracketed
+  (`Set("[::1]")`). Same rule on the JVM and Bun backends through the shared `HostGuard`; on Bun a
+  `Host: 127.0.0.1:99999` with the guard on now consistently answers the host gate's 403.
+- **stdio frames are written atomically** (TJC-2338): `StdioLoop.writeLine` (JVM and Scala Native)
+  emitted a reply as three `PrintStream` calls — the frame, its newline, then the flush — so any
+  concurrent `System.out` writer (a stray `println`, or ZIO's stdout logger above) could land
+  between the frame and its newline; the client then saw `{...}noise` plus an empty line and never
+  got that reply (the dogfooding stress lost one reply per 200 calls; 90-183 of 201 under `println`
+  spam). Frame and newline now go out in one call, so a foreign line can only ever land *between*
+  frames. Bun already wrote `line + "\n"` in one `process.stdout.write`.
+- **Legacy `tasks/result` always answers** (TJC-2353): a `tasks/result` for a task that was
+  cancelled — by `tasks/cancel`, by the TTL sweep, or with its session's release, whether the task
+  was already terminal or the waiter was parked when it happened — now fails with JSON-RPC
+  `-32602` (`Task <id> was cancelled`, the same family as `Unknown task`; new
+  `TaskCancelledError` carrier in `server.manager`). The awaiting handler used to re-raise the
+  task fiber's interrupt-only cause, which the router treated as a client-cancelled request and
+  answered with nothing: the streamable-HTTP SSE stream closed after at most a keepalive ping (JVM
+  and Bun), stdio wrote no frame, and the TypeScript SDK's `getTaskResult` hung until its 60 s
+  timeout. Real task failures keep their full cause; `tasks/get` snapshots of a cancelled task are
+  unchanged (no `result` / `error` block).
+- **Scala default arguments are applied on the annotation path** (TJC-2334): a `tools/call` or
+  `prompts/get` that omits a parameter declared with a default (`operation: String = "add"`,
+  `title: String = ""`) now invokes the method with that default — exactly what a direct Scala
+  call does — instead of failing with `Key not found in map: <param>` (`isError: true` on tools,
+  `-32603` on prompts). The generated handler resolves the compiler's `<method>$default$N` getter
+  for every parameter flagged `HasDefault` on the annotated method itself, so the flagship
+  `AnnotatedServer.calculator` / `greeting_prompt` and the README `search` / `greeting` examples
+  work as documented on JVM, Scala.js/Bun and Scala Native. An omitted `Option` parameter with a
+  non-`None` default now also takes that default (previously `None`). An omitted parameter without
+  a default fails with `Missing required argument '<param>'`, naming the argument, in the same
+  place as before (an `isError` tool result; `-32602` on prompts and resources).
+- **`@Param` no longer re-requires `Option` parameters** (TJC-2334): a description-only
+  `@Param("Maximum results") limit: Option[Int]` used to land in the advertised `required` array
+  (the bare parameter was optional, the annotated one was not). `required` now defaults to
+  `!isOption` for `@Tool` parameters, typed-request case-class fields and `@Prompt` arguments
+  (whose `Option` parameters were advertised `required: true` even without `@Param`); only an
+  explicit `@Param(required = true)` re-requires an `Option`. Existing `required = false` spellings
+  keep working.
+- **Prompt failures carry their cause** (TJC-2334): the `-32603` for a failing `@Prompt` handler
+  reads `Error rendering prompt '<name>': <cause message>` instead of swallowing the cause.
+- **Annotation macros bind to the annotated overload** (F4 / CWE-706, TJC-2298): `scanAnnotations`
+  used to re-resolve `@Tool` / `@Resource` / `@Prompt` targets by method name and could register,
+  schema-describe and invoke a different same-named overload (for example an un-annotated raw
+  helper declared before the annotated wrapper). The macro now emits a reference to the exact
+  annotated symbol, so the advertised `inputSchema`, the argument decoder and the invoked body
+  always come from the annotated declaration. Related name-based lookups were removed too:
+  `@Param(required = false)` default detection on method parameters and on typed-request
+  case-class fields now uses the parameter's own default flag instead of `name$default$N` /
+  `apply$default$N` lookups (a same-named sibling method or a companion `apply` overload with
+  defaults no longer satisfies it).
+- **Every literal spelling of an annotation `Option` argument is honoured** (TJC-2298):
+  `@Tool(name = scala.Some("x"))`, `Option("x")`, `Some.apply("x")`, `new Some("x")`,
+  `Some[String]("x")` and `final val` constants used to be silently ignored (the tool registered
+  under the method name); they now register under the given name. The same applies to
+  `description`, `title`, `taskSupport`, `mimeType`, `@Param(schema = ...)` and the boolean hints,
+  and to positional `@Resource(uri, name, description, mimeType)` arguments.
 - **Zero-boilerplate Scala 3 enum support** (TJC-2167, #78): enum fields —
   in typed contracts and annotation tools alike — derive string-enum JSON
   schemas (`{"type":"string","enum":[...]}`) and string-based zio-json
@@ -90,12 +714,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   search finds nothing), never exported givens that could shadow
   companions. Parameterized-case enums intentionally keep wrapper-object
   codecs; provide an `McpInputCodec` for a custom shape.
+- **Bun SSE keepalive no longer drops a reply that lands on a heartbeat tick** (TJC-2337): with
+  `keepAliveInterval` set, the Scala.js/Bun HTTP backend implemented the heartbeat as a timed `take`
+  on the per-request stream queue; a tool reply arriving in the same tick as the timeout was
+  discarded by the interrupted take and the stream then ended as `: ping` frames only — HTTP 200,
+  nothing logged (deterministic when the handler ran for exactly one interval, intermittent at
+  multiples; legacy per-request streams from the first frame, modern 2026-07-28 streams from the
+  second). The heartbeat is now a fiber that offers a ping marker into the queue — the Bun twin of
+  the JVM's stream merge — so the pull is a plain `take` and every reply frame is delivered.
+- **Bun's `idleTimeout` no longer cuts a slow tool's reply** (TJC-2337): the Scala.js/Bun HTTP
+  backend passed no `idleTimeout` to `Bun.serve`, whose 10 s default closes any connection with no
+  bytes in either direction — a per-request SSE response awaiting a slow tool included. With the
+  documented default `keepAliveInterval = None` a `tools/call` slower than that lost its reply: the
+  socket was cut mid-stream (measured 9–12 s) and the client saw only its own request timeout
+  (`-32001`). The listener now runs with `idleTimeout: 0`, disabling Bun's runtime idle close —
+  parity with the JVM listener, which has none; legacy session lifetime is still governed by
+  `sessionIdleTimeout` — so a quiet stream stays open until the reply. `keepAliveInterval` remains
+  the knob for intermediaries with idle timers of their own.
 
 ### Removed
 
 - Tapir, ApiSpec, Circe, and Cats production dependencies. Existing
   `sttp.tapir.Schema` overrides should migrate to `McpInputCodec`,
-  `McpSchema`, `@Param(schema = ...)`, or `McpTool.withSchema`.
+  `McpSchema`, `@Param(schema = ...)`, or `McpTool.withSchema`. Consumers that
+  relied on Tapir, ApiSpec, sttp, Circe, Cats or jawn arriving transitively
+  through `fast-mcp-scala_3` / `_sjs1_3` (they were in the RC3 POMs) must now
+  declare them explicitly.
+- The Scala.js TS-SDK facades (`com.tjclp.fastmcp.facades.server`) and
+  `McpServer#connect`, removed in the 0.5.0 development cycle and never
+  published: the library now owns the listener — use `runHttp()` /
+  `runStdio()` (or `startStatefulHttp()` / `startStatelessHttp()` on Bun).
+- The members deprecated at RC1, neither of which shipped in a stable release
+  (TJC-2277): `ErrorCodes.ResourceNotFound` (modern resource misses use
+  `InvalidParams`, `-32602`; legacy sessions keep `LegacyResourceNotFound`,
+  `-32002`) and `ElicitRequestUrlParams.requiredError` (the legacy `-32042`
+  helper; modern handlers use `McpContext.elicitUrl` and MRTR).
+- `HostGuard.isAllowed(host, origin, allowed: Set[String])` (TJC-2296, TJC-2277): deprecated
+  during the RC4 development cycle, never shipped in a stable release. Use
+  `HostGuard.isAllowed(host, origin, settings: McpServerSettings)`, which matches `Origin` as a
+  full origin and honours `allowedOrigins`. RC3 callers passed a `Set[String]` to the only
+  overload that existed then and must migrate to the settings overload.
 
 ## [1.0.0-RC3] - 2026-08-31
 
@@ -265,6 +923,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.0] - 2026-07-29
 
+_Never tagged or published to Maven Central; these changes first shipped in
+`1.0.0-RC1`. Kept as a section because the 1.0.0 rollup refers to it._
+
 Highlights: **the entire MCP protocol layer is now native pure-Scala 3** — both
 vendored SDKs are gone from the production classpath. The JSON-RPC core, wire
 types, router, built-in handlers, middleware, and the Tasks state machine all
@@ -371,7 +1032,13 @@ conformance suite: **42/42 on both platforms**, zero expected failures.
 - **Content ADT reshape** (spec alignment): `audience`/`priority` moved off the
   content constructors into `annotations` (`ContentAnnotations`), and
   `EmbeddedResourceContent` is replaced by `ResourceContents`
-  (`TextResourceContents` / `BlobResourceContents`).
+  (`TextResourceContents` / `BlobResourceContents` in `com.tjclp.fastmcp.core.wire`, with
+  `mimeType: Option[String]` and plain-`String` `text` / `blob`). `Content` also gained the
+  `AudioContent` and `ResourceLink` cases, so exhaustive matches over the 0.4.0 shape need two
+  more cases (see `[1.0.0] ### Upgrading`).
+- The Scala.js TS-SDK facade package `com.tjclp.fastmcp.facades.server` and
+  `McpServer#connect(transport)` went with the vendored SDK — the library now owns the listener
+  (migration under `[1.0.0] ### Removed`).
 - Stale GraalVM native-image reachability metadata (it described the removed
   Java SDK + Jackson reflection). Regenerate with the `native-image-agent`
   against a native-core server if you build native images.
@@ -484,6 +1151,12 @@ through the entire server stack, plus a fix for issue #56.
 - **GraalVM native-image reachability metadata** shipped with the JVM artifact at `META-INF/native-image/com.tjclp/fast-mcp-scala_3/reachability-metadata.json`. Covers Jackson record introspection over `io.modelcontextprotocol.spec.McpSchema$*`, zio-json's derivation, reactor-core, izumi-reflect, and `JacksonConversionContext`. Downstream apps can now build a working `native-image` of a fast-mcp-scala stdio server with zero hand-written config — just add `mill.javalib.NativeImageModule` and `jvmId = "graalvm-community:25.0.1"`. Covers initialize / notifications/initialized / tools/list / tools/call / ping / resources/list / prompts/list — the full protocol surface the Claude Agent SDK exercises during handshake.
 
 See the `[0.3.0-rc4]` section below for the cumulative rc1..rc4 changes rolled into this release (shared typed contracts, `McpServerApp` sugar, Jackson 3 migration, cross-platform Scala.js split, unified HTTP transport, MCP Tool Annotations, `$schema` key fix).
+
+### Removed
+
+- The `@ToolParam`, `@ResourceParam` and `@PromptParam` annotations, deprecated in favour of the
+  single `@Param` annotation (`@since 0.2.1`), were removed (#34). Replace each with `@Param`;
+  the parameter shape (`description`, `example`, `required`, `schema`) is unchanged.
 
 ## [0.3.0-rc4] - Strip `$schema` root key from tool inputSchema
 

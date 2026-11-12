@@ -6,17 +6,19 @@ import zio.http.*
 import zio.http.netty.{ChannelType, NettyConfig}
 
 import com.tjclp.fastmcp.server.McpServerSettings
-import com.tjclp.fastmcp.server.router.{McpRouter, Session}
+import com.tjclp.fastmcp.server.router.McpRouter
 import com.tjclp.fastmcp.server.transport.http.{HttpReply, HttpRequest, StreamableHttpHandler}
 
 /** JVM [[HttpTransportBackend]] — ZIO HTTP (Netty). Pure ZIO: the native router is ZIO, so `R`
   * flows straight through `Server.serve` and the user's `.provide(...)`. No `Unsafe`, no runtime
   * capture, no Mono.
   *
-  * Every streamable-HTTP decision lives in the shared [[StreamableHttpHandler]]; this object is the
-  * zio-http adapter around it (request → [[HttpRequest]], [[HttpReply]] → `Response`) plus the
-  * Netty channel-type pinning GraalVM native images need. The same handler backs the netty-free
-  * socket backend (`SocketHttpBackend`) over `java.net.ServerSocket`.
+  * Every streamable-HTTP decision — the header gates, the body and session caps, session minting
+  * and eviction, request→SSE, the 2026-07-28 stateless path — lives in the shared
+  * [[StreamableHttpHandler]]; this object is the zio-http adapter around it (request →
+  * [[HttpRequest]], [[HttpReply]] → `Response`) plus the Netty channel-type pinning GraalVM native
+  * images need. The same handler backs the netty-free socket backend (`SocketHttpBackend`) over
+  * `java.net.ServerSocket`.
   *
   * Split from [[JvmTransportBackend]] so stdio-only programs (and their GraalVM native images)
   * never reference zio-http or Netty.
@@ -30,22 +32,17 @@ object JvmHttpBackend extends HttpTransportBackend:
     // Capture the environment ZIO-natively and thread it into each handler via provideEnvironment,
     // so Routes stay `Routes[Any]` — Server.serve then needs only `Server`, avoiding the generic-R
     // HasNoScope constraint. No Unsafe, no runtime capture.
-    ZIO.environment[R].flatMap { env =>
-      StreamableHttpHandler.make(router, settings, JvmTransportBackend.randomId()).flatMap { mcp =>
-        // The idle-session sweeper is forked here (scoped to the server's lifetime), NOT in
-        // httpRoutes — tests drive httpRoutes directly and must not leak a sweeper fiber each.
-        ZIO.scoped {
-          mcp.evictIdleSessions.forkScoped *> serve(routes(mcp, env), settings)
+    StreamableHttpHandler.validateSettings(settings) *>
+      ZIO.environment[R].flatMap { env =>
+        StreamableHttpHandler.make(router, settings, JvmTransportBackend.randomId()).flatMap {
+          mcp =>
+            // The idle-session sweeper is forked here (scoped to the server's lifetime), NOT in
+            // httpRoutes — tests drive httpRoutes directly and must not leak a sweeper fiber each.
+            ZIO.scoped {
+              mcp.evictIdleSessions.forkScoped *> serve(routes(mcp, env), settings)
+            }
         }
       }
-    }
-
-  /** The shared idle-session sweeper, kept here as a seam for `JvmHttpTransportTest`. */
-  private[fastmcp] def evictIdleSessions(
-      store: Ref[Map[String, Session]],
-      settings: McpServerSettings
-  ): UIO[Unit] =
-    StreamableHttpHandler.evictIdleSessions(store, settings)
 
   /** Build the HTTP routes, allocating a fresh handler (and, unless stateless, session store).
     * Exposed to tests so specs can drive requests through `routes.runZIO(...)` in-memory, without
@@ -99,7 +96,13 @@ object JvmHttpBackend extends HttpTransportBackend:
     // Server.customized with NettyConfig.default is behavior-identical to Server.defaultWith
     // (Server.live supplies NettyConfig.default internally); going through it is what lets the
     // channel type be pinned.
-    val config = Server.Config.default.binding(settings.host, settings.port)
+    // `disableRequestStreaming(n)` installs netty's HttpObjectAggregator with `n` as its cap: bodies
+    // above `maxRequestBodyBytes` (declared or chunked) are answered 413 on the wire before the
+    // handler runs. The first-party checks in `postGate` / `bodyTooLarge` give the same verdict on
+    // paths with no aggregator in front (in-memory route tests).
+    val config = Server.Config.default
+      .binding(settings.host, settings.port)
+      .disableRequestStreaming(settings.maxRequestBodyBytes)
     val netty = nettyConfigFor(resolveChannelType())
     Server
       .serve(routes)
@@ -108,7 +111,7 @@ object JvmHttpBackend extends HttpTransportBackend:
 
   // ---------------------------------------------------------------------------
   // zio-http adapter: per-method routes on the endpoint, so zio-http keeps answering its own
-  // 404/405 for anything else; each route funnels into the shared handler.
+  // 404/405 for anything else; each route funnels into the shared handler behind `guarded`.
   // ---------------------------------------------------------------------------
 
   private def routes[R](
@@ -118,23 +121,50 @@ object JvmHttpBackend extends HttpTransportBackend:
     val ep = mcp.endpoint.stripPrefix("/")
     Routes(
       Method.POST / ep -> handler { (request: Request) =>
-        mcp.post(toRequest(request)).map(toResponse).provideEnvironment(env)
+        guarded(mcp.post(toRequest(request)).map(toResponse)).provideEnvironment(env)
       },
       Method.GET / ep -> handler { (request: Request) =>
-        mcp.get(toRequest(request)).map(toResponse)
+        guarded(mcp.get(toRequest(request)).map(toResponse))
       },
       Method.DELETE / ep -> handler { (request: Request) =>
-        mcp.delete(toRequest(request)).map(toResponse)
+        guarded(mcp.delete(toRequest(request)).map(toResponse))
       }
     )
+
+  /** First-party error boundary ([[StreamableHttpHandler.guardedWith]]) rendered as a zio-http
+    * `Response`: any non-interrupt Cause becomes a JSON-RPC 500 with a fixed message; the full
+    * cause is logged server-side only. Interrupts (client disconnect) keep zio-http's own 408 path.
+    * `effect` is by-name so a synchronous throw while the handler effect is BUILT (the eager header
+    * gates, the request adaptation) is caught too — parity with the Bun boundary.
+    */
+  private[fastmcp] def guarded[R](effect: => URIO[R, Response]): URIO[R, Response] =
+    StreamableHttpHandler.guardedWith[R, Response](
+      toResponse(
+        StreamableHttpHandler.transportError(500, HttpRequestGuards.InternalErrorMessage)
+      )
+    )(effect)
 
   private def toRequest(request: Request): HttpRequest =
     HttpRequest(
       method = request.method.name,
       path = request.url.path.encode,
       header = name => request.rawHeader(name),
-      body = request.body.asString
+      gateHeader = gateHeader(request),
+      body = request.body.asString,
+      // The TCP peer address as seen by netty (`None` for in-memory `routes.runZIO` requests).
+      clientKey = request.remoteAddress.map(_.getHostAddress)
     )
+
+  /** Header lookup for the gates: a header sent more than once is seen as its `", "`-joined value
+    * (what Bun's `Headers.get` returns), so a duplicated `Host`/`Origin` fails the origin parser
+    * closed (403) on every backend instead of only the first value being checked.
+    */
+  private def gateHeader(req: Request)(name: String): Option[String] =
+    val values = req.headers.iterator
+      .filter(_.headerName.equalsIgnoreCase(name))
+      .map(_.renderedValue)
+      .toList
+    if values.isEmpty then None else Some(values.mkString(", "))
 
   private def toResponse(reply: HttpReply): Response =
     val base = reply match

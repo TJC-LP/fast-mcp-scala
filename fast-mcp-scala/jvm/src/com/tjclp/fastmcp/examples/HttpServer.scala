@@ -5,29 +5,66 @@ import com.tjclp.fastmcp.*
 
 /** MCP server over HTTP — transport is a phantom type parameter on `McpServerApp`.
   *
-  * `runHttp()` (dispatched by `McpServerApp[Http, ...]`) serves the full MCP Streamable HTTP spec —
-  * `POST /mcp` for JSON-RPC, session tracking via the `mcp-session-id` header, and SSE streams for
-  * long-running calls. Flip `stateless = true` on the settings for a sessionless, SSE-free
-  * transport.
+  * `runHttp()` (dispatched by `McpServerApp[Http, ...]`) serves MCP 2026-07-28 Streamable HTTP:
+  * one stateless JSON-RPC message per `POST /mcp`, answered with plain JSON or a request-scoped SSE
+  * stream — no protocol sessions, standalone GET stream, or DELETE on the modern path. Requests
+  * that speak an older revision (2025-11-25 and earlier) are routed to the legacy initialize /
+  * session / GET / DELETE adapter, which is on by default. `stateless = true` disables only that
+  * adapter's session store (legacy replies then come back as plain JSON); modern requests are
+  * unaffected. Every POST, on either path, must carry `Content-Type: application/json` — anything
+  * else is refused with 415 before the body is read.
   *
   * Start with: `./mill fast-mcp-scala.jvm.runMain com.tjclp.fastmcp.examples.HttpServer`
   *
-  * Then exercise via curl:
+  * Modern requests (2026-07-28): one self-contained POST each, no session. Header set:
+  * `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method` (plus `Mcp-Name` for `tools/call`,
+  * `resources/read` and `prompts/get`), `Accept: application/json, text/event-stream` (both media
+  * types) and `Content-Type: application/json`; the body repeats the version and the client
+  * capabilities under `params._meta`:
   * {{{
-  *   # 1. Initialize (streamable mode returns an `mcp-session-id` response header)
+  *   # 1. Discover capabilities and supported protocol versions
+  *   curl -s -X POST http://localhost:8090/mcp \
+  *     -H "Content-Type: application/json" \
+  *     -H "Accept: application/json, text/event-stream" \
+  *     -H "MCP-Protocol-Version: 2026-07-28" \
+  *     -H "Mcp-Method: server/discover" \
+  *     -d '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}'
+  *
+  *   # 2. Call a tool (the reply arrives as JSON or as an SSE `event: message` frame)
+  *   curl -s -N -X POST http://localhost:8090/mcp \
+  *     -H "Content-Type: application/json" \
+  *     -H "Accept: application/json, text/event-stream" \
+  *     -H "MCP-Protocol-Version: 2026-07-28" \
+  *     -H "Mcp-Method: tools/call" \
+  *     -H "Mcp-Name: greet" \
+  *     -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"greet","arguments":{"name":"World"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}'
+  *
+  *   # 3. Wrong media type: refused with 415 before the body is read, on either protocol path
+  *   curl -s -i -X POST http://localhost:8090/mcp \
+  *     -H "Content-Type: text/plain" \
+  *     -H "Accept: application/json, text/event-stream" \
+  *     -d '{"jsonrpc":"2.0","id":3,"method":"ping"}'
+  *   # HTTP/1.1 415 ...
+  *   # {"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"Content-Type must be application/json"}}
+  * }}}
+  *
+  * Legacy 2025-11-25 adapter (also serves 2025-06-18 and earlier): `initialize` mints a session,
+  * every later request carries it in `mcp-session-id`, and DELETE closes it:
+  * {{{
+  *   # 1. Initialize (the response carries an `mcp-session-id` header)
   *   curl -s -D- -X POST http://localhost:8090/mcp \
   *     -H "Content-Type: application/json" \
   *     -H "Accept: application/json, text/event-stream" \
-  *     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
+  *     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
   *
-  *   # 2. Call a tool (SSE streamed back)
+  *   # 2. Call a tool on that session (SSE-framed reply)
   *   curl -N -X POST http://localhost:8090/mcp \
   *     -H "Content-Type: application/json" \
   *     -H "Accept: application/json, text/event-stream" \
   *     -H "mcp-session-id: <id-from-step-1>" \
   *     -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"greet","arguments":{"name":"World"}}}'
   *
-  *   # 3. Close the session (streamable mode only)
+  *   # 3. Close the session (legacy adapter only)
   *   curl -X DELETE http://localhost:8090/mcp -H "mcp-session-id: <id>"
   * }}}
   */

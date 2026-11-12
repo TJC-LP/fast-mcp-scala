@@ -13,8 +13,8 @@ on:
   push:
     branches: [main]
 
-env:
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+permissions:
+  contents: read
 
 jobs:
   native-smoke:
@@ -22,7 +22,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up build
         uses: ./.github/actions/setup-build
@@ -31,6 +33,8 @@ jobs:
 
       - name: Build native stdio smoke binary
         run: ./mill fast-mcp-scala.nativeSmoke.stdio.nativeImage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index / GraalVM provisioning by Mill; kept off the harness steps
 
       - name: Exercise binary over stdio JSON-RPC
         run: ./scripts/native-smoke.sh
@@ -40,16 +44,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up build
         uses: ./.github/actions/setup-build
         with:
           bun: "true"          # conformance harness
           cache-prefix: native
+          cache-write: "false" # this job executes the npm harness: restore the shared cache read-only
 
       - name: Build native HTTP conformance binary
         run: ./mill fast-mcp-scala.nativeSmoke.http.nativeImage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index / GraalVM provisioning by Mill; kept off the harness steps
 
       # The official MCP conformance suite against the native binary, held to the SAME
       # (empty) baseline as the JVM: any divergence is a native-image bug, never a new baseline.
@@ -60,8 +69,17 @@ jobs:
 
       # Scenario-level parity on the 2026 requirements run: the native binary must produce the
       # SAME normalized scenario results as the JVM server, not merely a passing exit code.
+      # pipefail makes each conformance.sh verdict fail this step as well — without it the grep
+      # filter's status masked a scored 2026-07-28 regression shared by both binaries (a clean
+      # diff). Only the grep stage is exempt: an empty selection is not a failure of its own, and
+      # the non-empty checks below turn a harness whose output shape changed into an error instead
+      # of a vacuous diff of two empty files.
       - name: Conformance parity (2026 requirements, JVM vs native)
         run: |
-          ./scripts/conformance.sh jvm 8078 2026 | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(✓|✗|Total:)' > jvm-2026.txt
-          ./scripts/conformance.sh native 8079 2026 | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(✓|✗|Total:)' > native-2026.txt
+          set -o pipefail
+          ./scripts/conformance.sh jvm 8078 2026 | sed 's/\x1b\[[0-9;]*m//g' | { grep -E '^(✓|✗|Total:)' || true; } > jvm-2026.txt
+          ./scripts/conformance.sh native 8079 2026 | sed 's/\x1b\[[0-9;]*m//g' | { grep -E '^(✓|✗|Total:)' || true; } > native-2026.txt
+          for f in jvm-2026.txt native-2026.txt; do
+            [ -s "$f" ] || { echo "::error::$f is empty — the harness printed no scenario lines, so the parity diff would be vacuous"; exit 1; }
+          done
           diff -u jvm-2026.txt native-2026.txt

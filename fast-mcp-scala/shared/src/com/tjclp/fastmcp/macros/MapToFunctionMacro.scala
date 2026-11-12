@@ -78,60 +78,142 @@ object MapToFunctionMacro:
         meth.symbol.paramSymss.headOption.map(_.map(_.name))
       case _ => None
 
+    /** The user-written method a (possibly eta-expanded) reference denotes. An eta-expansion is
+      * `Block(List(DefDef($anonfun, _, _, Some(Apply(Select(qual, m), args)))),
+      * Closure(Ident($anonfun)))` — the shape [[MacroUtils.getMethodRefExpr]] emits and the
+      * compiler produces for a bare `callByMap(m)` — so the callee is read off the synthetic
+      * method's body; a direct `Ident` / `Select` of a method is taken as is. `None` for lambdas
+      * and other function values.
+      */
+    def underlyingMethod(term: Term): Option[Symbol] =
+      @tailrec
+      def calleeOf(t: Term): Option[Symbol] = t match
+        case Apply(fn, _) => calleeOf(fn)
+        case TypeApply(fn, _) => calleeOf(fn)
+        case Inlined(_, _, inner) => calleeOf(inner)
+        case Typed(inner, _) => calleeOf(inner)
+        case Block(_, inner) => calleeOf(inner)
+        case s @ Select(_, _) if s.symbol.isDefDef => Some(s.symbol)
+        case i @ Ident(_) if i.symbol.isDefDef => Some(i.symbol)
+        case _ => None
+
+      term match
+        case Inlined(_, _, inner) => underlyingMethod(inner)
+        case Typed(inner, _) => underlyingMethod(inner)
+        case Block(stats, Closure(meth @ Ident(_), _)) if meth.symbol.isDefDef =>
+          stats.collectFirst { case dd: DefDef if dd.symbol == meth.symbol => dd } match
+            case Some(dd) => dd.rhs.flatMap(calleeOf)
+            case None => None
+        case Block(_, inner) => underlyingMethod(inner)
+        case ident @ Ident(_) if ident.symbol.isDefDef && !ident.symbol.flags.is(Flags.Synthetic) =>
+          Some(ident.symbol)
+        case select @ Select(_, _)
+            if select.symbol.isDefDef && !select.symbol.flags.is(Flags.Synthetic) =>
+          Some(select.symbol)
+        case _ => None
+
+    /** Scala default arguments of the denoted method's first parameter list, by parameter name: a
+      * reference to the compiler-generated `<method>$default$N` getter (`N` is the 1-based
+      * parameter position; the getter is declared next to the method, in the same class). Only
+      * parameters flagged `HasDefault` on the method's OWN symbol qualify (never a same-named
+      * sibling's getter), and only when the getter is nullary — a default in a FIRST parameter list
+      * cannot depend on other parameters, so a getter with parameters means the method is
+      * polymorphic and is left to the runtime "missing argument" failure.
+      */
+    def defaultGetters(methodSym: Symbol): Map[String, Expr[Any]] =
+      val owner = methodSym.owner
+      // Only object members: that is the sole shape `scanAnnotations` registers, and it gives the
+      // getter a stable qualifier (`Ref(module)`, `Outer.this.module` for a class-nested object).
+      if !(owner.isClassDef && owner.flags.is(Flags.Module)) then Map.empty
+      else
+        methodSym.paramSymss.headOption
+          .getOrElse(Nil)
+          .zipWithIndex
+          .flatMap {
+            case (pSym, idx) if pSym.flags.is(Flags.HasDefault) =>
+              owner.declaredMethod(s"${methodSym.name}$$default$$${idx + 1}") match
+                case getter :: Nil if getter.paramSymss.isEmpty =>
+                  Some(pSym.name -> Select(Ref(owner.companionModule), getter).asExprOf[Any])
+                case _ => None
+            case _ => None
+          }
+          .toMap
+
     def jsonDecoderToMcpDecoder[T: Type](jsonDecoderExpr: Expr[JsonDecoder[T]])(using
         Quotes
     ): Expr[McpDecoder[T]] =
+      // AST path (no re-serialisation of client input): see DefaultDecodeContext.decodeRaw.
       '{
         McpDecoder.instance[T] { (name, rawValue, context) =>
-          val json = context.writeValueAsString(rawValue)
-          $jsonDecoderExpr.decodeJson(json) match
-            case Right(value) => value
-            case Left(err) =>
-              throw new RuntimeException(
-                s"Failed to decode parameter '$name' from JSON: $err. Value: $json"
-              )
+          DefaultDecodeContext.decodeRaw[T](name, rawValue, context, $jsonDecoderExpr)
         }
       }
 
-    def summonOrDeriveJsonDecoder(tpe: TypeRepr)(using Quotes): Expr[JsonDecoder[?]] =
+    /** The zio-json decoder for `tpe`, derived structurally: container arms recurse into the
+      * element type and plant its decoder as a local `given` before summoning zio-json's container
+      * instance (the same wire shape the schema advertises); anything else is a summoned
+      * `JsonDecoder`, or a Mirror-derived one for products and singleton enums. `paramName` is the
+      * annotated parameter this decoder is for — every abort names it and the remedy.
+      */
+    def summonOrDeriveJsonDecoder(tpe: TypeRepr, paramName: String)(using
+        Quotes
+    ): Expr[JsonDecoder[?]] =
+      def derive(inner: TypeRepr): Expr[JsonDecoder[?]] =
+        summonOrDeriveJsonDecoder(inner, paramName)
       tpe.dealias.simplified.asType match
         case '[Option[a]] =>
-          summonOrDeriveJsonDecoder(TypeRepr.of[a]) match
+          derive(TypeRepr.of[a]) match
             case '{ $inner: JsonDecoder[a] } =>
               '{
                 given JsonDecoder[a] = $inner
                 summon[JsonDecoder[Option[a]]]
               }
         case '[List[a]] =>
-          summonOrDeriveJsonDecoder(TypeRepr.of[a]) match
+          derive(TypeRepr.of[a]) match
             case '{ $inner: JsonDecoder[a] } =>
               '{
                 given JsonDecoder[a] = $inner
                 summon[JsonDecoder[List[a]]]
               }
+        // Vector before Seq: quoted type patterns match by conformance, and Vector[a] <: Seq[a]
+        // would otherwise yield a JsonDecoder[Seq[a]] that is not a JsonDecoder[Vector[a]].
+        case '[Vector[a]] =>
+          derive(TypeRepr.of[a]) match
+            case '{ $inner: JsonDecoder[a] } =>
+              '{
+                given JsonDecoder[a] = $inner
+                summon[JsonDecoder[Vector[a]]]
+              }
         case '[Seq[a]] =>
-          summonOrDeriveJsonDecoder(TypeRepr.of[a]) match
+          derive(TypeRepr.of[a]) match
             case '{ $inner: JsonDecoder[a] } =>
               '{
                 given JsonDecoder[a] = $inner
                 summon[JsonDecoder[Seq[a]]]
               }
+        case '[Set[a]] =>
+          derive(TypeRepr.of[a]) match
+            case '{ $inner: JsonDecoder[a] } =>
+              '{
+                given JsonDecoder[a] = $inner
+                summon[JsonDecoder[Set[a]]]
+              }
         case '[Array[a]] =>
-          summonOrDeriveJsonDecoder(TypeRepr.of[a]) match
+          derive(TypeRepr.of[a]) match
             case '{ $inner: JsonDecoder[a] } =>
               '{
                 given JsonDecoder[a] = $inner
                 summon[JsonDecoder[Array[a]]]
               }
         case '[Map[String, v]] =>
-          summonOrDeriveJsonDecoder(TypeRepr.of[v]) match
+          derive(TypeRepr.of[v]) match
             case '{ $inner: JsonDecoder[v] } =>
               '{
                 given JsonDecoder[v] = $inner
                 summon[JsonDecoder[Map[String, v]]]
               }
         case '[Map[k, v]] =>
-          (Expr.summon[JsonFieldDecoder[k]], summonOrDeriveJsonDecoder(TypeRepr.of[v])) match
+          (Expr.summon[JsonFieldDecoder[k]], derive(TypeRepr.of[v])) match
             case (
                   Some('{ $keyDecoder: JsonFieldDecoder[k] }),
                   '{ $valueDecoder: JsonDecoder[v] }
@@ -143,8 +225,23 @@ object MapToFunctionMacro:
               }
             case _ =>
               report.errorAndAbort(
-                s"No JsonFieldDecoder / JsonDecoder combination found for type: ${tpe.show}"
+                s"Cannot decode parameter '$paramName': no JsonFieldDecoder for the keys and " +
+                  s"JsonDecoder for the values of ${tpe.show}. JSON object keys are strings — use " +
+                  s"Map[String, V], or provide a given JsonDecoder[${tpe.show}] or " +
+                  s"McpInputCodec[${tpe.show}]."
               )
+        // Either: derive both sides, then summon zio-json's instance — the {"Left": a} / {"Right": b}
+        // wrapper shape the schema advertises. Left to the '[t] fallback, a side needing derivation
+        // made the Mirror sum decoder win, which wants {"Left": {"value": a}} and rejects every
+        // schema-conforming call.
+        case '[Either[a, b]] =>
+          (derive(TypeRepr.of[a]), derive(TypeRepr.of[b])) match
+            case ('{ $left: JsonDecoder[a] }, '{ $right: JsonDecoder[b] }) =>
+              '{
+                given JsonDecoder[a] = $left
+                given JsonDecoder[b] = $right
+                summon[JsonDecoder[Either[a, b]]]
+              }
         case '[t] =>
           Expr
             .summon[JsonDecoder[t]]
@@ -158,47 +255,81 @@ object MapToFunctionMacro:
             )
             .getOrElse(
               report.errorAndAbort(
-                s"No McpDecoder or derivable JsonDecoder found for type: ${tpe.show}"
+                s"Cannot decode parameter '$paramName': no McpDecoder, JsonDecoder or " +
+                  s"Mirror-derivable JsonDecoder found for ${tpe.show}. Provide a given " +
+                  s"JsonDecoder[${tpe.show}] or McpInputCodec[${tpe.show}] (decoder + schema in one " +
+                  "value). Primitives, java.time values, Scala 3 enums, case classes, Option, Either, " +
+                  "List, Vector, Set, Seq, Array and Map[String, V] derive automatically."
               )
             )
 
-    def summonDecoder(tpe: TypeRepr)(using Quotes): Expr[McpDecoder[?]] =
+    /** The `McpDecoder` for one parameter: a user instance wins; otherwise the zio-json decoder is
+      * summoned or derived and wrapped. The derived decoder is CHECKED against `JsonDecoder[t]`
+      * (invariant) rather than cast — a container arm matched by conformance (a `Seq` or `Map`
+      * SUBTYPE such as `IndexedSeq[T]`) yields a decoder for the supertype, and casting it used to
+      * crash the macro with an `ExprCastException` and a compiler stack trace.
+      */
+    def summonDecoder(tpe: TypeRepr, paramName: String)(using Quotes): Expr[McpDecoder[?]] =
       tpe.dealias.simplified.asType match
         case '[t] =>
-          Expr
-            .summon[McpDecoder[t]]
-            .getOrElse(
-              jsonDecoderToMcpDecoder[t](
-                summonOrDeriveJsonDecoder(tpe).asExprOf[JsonDecoder[t]]
+          Expr.summon[McpDecoder[t]].getOrElse {
+            // `isExprOf`, not a quoted `'{ $d: JsonDecoder[t] }` pattern: a lowercase type name in a
+            // quoted pattern binds a FRESH type variable, so that pattern matches any decoder.
+            val derived = summonOrDeriveJsonDecoder(tpe, paramName)
+            if derived.isExprOf[JsonDecoder[t]] then
+              jsonDecoderToMcpDecoder[t](derived.asExprOf[JsonDecoder[t]])
+            else
+              report.errorAndAbort(
+                s"Cannot decode parameter '$paramName' of type ${tpe.show}: derivation produced a " +
+                  s"${derived.asTerm.tpe.widen.show}, which is not a JsonDecoder[${tpe.show}] " +
+                  "(JsonDecoder is invariant, so a decoder for a supertype does not fit). Provide a " +
+                  s"given JsonDecoder[${tpe.show}] or McpInputCodec[${tpe.show}], or declare the " +
+                  "parameter as List, Vector, Set, Seq, Array or Map[String, V]."
               )
-            )
+          }
 
-    def buildArgConversionExpr(params: List[ParamInfo], mapExpr: Expr[Map[String, Any]])(using
-        Quotes
-    ): Expr[List[Any]] =
+    /** One decoded argument per parameter. An argument present in the map is decoded; an absent one
+      * takes the parameter's Scala default when it has one (exactly what a direct Scala call would
+      * do), an absent `Option` without a default is `None`, and anything else is a missing required
+      * argument — reported by name (a `NoSuchElementException`, which the dispatch boundary maps to
+      * `-32602` / an `isError` result).
+      */
+    def buildArgConversionExpr(
+        params: List[ParamInfo],
+        defaults: Map[String, Expr[Any]],
+        mapExpr: Expr[Map[String, Any]]
+    )(using Quotes): Expr[List[Any]] =
       Expr.ofList(params.map { p =>
         val nameExpr = Expr(p.name)
-        val decoderExpr = summonDecoder(p.tpe)
+        val decoderExpr = summonDecoder(p.tpe, p.name)
         val isOptionType = p.tpe.dealias.simplified match
           case AppliedType(base, _) if base.typeSymbol.fullName == "scala.Option" => true
           case _ => false
 
-        if isOptionType then
-          '{
-            val key = $nameExpr
-            val rawOpt: Option[Any] = $mapExpr.get(key)
-            val raw: Any = rawOpt.getOrElse(None)
-            $decoderExpr.decode(key, raw, $contextExpr)
-          }.asExprOf[Any]
-        else
-          '{
-            val key = $nameExpr
-            val raw = $mapExpr.getOrElse(
-              key,
-              throw new NoSuchElementException("Key not found in map: " + key)
-            )
-            $decoderExpr.decode(key, raw, $contextExpr)
-          }.asExprOf[Any]
+        defaults.get(p.name) match
+          case Some(defaultExpr) =>
+            '{
+              val key = $nameExpr
+              $mapExpr.get(key) match
+                case Some(raw) => $decoderExpr.decode(key, raw, $contextExpr)
+                case None => $defaultExpr
+            }.asExprOf[Any]
+          case None if isOptionType =>
+            '{
+              val key = $nameExpr
+              val rawOpt: Option[Any] = $mapExpr.get(key)
+              val raw: Any = rawOpt.getOrElse(None)
+              $decoderExpr.decode(key, raw, $contextExpr)
+            }.asExprOf[Any]
+          case None =>
+            '{
+              val key = $nameExpr
+              val raw = $mapExpr.getOrElse(
+                key,
+                throw new NoSuchElementException("Missing required argument '" + key + "'")
+              )
+              $decoderExpr.decode(key, raw, $contextExpr)
+            }.asExprOf[Any]
       })
 
     val fnTerm = f.asTerm
@@ -207,12 +338,14 @@ object MapToFunctionMacro:
       case Some(names) if names.length == params.length =>
         params.zip(names).map((param, realName) => param.copy(name = realName))
       case _ => params
+    val defaults: Map[String, Expr[Any]] =
+      underlyingMethod(fnTerm).map(defaultGetters).getOrElse(Map.empty)
 
     retTpe.asType match
       case '[r] =>
         '{ (map: Map[String, Any]) =>
           val fnValue = $f
-          val argsList: List[Any] = ${ buildArgConversionExpr(namedParams, 'map) }
+          val argsList: List[Any] = ${ buildArgConversionExpr(namedParams, defaults, 'map) }
           val result = MacroUtils.invokeFunctionWithArgs(fnValue, argsList)
           result.asInstanceOf[r]
         }.asExprOf[Map[String, Any] => r]

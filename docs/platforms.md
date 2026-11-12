@@ -1,0 +1,169 @@
+# Platforms: JVM, Scala.js on Bun, Scala Native
+
+← [README](../README.md) · see also [Transports](./transports.md) · [Architecture](./architecture.md) · [GraalVM native image](./native-image.md)
+
+fast-mcp-scala is a single native MCP implementation. The entire protocol layer (JSON-RPC
+envelope, wire types, router, built-in handlers, middleware, the Tasks state machine) lives in
+`shared/`; each platform contributes only a transport backend. The
+[architecture diagram](./architecture.md#one-native-core-one-platform-seam) shows the seam.
+Capabilities are derived from the registered handler map, so a server can never advertise what it
+cannot serve. `McpServerApp[T, Self]` is the declarative entry point on every target; typed
+contracts compile and mount unchanged on all three.
+
+## Parity matrix
+
+| Capability | JVM | Scala.js (Bun-first) | Scala Native (experimental) |
+|---|---|---|---|
+| `McpServerApp[T, Self]` sugar trait | ✅ | ✅ | ✅ |
+| `@Tool` / `@Resource` / `@Prompt` + `scanAnnotations[T]` | ✅ | ✅ | ✅ |
+| Typed contracts (`McpTool`, `McpPrompt`, `McpStaticResource`, `McpTemplateResource`) | ✅ | ✅ | ✅ |
+| `ToolSchemaProvider[A]` auto-derivation from `@Param` | ✅ native macro | ✅ native macro | ✅ native macro |
+| `ToHandlerEffect[F]` — plain values / ZIO / Either / Try | ✅ | ✅ | ✅ |
+| Stdio transport | ✅ | ✅ (Node stdio) | ✅ (LLVM binary) |
+| Streamable HTTP, MCP 2026-07-28 (stateless POST + request-scoped SSE) | ✅ (ZIO HTTP) | ✅ (`Bun.serve`) | ✗ by design¹ |
+| Legacy HTTP adapter (initialize, `Mcp-Session-Id`, GET stream, DELETE) | ✅ | ✅ (GET answers 405; per-request SSE covers server→client) | ✗ by design¹ |
+| Tasks extension (bearer handles) | ✅ | ✅ | ✅ (over stdio) |
+| Skills extension (`skills/list`, `skills/get`, `resources/directory/read`, skill files as resources) | ✅ | ✅ | ✅ (over stdio) |
+| `SkillDirectoryLoader` (publish an on-disk skill directory) | ✅ | — (in-memory skills and providers) | — (in-memory skills and providers) |
+| SHA-256 for skill digests | `MessageDigest` | portable FIPS 180-4 (`core.skills.Sha256`) | portable FIPS 180-4 |
+| Custom decoders (`given JsonDecoder[T] → McpDecoder[T]`) | ✅ | ✅ (same shared zio-json path) | ✅ same |
+| Standalone binary | GraalVM native image (stdio + HTTP) | — | LLVM binary via Scala Native |
+
+¹ zio-http is not published for Scala Native (upstream support is 4.x-milestoned). The platform
+provides no `HttpTransportBackend` given, so `McpServerApp[Http]` programs fail to compile: a
+compile-time property, not a runtime failure. A socket-based HTTP backend is in progress
+([#81](https://github.com/TJC-LP/fast-mcp-scala/issues/81)).
+
+Node and Deno parity for the HTTP listener is a follow-up; only the `Bun.serve(...)` entry point is
+Bun-specific today.
+
+## JVM notes
+
+JDK 17 or newer (CI tests 17, 21 and 25). On JDK 24+ the HTTP transport's netty prints
+`WARNING: A restricted method in java.lang.System has been called` once at startup (native-transport
+probing); it is harmless, and `--enable-native-access=ALL-UNNAMED` silences it. Scala 3.9's
+`LazyVals` trigger a similar one-time `sun.misc.Unsafe` deprecation warning on JDK 25. Both go to
+stderr and never touch the stdio protocol channel.
+
+## Scala.js on Bun
+
+What the Scala.js target gives you:
+
+- The same native MCP **server runtime** on Bun: stdio (`runStdio`, Node stdin) and modern
+  stateless Streamable HTTP (`runHttp`, `Bun.serve`), plus the version-selected legacy session
+  adapter. The Bun listener runs with `development: false`, an `error` callback, `idleTimeout: 0`
+  (Bun's 10 s default would close a quiet SSE response before a slow tool replies) and a first-party
+  `catchAllCause` boundary (`NODE_ENV` is not security-relevant); `startStatefulHttp()` /
+  `startStatelessHttp()` return a `BunHttpHandle` (call `.stop()`), and idle-session eviction plus
+  the `maxSessions` cap run on every entry.
+- Pluggable tool-argument validation through the shared `Validation.scala` seam (permissive by
+  default on every platform).
+- The shared `McpContext`: client info and capabilities, request and trace metadata, progress and
+  logging, and MRTR-backed Roots, Sampling, and Elicitation, identical on JVM and JS.
+- Typed contracts derive their input schemas on Scala.js as well, with no schema-library import.
+
+### Quickstart on Bun
+
+```scala 3 raw
+//> using scala 3.9.0
+//> using platform scala-js
+//> using jsVersion 1.22.0
+//> using jsModuleKind es
+//> using dep com.tjclp::fast-mcp-scala::1.0.1
+
+import com.tjclp.fastmcp.{*, given}
+
+object HelloBun extends McpServerApp[Stdio, HelloBun.type]:
+  @Tool(name = Some("add"), description = Some("Add two numbers"), readOnlyHint = Some(true))
+  def add(@Param("First operand") a: Int, @Param("Second operand") b: Int): Int = a + b
+```
+
+Same shape as the JVM: the `McpServerApp` trait picks up the shared `McpServerCoreFactory` given
+and builds the one shared `McpServer` over the Bun `TransportBackend`. Note the double `::` before
+the version, which selects the platform artifact (`fast-mcp-scala_sjs1_3`).
+
+Package it to an ES module and run it on Bun:
+
+```bash
+scala-cli --power package --js --js-version 1.22.0 HelloBun.scala -o hello.mjs -f
+bun run hello.mjs
+```
+
+(`-f` overwrites an existing bundle on rebuilds; without it the second run stops with "already
+exists".)
+
+Scala 3.9 emits Scala.js IR 1.22, so the linker must be 1.22 or newer. scala-cli 1.14 applies the
+`//> using jsVersion` directive to compilation but not to the `package --js` linker, which is why
+the command repeats `--js-version 1.22.0`. Point Claude Desktop or the MCP Inspector at
+`bun run hello.mjs` exactly as you would a JVM command.
+
+### In this repository
+
+`./mill fast-mcp-scala.js.fastLinkJS` links the js module to
+`out/fast-mcp-scala/js/fastLinkJS.dest/main.js`. That bundle is an ES module that currently
+exports only the conformance server's `startConformance` entry point (this is what
+`scripts/conformance.sh js` imports); it has no module initializer, so running it directly starts
+nothing. Runnable entry points for the examples are on the [roadmap](../ROADMAP.md). Until then,
+run the examples on Bun with the scala-cli recipe above. See
+[`HelloWorld.scala`](../fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/HelloWorld.scala)
+(shared across platforms) and
+[`HttpServerJs.scala`](../fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HttpServerJs.scala)
+(Bun HTTP with `McpTool.withSchema`) for the reference sources.
+
+## Scala Native (experimental)
+
+The same shared core compiles to a standalone LLVM binary: no JVM, no JS runtime (about 21 MB in a
+debug link, single-digit-second link times). The artifact is `fast-mcp-scala_native0.5_3`, first
+published with 1.0.0.
+
+```scala 3 raw
+//> using scala 3.9.0
+//> using platform native
+//> using nativeVersion 0.5.12
+//> using dep com.tjclp::fast-mcp-scala::1.0.1
+
+import com.tjclp.fastmcp.{*, given}
+
+object HelloNative extends McpServerApp[Stdio, HelloNative.type]:
+  @Tool(name = Some("add"), description = Some("Add two numbers"), readOnlyHint = Some(true))
+  def add(@Param("First operand") a: Int, @Param("Second operand") b: Int): Int = a + b
+```
+
+`scala-cli --power package HelloNative.scala -o hello-native -f` produces the binary (`package` and
+`-o` are power-mode features, as in the Bun recipe above); clang/LLVM ≥ 17 must be installed.
+
+In this repository, `./mill fast-mcp-scala.scalaNative.nativeLink` builds the `AnnotatedServer`
+demo binary and `scripts/native-smoke.sh <binary>` drives it through the full MCP handshake, the
+same script that gates the GraalVM images. Its assertions are bound to the `AnnotatedServer`
+fixture (`add`, `calculator`, `hello_prompt`, `static://welcome`): against your own binary only the
+first three exchanges — initialize, `tools/list`, `tools/call` — are meaningful, and the later
+asserts fail by design. The script also feeds stdin through a named FIFO, and Node and Bun never
+observe EOF on a FIFO (`process.stdin` emits no `end` when the FIFO's writer closes — Bun 1.4.1 and
+Node 26 alike), so its final exit-on-EOF assertion fails for a Scala.js bundle too: grade a Bun or
+Node bundle on the `--- stdout ---` dump, or feed it through an anonymous pipe
+(`printf '...' | bun run hello.mjs`), where every runtime exits 0 on EOF — which is what MCP hosts,
+which spawn servers over pipes, see.
+
+Caveats (experimental):
+
+- stdio only (see the matrix footnote);
+- session and task ids come from `/dev/urandom` (Unix only);
+- ZIO's signal handlers and shutdown hooks are no-ops on Scala Native, so shutdown is EOF-driven
+  (the client closing stdin ends the loop) and SIGINT falls back to the OS default.
+
+## GraalVM native image (JVM)
+
+JVM servers also compile to self-contained native binaries with GraalVM `native-image`: stdio
+servers with zero hand-written reachability metadata, HTTP servers with a four-flag recipe, both
+CI-gated. Recipes, flags, and the metadata audit loop are in [native-image.md](./native-image.md).
+
+## How platform parity is verified
+
+`ci.yml` builds and tests the JVM and Scala.js modules on JDK 17, 21, and 25 and runs the Scala
+Native test suite, links the demo binary, and smokes it over stdio. `conformance.yml` runs the
+official MCP conformance harness against the JVM and Bun HTTP servers in both modes on every PR:
+the active suite at **73/73** checks (31 scenarios, 2025-11-25 wire, zero expected failures) and
+the 2026-07-28 requirements run at **37/37** scored scenarios (harness pinned and lock-frozen under
+`conformance/`); `native.yml` runs both against the GraalVM HTTP image — the 2026-07-28 run as a
+parity diff against the JVM — and smokes the GraalVM stdio image. Details in
+[spec-coverage.md](./spec-coverage.md).

@@ -36,8 +36,13 @@ class SocketHttpBackend(entropy: TransportBackend) extends HttpTransportBackend:
       settings: McpServerSettings
   ): ZIO[R & Scope, Throwable, SocketHttpServer.Started] =
     for
+      _ <- StreamableHttpHandler.validateSettings(settings)
       handler <- StreamableHttpHandler.make(router, settings, entropy.randomId())
       // Scoped to the server's lifetime, exactly like the zio-http backend forks it.
       _ <- handler.evictIdleSessions.forkScoped
-      started <- SocketHttpServer.start(settings.host, settings.port)(handler.handle)
+      // `handler.handle` carries the first-party error boundary (defect → JSON-RPC 500); the body
+      // cap is enforced on the wire here (declared and chunked) and again by the shared gates.
+      started <- SocketHttpServer.start(settings.host, settings.port, settings.maxRequestBodyBytes)(
+        handler.handle
+      )
     yield started

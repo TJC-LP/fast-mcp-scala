@@ -31,6 +31,17 @@ private[fastmcp] object Http1:
       val key = asciiLower(name)
       headers.collectFirst { case (k, v) if k == key => v }
 
+    /** Every value of `name`, `", "`-joined (what Bun's `Headers.get` returns) — the lookup the
+      * admission gates use, so a duplicated `Host` / `Origin` fails the origin parser closed
+      * instead of only its first value being checked.
+      */
+    def headerJoined(name: String): Option[String] =
+      val key = asciiLower(name)
+      headers.collect { case (k, v) if k == key => v } match
+        case Nil => None
+        case single :: Nil => Some(single)
+        case many => Some(many.mkString(", "))
+
     /** The request-target with any query string removed; absolute-form targets are reduced to their
       * path.
       */

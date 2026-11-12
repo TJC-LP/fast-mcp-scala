@@ -1,0 +1,55 @@
+name: OSV
+
+# Queries OSV.dev for every coordinate on the production classpath of the three published modules
+# (fast-mcp-scala.{jvm,js,scalaNative}.resolvedMvnDeps — the exact coursier resolution Mill puts on
+# the classpath, so the netty tree under zio-http is covered) and fails on any advisory rated
+# MODERATE or higher, or of unknown severity. GitHub's dependency graph cannot see Mill-resolved
+# Maven dependencies, so Dependabot alerts cover only the Actions and bun ecosystems: this workflow
+# is the published classpath's CVE feed. Rule, exit codes and the .github/osv-ignore format are
+# documented in scripts/osv-scan.sh; run it locally with `scripts/osv-scan.sh`.
+#
+# Runs weekly, on pull requests that change the build definition (or this gate), and on demand.
+on:
+  schedule:
+    - cron: '17 6 * * 1' # Mondays 06:17 UTC (off the hour: GitHub delays top-of-hour schedules)
+  pull_request:
+    paths:
+      - build.mill
+      - fast-mcp-scala/package.mill
+      - .github/workflows/osv.yml
+      - scripts/osv-scan.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  osv:
+    name: OSV advisories (published classpath)
+    runs-on: ubuntu-latest
+    # The weekly schedule runs only in the main repository (forks get no cron noise); pull requests
+    # and manual dispatches run anywhere.
+    if: github.event_name != 'schedule' || github.repository == 'TJC-LP/fast-mcp-scala'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Restore-only: this job fetches only part of what the CI builds need, and a cache saved here
+      # would pin an incomplete entry under the shared key.
+      - name: Set up build
+        uses: ./.github/actions/setup-build
+        with:
+          cache-write: "false"
+
+      # Dependency resolution only (no compilation). The job token is scoped to this Mill step, as
+      # in ci.yml; the OSV query step below talks to a third party and gets no token.
+      - name: Resolve the production classpath (jvm, js, native)
+        run: scripts/osv-scan.sh resolve | tee osv-coords.list
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill step (not the query step)
+
+      - name: Query OSV.dev and gate on severity (>= MODERATE or unknown fails)
+        run: scripts/osv-scan.sh check osv-coords.list

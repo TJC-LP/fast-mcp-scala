@@ -29,7 +29,8 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
     )
 
   private def request(method: String, headers: Map[String, String], body: String = ""): HttpRequest =
-    HttpRequest(method, "/mcp", name => headers.get(name.toLowerCase), ZIO.succeed(body))
+    val lookup: String => Option[String] = name => headers.get(name.toLowerCase)
+    HttpRequest(method, "/mcp", lookup, lookup, ZIO.succeed(body))
 
   private def framesOf(reply: HttpReply) =
     reply match
@@ -39,7 +40,16 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
   test("a reply stream halted before its first pull still runs the handler's finalizers") {
     val handler = makeHandler()
     val init = runUnsafe(
-      handler.post(request("POST", Map("accept" -> "application/json, text/event-stream"), initFrame))
+      handler.post(
+        request(
+          "POST",
+          Map(
+            "accept" -> "application/json, text/event-stream",
+            "content-type" -> "application/json"
+          ),
+          initFrame
+        )
+      )
     )
     init.status shouldBe 200
     val sid = init.headers
@@ -70,7 +80,15 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
     val body: IO[Throwable, String] = ZIO.succeed { touched.set(true); initFrame }
     // Accept without text/event-stream: rejected by the guard before the body is needed.
     val reply = runUnsafe(
-      handler.post(HttpRequest("POST", "/mcp", Map("accept" -> "text/plain").get, body))
+      handler.post(
+        HttpRequest(
+          "POST",
+          "/mcp",
+          Map("accept" -> "text/plain", "content-type" -> "application/json").get,
+          Map("accept" -> "text/plain", "content-type" -> "application/json").get,
+          body
+        )
+      )
     )
     reply.status shouldBe 406
     touched.get shouldBe false

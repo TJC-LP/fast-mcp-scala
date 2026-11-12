@@ -11,11 +11,10 @@ import com.tjclp.fastmcp.{*, given}
   * `settings` for host / port / endpoint / statelessness. The typed contract below shows explicit
   * JSON Schema input via `McpTool.withSchema` — mount it in `override val tools`.
   *
-  * Bundle and run:
-  * {{{
-  *   ./mill fast-mcp-scala.js.fullLinkJS
-  *   bun run out/fast-mcp-scala/js/fullLinkJS.dest/main.js
-  * }}}
+  * The js module's linked bundle (`./mill fast-mcp-scala.js.fastLinkJS`) has no module initializer
+  * and exports only the conformance server's `startConformance`, so `bun run` on it starts nothing
+  * (runnable example entry points are on the roadmap). Run this object on Bun with the scala-cli
+  * recipe in `docs/platforms.md` (Scala.js / Bun), or link it from your own project.
   */
 object HttpServerJs extends McpServerApp[Http, HttpServerJs.type]:
 
@@ -36,7 +35,7 @@ object HttpServerJs extends McpServerApp[Http, HttpServerJs.type]:
   )(args => GreetResult(s"Hello, ${args.name}!"))
 
   override def settings: McpServerSettings = McpServerSettings(
-    host = "0.0.0.0",
+    host = "127.0.0.1", // bind loopback unless you set allowedHosts
     port = 8090,
     httpEndpoint = "/mcp",
     stateless = false

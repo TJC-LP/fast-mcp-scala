@@ -24,6 +24,12 @@ object JvmTransportBackend extends TransportBackend:
   /** UUID v4 via `java.util.UUID` (SecureRandom-backed). */
   override def randomId(): UIO[String] = ZIO.succeed(UUID.randomUUID().toString)
 
+  /** Platform SHA-256 (`java.security.MessageDigest`) for skill digests; a fresh instance per call,
+    * so it is thread-safe without locking.
+    */
+  override def sha256(bytes: Array[Byte]): Array[Byte] =
+    java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+
   override def serveStdio[R](
       router: McpRouter[R],
       settings: McpServerSettings
@@ -33,9 +39,8 @@ object JvmTransportBackend extends TransportBackend:
       ZStream
         .fromInputStream(java.lang.System.in)
         .via(ZPipeline.utf8Decode)
-        .via(ZPipeline.splitLines)
-        .map(_.trim)
-        .filter(_.nonEmpty)
+        .via(BoundedLines.pipeline(router.limits.maxFrameChars))
+        .filter(MessageLoop.shouldDispatchStdioFrame(_, router.limits))
     )
 
   /** The JVM platform seam, in the impl object so it's exportable (givens can't be wildcard-
