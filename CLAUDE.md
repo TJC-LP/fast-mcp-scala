@@ -373,6 +373,17 @@ Key test classes:
 - **OSV** (`.github/workflows/osv.yml`): weekly + on PRs touching `build.mill`/`fast-mcp-scala/package.mill`, `scripts/osv-scan.sh` queries OSV.dev for the production classpath of the three published modules (`fast-mcp-scala.{jvm,js,scalaNative}.resolvedMvnDeps`) and fails on any advisory >= MODERATE or of unknown severity; accepted advisories go in `.github/osv-ignore`.
 - `.github/dependabot.yml` keeps action SHA pins (workflows + `.github/actions/setup-build`) and the harness lock current (weekly, 7-day cooldown); a new composite action needs its own `directories` entry.
 
+## Benchmarks
+
+`bench/run.sh [jvm-netty|jvm-socket|bun|scala-native ...]` measures the HTTP backends with the
+closed-loop Go load generator in `bench/mcpbench` against the `BenchServer` example
+(`shared/.../examples/bench/`, launchers `BenchServerJvm` / `BenchServerJs` / `BenchServerNative`,
+Native binary via `./mill fast-mcp-scala.scalaNative.benchLink`). `MODES`, `CONC`, `REPEATS`,
+`DURATION`, `PAYLOAD` select the matrix; results are JSON lines under `bench/results/` (ignored)
+and `bench/summarize.py after.jsonl [before.jsonl]` renders the tables. Nothing else may use the
+CPU while it runs. Read `bench/README.md` before quoting a number: one machine, closed loop, tiny
+calls measure overhead, quote the whole row with p99.
+
 ## Common Tasks
 
 ### Adding a New Feature
