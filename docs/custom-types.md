@@ -47,6 +47,88 @@ typed contracts.
   `uri` for the matching `java.time` / `UUID` / `URI` types; validators running in strict mode
   (`ajv --strict`) need their formats plugin (`ajv-formats`) to accept them.
 
+## What the server enforces
+
+The `inputSchema` a tool advertises on `tools/list` is also **enforced on `tools/call`**: before a
+handler (or an annotated method) runs, the arguments are checked against the schema, and a call
+that does not conform is answered with an `isError` tool result naming the location and the
+constraint — the same in-band answer an undecodable argument gets. The handler is not invoked. This
+holds for derived schemas, `@Param(schema = ...)` fragments, `McpSchema` / `McpInputCodec` schemas
+and `McpTool.withSchema`, on every transport, on the JVM, Scala.js and Scala Native.
+
+The check is a built-in, dependency-free validator
+(`com.tjclp.fastmcp.core.JsonSchemaValidator`) for a subset of JSON Schema:
+
+| Enforced | Keywords |
+|---|---|
+| Any value | `type` (a name or a list), `enum`, `const` |
+| Numbers | `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum` |
+| Strings | `minLength`, `maxLength` (Unicode code points) |
+| Arrays | `items`, `prefixItems` (and array-form `items` with `additionalItems`), `minItems`, `maxItems` |
+| Objects | `properties`, `required`, `additionalProperties` |
+| Combinators | `allOf`, `anyOf`, `oneOf`, `not` |
+| References | `$ref` to a location in the same schema (`#/$defs/...`, `#/definitions/...`, any JSON Pointer) |
+
+**Not enforced — advertised only:**
+
+- `pattern` and `patternProperties`. Matching a client-supplied string with a backtracking regular
+  expression engine is not linear-time, so the server does not evaluate patterns. Check the string
+  in the handler, or in an `McpInputCodec` decoder as in the example below.
+- `format`, `multipleOf`, `uniqueItems`, `minProperties`, `maxProperties`, `propertyNames`,
+  `contains` / `minContains` / `maxContains`, `dependentRequired` / `dependentSchemas` /
+  `dependencies`, `if` / `then` / `else`, `unevaluatedProperties` / `unevaluatedItems`, the
+  `content*` keywords, `$dynamicRef` / `$recursiveRef`.
+- A `$ref` that is not local, does not resolve, or is recursive (it leads back to a schema that is
+  still being resolved): that reference accepts any value.
+- `additionalProperties` when `patternProperties` is also present.
+- A supported keyword whose value has the wrong shape (`"maximum": "10"`).
+
+Everything else (`description`, `title`, `default`, `examples`, vendor keywords) is an annotation.
+A handler that relies on an unenforced constraint must check it itself. The derived schemas use two
+unenforced keywords, and in both cases the decoder does the work: `format` on `java.time` / `UUID` /
+`URI` types (the value is parsed) and `uniqueItems` on `Set` (duplicates collapse).
+
+Ask a server what it enforces:
+
+```scala 3 raw
+server.toolInputValidation
+// Map(search -> ToolInputValidation(enforced = true, unenforced = List()),
+//     lookup -> ToolInputValidation(enforced = true, unenforced = List(pattern)))
+```
+
+Turning it off:
+
+```scala 3 raw
+import com.tjclp.fastmcp.server.manager.ToolRegistrationOptions
+
+// one tool: advertise the schema, do not enforce it
+server.tool(myTool, ToolRegistrationOptions(validateInputSchema = false))
+
+// the whole server (also the switch for McpServerApp: override `settings`)
+McpServer("name", settings = McpServerSettings(validateToolInput = false))
+```
+
+With enforcement off a schema is documentation, and every handler must check what it relies on.
+
+Because the advertised schema is now the contract, it has to describe what the tool really accepts:
+
+- A parameter or field with a Scala default stays in `required` unless it is marked
+  `@Param(..., required = false)`; a call that omits a `required` member is rejected, so mark
+  defaulted members optional when clients may leave them out.
+- A hand-written schema that is stricter than, or simply different from, what the decoder reads
+  (a custom `JsonDecoder` for an enum with its own spelling, say) now rejects what the schema does
+  not describe. Supply a matching `McpSchema` / `McpInputCodec`.
+- `oneOf` means exactly one: alternatives that do not exclude each other (object alternatives
+  without `required`, for instance) reject every value that matches two of them.
+- A tool with no parameters derives `"additionalProperties": false`, so a call that sends
+  arguments to it is rejected.
+- A `@Param(schema = ...)` fragment on an `Option` parameter replaces the derived
+  `anyOf [..., {"type":"null"}]` wrapper. An omitted argument is still fine; an explicit `null`
+  conforms only if the fragment allows it (`"type": ["string", "null"]`).
+
+Cost: a schema is compiled once at registration, and a call is one walk over its arguments with no
+regular expressions, no number expansion and no table keyed by client-chosen names.
+
 ## `McpInputCodec[T]`: one value, decoder plus schema
 
 For a domain type whose wire representation differs from its Scala shape, define one
@@ -68,12 +150,17 @@ object UserId:
 case class LookupArgs(id: UserId)
 ```
 
+The `pattern` above tells clients what a valid id looks like, but the server does not evaluate
+patterns ([What the server enforces](#what-the-server-enforces)): the decode function is what
+rejects a bad id, so make it check everything the pattern promises.
+
 ## Per-field override: `@Param(schema = ...)`
 
 For a one-off field, `@Param(schema = Some("..."))` replaces that field's generated schema with a
 raw JSON Schema fragment — the whole property, `description` and `examples` included, so repeat
-the description inside the fragment. This is the right tool for enum constraints, patterns, or
-numeric bounds that Scala types cannot express:
+the description inside the fragment. This is the right tool for enum constraints, length limits
+or numeric bounds that Scala types cannot express, and the fragment is enforced on `tools/call`
+(a `pattern` or `format` in it is advertised only — check those in the method):
 
 ```scala 3 raw
 @Param(
@@ -85,8 +172,9 @@ sortBy: String
 
 ## Whole-tool override: `McpTool.withSchema`
 
-An entire typed tool can opt out of derivation and supply its `inputSchema` explicitly. The Bun
-HTTP example does exactly this:
+An entire typed tool can opt out of derivation and supply its `inputSchema` explicitly. The schema
+is enforced like a derived one, so it must describe what the `In` decoder accepts. The Bun HTTP
+example does exactly this:
 [`HttpServerJs.scala`](../fast-mcp-scala/js/src/com/tjclp/fastmcp/examples/HttpServerJs.scala).
 
 ```scala 3 raw

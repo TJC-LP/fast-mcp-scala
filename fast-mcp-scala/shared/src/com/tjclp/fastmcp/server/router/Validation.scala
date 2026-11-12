@@ -7,24 +7,32 @@ import com.tjclp.fastmcp.core.ToolInputSchema
 import com.tjclp.fastmcp.jsonrpc.{JsonFields, McpError}
 import com.tjclp.fastmcp.server.manager.ToolManager
 
-/** Pluggable JSON Schema validator for `tools/call` arguments.
+/** An ADDITIONAL, router-level check of `tools/call` arguments — not the library's input-schema
+  * enforcement.
   *
-  * The seam is shared and platform-neutral; concrete implementations are opt-in. A JVM
-  * implementation backed by `networknt/json-schema-validator` can be supplied without touching
-  * shared code; Scala.js can plug in its own (or stay on [[SchemaValidator.permissive]]). Default
-  * is permissive — validation is off unless the server wires a validator.
+  * Enforcement of a tool's advertised `inputSchema` is built in and on by default: it happens in
+  * `ToolManager.callTool`, before the handler, with the dependency-free
+  * [[com.tjclp.fastmcp.core.JsonSchemaValidator]] on every platform, and is controlled by
+  * `McpServerSettings.validateToolInput` and `ToolRegistrationOptions.validateInputSchema`.
+  *
+  * This trait is a separate seam for code that assembles a router itself through
+  * [[RouterBuilder.build]] (it is not reachable from `McpServer` / `McpServerApp`): a validator
+  * passed there runs first, in [[ValidationMiddleware]], and a rejection is a JSON-RPC `-32602`
+  * protocol error rather than the `isError` tool result the built-in check produces. The default is
+  * [[SchemaValidator.permissive]], which adds nothing.
   */
 trait SchemaValidator:
   /** Return `Left(message)` to reject the arguments, `Right(())` to accept. */
   def validate(schema: ToolInputSchema, arguments: Json): Either[String, Unit]
 
 object SchemaValidator:
-  /** Accept everything — the default when no validator is configured. */
+  /** Accept everything — the default: no check beyond the built-in one in `ToolManager`. */
   val permissive: SchemaValidator = (_, _) => Right(())
 
-/** Middleware that validates `tools/call` arguments against the tool's declared input schema before
-  * the handler runs. No-ops for every other method. With [[SchemaValidator.permissive]] it is a
-  * pass-through, so it is always safe to install.
+/** Middleware that rejects a `tools/call` for an unknown tool and runs the router-level
+  * [[SchemaValidator]] (see there; the built-in input-schema enforcement is in `ToolManager`, not
+  * here). No-ops for every other method. With [[SchemaValidator.permissive]] only the unknown-tool
+  * check remains, so it is always safe to install.
   */
 final class ValidationMiddleware[R](
     validator: SchemaValidator,
