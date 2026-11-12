@@ -201,7 +201,16 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       hostname = settings.host,
       fetch = js.Any.fromFunction2((req: js.Dynamic, server: js.Dynamic) =>
         ZioJsPromise.zioToPromise(runtime)(
-          guarded(settings)(handleFetch(router, settings, store, req, clientKeyOf(server, req)))
+          guarded(settings)(
+            handleFetch(
+              router,
+              settings,
+              store,
+              req,
+              // The peer address only buckets bearer tasks: skip the lookup when tasks are off.
+              if settings.tasks.enabled then clientKeyOf(server, req) else None
+            )
+          )
         )
       ),
       maxRequestBodySize = settings.maxRequestBodyBytes,

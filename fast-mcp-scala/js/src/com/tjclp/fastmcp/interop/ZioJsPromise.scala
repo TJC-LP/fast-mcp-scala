@@ -1,11 +1,8 @@
 package com.tjclp.fastmcp
 package interop
 
-import scala.concurrent.ExecutionContext
 import scala.scalajs.js
 import scala.scalajs.js.JavaScriptException
-import scala.util.Failure
-import scala.util.Success
 
 import zio.*
 
@@ -17,8 +14,6 @@ import zio.*
   *   - adapt incoming `js.Promise` results (`fetch`, `Request.text()`) into ZIO effects
   */
 object ZioJsPromise:
-
-  private given ExecutionContext = scala.concurrent.ExecutionContext.global
 
   /** Run a `ZIO[Any, Throwable, A]` on the default ZIO runtime and expose the result as a
     * `js.Promise[A]`.
@@ -32,19 +27,23 @@ object ZioJsPromise:
     * that need them.
     */
   def zioToPromise[R, A](runtime: Runtime[R])(effect: ZIO[R, Throwable, A]): js.Promise[A] =
-    val future = Unsafe.unsafe { implicit unsafe =>
-      runtime.unsafe.runToFuture(effect)
-    }
+    // The fiber settles the promise directly from its exit observer. Going through
+    // `runToFuture` + `Future.onComplete` put a Scala `Future` and a trip through the global
+    // execution context between every effect and its promise — on every HTTP request and on
+    // every stream pull.
     new js.Promise[A]((resolve, reject) =>
-      future.onComplete {
-        case Success(a) => val _ = resolve(a)
-        case Failure(t) =>
-          // Unwrap JavaScriptException so the JS caller sees the underlying error (e.g. an
-          // `McpError` thrown from a handler). Other Throwables reject as-is.
-          val rejectValue: scala.Any = t match
-            case JavaScriptException(inner) => inner
-            case other => other
-          val _ = reject(rejectValue)
+      Unsafe.unsafe { implicit unsafe =>
+        runtime.unsafe.fork(effect).unsafe.addObserver {
+          case Exit.Success(a) => val _ = resolve(a)
+          case Exit.Failure(cause) =>
+            // The same Throwable `runToFuture` would have failed its Future with. Unwrap
+            // JavaScriptException so the JS caller sees the underlying error (e.g. an `McpError`
+            // thrown from a handler). Other Throwables reject as-is.
+            val rejectValue: scala.Any = cause.squashTraceWith(identity) match
+              case JavaScriptException(inner) => inner
+              case other => other
+            val _ = reject(rejectValue)
+        }
       }
     )
 
