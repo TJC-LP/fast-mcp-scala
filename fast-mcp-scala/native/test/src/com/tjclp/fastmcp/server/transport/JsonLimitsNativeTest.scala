@@ -79,6 +79,52 @@ class JsonLimitsNativeTest extends AnyFunSuite with Matchers:
     ex3.getMessage should include("maxObjectFields")
   }
 
+  test("an over-long array and a frame of too many values are rejected before the parser runs") {
+    val limits = LimitSettings()
+    val megabyte = "[" + "1," * 524_000 + "1]"
+    message(MessageLoop.parseFrame(megabyte)) should include("maxArrayElements")
+    val at = Seq.fill(limits.maxArrayElements)("1").mkString("[", ",", "]")
+    MessageLoop
+      .parseFrame(s"""{"jsonrpc":"2.0","id":1,"method":"ping","params":{"xs":$at}}""")
+      .isRight shouldBe true
+    val rows = Seq.fill(1000)("[1,2,3]").mkString("[", ",", "]")
+    val many = (1 to 24).map(i => s""""t$i":$rows""").mkString("{", ",", "}")
+    message(MessageLoop.parseFrame(many)) should include("maxValues")
+    val ex = intercept[IllegalArgumentException](
+      DefaultDecodeContext.default.parseJsonArray("blob", megabyte)
+    )
+    ex.getMessage should include("maxArrayElements")
+  }
+
+  test("numbers with extreme exponents are rejected at the frame and before any decoder") {
+    Seq("1e999999999", "-1E+2147483647", "1e-999999999", "1e513").foreach { literal =>
+      val start = java.lang.System.nanoTime()
+      val frame = s"""{"jsonrpc":"2.0","id":1,"method":"ping","params":{"n":$literal}}"""
+      message(MessageLoop.parseFrame(frame)) should include("maxNumberExponent")
+      (java.lang.System.nanoTime() - start) / 1_000_000L should be < 500L
+    }
+    // Built from (unscaled, scale): the test itself never does magnitude-sized work. The moderate
+    // scale comes first on purpose: without the guard it decodes (cheaply) and fails this test at
+    // once, before the scales that would cost minutes and gigabytes.
+    Seq(-20000, -999999999, 999999999).foreach { scale =>
+      val node = zio.json.ast.Json.Num(new java.math.BigDecimal(java.math.BigInteger.ONE, scale))
+      val start = java.lang.System.nanoTime()
+      val ex = intercept[IllegalArgumentException](
+        DefaultDecodeContext.decodeRaw[BigInt](
+          "n",
+          node,
+          DefaultDecodeContext.default,
+          zio.json.JsonDecoder[BigInt]
+        )
+      )
+      ex.getMessage should include("maxNumberExponent")
+      (java.lang.System.nanoTime() - start) / 1_000_000L should be < 500L
+    }
+    val ok =
+      """{"jsonrpc":"2.0","id":1,"method":"ping","params":{"a":9223372036854775807,"b":1.7976931348623157E308,"c":4.9E-324}}"""
+    MessageLoop.parseFrame(ok).isRight shouldBe true
+  }
+
   test("the template matcher handles a 100 KB adversarial URI without regex") {
     val start = java.lang.System.nanoTime()
     ResourceTemplatePattern("x://{a}.{b}.{c}").matches("x://" + "a" * 99_999 + ".") shouldBe None

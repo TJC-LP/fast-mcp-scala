@@ -40,9 +40,17 @@ final class McpServer[R](
 )(using backend: TransportBackend)
     extends McpServerCore[R]:
 
-  // Embedded-JSON bounds (objects/arrays inside string arguments) follow the server's own limits.
+  // Embedded-JSON bounds (objects/arrays inside string arguments) and the number bounds in front
+  // of every argument decoder follow the server's own limits.
   protected val decodeContext: McpDecodeContext =
-    new DefaultDecodeContext(settings.limits.maxDepth, settings.limits.maxObjectFields)
+    new DefaultDecodeContext(
+      settings.limits.maxDepth,
+      settings.limits.maxObjectFields,
+      settings.limits.maxArrayElements,
+      settings.limits.maxValues,
+      settings.limits.maxNumberDigits,
+      settings.limits.maxNumberExponent
+    )
 
   val toolManager: ToolManager[R] = new ToolManager[R]()
   val resourceManager: ResourceManager[R] = new ResourceManager[R]()
