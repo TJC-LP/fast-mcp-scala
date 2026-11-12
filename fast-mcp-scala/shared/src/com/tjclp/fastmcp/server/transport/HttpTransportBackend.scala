@@ -25,9 +25,15 @@ import com.tjclp.fastmcp.server.router.McpRouter
   *     `postGate` (403 → 415 → 413 → 406) before reading the body or touching session state, then
   *     `bodyTooLarge` before `MessageLoop.parseFrame`;
   *   - `hostGate` on GET/DELETE;
-  *   - admit legacy `initialize` through `capReached` / `pickEvictable` (evict the longest-idle
-  *     session without a live GET; failing that, the longest-idle GET holder idle past
-  *     `sessionIdleTimeout`; else 503 `SessionLimitMessage`);
+  *   - dispatch a header-less legacy `initialize` on a session that is NOT stored, and store it
+  *     only when the dispatch succeeded: a failed one (undecodable params, `clientInfo` /
+  *     `capabilities` over the `ClientRetention` budget) returns no `mcp-session-id` and leaves the
+  *     store unchanged;
+  *   - admit the successful one through `capReached` / `pickVictim`, with the snapshot, the
+  *     decision and the insert in one atomic step (a client holding more sessions than the
+  *     newcomer's gives one up; among clients holding their share, the longest-idle session without
+  *     a live GET, failing that the longest-idle GET holder idle past `sessionIdleTimeout`; else
+  *     503 `SessionLimitMessage`), creating the session with the request's peer address;
   *   - run the idle-session sweeper for the listener's whole lifetime on every start entry;
   *   - wrap each handler in a Cause → JSON-RPC 500 (`InternalErrorMessage`) boundary that logs the
   *     cause server-side only and never renders exception text, traces or paths to the client.

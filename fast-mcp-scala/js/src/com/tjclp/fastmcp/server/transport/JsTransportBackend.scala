@@ -207,8 +207,11 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
               settings,
               store,
               req,
-              // The peer address only buckets bearer tasks: skip the lookup when tasks are off.
-              if settings.tasks.enabled then clientKeyOf(server, req) else None
+              // The peer address buckets bearer tasks: skip the per-request lookup when tasks are
+              // off. The one other reader — a header-less legacy `initialize`, which records who
+              // opens a session — looks it up itself from `server`.
+              if settings.tasks.enabled then clientKeyOf(server, req) else None,
+              server
             )
           )
         )
@@ -302,7 +305,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       settings: McpServerSettings,
       store: js.Dictionary[Session],
       req: js.Dynamic,
-      clientKey: Option[String]
+      clientKey: Option[String],
+      server: js.Dynamic
   ): ZIO[R, Throwable, js.Dynamic] =
     // `new URL(req.url)` throws on an unparseable authority (e.g. `Host: 127.0.0.1:99999`): answer
     // the host gate's 403 when the guard is on (JVM parity), else a plain 400 — never a defect.
@@ -321,7 +325,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         case None =>
           val handled =
             if settings.stateless then handleStateless(router, settings, req, clientKey)
-            else handleStreamable(router, settings, store, req, clientKey)
+            else handleStreamable(router, settings, store, req, clientKey, server)
           // Bind the allow-listed headers of THIS request around its dispatch (JVM twin:
           // `StreamableHttpHandler.post`). `Headers.get` already joins a repeated header.
           if settings.contextHeaders.isEmpty || methodOf(req) != "POST" then handled
@@ -371,7 +375,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       settings: McpServerSettings,
       store: js.Dictionary[Session],
       req: js.Dynamic,
-      clientKey: Option[String]
+      clientKey: Option[String],
+      server: js.Dynamic
   ): ZIO[R, Throwable, js.Dynamic] =
     methodOf(req) match
       case "POST" =>
@@ -403,15 +408,19 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                               settings,
                               req
                             )
-                    case None if MessageLoop.isInitialize(message) =>
-                      mintSession(router, store, message, settings, req)
                     case None =>
-                      ZIO.succeed(
-                        jsonRpcErrorResponse(
-                          400,
-                          s"$SessionIdHeader header is required (only initialize may open a session)"
-                        )
-                      )
+                      message match
+                        case rpc: JsonRpcMessage.Request if MessageLoop.isInitialize(rpc) =>
+                          // The peer address, read here when the task buckets did not need it.
+                          val peer = clientKey.orElse(clientKeyOf(server, req))
+                          mintSession(router, store, rpc, settings, peer)
+                        case _ =>
+                          ZIO.succeed(
+                            jsonRpcErrorResponse(
+                              400,
+                              s"$SessionIdHeader header is required (only initialize may open a session)"
+                            )
+                          )
         }
 
       case "DELETE" =>
@@ -438,56 +447,91 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
           jsonRpcErrorResponse(405, "No standalone GET stream; server→client rides the POST SSE")
         )
 
-  /** Mint a durable session for a header-less legacy `initialize`, bounded by
-    * `settings.maxSessions` (JVM twin: `StreamableHttpHandler.mintSession`). Bun is
-    * single-threaded, so the idle/live snapshot, the admission decision, the eviction and the
-    * insert all happen in ONE synchronous `ZIO.succeed` block (`Session.idleStateUnsafe`, no fiber
-    * yield in between): the store never exceeds the cap with N initializes in flight, and a
-    * newcomer is never refused while an evictable session exists. At the cap the longest-idle
-    * session WITHOUT a live GET is evicted — terminated (`Session.terminate`: in-flight requests
-    * interrupted, its tasks released, queue shut down; WARN logged) — and the newcomer admitted;
-    * only when every stored session holds a live GET is the request refused with 503.
+  /** Answer a header-less legacy `initialize`, and store a durable session for it only once it has
+    * succeeded (JVM twin: `StreamableHttpHandler.mintSession` / `admit`, which document the rules).
+    *
+    * The `initialize` is dispatched on a session that is not in the store. A failed one — params
+    * that do not decode, or `clientInfo` / `capabilities` over the retention budget
+    * (`ClientRetention`, `-32602`) — is answered without an `mcp-session-id` and leaves the store
+    * exactly as it was. A successful one is admitted against `settings.maxSessions`: Bun is
+    * single-threaded, so the snapshot of every stored session, the choice of the session that makes
+    * room (`HttpRequestGuards.pickVictim`), the eviction and the insert all happen in ONE
+    * synchronous `ZIO.succeed` block (`Session.idleStateUnsafe`, no fiber yield in between). The
+    * store never exceeds the cap with N initializes in flight, and a newcomer is never refused
+    * while a session can make room for it. The evicted session is terminated (`Session.terminate`:
+    * in-flight requests interrupted, its tasks released, queue shut down; WARN logged). There is no
+    * standalone GET stream on Bun, so no stored session is ever exempt and a full store always has
+    * a session to give up; the 503 is kept for parity.
+    *
+    * `peer` is the address the `initialize` came from: at the cap a client holding more sessions
+    * than the newcomer's client is the one that gives a session up.
     */
   private def mintSession[R](
       router: McpRouter[R],
       store: js.Dictionary[Session],
-      message: JsonRpcMessage,
+      message: JsonRpcMessage.Request,
       settings: McpServerSettings,
-      http: js.Dynamic
+      peer: Option[String]
   ): ZIO[R, Throwable, js.Dynamic] =
     for
       sid <- randomId()
-      session <- Session.makeProtocolSession(sid)
-      outcome <- ZIO.succeed {
-        if !HttpRequestGuards.capReached(store.size, settings) then
-          store(sid) = session
-          Right(None)
-        else
-          val snapshot = Unsafe.unsafe { implicit u =>
-            store.toList.map { case (id, s) =>
-              val (seen, live) = s.idleStateUnsafe
-              (id, seen, live)
+      session <- Session.makeProtocolSession(sid, peer)
+      // Anything the handler chain sends while it runs rides this reply, ahead of the result.
+      sink <- Queue.unbounded[JsonRpcMessage]
+      answer <- session.runWithSink(sink)(router.dispatch(session, message))
+      sent <- sink.takeAll <* sink.shutdown
+      resp <- answer match
+        case Some(_: JsonRpcMessage.Success) =>
+          ZIO
+            .succeed[Either[Unit, Option[Session]]] {
+              if !HttpRequestGuards.capReached(store.size, settings) then
+                store(sid) = session
+                Right(None)
+              else
+                val snapshot = Unsafe.unsafe { implicit u =>
+                  store.toList.map { case (id, s) =>
+                    val (seen, live) = s.idleStateUnsafe
+                    HttpRequestGuards.StoredSession(id, seen, live, s.clientKey)
+                  }
+                }
+                val now = java.lang.System.currentTimeMillis()
+                val idleMs = settings.sessionIdleTimeout.map(_.toMillis)
+                HttpRequestGuards.pickVictim(snapshot, peer, now, idleMs).flatMap(store.get) match
+                  case Some(victim) =>
+                    store -= victim.sessionId
+                    store(sid) = session
+                    Right(Some(victim))
+                  case None => Left(())
             }
-          }
-          HttpRequestGuards.pickEvictable(snapshot).flatMap(store.get) match
-            case Some(victim) =>
-              store -= victim.sessionId
-              store(sid) = session
-              Right(Some(victim))
-            case None => Left(())
-      }
-      resp <- outcome match
-        case Right(None) =>
-          respondStreamable(router, session, message, isNew = true, settings, http)
-        case Right(Some(victim)) =>
-          ZIO.logWarning(
-            s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted idle session ${victim.sessionId}"
-          ) *> victim.terminate *>
-            respondStreamable(router, session, message, isNew = true, settings, http)
-        case Left(()) =>
-          session.terminate
-            .as(jsonRpcErrorResponse(503, HttpRequestGuards.SessionLimitMessage))
+            .flatMap {
+              case Left(()) =>
+                session.terminate
+                  .as(jsonRpcErrorResponse(503, HttpRequestGuards.SessionLimitMessage))
+              case Right(evicted) =>
+                ZIO
+                  .foreachDiscard(evicted) { victim =>
+                    ZIO.logWarning(
+                      s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted session ${victim.sessionId}"
+                    ) *> victim.terminate
+                  }
+                  .as(initializeResponse(sent, answer, session, minted = true))
+            }
+        case _ => session.terminate.as(initializeResponse(sent, answer, session, minted = false))
     yield resp
+
+  /** The reply to a header-less `initialize`: what the handler chain sent, then its answer, as one
+    * fixed-length `text/event-stream` body. Only a stored session's id is echoed.
+    */
+  private def initializeResponse(
+      sent: Chunk[JsonRpcMessage],
+      answer: Option[JsonRpcMessage],
+      session: Session,
+      minted: Boolean
+  ): js.Dynamic =
+    val body = (sent ++ Chunk.fromIterable(answer))
+      .map(message => s"event: message\ndata: ${MessageLoop.encodeOutbound(message)}\n\n")
+      .mkString
+    webResponse(200, body, sseHeaders(session, isNew = minted, modern = false))
 
   /** Dispatch one streamable POST frame. A *request* gets a `text/event-stream` response that
     * streams the notifications and sub-requests it emits (progress, sampling, elicitation) followed

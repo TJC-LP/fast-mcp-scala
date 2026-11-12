@@ -207,65 +207,130 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
           case None => ZIO.succeed(transportError(404, s"Session not found: $id"))
           case Some(session) => session.touch *> respondStreamable(session, message, isNew = false)
         }
-      case None if MessageLoop.isInitialize(message) => mintSession(sessions, message)
       case None =>
-        ZIO.succeed(
-          transportError(
-            400,
-            s"$SessionIdHeader header is required (only initialize may open a session)"
-          )
-        )
+        message match
+          case rpc: JsonRpcMessage.Request if MessageLoop.isInitialize(rpc) =>
+            mintSession(sessions, req, rpc)
+          case _ =>
+            ZIO.succeed(
+              transportError(
+                400,
+                s"$SessionIdHeader header is required (only initialize may open a session)"
+              )
+            )
 
-  /** Mint a durable session for a header-less legacy `initialize`, bounded by
-    * `settings.maxSessions`. The cap check, the idle/live snapshot, the victim choice and the
-    * insert all run inside ONE `store.modifyZIO` on the `Ref.Synchronized` store, so concurrent
-    * initializes are serialised at the cap: the store never exceeds it, and a newcomer is never
-    * refused while an evictable session exists. When the store is full the longest-idle session
-    * WITHOUT a live GET is evicted — terminated, so its in-flight requests and tasks are released
-    * along with its queue — and the newcomer admitted. When every stored session holds a live GET,
-    * the longest-idle of them is evicted instead, provided it has been idle longer than
-    * `sessionIdleTimeout` (`HttpRequestGuards.pickEvictable` with the idle fallback): terminating
-    * it shuts its outbound queue, which ends the GET stream — the only way a GET peer that vanished
-    * without closing its connection ever frees its slot on a backend that cannot see the
-    * disconnect, since nothing is written on a quiet stream unless `keepAliveInterval` is set. Only
-    * when no session qualifies under either rule is the request refused with 503.
+  /** Answer a header-less legacy `initialize`, and store a durable session for it only once it has
+    * succeeded.
+    *
+    * The `initialize` is dispatched on a session that is not in the store. A failed one — params
+    * that do not decode, or `clientInfo` / `capabilities` over the retention budget
+    * (`ClientRetention`, `-32602`) — is answered without an `mcp-session-id` and leaves the store
+    * exactly as it was: no slot taken, nobody evicted. A successful one goes through [[admit]]; if
+    * the store has no room for it the answer is 503 and the session is discarded.
+    *
+    * The reply has the shape every other request's reply has: the handler's frames as one
+    * `text/event-stream` body. It is complete before the head is sent, since the head carries the
+    * session id and that exists only if `initialize` succeeded.
     */
   private def mintSession(
       sessions: Ref.Synchronized[Map[String, Session]],
-      message: JsonRpcMessage
+      req: HttpRequest,
+      message: JsonRpcMessage.Request
   ): URIO[R, HttpReply] =
     for
       id <- randomId
-      session <- Session.makeProtocolSession(id)
-      outcome <- sessions.modifyZIO { m =>
-        if !HttpRequestGuards.capReached(m.size, settings) then
-          ZIO.succeed((Right(None), m + (id -> session)))
-        else
-          ZIO
-            .foreach(m.values.toList) { s =>
-              (s.lastSeen zip s.hasActiveGet).map((seen, live) => (s.sessionId, seen, live))
+      session <- Session.makeProtocolSession(id, req.clientKey)
+      // A client that goes away before the reply is built never learns the id: drop the session.
+      reply <- answerInitialize(sessions, session, message)
+        .onInterrupt(sessions.update(_ - id) *> session.terminate)
+    yield reply
+
+  private def answerInitialize(
+      sessions: Ref.Synchronized[Map[String, Session]],
+      session: Session,
+      message: JsonRpcMessage.Request
+  ): URIO[R, HttpReply] =
+    for
+      // Anything the handler chain sends while it runs rides this reply, ahead of the result,
+      // exactly as on a stored session's request.
+      sink <- Queue.unbounded[JsonRpcMessage]
+      answer <- session.runWithSink(sink)(router.dispatch(session, message))
+      sent <- sink.takeAll <* sink.shutdown
+      reply <- answer match
+        case Some(_: JsonRpcMessage.Success) =>
+          // Uninterruptible: once the store has swapped a session out for this one, that session
+          // must be terminated, or its requests, tasks and GET stream outlive its slot.
+          admit(sessions, session).flatMap {
+            case Left(()) =>
+              session.terminate.as(transportError(503, HttpRequestGuards.SessionLimitMessage))
+            case Right(evicted) =>
+              ZIO
+                .foreachDiscard(evicted) { victim =>
+                  victim.hasActiveGet.flatMap { heldGet =>
+                    val detail = if heldGet then " (its GET stream is closed)" else ""
+                    ZIO.logWarning(
+                      s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted session ${victim.sessionId}$detail"
+                    )
+                  } *> victim.terminate
+                }
+                .as(initializeReply(sent, answer, sessionHeader(session, isNew = true)))
+          }.uninterruptible
+        case _ => session.terminate.as(initializeReply(sent, answer, Nil))
+    yield reply
+
+  /** Put a freshly initialized session in the store, bounded by `settings.maxSessions`. The cap
+    * check, the snapshot of every stored session, the choice of the session that makes room and the
+    * insert all run inside ONE `modifyZIO` on the `Ref.Synchronized` store, so concurrent
+    * initializes are serialised at the cap: the store never exceeds it, and a newcomer is never
+    * refused while a session can make room for it.
+    *
+    * `Right(None)`: stored, there was room. `Right(Some(victim))`: stored in the place of `victim`,
+    * which the caller terminates — its in-flight requests and tasks are released along with its
+    * queue, and shutting the queue ends its GET stream, the only way a GET peer that vanished
+    * without closing its connection ever frees its slot on a backend that cannot see the
+    * disconnect. `Left`: the store is full and nobody gives a session up (503).
+    *
+    * Which session makes room is `HttpRequestGuards.pickVictim`'s decision: a client holding more
+    * sessions than the newcomer's client gives one up whatever state its sessions are in; among
+    * clients holding their share, the longest-idle session without a live GET, else the
+    * longest-idle GET holder idle past `sessionIdleTimeout`.
+    */
+  private def admit(
+      sessions: Ref.Synchronized[Map[String, Session]],
+      session: Session
+  ): UIO[Either[Unit, Option[Session]]] =
+    val id = session.sessionId
+    sessions.modifyZIO { m =>
+      if !HttpRequestGuards.capReached(m.size, settings) then
+        ZIO.succeed((Right(None), m + (id -> session)))
+      else
+        ZIO
+          .foreach(m.values.toList) { s =>
+            (s.lastSeen zip s.hasActiveGet).map { (seen, live) =>
+              HttpRequestGuards.StoredSession(s.sessionId, seen, live, s.clientKey)
             }
-            .map { snapshot =>
-              val now = java.lang.System.currentTimeMillis()
-              val idleMs = settings.sessionIdleTimeout.map(_.toMillis)
-              HttpRequestGuards.pickEvictable(snapshot, now, idleMs) match
-                case Some(victim) => (Right(Some(m(victim))), (m - victim) + (id -> session))
-                case None => (Left(()), m)
-            }
-      }
-      resp <- outcome match
-        case Right(None) => respondStreamable(session, message, isNew = true)
-        case Right(Some(victim)) =>
-          victim.hasActiveGet.flatMap { heldGet =>
-            val detail =
-              if heldGet then " (idle past sessionIdleTimeout; its GET stream is closed)" else ""
-            ZIO.logWarning(
-              s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted idle session ${victim.sessionId}$detail"
-            )
-          } *> victim.terminate *> respondStreamable(session, message, isNew = true)
-        case Left(()) =>
-          session.terminate.as(transportError(503, HttpRequestGuards.SessionLimitMessage))
-    yield resp
+          }
+          .map { snapshot =>
+            val now = java.lang.System.currentTimeMillis()
+            val idleMs = settings.sessionIdleTimeout.map(_.toMillis)
+            HttpRequestGuards.pickVictim(snapshot, session.clientKey, now, idleMs) match
+              case Some(victim) => (Right(Some(m(victim))), (m - victim) + (id -> session))
+              case None => (Left(()), m)
+          }
+    }
+
+  /** The reply to a header-less `initialize`: what the handler chain sent, then its answer, as one
+    * fixed-length `text/event-stream` body when that is a single frame (which it is unless a
+    * middleware sent something first).
+    */
+  private def initializeReply(
+      sent: Chunk[JsonRpcMessage],
+      answer: Option[JsonRpcMessage],
+      headers: List[(String, String)]
+  ): HttpReply =
+    val frames = (sent ++ Chunk.fromIterable(answer)).map(SseFrame.message)
+    if frames.size == 1 then HttpReply.SseComplete(headers, frames(0))
+    else HttpReply.Sse(headers, ZStream.fromChunk(frames), keepAlive)
 
   /** Dispatch one streamable POST frame. A *request* gets an SSE response that streams the
     * notifications and sub-requests it emits (progress, sampling, elicitation) followed by its
@@ -565,7 +630,7 @@ private[fastmcp] object StreamableHttpHandler:
   /** Periodically drop streamable sessions idle past `settings.sessionIdleTimeout` — abandoned
     * clients would otherwise grow the store forever. Sessions with a live GET stream are exempt
     * here (push-only consumers may never POST, and while capacity is free there is no reason to
-    * close their stream); they become evictable only at the `maxSessions` cap, see `mintSession`.
+    * close their stream); they become evictable only at the `maxSessions` cap, see `admit`.
     * Eviction calls `session.terminate`, which interrupts the session's in-flight requests,
     * releases (interrupts) its tasks and shuts the outbound queue down. The store is additionally
     * bounded by `settings.maxSessions` at mint time.

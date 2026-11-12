@@ -1533,6 +1533,67 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     checked.andThen { case _ => handle.stop() }
   }
 
+  // Bun twin of the legacy session-store tests in `StreamableHttpHandlerTest`: a session is stored
+  // only for an `initialize` that succeeded and passed the retention budget.
+  "a failed initialize on Bun" should "return no session id and leave the store unchanged at the cap" in {
+    val failPort = 38961
+    // One slot, taken by an idle session: the first candidate for eviction.
+    val handle = statefulServer("JsHttpFailedInitServer", failPort, _.copy(maxSessions = Some(1)))
+    def post(body: String, sid: Option[String] = None): Future[(Int, Option[String], String)] =
+      fetchAt(
+        failPort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders(sid.map("mcp-session-id" -> _).toSeq*),
+          body = body
+        )
+      ).flatMap(resp => text(resp).map(t => (status(resp), header(resp, "mcp-session-id"), t)))
+    def initWith(capabilities: String, clientInfo: String): String =
+      s"""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":$capabilities,"clientInfo":$clientInfo}}"""
+    val plainInfo = """{"name":"t","version":"1.0"}"""
+    val undecodable =
+      """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}"""
+    val tooManyValues =
+      initWith(s"""{"experimental":{"x":${List.fill(300)("0").mkString("[", ",", "]")}}}""", plainInfo)
+    val tooMuchText = initWith("{}", s"""{"name":"${"n" * (32 * 1024)}","version":"1.0"}""")
+    // A body just under the 1 MiB default cap whose capability member is one very long flat array.
+    val cap = McpServerSettings().maxRequestBodyBytes - 64
+    val head =
+      """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"t","version":"1.0"},"capabilities":{"experimental":{"x":[0"""
+    val tail = "]}}}}"
+    val capSized = head + ",0" * ((cap - head.length - tail.length) / 2) + tail
+
+    val checked = for
+      first <- post(legacyInitBody)
+      stored = first._2.getOrElse("")
+      refused <- Future.sequence(List(undecodable, tooManyValues, tooMuchText).map(post(_)))
+      afterRefused <- post(legacyListBody, Some(stored))
+      big <- post(capSized)
+      afterBig <- post(legacyListBody, Some(stored))
+      next <- post(legacyInitBody) // a successful initialize is what takes the slot
+      afterNext <- post(legacyListBody, Some(stored))
+    yield
+      first._1 shouldBe 200
+      stored should not be empty
+      refused.foreach { case (_, sid, body) =>
+        body should include("-32602")
+        body should not include "serverInfo"
+        sid shouldBe None
+      }
+      afterRefused._1 shouldBe 200 // nobody was evicted for a failed initialize
+      capSized.length should be <= cap
+      // -32602 from the retention budget; a frame-level bound on array length, where configured
+      // below this size, answers -32700 first. Either way: refused, nothing stored.
+      big._3 should (include("-32602") or include("-32700"))
+      big._3 should not include "serverInfo"
+      big._2 shouldBe None
+      afterBig._1 shouldBe 200
+      next._1 shouldBe 200
+      next._2 should not be empty
+      afterNext._1 shouldBe 404
+    checked.andThen { case _ => handle.stop() }
+  }
+
   // --- request context: allow-listed headers, protocolSessionId, reply opening on a heartbeat ---
   // Bun twin of `RequestContextHandlerTest` (the JVM / Scala Native handler test).
 

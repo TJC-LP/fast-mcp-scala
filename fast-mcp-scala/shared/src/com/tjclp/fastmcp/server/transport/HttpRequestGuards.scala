@@ -12,7 +12,13 @@ import com.tjclp.fastmcp.server.router.RequestHeaders
   * {{{
   * path 404 → hostGate 403 → Content-Type 415 → declared Content-Length 413 → Accept 406 →
   *   body read (platform byte cap → 413) → bodyTooLarge 413 → parseFrame → dispatch →
-  *   session cap (evict oldest idle / 503) → any defect → JSON-RPC 500 (guarded)
+  *   any defect → JSON-RPC 500 (guarded)
+  * }}}
+  * A header-less legacy `initialize` is dispatched on a session that is not stored yet, and only a
+  * successful one then meets the session cap:
+  * {{{
+  * initialize (over the retention budget → -32602, nothing stored) →
+  *   session cap (pickVictim: evict / 503) → store
   * }}}
   */
 private[fastmcp] object HttpRequestGuards:
@@ -154,3 +160,65 @@ private[fastmcp] object HttpRequestGuards:
           .map(_._1)
       }
     }
+
+  /** One stored legacy session as the cap-time policy sees it. `client` is the transport-supplied
+    * identity of whoever opened it (`Session.clientKey`: the peer address on the shipped backends);
+    * `None` when the backend cannot tell clients apart.
+    */
+  final case class StoredSession(
+      id: String,
+      lastSeen: Long,
+      liveGet: Boolean,
+      client: Option[String]
+  )
+
+  /** The session that makes room for a newcomer when the store is full, or `None` to refuse the
+    * newcomer (503). `newcomer` is the identity of the client asking for the new session.
+    *
+    * Whether a session can be evicted under the idle rules ([[pickEvictable]]) depends only on what
+    * its owner does: holding a GET stream open and touching the session keeps it exempt. Left at
+    * that, one client could fill the store with exempt sessions and have every other client
+    * refused. So the sessions each client holds are counted, and a client holding more than its
+    * share is the one that gives a session up, whatever state its sessions are in:
+    *
+    *   1. '''The newcomer's own client already holds as many sessions as any other client''': it
+    *      replaces one of its own. A client at the top can grow only at its own expense.
+    *   1. '''Some client holds at least two sessions more than the newcomer's client''': the client
+    *      holding the most gives one up. Afterwards it still holds at least as many as the
+    *      newcomer's client does.
+    *   1. '''Otherwise holdings are level''' and the idle rules decide over the whole store, as
+    *      they always have: the longest-idle session without a live GET, else the longest-idle GET
+    *      holder idle past `idleTimeoutMs`, else nothing — the store is full of clients that each
+    *      hold their share, and the newcomer is refused.
+    *
+    * In cases 1 and 2 the session given up is that client's longest-idle one without a live GET,
+    * else its longest-idle one outright — its GET stream is closed and the client reconnects.
+    *
+    * A session without an identity counts as a client of its own holding one session, so on a
+    * backend that supplies no identity only case 3 ever applies. Behind a reverse proxy every
+    * session carries the proxy's address: they are one client, case 1 always applies, and the store
+    * behaves as a least-recently-used cache.
+    */
+  def pickVictim(
+      snapshot: Iterable[StoredSession],
+      newcomer: Option[String],
+      now: Long,
+      idleTimeoutMs: Option[Long]
+  ): Option[String] =
+    val held: Map[String, Int] = snapshot.iterator
+      .flatMap(_.client)
+      .foldLeft(Map.empty[String, Int])((counts, c) =>
+        counts.updated(c, counts.getOrElse(c, 0) + 1)
+      )
+    def holdings(s: StoredSession): Int = s.client.fold(1)(held.getOrElse(_, 1))
+    val most = snapshot.iterator.map(holdings).maxOption.getOrElse(0)
+    val own = newcomer.fold(0)(held.getOrElse(_, 0))
+    def longestIdle(pool: Iterable[StoredSession]): Option[String] =
+      pool
+        .filterNot(_.liveGet)
+        .minByOption(_.lastSeen)
+        .orElse(pool.minByOption(_.lastSeen))
+        .map(_.id)
+    if own > 0 && own >= most then longestIdle(snapshot.filter(_.client == newcomer))
+    else if most >= own + 2 then longestIdle(snapshot.filter(holdings(_) == most))
+    else pickEvictable(snapshot.map(s => (s.id, s.lastSeen, s.liveGet)), now, idleTimeoutMs)
