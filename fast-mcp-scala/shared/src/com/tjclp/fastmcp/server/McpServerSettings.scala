@@ -67,6 +67,31 @@ import com.tjclp.fastmcp.core.Tasks
   *   -> one anonymous bucket). `Custom(f)` lets an operator behind an authenticating proxy derive a
   *   key; `_meta`/`clientInfo` are client-controlled and must not be used as a key unless the proxy
   *   rewrites them.
+  * @param maxRequestBytes
+  *   Byte budget for what ONE running task keeps of the request that created it: the `tools/call`
+  *   params (arguments, `_meta`, `inputResponses`, `requestState`), the decoded client capabilities
+  *   and client info, the request id, and any allow-listed HTTP headers (`contextHeaders`). A
+  *   handler running as a task can still read all of it; the budget bounds it. A request over it is
+  *   refused with `-32602` before anything is forked; it can still be sent as an ordinary
+  *   synchronous call to a tool whose task support is optional by not asking for a task. All four
+  *   byte settings count ESTIMATED heap bytes (two per string character plus a fixed overhead per
+  *   JSON node), not wire bytes, so a body of many small JSON nodes is charged several times its
+  *   wire size. The 2 MiB default admits any string-dominated request inside the default 1 MiB HTTP
+  *   body cap.
+  * @param maxResultBytes
+  *   Byte budget for ONE stored result (or stored failure). A task whose result is larger ends
+  *   `failed` with a message naming this setting and the result is not kept. Default 8 MiB.
+  * @param maxBytesPerOwner
+  *   Byte budget for everything the store holds for one owner: the request of each running task
+  *   plus each stored result. A create that does not fit evicts the owner's oldest results older
+  *   than `minResultRetentionMs` and is otherwise refused with `-32003`; a finishing task whose
+  *   result does not fit evicts the same way and otherwise ends `failed` with its result discarded.
+  *   Must be >= `maxRequestBytes` and >= `maxResultBytes`. Default 16 MiB.
+  * @param maxBytesTotal
+  *   The same budget per POOL (legacy-session tasks and modern bearer tasks are counted
+  *   separately), with the stored-cap eviction order: the creating owner's own stale results first,
+  *   then those of the owner holding the most stale results. Must be >= `maxBytesPerOwner`. Default
+  *   128 MiB, so the two pools together retain at most twice that; size it to the heap.
   */
 case class TaskSettings(
     enabled: Boolean = false,
@@ -79,7 +104,11 @@ case class TaskSettings(
     maxStoredTotal: Int = 4096,
     minResultRetentionMs: Long = 30_000L,
     sweepIntervalMs: Long = 1_000L,
-    ownerKey: com.tjclp.fastmcp.core.TaskOwnerKey = com.tjclp.fastmcp.core.TaskOwnerKey.Transport
+    ownerKey: com.tjclp.fastmcp.core.TaskOwnerKey = com.tjclp.fastmcp.core.TaskOwnerKey.Transport,
+    maxRequestBytes: Long = 2L * 1024 * 1024,
+    maxResultBytes: Long = 8L * 1024 * 1024,
+    maxBytesPerOwner: Long = 16L * 1024 * 1024,
+    maxBytesTotal: Long = 128L * 1024 * 1024
 ):
   require(maxConcurrentPerSession >= 1, "TaskSettings.maxConcurrentPerSession must be >= 1")
   require(
@@ -90,6 +119,16 @@ case class TaskSettings(
   require(maxStoredTotal >= 1, "TaskSettings.maxStoredTotal must be >= 1")
   require(minResultRetentionMs >= 0L, "TaskSettings.minResultRetentionMs must be >= 0")
   require(sweepIntervalMs >= 1L, "TaskSettings.sweepIntervalMs must be >= 1")
+  require(maxRequestBytes >= 1L, "TaskSettings.maxRequestBytes must be >= 1")
+  require(maxResultBytes >= 1L, "TaskSettings.maxResultBytes must be >= 1")
+  require(
+    maxBytesPerOwner >= maxRequestBytes && maxBytesPerOwner >= maxResultBytes,
+    "TaskSettings.maxBytesPerOwner must be >= maxRequestBytes and >= maxResultBytes"
+  )
+  require(
+    maxBytesTotal >= maxBytesPerOwner,
+    "TaskSettings.maxBytesTotal must be >= maxBytesPerOwner"
+  )
 
 /** Settings for the **Skills extension** (`io.modelcontextprotocol/skills`, SEP-2640). Full
   * reference: `docs/skills.md`.
