@@ -114,7 +114,9 @@ object AnnotatedServer extends McpServerApp[Stdio, AnnotatedServer.type]:
     *   - `examples` — populates the schema's `examples` array so clients can show suggestions
     *   - `required = false` + `Option[...]` — makes parameters optional with explicit `None`
     *   - `schema` — pastes a raw JSON Schema fragment, overriding the derived schema (useful for
-    *     enum constraints, regex patterns, or numeric bounds that Scala types can't express)
+    *     enum constraints or numeric bounds that Scala types can't express). The fragment is
+    *     enforced: a `sortBy` outside the enum is rejected before this method runs. `pattern` and
+    *     `format` are the exception — advertised but not evaluated, so check those here.
     */
   @Tool(
     name = Some("search"),

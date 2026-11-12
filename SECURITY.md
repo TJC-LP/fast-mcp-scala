@@ -106,6 +106,16 @@ Hardening knobs worth knowing when you deploy over HTTP
   transport supplies (`TaskOwnerKey.Transport`); behind a reverse proxy every client collapses to
   one address, so use `TaskOwnerKey.Custom` with an authenticated principal. `_meta` and
   `clientInfo` are client-controlled and are never used as a key.
+- Each tool's advertised `inputSchema` is enforced on `tools/call` before the handler runs
+  (`validateToolInput`, on by default, every transport and platform): a value outside a declared
+  `enum`, bound, length, type, `required` list or `additionalProperties` rule is answered with an
+  `isError` result and never reaches the handler. The built-in validator covers a documented
+  subset of JSON Schema and deliberately does not evaluate `pattern` (no backtracking regular
+  expression is ever run on client input), `format`, `multipleOf` or `uniqueItems`; a handler
+  that relies on one of those, or that runs with validation switched off, must check it itself.
+  `McpServer.toolInputValidation` lists, per tool, whether enforcement is on and which declared
+  keywords are skipped ([docs/custom-types.md](docs/custom-types.md#what-the-server-enforces)).
+  Schema validation is input hygiene, not authorization.
 - `scanAnnotations` binds each `@Tool` / `@Resource` / `@Prompt` to the exact annotated overload,
   and duplicate registrations within one object are compile-time errors, so the advertised schema
   and the invoked handler always come from the same declaration.

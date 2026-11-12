@@ -7,7 +7,9 @@ import java.util.concurrent.ConcurrentHashMap
 import scala.jdk.CollectionConverters.*
 
 import zio.*
+import zio.json.ast.Json
 
+import codec.DefaultDecodeContext
 import core.*
 import server.*
 
@@ -20,6 +22,17 @@ import server.*
 type ContextualToolHandler[R] = (Map[String, Any], Option[McpContext]) => ZIO[R, Throwable, Any]
 
 /** Options for tool registration
+  *
+  * @param validateInputSchema
+  *   Check every call's arguments against the tool's advertised `inputSchema` before the handler
+  *   runs (default). A call that does not conform fails with [[ToolArgumentError]] — on the wire an
+  *   `isError` tool result, the same answer an undecodable argument gets — and the handler is not
+  *   invoked. `false` restores decode-only behaviour for this one tool: the schema is then
+  *   advertised but not enforced, and the handler must check whatever it relies on. Has no effect
+  *   when the server was built with `McpServerSettings(validateToolInput = false)`. What is and is
+  *   not enforced: [[com.tjclp.fastmcp.core.JsonSchemaValidator]].
+  * @param validateOutputSchema
+  *   Reserved; results are not validated against `outputSchema`.
   */
 case class ToolRegistrationOptions(
     validateInputSchema: Boolean = true,
@@ -28,17 +41,39 @@ case class ToolRegistrationOptions(
     warnOnDuplicates: Boolean = true
 )
 
+/** Whether one tool's `tools/call` arguments are checked against its advertised `inputSchema`.
+  *
+  * @param enforced
+  *   `true` when a non-conforming call is rejected before the handler runs; `false` when validation
+  *   is off for the tool (`ToolRegistrationOptions(validateInputSchema = false)`) or for the whole
+  *   server (`McpServerSettings(validateToolInput = false)`)
+  * @param unenforced
+  *   what the schema declares that is NOT checked even when `enforced` is true — keywords outside
+  *   the supported subset (`pattern`, `format`, `uniqueItems`, ...) and unusable `$ref`s; see
+  *   [[com.tjclp.fastmcp.core.JsonSchemaValidator]]. A handler that relies on one of these must
+  *   check it itself.
+  */
+case class ToolInputValidation(enforced: Boolean, unenforced: List[String])
+
 /** Manager for MCP tools
   *
   * Responsible for registering, storing, and executing tools.
   *
+  * @param validateInput
+  *   server-wide switch for input-schema enforcement (`McpServerSettings.validateToolInput`). When
+  *   `true` (default) each tool follows its own `ToolRegistrationOptions.validateInputSchema`; when
+  *   `false` no tool's arguments are validated.
   * @tparam R
   *   the ZIO environment all stored handlers may require; supplied by the server at `runHttp[R]()`
   *   / `runStdio[R]()` entry.
   */
-class ToolManager[R] extends Manager[ToolDefinition]:
+class ToolManager[R](validateInput: Boolean = true) extends Manager[ToolDefinition]:
   // Thread-safe storage for registered tools - public for direct access in examples
   val tools = new ConcurrentHashMap[String, (ToolDefinition, ContextualToolHandler[R])]()
+
+  // The compiled inputSchema of each tool, next to (not inside) `tools` so that map keeps its
+  // public shape. Keyed by name and tied to the exact definition it was compiled from.
+  private val inputChecks = new ConcurrentHashMap[String, ToolManager.InputCheck]()
 
   private def checkToolConflict(
       name: String,
@@ -70,9 +105,68 @@ class ToolManager[R] extends Manager[ToolDefinition]:
     ZIO
       .attempt {
         checkToolConflict(name, options)
+        // Compiled first (so a schema is never half-registered), stored second: a call that sees
+        // the new definition before its check is stored validates it on the spot (inputCheckFor).
+        val check = ToolManager.InputCheck(definition, options.validateInputSchema)
         tools.put(name, (definition, handler))
+        inputChecks.put(name, check)
         ()
       }
+
+  /** The compiled input check for the definition currently stored under `name`. A definition that
+    * did not come through [[addTool]] (written straight into [[tools]]) is compiled on first use
+    * with validation requested, the registration default — and cached only if no registration
+    * stored a check in the meantime, so a concurrent [[addTool]] always has the last word.
+    */
+  private def inputCheckFor(name: String, definition: ToolDefinition): ToolManager.InputCheck =
+    val stored = Option(inputChecks.get(name))
+    stored.filter(_.definition eq definition).getOrElse {
+      val check = ToolManager.InputCheck(definition, requested = true)
+      stored match
+        case Some(stale) => inputChecks.replace(name, stale, check)
+        case None => inputChecks.putIfAbsent(name, check)
+      check
+    }
+
+  /** Whether calls to `name` are validated against its `inputSchema`, and what that schema declares
+    * that the validator does not enforce. `None` for an unknown tool.
+    */
+  def inputValidation(name: String): Option[ToolInputValidation] =
+    getToolDefinition(name).map { definition =>
+      val check = inputCheckFor(name, definition)
+      ToolInputValidation(validateInput && check.requested, check.validator.unenforced)
+    }
+
+  /** [[inputValidation]] for every registered tool, by tool name. */
+  def inputValidationReport: Map[String, ToolInputValidation] =
+    tools.keySet().asScala.iterator.flatMap(name => inputValidation(name).map(name -> _)).toMap
+
+  /** Reject arguments that do not conform to the tool's advertised `inputSchema`. Wire arguments
+    * are already `Json`; values passed in process go through the same coercion the default decoder
+    * applies (`DefaultDecodeContext.toJsonAst`), so the validator sees what the decoder will see.
+    */
+  private def checkArguments(
+      name: String,
+      definition: ToolDefinition,
+      arguments: Map[String, Any]
+  ): ZIO[Any, Throwable, Unit] =
+    if !validateInput then ZIO.unit
+    else
+      val check = inputCheckFor(name, definition)
+      if !check.requested || !check.validator.constrains then ZIO.unit
+      else
+        ZIO
+          .attempt {
+            val fields = Chunk.fromIterator(
+              arguments.iterator.map((key, value) => key -> DefaultDecodeContext.toJsonAst(value))
+            )
+            check.validator.validate(Json.Obj(fields))
+          }
+          .flatMap {
+            case None => ZIO.unit
+            case Some(reason) =>
+              ZIO.fail(new ToolArgumentError(s"Invalid arguments for tool '$name': $reason"))
+          }
 
   /** List all registered tool definitions
     */
@@ -89,7 +183,9 @@ class ToolManager[R] extends Manager[ToolDefinition]:
     *   Optional context for the tool execution
     * @return
     *   ZIO effect that completes with the tool's result or fails with Throwable (errors will be
-    *   converted to CallToolResult with isError=true at handler level)
+    *   converted to CallToolResult with isError=true at handler level). Arguments that do not
+    *   conform to the tool's `inputSchema` fail with [[ToolArgumentError]] before the handler runs,
+    *   unless validation is off for the tool or the server (see [[inputValidation]]).
     */
   def callTool(
       name: String,
@@ -97,23 +193,14 @@ class ToolManager[R] extends Manager[ToolDefinition]:
       context: Option[McpContext]
   ): ZIO[R, Throwable, Any] =
     for
-      // Get the handler and definition
-      handlerOpt <- ZIO.succeed(getToolHandler(name))
-
-      // Validate that the tool exists
-      handler <- ZIO
-        .fromOption(handlerOpt)
+      // One read, so the definition validated against is the one whose handler runs.
+      entry <- ZIO
+        .fromOption(Option(tools.get(name)))
         .orElseFail(new ToolNotFoundError(s"Tool '$name' not found"))
+      (definition, handler) = entry
 
-      // Get the tool definition to validate arguments against schema (future enhancement)
-      _ <- ZIO
-        .fromOption(getToolDefinition(name))
-        .orElseFail(
-          new ToolExecutionError(s"Tool definition for '$name' not found but handler exists")
-        )
-
-      // TODO: Validate arguments against the schema
-      // For future implementation
+      // Enforce the advertised inputSchema before any handler code runs.
+      _ <- checkArguments(name, definition, arguments)
 
       // Call the handler
       result <- handler(arguments, context)
@@ -139,6 +226,24 @@ class ToolManager[R] extends Manager[ToolDefinition]:
   def getToolDefinition(name: String): Option[ToolDefinition] =
     Option(tools.get(name)).map(_._1)
 
+object ToolManager:
+
+  /** A tool's compiled `inputSchema`, tied to the definition it was compiled from.
+    *
+    * @param requested
+    *   the registration's `ToolRegistrationOptions.validateInputSchema`
+    */
+  private final class InputCheck(
+      val definition: ToolDefinition,
+      val requested: Boolean,
+      val validator: JsonSchemaValidator
+  )
+
+  private object InputCheck:
+
+    def apply(definition: ToolDefinition, requested: Boolean): InputCheck =
+      new InputCheck(definition, requested, JsonSchemaValidator.compile(definition.inputSchema))
+
 /** Custom exceptions for tool operations
   */
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
@@ -153,4 +258,8 @@ class ToolRegistrationError(message: String, cause: Option[Throwable] = None)
 class ToolExecutionError(message: String, cause: Option[Throwable] = None)
     extends ToolError(message, cause)
 
+/** A call's arguments do not conform to the tool's advertised `inputSchema`. Raised by
+  * `ToolManager.callTool` before the handler runs; on the wire it becomes an `isError` tool result
+  * carrying the message, like any other failed call.
+  */
 class ToolArgumentError(message: String) extends ToolError(message)

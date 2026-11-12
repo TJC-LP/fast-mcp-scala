@@ -197,6 +197,7 @@ server.tool(addTool) *> server.runStdio()
 - `McpTemplateResource[In]` / `McpTemplateResource[In, R](...)` - Typed resource template
 - `McpDecoder[T]` / `McpEncoder[A]` - Platform-neutral codecs
 - `ToolSchemaProvider[A]` - Auto-derives `inputSchema` from `@Param`-annotated case classes on both JVM and JS
+- The advertised `inputSchema` is **enforced on `tools/call`** (both registration paths, all platforms): `ToolManager.callTool` validates arguments with the dependency-free `core/JsonSchemaValidator` before the handler and fails with `ToolArgumentError` (an `isError` result on the wire). Subset: `type`, `enum`, `const`, numeric/length/item bounds, `properties`, `required`, `additionalProperties`, `items`/`prefixItems`, `allOf`/`anyOf`/`oneOf`/`not`, local non-recursive `$ref`; `pattern`, `format`, `multipleOf`, `uniqueItems` and friends are NOT evaluated. Off switches: `McpServerSettings(validateToolInput = false)`, per tool `ToolRegistrationOptions(validateInputSchema = false)`; `server.toolInputValidation` reports the effective state. Reference: `docs/custom-types.md` § "What the server enforces"
 - `McpEncoder` falls back to `JsonEncoder[A]` → `TextContent(a.toJson)` via ZIO JSON; case classes without any `JsonEncoder` derive one automatically (Mirror-based, `NotGiven`-guarded)
 - Scala 3 enums and nested case classes in `In`/`Out` need no user-supplied givens (GH #78): schemas render string enums, codecs derive string-based; user-defined instances always win (macro-side summon-first, never exported givens). Machinery: `shared/.../macros/EnumTypeCollector.scala` + `ZioJsonEnumDerivation.scala`
 
@@ -361,6 +362,7 @@ Key test classes:
 - `HostGuardTest` / `HttpRequestGuardsTest` / `HttpHeaderValidationTest` - full-origin guard truth table, POST gate order + settings invariants, header sentinel handling
 - `TaskManagerSpec` / `TaskTransportGuardTest` / `LifecycleSoakTest` - task store bounds, sweeper hygiene, `Session.terminate`, interruption atomicity, per-client buckets
 - `OverloadBindingTest` / `OverloadNegativeTest` (JVM) and `OverloadBindingJsTest` (JS) - exact-overload binding, duplicate-registration and non-literal diagnostics
+- `JsonSchemaValidatorTest` / `ToolInputValidationTest` (JVM), `ToolInputValidationJsTest` (JS), `ToolInputValidationNativeTest` (Native) - the `inputSchema` validator (keywords, unenforced reporting, cost bounds) and its enforcement on `tools/call` (both registration paths, wire shape, opt-outs)
 - `JsServerLimitsTest` / `FromJsonAstDecodeTest` (JS), `JsonLimitsNativeTest` (Native) - limits and decode path on the other platforms
 - Skills extension: `SkillUriTest` / `Sha256AndUtf8Test` / `SkillFrontmatterReaderTest` / `SkillsWireCodecTest` / `McpSkillSnapshotTest` / `SkillVerifierTest` (core), `SkillRegistryTest` / `SkillsRouterTest` / `SkillDirectoryLoaderTest` (server), `SkillsStdioTranscriptTest` / `SkillsHttpTransportTest` (transports), `SkillsRootImportTest`, `SkillsServerExampleTest`; `SkillsConformanceTest` + `SkillsJsTest` (JS: TS SDK client over stdio, Bun stdio callbacks, Bun HTTP), `SkillsNativeTest` (Native stdio transcript)
 

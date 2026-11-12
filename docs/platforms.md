@@ -63,8 +63,9 @@ What the Scala.js target gives you:
   `catchAllCause` boundary (`NODE_ENV` is not security-relevant); `startStatefulHttp()` /
   `startStatelessHttp()` return a `BunHttpHandle` (call `.stop()`), and idle-session eviction plus
   the `maxSessions` cap run on every entry.
-- Pluggable tool-argument validation through the shared `Validation.scala` seam (permissive by
-  default on every platform).
+- The same built-in enforcement of each tool's advertised `inputSchema` on `tools/call` as on the
+  JVM and Scala Native (a dependency-free validator in `shared/`, on by default; see
+  [custom-types.md § What the server enforces](./custom-types.md#what-the-server-enforces)).
 - The shared `McpContext`: client info and capabilities, request and trace metadata, progress and
   logging, and MRTR-backed Roots, Sampling, and Elicitation, identical on JVM and JS.
 - Typed contracts derive their input schemas on Scala.js as well, with no schema-library import.

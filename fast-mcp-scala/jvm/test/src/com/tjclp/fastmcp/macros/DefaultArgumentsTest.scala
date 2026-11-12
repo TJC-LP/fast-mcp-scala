@@ -93,8 +93,9 @@ class DefaultArgumentsTest extends AnyFunSuite:
 
     val err = failureOf(server.toolManager.callTool("with_default", Map("s" -> "y"), None))
     val message = Option(err.getMessage).getOrElse("")
+    // The omission is caught against the advertised `required` list before the method is reached.
     assert(
-      message.contains("Missing required argument 'a'"),
+      message.contains("missing required property 'a'"),
       s"expected the failure to name the missing argument, got: $message"
     )
   }

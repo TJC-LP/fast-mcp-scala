@@ -143,7 +143,7 @@ case class SkillSettings(
 /** Settings for an MCP server. HTTP-specific fields (`host`, `port`, `httpEndpoint`, `stateless`,
   * `keepAliveInterval`, `sessionIdleTimeout`, `disallowDelete`, `allowedHosts`, `allowedOrigins`,
   * `maxRequestBodyBytes`, `maxSessions`, `contextHeaders`) are ignored under stdio transports.
-  * `limits` and `tasks` apply on every transport.
+  * `limits`, `tasks` and `validateToolInput` apply on every transport.
   */
 case class McpServerSettings(
     // Spec: HTTP servers SHOULD bind to localhost by default (DNS-rebinding surface). Deployments
@@ -235,7 +235,18 @@ case class McpServerSettings(
     // is the server author's statement that the proxy sets or strips it: a client that reaches the
     // server directly can send any header it likes. Values are read per request, are never logged
     // by the library, and a header sent more than once is seen as its ", "-joined value.
-    contextHeaders: Set[String] = Set.empty
+    contextHeaders: Set[String] = Set.empty,
+    // Check every `tools/call` against the tool's advertised `inputSchema` before its handler runs
+    // (every transport, every platform). A call that does not conform is answered with an `isError`
+    // tool result and the handler is not invoked. The check covers a documented subset of JSON
+    // Schema (`core.JsonSchemaValidator`): `type`, `enum`, `const`, numeric and length bounds,
+    // `required`, `properties`, `additionalProperties`, `items`, `allOf`/`anyOf`/`oneOf`/`not` and
+    // local `$ref`; `pattern`, `format` and `uniqueItems` among others are NOT evaluated. `false`
+    // turns the check off for every tool — schemas are then advertised only and each handler must
+    // check what it relies on. One tool can opt out with
+    // `ToolRegistrationOptions(validateInputSchema = false)`; `McpServer.toolInputValidation`
+    // reports the effective state per tool.
+    validateToolInput: Boolean = true
 )
 
 /** Input limits applied to every inbound JSON-RPC frame on every transport (stdio and HTTP; JVM,

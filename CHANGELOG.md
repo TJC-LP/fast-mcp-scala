@@ -101,6 +101,56 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     newcomer by closing the longest-idle session — live GET or not — where it answered 503 when
     every session held a live, recently used GET stream. Limit sessions per principal in the proxy.
   - A backend that reports no peer address keeps the previous cap rules unchanged.
+- **A tool's advertised `inputSchema` is now enforced on `tools/call`** (TJC-5087). Until now the
+  schema was advertised on `tools/list` but arguments were only decoded by Scala type, so a
+  constraint that lived in the schema alone — an `enum`, numeric bounds, a length limit,
+  `additionalProperties: false`, declared through `@Param(schema = ...)`, `McpSchema` /
+  `McpInputCodec` or `McpTool.withSchema` — was not checked, and `ToolRegistrationOptions
+  .validateInputSchema` (default `true`) was never read. Now, before a handler or annotated method
+  runs, the arguments are validated against the schema; a call that does not conform is answered
+  with an `isError` tool result naming the location and the constraint (the same in-band answer an
+  undecodable argument gets; the offending value is not echoed) and the handler is not invoked.
+  Applies to the annotation path and to typed contracts, on every transport, on the JVM, Scala.js
+  and Scala Native, and to task-augmented calls.
+  - The validator is built in (`com.tjclp.fastmcp.core.JsonSchemaValidator`: no dependency, no
+    regular expressions, no reflection) and covers a documented subset of JSON Schema: `type`,
+    `enum`, `const`, `minimum` / `maximum` / `exclusiveMinimum` / `exclusiveMaximum`, `minLength` /
+    `maxLength`, `items` / `prefixItems`, `minItems` / `maxItems`, `properties`, `required`,
+    `additionalProperties`, `allOf` / `anyOf` / `oneOf` / `not`, and `$ref` to a location inside
+    the same schema. A schema is compiled once at registration; a call costs one walk over its
+    arguments.
+  - **Not enforced, by design:** `pattern` and `patternProperties` (no backtracking regular
+    expression is run on client input), `format`, `multipleOf`, `uniqueItems`, `minProperties` /
+    `maxProperties`, `propertyNames`, `contains`, the `dependent*` keywords, `if` / `then` /
+    `else`, `unevaluated*`, and a `$ref` that is remote, unresolvable or recursive. These remain
+    advertised only: a handler (or an `McpInputCodec` decoder) that relies on one must check it.
+  - New setting `McpServerSettings.validateToolInput: Boolean = true` — the server-wide switch
+    (`false` restores decode-only behaviour for every tool). One tool opts out with
+    `ToolRegistrationOptions(validateInputSchema = false)`, which is now honoured.
+  - New `McpServer.toolInputValidation: Map[String, ToolInputValidation]` (also
+    `ToolManager.inputValidation(name)` / `inputValidationReport`) reports, per tool, whether
+    enforcement is on and which declared keywords the validator skips. `McpServerCore` gains
+    `toolInputValidation` with an empty default, so third-party implementations keep compiling.
+  - `ToolManager` takes an optional constructor argument (`validateInput: Boolean = true`).
+  - **What a client or server author can notice** — each of these was accepted before because the
+    decoder was more lenient than the schema, and is now rejected because the schema says so:
+    a string where the schema says `integer` / `number` (`"5"`), or any other JSON type mismatch;
+    a call that omits a member listed in `required`, including a parameter or field that has a
+    Scala default but is not marked `@Param(..., required = false)` (mark it to keep it optional)
+    and an `Option` parameter annotated `@Param(required = true)`; arguments sent to a tool that
+    takes none (its derived schema says `additionalProperties: false`); an explicit `null` for an
+    `Option` parameter whose `@Param(schema = ...)` override does not admit `null`; any value a
+    custom decoder accepts but the advertised schema does not describe (give the type a matching
+    `McpSchema` / `McpInputCodec`); and every value under a hand-written `oneOf` whose
+    alternatives overlap (`oneOf` means exactly one — add `required` to object alternatives).
+    The message for a missing argument changes from `Missing required argument 'x'` to `Invalid
+    arguments for tool '<tool>': missing required property 'x'`, and an out-of-enum value is
+    reported as `... 'field' must be one of: a, b` instead of the decoder's text.
+  - The router-level `SchemaValidator` / `ValidationMiddleware` seam is unchanged and still
+    permissive by default; its documentation no longer describes it as the validation mechanism.
+  - Docs: `docs/custom-types.md` § "What the server enforces", `SECURITY.md`, the Scaladoc of
+    `@Param(schema)`, `McpSchema`, `McpInputCodec`, `McpTool.withSchema` and
+    `ToolRegistrationOptions`.
 
 ### Added
 

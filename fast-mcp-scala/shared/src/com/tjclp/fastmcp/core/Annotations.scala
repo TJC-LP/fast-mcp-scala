@@ -98,7 +98,18 @@ class Tool(
   *   takes the Scala default (or `None`) when the tool or prompt is called
   * @param schema
   *   Optional JSON schema override for the parameter type. Literal values only (`Some("...")` /
-  *   `None` / a `final val`); a non-literal argument is a compile-time error.
+  *   `None` / a `final val`); a non-literal argument is a compile-time error. The override is
+  *   ENFORCED: a `tools/call` whose value does not conform is rejected before the method runs
+  *   (unless validation is turned off, `McpServerSettings.validateToolInput`). Enforcement covers
+  *   `type`, `enum`, `const`, `minimum` / `maximum` and the exclusive forms, `minLength` /
+  *   `maxLength`, `minItems` / `maxItems`, `items`, `properties`, `required`,
+  *   `additionalProperties`, `allOf` / `anyOf` / `oneOf` / `not` and local `$ref`. It does NOT
+  *   cover `pattern`, `format`, `multipleOf` or `uniqueItems` (full list:
+  *   [[com.tjclp.fastmcp.core.JsonSchemaValidator]]) — those are advertised only, so check them in
+  *   the method. The override replaces the whole derived property, including the `null` alternative
+  *   of an `Option` parameter: write `"type": ["string", "null"]` (and `null` in an `enum`) if
+  *   clients may send an explicit `null`. Only tools have an input schema, so this applies to
+  *   `@Tool` parameters and typed-tool fields.
   * @since 0.2.1
   */
 class Param(
