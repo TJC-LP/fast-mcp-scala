@@ -162,6 +162,10 @@ Caveats (experimental):
   but not yet in a release). The HTTP request path itself stays below that size, but concurrent
   requests or replies of 8 KiB and up do reach it — see
   [the socket backend](./transports.md#the-socket-backend);
+- under sustained HTTP load on Scala Native 0.5.12, resident memory grows slowly (roughly 10 to 30
+  bytes per request) and is not reclaimed; both this and the allocator defect are fixed on Scala
+  Native's main branch — details and measurements in
+  [the socket backend](./transports.md#the-socket-backend);
 - request fibers are not listed in `Fiber.roots` / fiber dumps on this platform (registering them
   costs a `WeakReference` each, which Scala Native does not reclaim at request rates);
 - session and task ids come from `/dev/urandom` (Unix only);

@@ -36,8 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Native 0.5.12 runtime defect — its large-object allocator can abort the process when several
     threads allocate 8 KiB or more at once (scala-native#4916, fixed upstream, not yet released).
     The request path stays below that size, but concurrent requests or replies of 8 KiB and up
-    reach it — see docs/transports.md "The socket backend". Request fibers are not listed in
-    `Fiber.roots` on this platform.
+    reach it. On 0.5.12 resident memory also grows slowly under sustained load (roughly 10 to 30
+    bytes per request, not reclaimed). Both are fixed on Scala Native's main branch: the same server
+    built against nightly `0.5.13-20261107` survived the large-payload stress and held flat memory
+    — see docs/transports.md "The socket backend". Request fibers are not listed in `Fiber.roots`
+    on this platform.
 - **Skills extension (`io.modelcontextprotocol/skills`, SEP-2640)** as a native part of the shared
   core on JVM, Scala.js/Bun and Scala Native, over stdio and (where available) HTTP, in both the
   2026-07-28 stateless path and the initialize/session adapter. Implements the stable extension page

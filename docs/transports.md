@@ -336,10 +336,25 @@ fast-mcp-scala code, under both the Immix and Commix collectors, on macOS and Li
 configuration switch; a larger `GC_INITIAL_HEAP_SIZE` makes it rarer but does not remove it. The request path of this server is kept below the threshold — per-connection buffers start at
 4 KiB and a small request allocates nothing that large — so ordinary small tool calls do not reach
 it. Concurrent requests or replies of 8 KiB and up do: in a stress test with 16 KiB request bodies
-on 16 connections the process aborted within seconds in most runs. Until a Scala Native release
-carries the fix, treat Scala Native HTTP as suitable for small payloads or low concurrency, and run
-it under a supervisor that restarts it — which is why the backend is `@experimental`. The JVM
-socket backend is not affected.
+on 16 connections the process aborted within seconds in most runs (6 of 10).
+
+**Memory on Scala Native (0.5.12).** Resident memory also grows slowly under sustained load and is
+not given back: roughly 10 to 30 bytes per request, which is 1 to 3 GiB per hour at 30,000
+requests per second. It is a real leak, not a heap settling — with `GC_MAXIMUM_HEAP_SIZE=128m` the server ran
+out of heap after about 3.7 million 2026-07-28 requests — and it is in the runtime: the same
+workload on the JVM holds a flat 9 MB live heap. Runtime-allocated weak references are the likely
+cause (zio-json's encoder pool allocates one after each collection, and 0.5.12 does not reclaim
+weak references under churn).
+
+**Both are fixed on Scala Native's main branch.** The same server built entirely against the
+nightly `0.5.13-20261107-69432d9-SNAPSHOT` survived the 16 KiB stress in 10 of 10 runs and held a
+flat 79 MB for a four-minute soak (9 million requests) under the 128 MiB cap that kills the 0.5.12
+build. Until a Scala Native release carries those fixes, treat Scala Native HTTP as suitable for
+small payloads and bounded uptime, run it under a supervisor that restarts it, and expect the
+`@experimental` gate to stay. fast-mcp-scala itself keeps building against the released 0.5.12: a
+published library cannot depend on a snapshot, and the runtime is linked by the application's own
+Scala Native version in any case — an application that accepts a nightly toolchain gets the fixes
+without a new fast-mcp-scala release. The JVM socket backend is not affected by either problem.
 
 Two more Scala Native specifics: request fibers are not registered in `Fiber.roots` (each
 registration allocates a `WeakReference`, which Scala Native does not reclaim at request rates —
