@@ -254,6 +254,40 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     reply.status shouldBe 200
     reply.header("mcp-session-id").getOrElse(fail("initialize did not mint a session"))
 
+  /** Control bytes made visible, for failure messages. */
+  private def visible(raw: String): String =
+    raw.flatMap {
+      case '\r' => "\\r"
+      case '\n' => "\\n"
+      case '\t' => "\\t"
+      case c if c < ' ' || c == '\u007f' => f"\\x${c.toInt}%02x"
+      case c => c.toString
+    }
+
+  /** `raw` must be refused by the socket layer itself: a `400` transport error with
+    * `Connection: close`, after which the server closes without answering anything else on the
+    * connection — so no byte of `raw` is ever served as a further request.
+    */
+  private def refused(port: Int, raw: String): Unit =
+    val client = new RawClient(port)
+    try
+      client.send(raw)
+      withClue(s"request ${visible(raw)}: ") {
+        val reply = client.readReply()
+        reply.status shouldBe 400
+        reply.header("connection") shouldBe Some("close")
+        reply.body should include(""""code":-32000""")
+        client.atEof() shouldBe true
+      }
+    finally client.close()
+
+  private val chunkedHead =
+    "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" +
+      "Accept: application/json, text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+
+  /** `initFrame` is ASCII, so its length in chars is its length in bytes. */
+  private val initHex = Integer.toHexString(initFrame.length)
+
   // --- tests --------------------------------------------------------------------------------------
 
   test("initialize mints a session; its reply, complete at once, is a fixed-length SSE body") {
@@ -484,6 +518,171 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       val reply = request(port, raw)
       reply.status shouldBe 200
       reply.header("mcp-session-id").isDefined shouldBe true
+    }
+  }
+
+  // --- strict request-head parsing ---------------------------------------------------------------
+
+  test("a request head must end every line in CRLF: a bare LF is refused with 400 and a close") {
+    withServer() { port =>
+      request(port, get(None)).status shouldBe 405 // the well-formed twin is served
+      refused(port, "GET /mcp HTTP/1.1\nHost: 127.0.0.1\n\n")
+      refused(port, "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\n\r\n")
+      refused(port, "GET /mcp HTTP/1.1\nHost: 127.0.0.1\r\n\r\n")
+      refused(port, "\nGET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+      refused(port, "\r\n\nGET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    }
+  }
+
+  test("LF LF or LF CRLF inside a head does not end it: the bytes after are never a second request") {
+    withServer() { port =>
+      val second = "GET /other HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+      // `refused` also proves the connection closes with ONE reply: nothing answers `second`.
+      refused(port, "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nX-A: b\n\n" + second)
+      refused(port, "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nX-A: b\n\r\n" + second)
+    }
+  }
+
+  test("a lone LF or CR inside a field value cannot introduce a header") {
+    withServer() { port =>
+      val length = s"Content-Length: ${initFrame.length}"
+      def smuggled(separator: String): String =
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" +
+          "Accept: application/json, text/event-stream\r\n" +
+          s"X-A: b$separator$length\r\n\r\n$initFrame"
+      refused(port, smuggled("\n"))
+      refused(port, smuggled("\r"))
+    }
+  }
+
+  test("a bare CR, NUL or another control byte in a request head is refused with 400 and a close") {
+    withServer() { port =>
+      def withValue(value: String): String =
+        s"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nX-A: $value\r\n\r\n"
+      // HTAB inside a value is the one control byte a head may carry.
+      request(port, withValue("a\tb")).status shouldBe 405
+      List("a\rb", "a\u0000b", "\u0000", "a\u000bb", "a\u000c", "\u001fa", "a\u007fb").foreach { v =>
+        refused(port, withValue(v))
+      }
+      refused(port, "\rGET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+      refused(port, "GET /mcp\u0000 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+      refused(port, "GET\t/mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+      refused(port, "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nX\u0000A: b\r\n\r\n")
+    }
+  }
+
+  test("Transfer-Encoding / Content-Length padded with control bytes are refused, not recognised") {
+    withServer() { port =>
+      val head =
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" +
+          "Accept: application/json, text/event-stream\r\n"
+      val chunkedBody = s"$initHex\r\n$initFrame\r\n0\r\n\r\n"
+      List("\u000b", "\u000c", "\u0000", "\r").foreach { pad =>
+        refused(port, s"${head}Transfer-Encoding: ${pad}chunked\r\n\r\n$chunkedBody")
+        refused(port, s"${head}Transfer-Encoding: chunked$pad\r\n\r\n$chunkedBody")
+        refused(port, s"${head}Content-Length: $pad${initFrame.length}\r\n\r\n$initFrame")
+        refused(port, s"${head}Content-Length: ${initFrame.length}$pad\r\n\r\n$initFrame")
+      }
+      // Optional whitespace (SP / HTAB) around the value is still just whitespace.
+      val ok = request(port, s"${head}Content-Length: \t${initFrame.length} \r\n\r\n$initFrame")
+      ok.status shouldBe 200
+    }
+  }
+
+  test("a well-formed request delivered one byte at a time is still parsed") {
+    withServer() { port =>
+      def dribble(raw: String): Reply =
+        val client = new RawClient(port)
+        try
+          raw.foreach { c =>
+            client.send(c.toString)
+            Thread.sleep(1)
+          }
+          client.readReply()
+        finally client.close()
+      // Every CR arrives without its LF, so each line end is judged across two reads.
+      dribble("\r\n" + get(None)).status shouldBe 405
+      val chunked = dribble(
+        chunkedHead + s"$initHex;ext=1\r\n$initFrame\r\n0\r\nX-Trailer: v\r\n\r\n"
+      )
+      chunked.status shouldBe 200
+      chunked.header("mcp-session-id").isDefined shouldBe true
+    }
+  }
+
+  // --- strict chunked framing ---------------------------------------------------------------------
+
+  test("well-formed chunked bodies decode: extensions, trailers, and the connection stays usable") {
+    withServer() { port =>
+      val (a, b) = initFrame.splitAt(40)
+      def chunk(s: String, ext: String = "") = s"${Integer.toHexString(s.length)}$ext\r\n$s\r\n"
+      val client = new RawClient(port)
+      try
+        client.send(
+          chunkedHead + chunk(a, ";name=value") + chunk(b, " ; q=\"quoted text\"") +
+            "0;last\r\nX-Trailer: one\r\nX-Other:\ttwo\r\n\r\n"
+        )
+        val first = client.readReply()
+        first.status shouldBe 200
+        first.header("connection") shouldBe Some("keep-alive")
+        // Upper-case hex digits and leading zeros (within the digit bound) are sizes too.
+        val upper = "%07X".format(initFrame.length)
+        client.send(chunkedHead + s"$upper\r\n$initFrame\r\n0\r\n\r\n")
+        client.readReply().status shouldBe 200
+      finally client.close()
+    }
+  }
+
+  test("chunk-size lines, the terminator after chunk data, and trailers must end in CRLF") {
+    withServer() { port =>
+      val data = s"$initFrame\r\n"
+      val end = "0\r\n\r\n"
+      // A chunk header ending in a bare LF, with or without a chunk extension.
+      refused(port, chunkedHead + s"$initHex\n$data$end")
+      refused(port, chunkedHead + s"$initHex;a=b\n$data$end")
+      // Chunk data followed by a single LF, or by nothing.
+      refused(port, chunkedHead + s"$initHex\r\n$initFrame\n$end")
+      refused(port, chunkedHead + s"$initHex\r\n$initFrame$end")
+      // The last chunk and the trailer section.
+      refused(port, chunkedHead + s"$initHex\r\n${data}0\n\r\n")
+      refused(port, chunkedHead + s"$initHex\r\n${data}0\r\n\n")
+      refused(port, chunkedHead + s"$initHex\r\n${data}0\r\nX-Trailer: v\n\r\n")
+      refused(port, chunkedHead + s"$initHex\r\n${data}0\r\nX-Trailer: v\r\n\n")
+      // A CR that is not followed by LF.
+      refused(port, chunkedHead + s"$initHex\r$data$end")
+      refused(port, chunkedHead + s"$initHex\r\n$initFrame\r$end")
+      refused(port, chunkedHead + s"$initHex\r\n${data}0\r\nX-Trailer: a\rb\r\n\r\n")
+    }
+  }
+
+  test("a chunk size is hex digits from the first byte; padding and control bytes are refused") {
+    withServer() { port =>
+      val rest = s"\r\n$initFrame\r\n0\r\n\r\n"
+      List(" ", "\t", "\u000b", "\u000c", "\u0000", "\u00a0").foreach { pad =>
+        refused(port, chunkedHead + s"$pad$initHex$rest")
+        refused(port, chunkedHead + s"$initHex$pad$rest")
+      }
+      refused(port, chunkedHead + s"0x$initHex$rest")
+      refused(port, chunkedHead + s"+$initHex$rest")
+      refused(port, chunkedHead + s"$rest") // no size at all
+      refused(port, chunkedHead + s"0000000$initHex$rest") // past the digit bound
+      // Something after the size that is not a chunk extension.
+      refused(port, chunkedHead + s"$initHex junk$rest")
+      refused(port, chunkedHead + s"$initHex=1$rest")
+      // A chunk extension carrying control bytes.
+      refused(port, chunkedHead + s"$initHex;a=\u0000b$rest")
+      refused(port, chunkedHead + s"$initHex;a\rb$rest")
+      refused(port, chunkedHead + s"$initHex;a=\u007f$rest")
+      refused(port, chunkedHead + s"$initHex\r\n$initFrame\r\n0;\u000b\r\n\r\n")
+    }
+  }
+
+  test("a chunked trailer section holds field lines only") {
+    withServer() { port =>
+      val body = s"$initHex\r\n$initFrame\r\n0\r\n"
+      refused(port, chunkedHead + body + "not a field line\r\n\r\n")
+      refused(port, chunkedHead + body + "X-Trailer: v\r\n folded\r\n\r\n")
+      refused(port, chunkedHead + body + "X-Trailer: a\u0000b\r\n\r\n")
     }
   }
 
