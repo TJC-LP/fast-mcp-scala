@@ -78,8 +78,11 @@ final class Session private (
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   @volatile private var outboundClosed: Boolean = false
 
-  /** Millis timestamp of the last client activity (transports touch on every request). Drives idle
-    * eviction of abandoned streamable sessions.
+  /** When the client was last active (transports touch on every request), in milliseconds on the
+    * MONOTONIC clock ([[Session.monotonicMs]]) — comparable only with another reading of that
+    * clock, never with wall-clock time. Drives idle eviction and the eviction order at the session
+    * cap, so a wall-clock step (NTP, a VM resume, a manual change) can neither make a session just
+    * used look like the longest idle one nor expire every session at once.
     */
   def lastSeen: UIO[Long] = ZIO.succeed(lastSeenRef.get())
 
@@ -91,7 +94,7 @@ final class Session private (
     (lastSeenRef.get(), activeGetRef.get())
 
   def touch: UIO[Unit] =
-    ZIO.succeed(lastSeenRef.set(java.lang.System.currentTimeMillis()))
+    ZIO.succeed(lastSeenRef.set(Session.monotonicMs()))
 
   /** At most one standalone GET SSE stream may drain `outbound` — two would round-robin-steal
     * messages. `tryAcquireGet` is an atomic test-and-set (false = a stream is already live, answer
@@ -322,6 +325,12 @@ object Session:
     */
   val DefaultOutboundCapacity: Int = 256
 
+  /** Milliseconds on the monotonic clock (`System.nanoTime`, available on the JVM, Scala.js and
+    * Scala Native): the clock of [[Session.lastSeen]] and of every "how long idle" comparison in
+    * the session stores. Its origin is arbitrary; only differences mean anything.
+    */
+  private[fastmcp] def monotonicMs(): Long = java.lang.System.nanoTime() / 1_000_000L
+
   /** What [[Session.outbound]] does with a message offered to a full buffer. */
   private enum AtBound:
     /** Drop the oldest buffered message; the emitter never waits. */
@@ -447,7 +456,7 @@ object Session:
           FiberRef.unsafe.make(Option.empty[RequestContext]),
           FiberRef.unsafe.make(Option.empty[RequestId]),
           FiberRef.unsafe.make(Option.empty[Ref[Map[String, Int]]]),
-          new java.util.concurrent.atomic.AtomicLong(java.lang.System.currentTimeMillis()),
+          new java.util.concurrent.atomic.AtomicLong(monotonicMs()),
           new java.util.concurrent.atomic.AtomicBoolean(false),
           Ref.unsafe.make(Option(Map.empty[String, UIO[Unit]]))
         )
