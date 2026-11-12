@@ -456,6 +456,34 @@ class RequestContextHandlerTest extends AnyFunSuite with Matchers:
     all.last.data should include("progress-done")
   }
 
+  test("a silent legacy call gets its response head within the grace, without keepAliveInterval") {
+    // A legacy reply's head used to be sent at once. A client with a response-header timeout
+    // must not see a quiet call differently, so the stream opens after LegacyHeadGrace (1 s)
+    // even though nothing has arrived and no heartbeat is configured.
+    val handler = makeHandler(McpServerSettings())
+    val sid = initialize(handler)
+    val (reply, elapsedMs) =
+      timedPost(handler, post(List("mcp-session-id" -> sid), legacyCall(75, "very-silent")))
+    elapsedMs should be >= 900L
+    elapsedMs should be < 2500L // the tool is silent for 3 s
+    reply match
+      case HttpReply.Sse(_, _, keepAlive) => keepAlive shouldBe None
+      case other => fail(s"expected a streamed SSE reply, got $other")
+    val all = frames(reply)
+    all.exists(_ == SseFrame.Ping) shouldBe false
+    all.size shouldBe 1
+    all.head.data should include("very-silent-done")
+  }
+
+  test("a legacy call that answers within the grace is still one complete SSE body") {
+    val handler = makeHandler(McpServerSettings())
+    val sid = initialize(handler)
+    // 300 ms of silence is inside the 1 s grace.
+    runUnsafe(handler.post(post(List("mcp-session-id" -> sid), legacyCall(76, "briefly-silent")))) match
+      case HttpReply.SseComplete(_, frame) => frame.data should include("briefly-silent-done")
+      case other => fail(s"expected a complete SSE reply, got $other")
+  }
+
   test("a silent legacy call opens its SSE reply at the first heartbeat too") {
     val handler = makeHandler(heartbeat)
     val sid = initialize(handler)
@@ -521,6 +549,13 @@ object RequestContextHandlerTest:
     @Tool(name = Some("progress-then-done"), description = Some("Reports progress, then answers"))
     def progressThenDone(ctx: McpContext): ZIO[Any, Throwable, String] =
       ZIO.foreachDiscard(ctx.progressToken)(t => ctx.sendProgress(t, 0.5)).as("progress-done")
+
+    @Tool(name = Some("very-silent"), description = Some("Says nothing for 3 s, then answers"))
+    def verySilent(): ZIO[Any, Throwable, String] = ZIO.sleep(3.seconds).as("very-silent-done")
+
+    @Tool(name = Some("briefly-silent"), description = Some("Says nothing for 300 ms"))
+    def brieflySilent(): ZIO[Any, Throwable, String] =
+      ZIO.sleep(300.millis).as("briefly-silent-done")
 
     @Tool(name = Some("silent"), description = Some("Says nothing for a while, then answers"))
     def silent(): ZIO[Any, Throwable, String] = ZIO.sleep(1500.millis).as("silent-done")

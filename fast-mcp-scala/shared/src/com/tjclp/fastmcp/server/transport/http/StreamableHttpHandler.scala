@@ -329,12 +329,17 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     *     body ([[HttpReply.SseComplete]]) — nothing is streamed, pulled or finalized;
     *   - anything else opens the request's SSE stream, which carries that frame and the rest.
     *
-    * Without `keepAliveInterval` the reply waits for that first frame, however long the handler is
-    * silent. With it, the wait is bounded by one interval: a handler that has produced nothing by
-    * then gets its SSE stream opened anyway, starting with a heartbeat, so a proxy in front sees
-    * bytes at that cadence during a long quiet call. The cost is that a status-mapped error
-    * arriving after the stream opened is delivered in-band (HTTP 200, the JSON-RPC error as the
-    * stream's final event) — the status line is gone by then.
+    * How long the reply may wait for that frame:
+    *   - legacy sessions: at most [[StreamableHttpHandler.LegacyHeadGrace]] (or one
+    *     `keepAliveInterval`, if that is shorter). A legacy reply's `200` head used to be sent at
+    *     once; a client that times out on response headers must not see a quiet call any
+    *     differently, so the stream is opened after that grace whether or not anything arrived.
+    *   - 2026-07-28: one `keepAliveInterval` when set, otherwise until the frame arrives (as it
+    *     always has) — the first frame decides the HTTP status there.
+    * A stream opened by the bound starts with a heartbeat when `keepAliveInterval` is set, so a
+    * proxy in front sees bytes at that cadence during a long quiet call. The cost on the 2026-07-28
+    * path is that a status-mapped error arriving after the stream opened is delivered in-band (HTTP
+    * 200, the JSON-RPC error as the stream's final event) — the status line is gone by then.
     *
     * The bound is a timer fiber that OFFERS [[MessageLoop.KeepAliveSentinel]] into the request's
     * queue; the wait itself stays one plain `take`, so the timer can never discard a frame.
@@ -362,7 +367,10 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
           (signalInterrupt(dispatchFiber) *> reqQueue.shutdown)
             .as(HttpReply.SseComplete(headers, SseFrame.message(first)))
         case None => ZIO.succeed(sse(Some(first), openedByHeartbeat = false))
-    keepAlive match
+    val bound: Option[Duration] =
+      if modern then keepAlive
+      else Some(keepAlive.fold(LegacyHeadGrace)(_.min(LegacyHeadGrace)))
+    bound match
       case None => reqQueue.take.onInterrupt(abandon).flatMap(shaped)
       case Some(interval) =>
         for
@@ -371,7 +379,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
           first <- reqQueue.take.onInterrupt(signalInterrupt(timer) *> abandon)
           reply <-
             if MessageLoop.isKeepAliveSentinel(first) then
-              ZIO.succeed(sse(None, openedByHeartbeat = true))
+              ZIO.succeed(sse(None, openedByHeartbeat = keepAlive.isDefined))
             else signalInterrupt(timer) *> shaped(first)
         yield reply
 
@@ -519,6 +527,13 @@ private[fastmcp] object StreamableHttpHandler:
 
   /** Startup validation every backend runs before binding (`HttpRequestGuards.validateSettings`).
     */
+  /** The longest a legacy (pre-2026-07-28) POST reply waits for its first frame before the SSE
+    * response is opened anyway. Long enough that a call which answers promptly gets the
+    * fixed-length reply; short enough that no client's response-header timeout can tell a quiet
+    * call from the days when the head was sent at once.
+    */
+  private[fastmcp] val LegacyHeadGrace: Duration = 1.second
+
   /** Tell a fiber to stop without waiting for it to exit and without forking a fiber to wait. */
   private[fastmcp] def signalInterrupt(fiber: Fiber.Runtime[?, ?]): UIO[Unit] =
     ZIO.fiberIdWith(id => fiber.interruptAsFork(id))
