@@ -1,0 +1,7 @@
+# Properties expected to fail, each with the finding it regression-tests.
+# property message	finding	note
+a request head with bare LF line endings is refused	find_01WfRKp4HWnn2Jwpk2NCeL5N	Socket HTTP request-head parser accepts bare LF terminators
+a chunked body with bare LF framing is refused	find_01AUuNgY4ScFXJjHFvUqnpU7	Socket HTTP chunked-body parser accepts bare LF
+a request with conflicting duplicate routing headers is refused	find_0149aHfa7kCu5REzbDVtikEZ	Duplicate Mcp-Method/Mcp-Name headers resolved first-wins
+a tools/call argument outside the declared input schema is rejected	find_014A3ABnWQhtbo1fNHZ9bx5f	Declared tool input-schema constraints are not enforced
+a tool handler only sees arguments that satisfy its declared input schema	find_014A3ABnWQhtbo1fNHZ9bx5f	The same finding, seen from inside the handler

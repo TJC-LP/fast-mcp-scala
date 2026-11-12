@@ -1,0 +1,15 @@
+# Local-loop overrides: the SDKs write their assertions to files, and the servers are reachable
+# from the host for poking at them.
+services:
+  mcp-netty:
+    environment:
+      ANTITHESIS_SDK_LOCAL_OUTPUT: /tmp/sdk.jsonl
+    ports: ["18101:8000"]
+  mcp-socket:
+    environment:
+      ANTITHESIS_SDK_LOCAL_OUTPUT: /tmp/sdk.jsonl
+    ports: ["18102:8000"]
+  driver:
+    environment:
+      ANTITHESIS_SDK_LOCAL_OUTPUT: /tmp/sdk.jsonl
+      DRIVER_EVENTUALLY_AFTER_S: ${DRIVER_EVENTUALLY_AFTER_S:-90}

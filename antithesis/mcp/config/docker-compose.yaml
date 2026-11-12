@@ -1,0 +1,45 @@
+# Antithesis topology for the fast-mcp-scala HTTP workload: the same server on the two JVM HTTP
+# backends, and the driver.
+#
+# snouty copies this whole directory into the config image, so it holds this file only. Build the
+# jars first (`scripts/build.sh`), then `<engine> compose -f <this file> build`.
+name: fast-mcp-scala-mcp
+
+x-sut: &sut
+  platform: linux/amd64
+  init: true
+  build:
+    context: ../sut
+  image: fast-mcp-scala-sut:latest
+  # No restart policy: Antithesis restarts a node it stopped or killed itself.
+  stop_grace_period: 15s
+
+services:
+  # ZIO HTTP (netty), the default JVM backend.
+  mcp-netty:
+    <<: *sut
+    container_name: mcp-netty
+    hostname: mcp-netty
+    environment:
+      SUT_PORT: "8000"
+      SUT_BACKEND: netty
+
+  # The java.net.ServerSocket backend (JvmSocketHttpBackend).
+  mcp-socket:
+    <<: *sut
+    container_name: mcp-socket
+    hostname: mcp-socket
+    environment:
+      SUT_PORT: "8000"
+      SUT_BACKEND: socket
+
+  # The fault exclusion `^driver$` matches this container name.
+  driver:
+    container_name: driver
+    hostname: driver
+    platform: linux/amd64
+    build:
+      context: ../driver
+    image: fast-mcp-scala-driver:latest
+    environment:
+      MCP_NODES: netty=http://mcp-netty:8000,socket=http://mcp-socket:8000

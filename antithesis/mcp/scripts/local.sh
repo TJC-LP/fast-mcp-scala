@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Runs the workload on this machine, with no faults, until the driver's eventually ends it; then
+# lists every assertion that would fail in a run.
+#
+#   antithesis/mcp/scripts/local.sh [seconds of workload before the eventually]
+#
+# CONTAINER_ENGINE picks the engine (default podman). Evidence lands in a fresh directory under
+# antithesis/mcp/out/ (git-ignored).
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+engine="${CONTAINER_ENGINE:-podman}"
+export DRIVER_EVENTUALLY_AFTER_S="${1:-90}"
+compose=("${engine}" compose -f "${here}/config/docker-compose.yaml" -f "${here}/local/docker-compose.local.yaml")
+out="${here}/out/$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "${out}"
+
+"${compose[@]}" down -v >/dev/null 2>&1 || true
+"${here}/scripts/build.sh" "${here}/local/docker-compose.local.yaml"
+"${compose[@]}" up -d
+"${compose[@]}" exec -T driver /opt/antithesis/test/v1/main/first_start_workload
+
+# The driver exits 0 when its eventually ends the timeline.
+deadline=$(( $(date +%s) + DRIVER_EVENTUALLY_AFTER_S + 600 ))
+while [[ "$("${engine}" inspect -f '{{.State.Running}}' driver 2>/dev/null)" == "true" ]]; do
+  if (( $(date +%s) > deadline )); then
+    echo "local.sh: the driver is still running past its deadline" >&2
+    break
+  fi
+  sleep 5
+done
+code="$("${engine}" inspect -f '{{.State.ExitCode}}' driver)"
+
+"${compose[@]}" cp driver:/tmp/sdk.jsonl "${out}/sdk.jsonl" || true
+for svc in mcp-netty mcp-socket; do
+  "${compose[@]}" cp "${svc}:/tmp/sdk.jsonl" "${out}/sdk-${svc}.jsonl" || true
+done
+for svc in driver mcp-netty mcp-socket; do
+  "${compose[@]}" logs --no-color "${svc}" > "${out}/${svc}.log" 2>&1 || true
+done
+# Down, not stop: `snouty validate` refuses a project with containers left over.
+"${compose[@]}" down -v >/dev/null 2>&1
+
+echo "local.sh: driver exit code ${code}; evidence in ${out}"
+echo "local.sh: assertions that would fail in a run (see known-failing.tsv for the expected ones):"
+jq -rs '[.[].antithesis_assert // empty] | group_by(.message)[]
+  | select(if .[0].assert_type == "sometimes" then any(.hit and .condition) | not
+           else any(.hit and (.condition | not)) or (.[0].must_hit and (any(.hit) | not)) end)
+  | "\(.[0].display_type)\t\(.[0].message)"' "${out}"/sdk*.jsonl | tee "${out}/unmet.tsv"
+[[ "${code}" == "0" ]]

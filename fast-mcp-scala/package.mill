@@ -242,6 +242,35 @@ object `package` extends Module {
     }
   }
 
+  /** The server the Antithesis workload tests (`antithesis/mcp`): the JVM library plus a small
+    * application with tools the driver can judge, and the Antithesis Java SDK for assertions inside
+    * it. Not published; the SDK is on no other classpath. `stage` lays the jars out the way the
+    * image wants them: `bin/` holds this project's own jars (instrumented by Antithesis), `lib/`
+    * the third-party ones.
+    */
+  object antithesisSut extends ScalaModule {
+    override def scalaVersion: T[String] = scala3Version
+    override def moduleDeps = Seq(jvm)
+    override def sources = Task.Sources(
+      BuildCtx.workspaceRoot / "antithesis" / "mcp" / "sut" / "src"
+    )
+    override def mvnDeps = Seq(mvn"com.antithesis:sdk:${Versions.antithesisSdk}")
+    override def mainClass = Some("com.tjclp.fastmcp.antithesis.AntithesisSut")
+
+    def stage: T[PathRef] = Task {
+      val bin = Task.dest / "bin"
+      val lib = Task.dest / "lib"
+      os.makeDir.all(bin)
+      os.makeDir.all(lib)
+      os.copy(jvm.jar().path, bin / "fast-mcp-scala.jar")
+      os.copy(jar().path, bin / "antithesis-sut.jar")
+      resolvedRunMvnDeps().map(_.path).filter(_.ext == "jar").foreach { dep =>
+        os.copy.over(dep, lib / dep.last)
+      }
+      PathRef(Task.dest)
+    }
+  }
+
   /** GraalVM native-image smoke binaries (NOT published — verify with `resolve __.publishArtifacts`).
     *
     * These exist so CI proves that a downstream `NativeImageModule` build against fast-mcp-scala
