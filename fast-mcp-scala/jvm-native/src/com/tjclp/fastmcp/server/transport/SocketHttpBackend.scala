@@ -22,14 +22,23 @@ import com.tjclp.fastmcp.server.transport.http.{
   * the transport-level differences are the ones listed on [[SocketHttpServer]] (caps, idle timeout,
   * connection gate, plaintext only).
   *
+  * The constructor is internal on purpose. A backend is obtained from the platform object —
+  * `JvmSocketHttpBackend` or `JvmSocketHttpBackend.withSettings(...)` on the JVM,
+  * `NativeHttpBackend` or `NativeHttpBackend.withSettings(...)` on Scala Native — so that on Scala
+  * Native every route to a socket backend goes through an `@experimental` definition and has the
+  * fiber-roots registration off. A public constructor let stable code build one directly, without
+  * the experimental opt-in and with the registration on, which is what made the heap grow by
+  * gigabytes per minute there.
+  *
   * @param entropy
   *   the platform backend whose `randomId()` mints session ids
   * @param maxConnections
   *   concurrent connection cap (one parked thread per idle connection); further connections wait in
   *   the kernel backlog
   * @param trackFiberRoots
-  *   whether request fibers are registered in ZIO's `Fiber.roots` (fiber dumps). `false` on Scala
-  *   Native, where that registration's `WeakReference` per fiber is not reclaimed fast enough
+  *   whether request fibers are registered in ZIO's `Fiber.roots` (fiber dumps). Off on Scala
+  *   Native — also by default, see `SocketHttpBackend.TrackFiberRootsByDefault` — where that
+  *   registration's `WeakReference` per fiber is not reclaimed fast enough
   * @param idleTimeout
   *   a connection with no request activity is closed after this long
   * @param requestReadTimeout
@@ -39,10 +48,10 @@ import com.tjclp.fastmcp.server.transport.http.{
   *   a write blocked this long — the peer stopped reading a reply or an event stream — closes the
   *   connection, so a stalled client cannot hold one of the `maxConnections` slots indefinitely
   */
-class SocketHttpBackend(
+class SocketHttpBackend private[fastmcp] (
     entropy: TransportBackend,
     maxConnections: Int = SocketHttpServer.DefaultMaxConnections,
-    trackFiberRoots: Boolean = true,
+    trackFiberRoots: Boolean = SocketHttpBackend.TrackFiberRootsByDefault,
     idleTimeout: Duration = 60.seconds,
     requestReadTimeout: Duration = 60.seconds,
     writeStallTimeout: Duration = 30.seconds
@@ -88,3 +97,14 @@ class SocketHttpBackend(
       )
       started <- SocketHttpServer.start(settings.host, settings.port, config)(app)
     yield started
+
+object SocketHttpBackend:
+
+  /** Whether this binary is a Scala Native one (its javalib reports itself in `java.vm.name`). */
+  private[fastmcp] val OnScalaNative: Boolean =
+    Option(java.lang.System.getProperty("java.vm.name")).exists(_.contains("Scala Native"))
+
+  /** The default for `trackFiberRoots`: on everywhere except Scala Native, so that no way of
+    * building a backend there — including the tests in this package — leaves the registration on.
+    */
+  private[fastmcp] val TrackFiberRootsByDefault: Boolean = !OnScalaNative

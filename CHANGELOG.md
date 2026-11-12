@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Content-Length` and chunked request bodies, `Expect: 100-continue`, HTTP/1.0 clients, chunked
     SSE, a once-a-second liveness probe on quiet streams; 8 KiB head cap (431),
     `maxRequestBodyBytes` on the wire (413), 256 concurrent connections by default
-    (`new SocketHttpBackend(backend, maxConnections = n)`); plaintext only. Because the connection
+    (`JvmSocketHttpBackend.withSettings(maxConnections = n)` / `NativeHttpBackend.withSettings(...)`; the backend class has no public constructor); plaintext only. Because the connection
     cap is a hard ceiling, three timeouts stop a client holding a slot without progress: idle
     (60 s), whole-request read (60 s, 408) and blocked write (30 s, enforced by a once-a-second
     sweep since blocking sockets have no write timeout).

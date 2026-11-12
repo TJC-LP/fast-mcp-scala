@@ -6,7 +6,11 @@ import org.scalatest.funsuite.AnyFunSuite
 import zio.*
 
 import com.tjclp.fastmcp.{given, *}
-import com.tjclp.fastmcp.server.transport.{HttpTransportBackend, NativeHttpBackend}
+import com.tjclp.fastmcp.server.transport.{
+  HttpTransportBackend,
+  NativeHttpBackend,
+  SocketHttpBackend
+}
 
 /** The Scala Native HTTP surface: with the root import, `McpServerApp[Http]` now compiles and
   * resolves the `java.net.ServerSocket` backend (before #81 it failed at the declaration site by
@@ -33,6 +37,14 @@ class NativeHttpSurfaceTest extends AnyFunSuite:
 
   test("the root import resolves the socket backend as the HttpTransportBackend") {
     assert(summon[HttpTransportBackend] eq NativeHttpBackend)
+  }
+
+  test("the socket backend never registers fiber roots on Scala Native, however it is built") {
+    assert(SocketHttpBackend.OnScalaNative)
+    assert(!SocketHttpBackend.TrackFiberRootsByDefault)
+    // The configured form is experimental too (this class is @experimental) and shares the type.
+    val configured: SocketHttpBackend = NativeHttpBackend.withSettings(maxConnections = 8)
+    assert(configured ne NativeHttpBackend)
   }
 
   test("McpServerApp[Http] compiles and builds its core on Scala Native") {

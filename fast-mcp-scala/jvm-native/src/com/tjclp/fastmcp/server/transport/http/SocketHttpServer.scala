@@ -447,8 +447,13 @@ private[fastmcp] object SocketHttpServer:
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private final class Connection[R](socket: Socket, owner: Listener[R]) extends Runnable:
 
-    private val input =
-      new ConnectionInput(socket.getInputStream, owner.config.requestReadTimeoutMs)
+    private val input = new ConnectionInput(
+      socket.getInputStream,
+      owner.config.requestReadTimeoutMs,
+      // The most a well-formed request can be: what its bytes may earn in extra time is capped
+      // at this, so filler that counts toward neither cap cannot extend the deadline forever.
+      MaxHeadBytes.toLong + owner.maxBodyBytes
+    )
     private val out: OutputStream = socket.getOutputStream
     private val idleTimeoutMs = owner.config.idleTimeoutMs
 
@@ -802,7 +807,11 @@ private[fastmcp] object SocketHttpServer:
     * lengths, and chunked bodies. Every method blocks; only the connection's own thread calls in.
     */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private final class ConnectionInput(in: InputStream, requestReadTimeoutMs: Int):
+  private final class ConnectionInput(
+      in: InputStream,
+      requestReadTimeoutMs: Int,
+      maxCreditedBytes: Long
+  ):
     // Deliberately below 8 KiB: Scala Native allocates objects of 8 KiB and up through its
     // large-object allocator, whose slow path can hand a racing thread a null pointer (0.5.12:
     // `LargeAllocator_Alloc` retries once after growing the heap by exactly one object). A burst of
@@ -815,6 +824,10 @@ private[fastmcp] object SocketHttpServer:
 
     /** `nanoTime` by which the request being read must be complete; armed by its first byte. */
     private var deadline = Long.MaxValue
+
+    /** The latest the deadline can be pushed by bytes received; fixed when the deadline is armed.
+      */
+    private var deadlineCeiling = Long.MaxValue
 
     /** The deadline was armed by ignorable blank lines only; the request line re-arms it. */
     private var armedByBlankLines = false
@@ -840,17 +853,20 @@ private[fastmcp] object SocketHttpServer:
     /** The request has been read (or abandoned): the next one gets a fresh deadline. */
     def endRequest(): Unit =
       deadline = Long.MaxValue
+      deadlineCeiling = Long.MaxValue
       armedByBlankLines = false
 
-    private def freshDeadline(): Long =
-      java.lang.System.nanoTime() + requestReadTimeoutMs.toLong * 1_000_000L
+    /** Start the clock now, and fix how far received bytes may push it. */
+    private def startClock(): Unit =
+      deadline = java.lang.System.nanoTime() + requestReadTimeoutMs.toLong * 1_000_000L
+      deadlineCeiling = deadline + maxCreditedBytes * RequestNanosPerByte
 
     /** The first byte of the request line starts the request's clock — afresh if only blank lines
       * had started one.
       */
     private def armDeadline(): Unit =
       if deadline == Long.MaxValue || armedByBlankLines then
-        deadline = freshDeadline()
+        startClock()
         armedByBlankLines = false
 
     /** Skipped blank lines start a clock too, so a peer that sends nothing but an occasional CRLF —
@@ -859,7 +875,7 @@ private[fastmcp] object SocketHttpServer:
       */
     private def armDeadlineForBlankLines(): Unit =
       if deadline == Long.MaxValue then
-        deadline = freshDeadline()
+        startClock()
         armedByBlankLines = true
 
     /** One blocking read appended to the buffer; the count read, or -1 at EOF. Compacts or grows
@@ -882,8 +898,12 @@ private[fastmcp] object SocketHttpServer:
       if n > 0 then
         end += n
         // Bytes that arrive buy the request time: the deadline bounds how slowly a request may
-        // come in, not how long a large one may take.
-        if deadline != Long.MaxValue then deadline += n * RequestNanosPerByte
+        // come in, not how long a large one may take. The credit is capped at what a full head
+        // plus a full body could earn — bytes that count toward neither cap (leading blank
+        // lines, chunk trailers) would otherwise let a peer streaming filler hold the connection
+        // for as long as it liked.
+        if deadline != Long.MaxValue then
+          deadline = math.min(deadline + n * RequestNanosPerByte, deadlineCeiling)
       n
 
     /** Read a request head up to (excluding) its blank-line terminator (`CRLF CRLF`, or bare `LF

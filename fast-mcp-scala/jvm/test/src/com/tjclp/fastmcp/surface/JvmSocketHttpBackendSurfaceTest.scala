@@ -23,6 +23,12 @@ class JvmSocketHttpBackendSurfaceTest extends AnyFunSuite:
     assert(Pitfall.InObject.resolved eq JvmHttpBackend)
   }
 
+  test("withSettings builds a configured backend in stable code; fiber roots stay on by default") {
+    val configured: HttpTransportBackend = JvmSocketHttpBackend.withSettings(maxConnections = 8)
+    assert(configured ne JvmSocketHttpBackend)
+    assert(com.tjclp.fastmcp.server.transport.SocketHttpBackend.TrackFiberRootsByDefault)
+  }
+
   test("the socket backend is not exported from the package root") {
     assert(summon[HttpTransportBackend] ne JvmSocketHttpBackend)
   }

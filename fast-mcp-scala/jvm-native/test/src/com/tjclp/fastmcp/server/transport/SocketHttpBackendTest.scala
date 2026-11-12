@@ -725,6 +725,29 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     }
   }
 
+  test("filler bytes cannot extend the request-read deadline past its ceiling") {
+    // Blank lines at ~80 KiB/s earn time like any other bytes, but the credit is capped at what a
+    // full head plus a full body could earn: here 0.4 s + (8 KiB + 4 KiB) / 4 KiB/s = 3.4 s.
+    val backend =
+      new SocketHttpBackend(summon[TransportBackend], requestReadTimeout = 400.millis)
+    withServer(baseSettings.copy(maxRequestBodyBytes = 4 * 1024), backend) { port =>
+      val client = new RawClient(port, readTimeoutMs = 40_000)
+      val filler = "\r\n" * (4 * 1024)
+      val started = java.lang.System.nanoTime()
+      var open = true
+      while open && (java.lang.System.nanoTime() - started) < 25_000_000_000L do
+        try
+          client.send(filler)
+          Thread.sleep(100)
+        catch case _: java.io.IOException => open = false // closed by the server: the point
+      val elapsedMs = (java.lang.System.nanoTime() - started) / 1_000_000L
+      open shouldBe false
+      // 3.4 s of deadline, then up to 5 s of lingering close while the filler keeps coming.
+      elapsedMs should be < 18_000L
+      client.close()
+    }
+  }
+
   test("a slow but steady upload outlives the request-read allowance") {
     // 48 KiB in 8 KiB pieces 150 ms apart: about 0.9 s in all, more than twice the 400 ms
     // allowance, but at ~53 KiB/s — far above the 4 KiB/s floor — every piece extends the deadline.

@@ -3,6 +3,10 @@ package server.transport
 
 import scala.annotation.experimental
 
+import zio.*
+
+import com.tjclp.fastmcp.server.transport.http.SocketHttpServer
+
 /** Scala Native [[HttpTransportBackend]] — streamable HTTP over `java.net.ServerSocket`
   * ([[SocketHttpBackend]]) with session ids from `/dev/urandom` via [[NativeTransportBackend]].
   * zio-http has no Scala Native artifacts (upstream support is 4.x-milestoned, zio-http#2526), so
@@ -32,4 +36,24 @@ import scala.annotation.experimental
 @experimental(
   "HTTP on Scala Native is experimental: Scala Native 0.5.12 can abort the process under concurrent payloads of 8 KiB and up (see docs/transports.md, \"The socket backend\"). Compile with -experimental to use it."
 )
-object NativeHttpBackend extends SocketHttpBackend(NativeTransportBackend, trackFiberRoots = false)
+object NativeHttpBackend extends SocketHttpBackend(NativeTransportBackend, trackFiberRoots = false):
+
+  /** A Scala Native HTTP backend with non-default limits — experimental like this object, and with
+    * the fiber-roots registration off like it. This is the only way to configure the socket backend
+    * on Scala Native: its constructor is internal precisely so that no stable code can build one
+    * without the `-experimental` opt-in or with the registration on.
+    */
+  def withSettings(
+      maxConnections: Int = SocketHttpServer.DefaultMaxConnections,
+      idleTimeout: Duration = 60.seconds,
+      requestReadTimeout: Duration = 60.seconds,
+      writeStallTimeout: Duration = 30.seconds
+  ): SocketHttpBackend =
+    new SocketHttpBackend(
+      NativeTransportBackend,
+      maxConnections = maxConnections,
+      trackFiberRoots = false,
+      idleTimeout = idleTimeout,
+      requestReadTimeout = requestReadTimeout,
+      writeStallTimeout = writeStallTimeout
+    )
