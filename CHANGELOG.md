@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
+### Security
+
+- **The legacy session store is bounded in what each session holds, not only in how many there
+  are.** Applies to the legacy (pre-2026-07-28) streamable-HTTP adapter on the JVM, Bun and Scala
+  Native; 2026-07-28 requests never store a session.
+  - **A session is stored only for an `initialize` that succeeded.** A header-less `initialize` is
+    answered on a session that is not in the store. One that fails — params that do not decode, or
+    a `clientInfo` / `capabilities` over the budget below — returns the JSON-RPC error with no
+    `Mcp-Session-Id`, takes no slot and evicts nobody. The cap check, the choice of the session
+    that makes room and the insert remain one atomic step.
+  - **What a stored session keeps from `initialize` has a fixed budget**: `clientInfo` and
+    `capabilities` together may hold at most 256 JSON values and 16 KiB of text (member names,
+    strings, number digits). Over either bound the `initialize` is refused with `-32602`. The
+    budget does not grow with `maxRequestBodyBytes` or `limits.maxFrameChars`. Stdio and the
+    sessionless adapter (`stateless = true`) store nothing and are not budgeted.
+  - **One client can no longer fill the store and have every other client refused.** At the
+    `maxSessions` cap, sessions are counted per client (the peer address the backend reports). A
+    client that already holds as many sessions as any other replaces one of its own; otherwise a
+    client holding at least two more than the newcomer's gives one up — its longest-idle session,
+    a live and recently used GET stream included. Only when holdings are level do the previous
+    rules decide (longest-idle session without a live GET, else the longest-idle GET holder idle
+    past `sessionIdleTimeout`, else 503).
+  - `docs/transports.md` ("The legacy session store") states the resulting worst case:
+    `maxSessions` × the per-session budget, about 100 MiB of heap at the defaults, plus the
+    subscription and task terms when those features are enabled.
+
+  What changes for a deployment:
+  - A client whose `initialize` carries more than the budget (in practice: an icon inlined as a
+    large `data:` URI, or a very large `experimental` / `extensions` object) is refused with
+    `-32602` on the legacy streamable adapter, where it used to be accepted.
+  - A failed header-less `initialize` no longer returns an `Mcp-Session-Id`; a successful one
+    returns it as before. Its reply is sent when the handler has finished rather than being opened
+    after the one-second legacy grace.
+  - Behind a reverse proxy all clients share the proxy's address, so a full store now admits a
+    newcomer by closing the longest-idle session — live GET or not — where it answered 503 when
+    every session held a live, recently used GET stream. Limit sessions per principal in the proxy.
+  - A backend that reports no peer address keeps the previous cap rules unchanged.
+
 ### Added
 
 - **Allow-listed HTTP request headers on `McpContext`** (#130): `McpServerSettings.contextHeaders:

@@ -195,14 +195,26 @@ case class McpServerSettings(
     // decoding. 1 MiB default (the JVM was implicitly ~100 KiB; Bun was 128 MiB); raise it for
     // tools that legitimately take large payloads. Must be > 0.
     maxRequestBodyBytes: Int = 1024 * 1024,
-    // Legacy streamable adapter only: cap on concurrently stored sessions. When a header-less
-    // `initialize` arrives at the cap, the longest-idle session without a live GET stream is evicted
-    // — terminated (`Session.terminate`: in-flight requests interrupted, its tasks released, queue
-    // shut down) — to make room. When every stored session holds a live GET, the longest-idle of
-    // them is evicted instead (its GET stream is closed) provided it has been idle longer than
-    // `sessionIdleTimeout`; the request is refused with 503 only when no session qualifies under
-    // either rule. Bounds memory without letting a flood — or a set of vanished GET peers — lock new
-    // clients out. `None` disables. Modern 2026-07-28 requests never store sessions.
+    // Legacy streamable adapter only: cap on concurrently stored sessions. A session is stored only
+    // for a header-less `initialize` that succeeded; a failed one takes no slot and evicts nobody.
+    // When a successful one finds the store full, one stored session is evicted — terminated
+    // (`Session.terminate`: in-flight requests interrupted, its tasks released, queue shut down) —
+    // to make room. Sessions are counted per client (the peer address the backend reports): a
+    // client that already holds as many sessions as any other replaces one of its own, and
+    // otherwise a client holding at least two more than the newcomer's gives one up — its
+    // longest-idle session, a live GET stream included — so one client cannot fill the store and
+    // have the others refused. When holdings are level, the longest-idle session without a live GET
+    // stream is evicted; when every stored session holds a live GET, the longest-idle of them,
+    // provided it has been idle longer than `sessionIdleTimeout` (its GET stream is closed); the
+    // request is refused with 503 only when no session qualifies.
+    //
+    // This bounds the NUMBER of sessions. What one session keeps from its client is bounded
+    // separately — 256 JSON values and 16 KiB of text of `clientInfo` + `capabilities`
+    // (`-32602` beyond that), plus `limits.maxSubscriptionsPerSession` URIs when
+    // `resourcesSubscribe` is on — so the store's worst case is `maxSessions` times that
+    // per-session budget (about 100 MiB of heap at the defaults; docs/transports.md, "The legacy
+    // session store"). `None` disables the cap and with it that bound. Modern 2026-07-28 requests
+    // never store sessions.
     maxSessions: Option[Int] = Some(1000),
     // Optional io.modelcontextprotocol/tasks extension. Off by default.
     tasks: TaskSettings = TaskSettings(),

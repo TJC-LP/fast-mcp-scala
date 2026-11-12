@@ -64,11 +64,22 @@ Hardening knobs worth knowing when you deploy over HTTP
   `limits: LimitSettings` bounds every inbound frame on every transport — frame size 4 MiB, JSON
   depth 64, object width 1024 (`-32700` before dispatch), resource URI length 8192 and
   subscriptions per session 1024 (`-32602`). The limits cannot be disabled, only moved.
-- `maxSessions` (`Some(1000)`) caps the legacy session store; at the cap the longest-idle session
-  without a live GET is evicted — or, when every stored session holds a GET stream, the
-  longest-idle one that has been idle longer than `sessionIdleTimeout` — so an unauthenticated
-  flood of `initialize` requests can evict idle legitimate sessions. Front non-loopback deployments
-  with `allowedHosts`/`allowedOrigins` and an authenticating proxy.
+- `maxSessions` (`Some(1000)`) caps the legacy session store, and what each stored session keeps
+  from its client is bounded too: a session is stored only for an `initialize` that succeeded, and
+  its `clientInfo` + `capabilities` may hold at most 256 JSON values and 16 KiB of text (`-32602`
+  otherwise; a fixed budget, independent of `maxRequestBodyBytes`). The store's worst case is
+  therefore `maxSessions` × the per-session budget — about 100 MiB of heap at the defaults; the
+  table in [docs/transports.md](docs/transports.md#the-legacy-session-store) adds the terms that
+  `resourcesSubscribe` and tasks contribute when enabled.
+- At the cap, sessions are counted per client (the peer address the backend reports): a client
+  holding more sessions than the newcomer's gives one up, even one with a live, recently used GET
+  stream, so a single address cannot fill the store and have every other client refused. Among
+  clients holding their share the longest-idle session without a live GET is evicted — or, when
+  every one holds a GET stream, the longest-idle one idle longer than `sessionIdleTimeout` — so an
+  unauthenticated flood of `initialize` requests from many addresses can still evict idle
+  legitimate sessions. Behind a reverse proxy all clients share the proxy's address and the store
+  is plain least-recently-used. Front non-loopback deployments with `allowedHosts`/`allowedOrigins`
+  and an authenticating proxy that limits sessions per principal.
 - Transport failures and defects answer a fixed JSON-RPC error (400/413/500) with no exception
   text, stack trace, or path, on the JVM and on Bun regardless of `NODE_ENV`.
 - Modern Tasks IDs are bearer handles: possession grants access to that task

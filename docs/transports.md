@@ -136,8 +136,9 @@ Schema-driven `Mcp-Param-*` values may be supplied through `x-mcp-header`.
 The admission gates run in a fixed order on every backend, on headers first and before any session
 state is touched: unknown path 404 → `allowedHosts`/`allowedOrigins` 403 → `Content-Type` 415 →
 declared `Content-Length` over `maxRequestBodyBytes` 413 → `Accept` 406 → body read (platform byte
-cap, then a first-party post-read check → 413) → frame limits (`-32700`, HTTP 400) → dispatch. The
-legacy session cap (`maxSessions`) is applied when an `initialize` is dispatched. Any transport or
+cap, then a first-party post-read check → 413) → frame limits (`-32700`, HTTP 400) → dispatch. A
+legacy `initialize` meets the session cap (`maxSessions`) only after it has succeeded — see
+[The legacy session store](#the-legacy-session-store). Any transport or
 handler-construction defect on the way is answered by a fixed JSON-RPC 500 boundary
 (`Internal server error`) on both backends, with no exception text, stack trace, or path. A defect
 raised *inside* a tool handler (`ZIO.die`, an uncaught exception) is not on this path: the router
@@ -201,11 +202,8 @@ server→client traffic), and DELETE terminates the session (`disallowDelete = t
 instead). Legacy POSTs are subject to the same
 `Content-Type: application/json` gate (415) as modern ones. Only `initialize` mints a session; idle
 sessions are evicted after `sessionIdleTimeout`, and the store is capped by `maxSessions`
-(`Some(1000)` by default): at the cap the longest-idle session without a live GET stream is evicted
-to make room; when every stored session holds a live GET, the longest-idle of them is evicted
-instead — its GET stream is closed — provided it has been idle longer than `sessionIdleTimeout`
-(clients reopen their GET stream as usual); the `initialize` is refused with 503 only when no
-session qualifies under either rule. The periodic idle sweeper never evicts a session with a live
+(`Some(1000)` by default) — [The legacy session store](#the-legacy-session-store) below has the
+rules. The periodic idle sweeper never evicts a session with a live
 GET stream while capacity is free. DELETE, idle eviction, and cap eviction all go through
 `Session.terminate`: a request still in flight on that session is interrupted (no reply) and its
 running legacy tasks are released. Activity is stamped when a request arrives, not while it runs,
@@ -220,13 +218,86 @@ A GET peer that disappears without closing its connection (NAT expiry, a suspend
 the stream "live" from the server's point of view: the OS only notices such a peer once the server
 writes to the socket — that is, with `keepAliveInterval` set — and only after its own TCP
 retransmission budget (zio-http 3.11.4 exposes no accepted-socket option, so the server does not
-set TCP keepalive itself). The cap-time rule above bounds the session store regardless.
+set TCP keepalive itself). The cap-time rules below bound the session store regardless.
 
 `stateless` controls **only** this adapter. Modern requests are stateless regardless of the flag.
 Leaving it `false` (the default) lets older clients fall back to the initialize/session/GET/DELETE
 flow; setting it `true` disables that legacy session store. On the stateless legacy adapter all
 clients share one session identity, which is why legacy task requests there are refused
 (see [tasks.md](./tasks.md)).
+
+#### The legacy session store
+
+**A session is stored only for an `initialize` that succeeded.** A header-less `initialize` is
+answered on a session that is not in the store yet. If it fails — params that do not decode, or a
+`clientInfo` / `capabilities` over the budget below — the reply carries the JSON-RPC error and no
+`Mcp-Session-Id`, and the store is exactly as it was: no slot is taken and nobody is evicted. Only a
+successful `initialize` meets the cap, and the cap check, the choice of the session that makes room
+and the insert are one atomic step, so the store never exceeds `maxSessions` however many
+initializes race. Because the session id travels in the response head, the reply to a header-less
+`initialize` is sent once the handler has finished (it is not opened early after the one-second
+grace other legacy replies have).
+
+**What a session keeps from its client is bounded.** A stored session holds the `clientInfo` and
+`capabilities` of its `initialize` for as long as it lives, and both have open members (`icons`,
+`experimental`, `extensions`, the per-capability objects). Together they may hold at most
+**256 JSON values** (every object, array, string, number, boolean and null in the two members) and
+**16 KiB of text** (16,384 UTF-16 code units of member names, string values and number digits). An
+`initialize` over either bound is refused with `-32602` on the legacy streamable adapter. The
+budget is a fixed constant: it does not grow with `maxRequestBodyBytes` or `limits.maxFrameChars`.
+An ordinary `initialize` uses a few dozen values and a few hundred characters; the one thing that
+can meet the bound in practice is an icon sent inline as a large `data:` URI. Stdio and the
+sessionless adapter (`stateless = true`) store no session and are not subject to the budget.
+
+**Sizing the heap.** The store's worst case is `maxSessions` multiplied by what one session may
+hold:
+
+| Per session | Bound | Worst case |
+| --- | --- | --- |
+| `clientInfo` + `capabilities` | 256 JSON values, 16 KiB of text | under 100 KiB of heap on the JVM: the text at up to two bytes a character (32 KiB) plus object overhead per value |
+| `resources/subscribe` URIs (only with `resourcesSubscribe = true`) | `limits.maxSubscriptionsPerSession` × `limits.maxUriChars` (1024 × 8192) | 8 Mi characters, about 16 MiB |
+| Legacy tasks (only with `tasks.enabled`) | `TaskSettings` caps | see [tasks.md](tasks.md) |
+
+At the defaults (`maxSessions = Some(1000)`, subscriptions and tasks off) the client-supplied data
+the store can pin is therefore at most about **100 MiB**, and a few hundred kilobytes in normal
+use. The value and character bounds are exact; the heap figure is a rounded-up estimate of object
+overhead on top of them (sessions built to sit exactly at the budget measured between 5 and 50 KiB
+each on a 64-bit JVM, depending on the shape). `maxSessions = None` removes the bound on the number
+of sessions and with it any worst case. If you enable `resourcesSubscribe` for untrusted clients, lower
+`maxSubscriptionsPerSession`, `maxUriChars` or `maxSessions` so their product fits your heap.
+
+**Who makes room at the cap.** When a successful `initialize` finds the store full, one stored
+session is terminated to make room. Sessions are counted per client — the TCP peer address the
+backend reports for the `initialize` that opened them:
+
+1. If the newcomer's own client already holds as many sessions as any other client, it replaces
+   one of its own. A client at the top can only grow at its own expense.
+2. Otherwise, if some client holds at least two sessions more than the newcomer's client, the
+   client holding the most gives one up.
+3. Otherwise holdings are level and the idle rules decide over the whole store: the longest-idle
+   session without a live GET stream; failing that, the longest-idle session with a live GET that
+   has been idle longer than `sessionIdleTimeout`. If neither exists, the store is full of clients
+   that each hold their share, and the `initialize` is refused with 503.
+
+In cases 1 and 2 the session given up is that client's longest-idle one without a live GET stream,
+or else its longest-idle one outright: its GET stream is closed and the client reconnects (a later
+request on the evicted session answers 404, and a client then initializes again). Holding a GET
+stream open and touching a session keeps it out of the idle rules, but not out of cases 1 and 2,
+so one client cannot fill the store with exempt sessions and have every other client refused.
+
+Two limits of this accounting are worth knowing:
+
+- **Behind a reverse proxy every session carries the proxy's address**, so all clients count as
+  one: case 1 always applies and the store behaves as a least-recently-used cache (a full store
+  admits a newcomer by closing the longest-idle session, live GET or not, instead of answering
+  503). Per-client fairness then belongs in the proxy — authenticate there and limit sessions or
+  connections per principal.
+- **It counts addresses, not people.** Clients behind one NAT share a count, and a party that
+  controls many addresses holds one share per address. The cap is not a rate limiter: put one in
+  front of a server exposed to untrusted networks.
+
+A backend that reports no peer address (a custom backend, or an in-memory test) treats every
+session as its own client, so only case 3 applies.
 
 ### `McpServerSettings` reference
 
@@ -242,7 +313,7 @@ clients share one session identity, which is why legacy task requests there are 
 | `allowedHosts` | `None` | DNS-rebinding/CSRF guard: the `Host` value must parse as one `host[:port]` authority and its hostname (or the verbatim `host:port`) must be listed — the port itself is not compared; a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, a `Host` or `Origin` sent more than once (seen as its `", "`-joined value), and malformed `Host`/`Origin` ports are refused (403), with or without the other header. IPv6 entries are written bracketed, exactly as they appear in the `Host` header: `Set("[::1]")`, not `Set("::1")`. |
 | `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted in addition to the request's own authority **when `allowedHosts` is also set**; with `allowedOrigins` alone only the listed origins pass (the request's own authority is then refused 403 too). Malformed entries fail `runHttp()` at startup. |
 | `maxRequestBodyBytes` | `1 MiB` | Request body cap on every backend; larger bodies get 413 before decoding (empty 413 on the wire from netty/Bun, JSON-RPC `-32000` on first-party paths); must not exceed `limits.maxFrameChars`. This is the cap a large `sampling/createMessage` or elicitation *result* meets over HTTP (a legacy client then waits out its 60 s request timeout): raise it together with `limits.maxFrameChars` — see [Input limits](#input-limits). |
-| `maxSessions` | `Some(1000)` | Cap on stored legacy sessions; at the cap the longest-idle session without a live GET is evicted, else the longest-idle GET-holding session that has been idle longer than `sessionIdleTimeout` (its GET stream is closed). Unauthenticated initializes can evict idle sessions — front non-loopback deployments with auth. 503 only if neither rule finds a victim; `None` disables. |
+| `maxSessions` | `Some(1000)` | Cap on stored legacy sessions. A session is stored only for an `initialize` that succeeded, and keeps at most 256 JSON values / 16 KiB of text from it, so the store's worst case is `maxSessions` × the per-session budget (about 100 MiB at the defaults). At the cap a client holding more sessions than the newcomer's gives one up; among clients holding their share, the longest-idle session without a live GET is evicted, else the longest-idle GET-holding session idle longer than `sessionIdleTimeout`; 503 only if nobody qualifies. Unauthenticated initializes can evict idle sessions — front non-loopback deployments with auth. `None` disables. See [The legacy session store](#the-legacy-session-store). |
 | `loggingEnabled` | `false` | Advertise logging; modern clients use per-request `_meta` levels, legacy clients `logging/setLevel`. |
 | `resourcesSubscribe` | `false` | Enable legacy `resources/subscribe`; modern clients use `subscriptions/listen`. |
 | `exposeTemplatesEndpoint` | `false` | List registered resource templates through `resources/templates/list`. `resources/list` never lists templates; with the default the templates endpoint answers an empty page (clients derive templates from `{}` URIs) and `resources/read` on a matching URI works either way. Applies on every transport. |
