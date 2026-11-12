@@ -36,7 +36,9 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     settings: McpServerSettings,
     randomId: UIO[String],
     // `None` iff `settings.stateless`: the legacy adapter then has no durable sessions at all.
-    store: Option[Ref.Synchronized[Map[String, Session]]]
+    store: Option[Ref.Synchronized[Map[String, Session]]],
+    // How long a streamed reply may sit unstarted before its resources are released.
+    unstartedReplyGrace: Duration
 ):
   import StreamableHttpHandler.*
 
@@ -164,10 +166,15 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
             req.header(SessionIdHeader) match
               case None => ZIO.succeed(HttpReply.Empty(405))
               case Some(id) =>
-                sessions.modify(all => (all.get(id), all - id)).flatMap {
-                  case Some(session) => session.terminate.as(HttpReply.Empty(200))
-                  case None => ZIO.succeed(transportError(404, s"Session not found: $id"))
-                }
+                // One uninterruptible step: a session that left the store can no longer be reached
+                // by id, so a DELETE whose client goes away mid-way must still terminate it.
+                sessions
+                  .modify(all => (all.get(id), all - id))
+                  .flatMap {
+                    case Some(session) => session.terminate.as(HttpReply.Empty(200))
+                    case None => ZIO.succeed(transportError(404, s"Session not found: $id"))
+                  }
+                  .uninterruptible
 
   /** The idle-session sweeper for this handler's store — a no-op on the stateless adapter. Fork it
     * scoped to the listener's lifetime (never per request).
@@ -176,6 +183,12 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     store match
       case None => ZIO.unit
       case Some(sessions) => StreamableHttpHandler.evictIdleSessions(sessions, settings)
+
+  /** The stored legacy session with this id, if any (test seam). */
+  private[fastmcp] def session(id: String): UIO[Option[Session]] =
+    store match
+      case None => ZIO.none
+      case Some(sessions) => sessions.get.map(_.get(id))
 
   // ---------------------------------------------------------------------------
   // Legacy stateless: request/response, no session state, no SSE.
@@ -229,6 +242,11 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     * without closing its connection ever frees its slot on a backend that cannot see the
     * disconnect, since nothing is written on a quiet stream unless `keepAliveInterval` is set. Only
     * when no session qualifies under either rule is the request refused with 503.
+    *
+    * The store update and the termination it calls for are one uninterruptible step. Once the
+    * victim has left the store nothing can reach it by id — not DELETE, not the idle sweeper — so
+    * an `initialize` whose client goes away right then must still terminate it, or its in-flight
+    * requests and tasks would never be released.
     */
   private def mintSession(
       sessions: Ref.Synchronized[Map[String, Session]],
@@ -237,34 +255,39 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     for
       id <- randomId
       session <- Session.makeProtocolSession(id)
-      outcome <- sessions.modifyZIO { m =>
-        if !HttpRequestGuards.capReached(m.size, settings) then
-          ZIO.succeed((Right(None), m + (id -> session)))
-        else
-          ZIO
-            .foreach(m.values.toList) { s =>
-              (s.lastSeen zip s.hasActiveGet).map((seen, live) => (s.sessionId, seen, live))
-            }
-            .map { snapshot =>
-              val now = java.lang.System.currentTimeMillis()
-              val idleMs = settings.sessionIdleTimeout.map(_.toMillis)
-              HttpRequestGuards.pickEvictable(snapshot, now, idleMs) match
-                case Some(victim) => (Right(Some(m(victim))), (m - victim) + (id -> session))
-                case None => (Left(()), m)
-            }
-      }
-      resp <- outcome match
-        case Right(None) => respondStreamable(session, message, isNew = true)
-        case Right(Some(victim)) =>
-          victim.hasActiveGet.flatMap { heldGet =>
-            val detail =
-              if heldGet then " (idle past sessionIdleTimeout; its GET stream is closed)" else ""
-            ZIO.logWarning(
-              s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted idle session ${victim.sessionId}$detail"
-            )
-          } *> victim.terminate *> respondStreamable(session, message, isNew = true)
-        case Left(()) =>
-          session.terminate.as(transportError(503, HttpRequestGuards.SessionLimitMessage))
+      admitted <- sessions
+        .modifyZIO { m =>
+          if !HttpRequestGuards.capReached(m.size, settings) then
+            ZIO.succeed((Right(None), m + (id -> session)))
+          else
+            ZIO
+              .foreach(m.values.toList) { s =>
+                (s.lastSeen zip s.hasActiveGet).map((seen, live) => (s.sessionId, seen, live))
+              }
+              .map { snapshot =>
+                val now = java.lang.System.currentTimeMillis()
+                val idleMs = settings.sessionIdleTimeout.map(_.toMillis)
+                HttpRequestGuards.pickEvictable(snapshot, now, idleMs) match
+                  case Some(victim) => (Right(Some(m(victim))), (m - victim) + (id -> session))
+                  case None => (Left(()), m)
+              }
+        }
+        .flatMap {
+          case Right(None) => ZIO.succeed(true)
+          case Right(Some(victim)) =>
+            victim.hasActiveGet.flatMap { heldGet =>
+              val detail =
+                if heldGet then " (idle past sessionIdleTimeout; its GET stream is closed)" else ""
+              ZIO.logWarning(
+                s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted idle session ${victim.sessionId}$detail"
+              )
+            } *> victim.terminate.as(true)
+          case Left(()) => session.terminate.as(false)
+        }
+        .uninterruptible
+      resp <-
+        if admitted then respondStreamable(session, message, isNew = true)
+        else ZIO.succeed(transportError(503, HttpRequestGuards.SessionLimitMessage))
     yield resp
 
   /** Dispatch one streamable POST frame. A *request* gets an SSE response that streams the
@@ -291,6 +314,16 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
 
   /** Run a request's dispatch with its server→client messages routed to a per-request queue, and
     * answer from that queue: see [[firstFrameReply]].
+    *
+    * The dispatch runs on a fiber of its own that nothing else supervises, so from the fork onwards
+    * something must always be answerable for stopping it and shutting its queue down. That is this
+    * region until the reply is handed back, and the reply itself afterwards:
+    *   - the region is uninterruptible except while it waits for the first frame, and any way out
+    *     of it other than a reply — the client going away during that wait, a defect — stops the
+    *     dispatch (`onError`);
+    *   - a reply that is complete ([[HttpReply.SseComplete]], a status-mapped JSON error) has
+    *     already released both when it is returned;
+    *   - a streamed reply ([[HttpReply.Sse]]) carries them on, see [[ownedSse]].
     */
   private def streamRequest(
       session: Session,
@@ -303,24 +336,29 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     val dispatch = modern match
       case Some(context) => router.dispatchModern(session, message, context)
       case None => router.dispatch(session, message)
-    for
-      reqQueue <- Queue.unbounded[JsonRpcMessage]
-      // `ensuring` (uninterruptible) offers the close sentinel after the dispatch delivers its
-      // reply — or after it is cancelled / dies replyless — so a streamed reply always ends.
-      dispatchFiber <- session
-        .runWithSink(reqQueue)(dispatch)
-        .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
-        .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
-        .forkDaemon
-      response <- firstFrameReply(
-        reqQueue,
-        message.id,
-        session,
-        isNew,
-        dispatchFiber,
-        modern.isDefined
-      )
-    yield response
+    ZIO.uninterruptibleMask { restore =>
+      for
+        reqQueue <- Queue.unbounded[JsonRpcMessage]
+        // `ensuring` (uninterruptible) offers the close sentinel after the dispatch delivers its
+        // reply — or after it is cancelled / dies replyless — so a streamed reply always ends.
+        dispatchFiber <- session
+          .runWithSink(reqQueue)(dispatch)
+          .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
+          .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
+          // A fork inherits the region it is made in; the dispatch must stay interruptible.
+          .interruptible
+          .forkDaemon
+        response <- firstFrameReply(
+          restore,
+          reqQueue,
+          message.id,
+          session,
+          isNew,
+          dispatchFiber,
+          modern.isDefined
+        ).onError(_ => dispatchFiber.interrupt *> reqQueue.shutdown)
+      yield response
+    }
 
   /** Choose the HTTP shape of a request's reply from its FIRST frame:
     *   - 2026-07-28 only: an error that maps to an HTTP status is plain JSON with that status;
@@ -343,8 +381,12 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     *
     * The bound is a timer fiber that OFFERS [[MessageLoop.KeepAliveSentinel]] into the request's
     * queue; the wait itself stays one plain `take`, so the timer can never discard a frame.
+    *
+    * Runs inside [[streamRequest]]'s uninterruptible region: only the wait for the first frame is
+    * interruptible (`restore`), and the caller stops the dispatch if this ends without a reply.
     */
   private def firstFrameReply(
+      restore: ZIO.InterruptibilityRestorer,
       reqQueue: Queue[JsonRpcMessage],
       reqId: RequestId,
       session: Session,
@@ -353,33 +395,36 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       modern: Boolean
   ): UIO[HttpReply] =
     val headers = (if modern then ModernSseHeaders else Nil) ++ sessionHeader(session, isNew)
-    val abandon = dispatchFiber.interrupt *> reqQueue.shutdown
-    def sse(first: Option[JsonRpcMessage], openedByHeartbeat: Boolean): HttpReply =
+    // The dispatch has nothing more to say once its reply is the first frame. It is past its last
+    // step, so it is signalled rather than awaited: waiting for its exit would park this request
+    // (uninterruptibly, here) behind a fiber that has nothing left to do.
+    val done = signalInterrupt(dispatchFiber) *> reqQueue.shutdown
+    def sse(first: Option[JsonRpcMessage], openedByHeartbeat: Boolean): UIO[HttpReply] =
       requestSse(reqQueue, reqId, headers, dispatchFiber, first, openedByHeartbeat)
     def shaped(first: JsonRpcMessage): UIO[HttpReply] =
       (if modern then ModernHttpValidation.errorStatus(first) else None) match
-        case Some(status) => abandon.as(HttpReply.Json(status, first.toJson))
-        // The dispatch has nothing more to say. Release the request's resources here (the
-        // stream's finalizer does it for a streamed reply). The dispatch fiber is past its last
-        // step, so it is signalled rather than awaited: waiting for its exit would park this
-        // request behind a fiber that has nothing left to do.
+        // Both complete replies release the request's resources here; a streamed reply carries
+        // them on (`ownedSse`).
+        case Some(status) => done.as(HttpReply.Json(status, first.toJson))
         case None if isFinalReply(first, reqId) =>
-          (signalInterrupt(dispatchFiber) *> reqQueue.shutdown)
-            .as(HttpReply.SseComplete(headers, SseFrame.message(first)))
-        case None => ZIO.succeed(sse(Some(first), openedByHeartbeat = false))
+          done.as(HttpReply.SseComplete(headers, SseFrame.message(first)))
+        case None => sse(Some(first), openedByHeartbeat = false)
     val bound: Option[Duration] =
       if modern then keepAlive
       else Some(keepAlive.fold(LegacyHeadGrace)(_.min(LegacyHeadGrace)))
     bound match
-      case None => reqQueue.take.onInterrupt(abandon).flatMap(shaped)
+      case None => restore(reqQueue.take).flatMap(shaped)
       case Some(interval) =>
         for
           // An offer into a queue that was shut down meanwhile interrupts this fiber by itself.
-          timer <- (ZIO.sleep(interval) *> reqQueue.offer(MessageLoop.KeepAliveSentinel)).forkDaemon
-          first <- reqQueue.take.onInterrupt(signalInterrupt(timer) *> abandon)
+          // `interruptible` for the same reason as the dispatch fiber: the timer must be stoppable.
+          timer <- (ZIO.sleep(interval) *> reqQueue.offer(
+            MessageLoop.KeepAliveSentinel
+          )).interruptible.forkDaemon
+          first <- restore(reqQueue.take).onInterrupt(signalInterrupt(timer))
           reply <-
             if MessageLoop.isKeepAliveSentinel(first) then
-              ZIO.succeed(sse(None, openedByHeartbeat = keepAlive.isDefined))
+              sse(None, openedByHeartbeat = keepAlive.isDefined)
             else signalInterrupt(timer) *> shaped(first)
         yield reply
 
@@ -390,7 +435,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       dispatchFiber: Fiber.Runtime[?, ?],
       first: Option[JsonRpcMessage],
       openedByHeartbeat: Boolean
-  ): HttpReply =
+  ): UIO[HttpReply] =
     // `ZStream.succeed`, not `ZStream.fromIterable(List(first))`: the iterable form sizes its chunk
     // builder for a full default chunk (4096 slots, a 32 KiB array) to carry this one message — on
     // every streamed request. Besides the waste, an allocation that size takes Scala Native's
@@ -405,11 +450,11 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         .filter(msg => !MessageLoop.isCloseSentinel(msg) && !MessageLoop.isKeepAliveSentinel(msg))
         .map(SseFrame.message)
     val frames: ZStream[Any, Nothing, SseFrame] =
-      (if openedByHeartbeat then ZStream.succeed(SseFrame.Ping) ++ messages else messages)
-        // Runs on the normal end of stream too, not just client abort. Task fibers are safe: they
-        // are forked under Session.runWithoutSink (TaskRouting), so they never hold this queue.
-        .ensuring(dispatchFiber.interrupt *> reqQueue.shutdown)
-    HttpReply.Sse(headers, frames, keepAlive)
+      if openedByHeartbeat then ZStream.succeed(SseFrame.Ping) ++ messages else messages
+    // The release runs on the normal end of stream too, not just client abort. Task fibers are
+    // safe: they are forked under Session.runWithoutSink (TaskRouting), so they never hold this
+    // queue.
+    ownedSse(headers, frames, dispatchFiber.interrupt *> reqQueue.shutdown)
 
   /** Dispatch a 2026-07-28 request without consulting or mutating the legacy session store. */
   private def modernPost(req: HttpRequest, message: JsonRpcMessage): URIO[R, HttpReply] =
@@ -470,19 +515,72 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         sessions.get.map(_.get(id)).flatMap {
           case None => ZIO.succeed(transportError(404, s"Session not found: $id"))
           case Some(session) =>
-            session.touch *> session.tryAcquireGet.map {
+            // Taking the slot and handing it to the reply are one uninterruptible step, so the
+            // slot is never held by nobody; from then on the reply gives it back ([[ownedSse]])
+            // whether or not its stream is ever run.
+            (session.touch *> session.tryAcquireGet.flatMap {
               case false =>
                 // A live GET already drains this session's outbound queue; a second stream would
                 // round-robin-steal its messages (TS SDK answers 409 too).
-                transportError(409, "A GET SSE stream is already open for this session")
+                ZIO.succeed(
+                  transportError(409, "A GET SSE stream is already open for this session")
+                )
               case true =>
-                val frames = ZStream
-                  .fromQueue(session.outbound)
-                  .map(SseFrame.message)
-                  .ensuring(session.releaseGet)
-                HttpReply.Sse(Nil, frames, keepAlive)
-            }
+                val frames = ZStream.fromQueue(session.outbound).map(SseFrame.message)
+                ownedSse(Nil, frames, session.releaseGet)
+            }).uninterruptible
         }
+
+  /** A streamed reply that answers for `release` from the moment it exists, whether or not a
+    * backend ever runs its stream. `release` runs exactly once, by whichever of these is first:
+    *   - the stream ending or being interrupted, once it was started — the ordinary case;
+    *   - [[HttpReply.Sse.abandon]], called by a backend that will not run the stream;
+    *   - a watchdog, when the stream has not been started `unstartedReplyGrace` after the reply was
+    *     built. A backend pulls a reply's stream as soon as it has written the response head, so a
+    *     reply only gets that old when nothing is going to run it: the client left as the head went
+    *     out, or the request was interrupted between this handler and the backend.
+    * A stream started only after its reply was released that way ends at once, empty: it must not
+    * read a queue (or hold a GET slot) that is no longer its own.
+    *
+    * The watchdog is one sleeping fiber per STREAMED reply, stopped at the stream's first pull; a
+    * reply that is complete at its first frame never builds a stream and never gets here. Call it
+    * from an uninterruptible region, so that the reply cannot be lost between being built and being
+    * returned.
+    */
+  private def ownedSse(
+      headers: List[(String, String)],
+      frames: ZStream[Any, Nothing, SseFrame],
+      release: UIO[Unit]
+  ): UIO[HttpReply.Sse] =
+    ZIO.suspendSucceed {
+      val state = new java.util.concurrent.atomic.AtomicInteger(ReplyPending)
+      val giveUp: UIO[Unit] =
+        ZIO.suspendSucceed {
+          if state.compareAndSet(ReplyPending, ReplyReleased) then release else ZIO.unit
+        }
+      // Interruptible only while it sleeps: once it has claimed the reply it finishes the release.
+      (ZIO.sleep(unstartedReplyGrace).interruptible *> giveUp).uninterruptible.forkDaemon.map {
+        watchdog =>
+          val stopWatchdog = signalInterrupt(watchdog)
+          // Decided at the first pull: this run owns the reply, or the reply is gone.
+          val started = ZChannel.unwrap {
+            ZIO.suspendSucceed {
+              if state.compareAndSet(ReplyPending, ReplyStarted) then
+                stopWatchdog.as(frames.channel)
+              else ZIO.succeed(NoFrames)
+            }
+          }
+          // Registered when the stream is run, before the claim above; it also covers a stream
+          // that is halted before its first pull.
+          val finish = ZIO.suspendSucceed {
+            if state.getAndSet(ReplyReleased) != ReplyReleased then release *> stopWatchdog
+            else ZIO.unit
+          }
+          HttpReply.Sse(headers, ZStream.fromChannel(started).ensuring(finish), keepAlive)(
+            giveUp *> stopWatchdog
+          )
+      }
+    }
 
   // --- Header validation. The decisions live in the shared [[HttpRequestGuards]] (one truth for
   // every backend); this class only renders the verdicts. `mcp-protocol-version` stays lenient
@@ -534,6 +632,22 @@ private[fastmcp] object StreamableHttpHandler:
     */
   private[fastmcp] val LegacyHeadGrace: Duration = 1.second
 
+  /** How long a streamed reply ([[HttpReply.Sse]]) may sit unstarted after the handler returned it
+    * before its resources are released as if the client had gone. A backend pulls a reply's stream
+    * as soon as it has written the response head, so only a reply that is never going to be
+    * streamed gets this old.
+    */
+  private[fastmcp] val UnstartedReplyGrace: Duration = 5.seconds
+
+  // Who answers for a streamed reply's resources, see `ownedSse`: nobody has run its stream yet;
+  // a run of its stream does; or they have been released.
+  private val ReplyPending = 0
+  private val ReplyStarted = 1
+  private val ReplyReleased = 2
+
+  /** The stream of a reply that was released before anything ran it. */
+  private val NoFrames: ZChannel[Any, Any, Any, Any, Nothing, Chunk[SseFrame], Any] = ZChannel.unit
+
   /** Tell a fiber to stop without waiting for it to exit and without forking a fiber to wait. */
   private[fastmcp] def signalInterrupt(fiber: Fiber.Runtime[?, ?]): UIO[Unit] =
     ZIO.fiberIdWith(id => fiber.interruptAsFork(id))
@@ -553,14 +667,19 @@ private[fastmcp] object StreamableHttpHandler:
   def make[R](
       router: McpRouter[R],
       settings: McpServerSettings,
-      randomId: UIO[String]
+      randomId: UIO[String],
+      unstartedReplyGrace: Duration = UnstartedReplyGrace
   ): UIO[StreamableHttpHandler[R]] =
     if settings.stateless then
-      ZIO.succeed(new StreamableHttpHandler[R](router, settings, randomId, None))
+      ZIO.succeed(
+        new StreamableHttpHandler[R](router, settings, randomId, None, unstartedReplyGrace)
+      )
     else
       Ref.Synchronized
         .make(Map.empty[String, Session])
-        .map(store => new StreamableHttpHandler[R](router, settings, randomId, Some(store)))
+        .map(store =>
+          new StreamableHttpHandler[R](router, settings, randomId, Some(store), unstartedReplyGrace)
+        )
 
   /** Periodically drop streamable sessions idle past `settings.sessionIdleTimeout` — abandoned
     * clients would otherwise grow the store forever. Sessions with a live GET stream are exempt
@@ -585,8 +704,10 @@ private[fastmcp] object StreamableHttpHandler:
             expired <- ZIO.filter(all.values.toList) { s =>
               (s.lastSeen zip s.hasActiveGet).map((seen, live) => !live && now - seen > timeoutMs)
             }
-            _ <- store.update(_ -- expired.map(_.sessionId))
-            _ <- ZIO.foreachDiscard(expired)(_.terminate)
+            // One uninterruptible step, as for cap eviction: a session that left the store is
+            // terminated even when the sweeper is stopped right then (server shutdown).
+            _ <- (store.update(_ -- expired.map(_.sessionId)) *>
+              ZIO.foreachDiscard(expired)(_.terminate)).uninterruptible
           yield ()
         val interval = Duration.fromMillis(math.max(timeoutMs / 4, 1000L))
         sweep.repeat(Schedule.spaced(interval)).unit

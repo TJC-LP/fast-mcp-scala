@@ -150,13 +150,19 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val _ = bodyOf(resp)
     resp.rawHeader(SessionIdHeader).getOrElse(fail("no session id"))
 
-  /** Open — and never drain — the session's standalone GET SSE channel, so the session holds a live
-    * GET for the rest of the test (in-memory, the SSE body is never run, so `releaseGet` never
-    * fires: exactly the shape of a peer that vanished without closing its stream).
+  /** Open the session's standalone GET SSE channel and keep reading it for the rest of the test,
+    * so the session holds a live GET: the shape of a peer that vanished without closing its
+    * stream. The body has to be read — a GET reply whose stream nobody starts gives its slot back
+    * after the handler's unstarted-reply bound. The reading fiber ends when the session is
+    * terminated (its queue shuts down).
     */
   private def openGet(routes: Routes[Any, Response], sid: String): Unit =
-    run(routes, Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid)))
-      .status shouldBe Status.Ok
+    val resp = run(
+      routes,
+      Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid))
+    )
+    resp.status shouldBe Status.Ok
+    val _ = runUnsafe(resp.body.asStream.runDrain.ignore.forkDaemon)
 
   test("streamable: initialize mints a session id, reused for tools/call, then deleted") {
     val routes = buildRoutes(stateless = false)
@@ -254,7 +260,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val routes = buildRoutes(stateless = false)
     val sid = initSid(routes)
     val get = Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid))
-    run(routes, get).status shouldBe Status.Ok
+    openGet(routes, sid) // a stream that is being read
     run(routes, get).status shouldBe Status.Conflict
   }
 
@@ -637,10 +643,8 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val routes = buildRoutes(stateless = false, maxSessions = Some(2))
     val sid1 = initSid(routes)
     val sid2 = initSid(routes)
-    for sid <- List(sid1, sid2) do
-      // Open (and never drain) the GET SSE channel: the session now has a live GET.
-      run(routes, Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid)))
-        .status shouldBe Status.Ok
+    // Open the GET SSE channel and keep it open: the session now has a live GET.
+    for sid <- List(sid1, sid2) do openGet(routes, sid)
 
     val refused = post(routes, initFrame, None)
     refused.status.code shouldBe 503

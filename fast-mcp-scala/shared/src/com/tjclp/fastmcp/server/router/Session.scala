@@ -70,9 +70,12 @@ final class Session private (
 
   /** At most one standalone GET SSE stream may drain `outbound` — two would round-robin-steal
     * messages. `tryAcquireGet` is an atomic test-and-set (false = a stream is already live, answer
-    * 409); the stream's finalizer must call [[releaseGet]]. Sessions with a live GET are exempt
-    * from the periodic idle sweep (push-only consumers may never POST); at the `maxSessions` cap a
-    * GET holder idle past `sessionIdleTimeout` may still be evicted, which closes its stream.
+    * 409). Whoever acquires the slot must hand it, in the same uninterruptible step, to something
+    * that calls [[releaseGet]] whether or not a stream is ever run — a stream's finalizer alone is
+    * not enough, since it does nothing for a stream nobody starts (the streamable-HTTP handler's
+    * `ownedSse`). Sessions with a live GET are exempt from the periodic idle sweep (push-only
+    * consumers may never POST); at the `maxSessions` cap a GET holder idle past
+    * `sessionIdleTimeout` may still be evicted, which closes its stream.
     */
   def tryAcquireGet: UIO[Boolean] = ZIO.succeed(activeGetRef.compareAndSet(false, true))
   def releaseGet: UIO[Unit] = ZIO.succeed(activeGetRef.set(false))
