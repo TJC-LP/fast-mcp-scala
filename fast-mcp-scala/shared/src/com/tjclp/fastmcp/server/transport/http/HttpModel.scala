@@ -89,7 +89,15 @@ private[fastmcp] object HttpReply:
 
   /** A `200 text/event-stream` response whose body is the frame stream; the response ends when the
     * stream does (or the client disconnects, which runs the stream's finalizers).
+    *
+    * `frames` carries data frames only. `keepAlive`, when set, asks the backend to emit an
+    * [[SseFrame.Ping]] whenever the stream has been quiet that long — a transport concern each
+    * backend implements with what it has (a merged schedule on zio-http, the connection thread's
+    * wait loop on the socket server), so no backend has to race a timer against the data stream.
     */
-  final case class Sse(headers: List[(String, String)], frames: ZStream[Any, Nothing, SseFrame])
-      extends HttpReply:
+  final case class Sse(
+      headers: List[(String, String)],
+      frames: ZStream[Any, Nothing, SseFrame],
+      keepAlive: Option[Duration] = None
+  ) extends HttpReply:
     def status: Int = 200

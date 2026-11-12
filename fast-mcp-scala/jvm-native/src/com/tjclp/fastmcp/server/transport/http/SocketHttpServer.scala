@@ -1,15 +1,18 @@
 package com.tjclp.fastmcp
 package server.transport.http
 
-import java.io.{BufferedOutputStream, InputStream, OutputStream}
-import java.net.{InetSocketAddress, ServerSocket, Socket, SocketTimeoutException}
+import java.io.{IOException, InputStream, OutputStream}
+import java.net.{InetSocketAddress, ServerSocket, Socket, SocketException, SocketTimeoutException}
 import java.nio.charset.StandardCharsets
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+import java.util.concurrent.{ConcurrentHashMap, Semaphore, TimeUnit}
+import java.util.concurrent.atomic.AtomicBoolean
+
+import scala.util.control.NonFatal
 
 import zio.*
-import zio.stm.TSemaphore
 import zio.stream.*
 
+import com.tjclp.fastmcp.server.transport.HttpRequestGuards
 import com.tjclp.fastmcp.server.transport.http.Http1.{Framing, Head, Rejection, Version}
 
 /** A minimal HTTP/1.1 + SSE server over `java.net.ServerSocket`, sufficient for MCP streamable HTTP
@@ -18,36 +21,51 @@ import com.tjclp.fastmcp.server.transport.http.Http1.{Framing, Head, Rejection, 
   * (`jvm-native/`), so it uses only the javalib subset both platforms link — blocking sockets, no
   * NIO channels, no `Locale`, no TLS.
   *
-  * Threading model: the accept loop and every socket read/write run on ZIO's blocking executor via
-  * `attemptBlockingCancelable`, whose cancel action closes the socket — the only way to unblock a
-  * read on Scala Native, where `Thread.interrupt` has no effect on sockets. One fiber per
-  * connection; an idle keep-alive connection or an idle SSE stream costs one parked blocking
-  * thread, so the accept loop is gated by [[MaxConnections]] (ZIO's blocking pool is unbounded).
+  * Threading model: one thread per connection, taken from ZIO's blocking executor, that owns the
+  * socket for the connection's whole life and does plain blocking I/O on it — no fiber, no executor
+  * hop and no ZIO effect per read or write. The thread enters ZIO only to run the MCP handler, via
+  * `Runtime.unsafe.runOrFork`: the effect runs on the connection thread itself until it first
+  * suspends, so a request the handler can answer synchronously costs no thread handoff at all, and
+  * one that suspends (a dispatch running on ZIO's scheduler) costs exactly the wake-up that
+  * delivers its result. An idle keep-alive connection or an idle SSE stream parks its one thread,
+  * so the accept loop is gated by `maxConnections` (ZIO's blocking pool is unbounded; with a
+  * Loom-based blocking executor installed the threads are virtual).
   *
   * Wire behaviour: HTTP/1.1 keep-alive with requests handled sequentially per connection;
   * `Content-Length` and `Transfer-Encoding: chunked` request bodies; `Expect: 100-continue` (curl
   * sends it for bodies over 1 KiB); HTTP/1.0 and `Connection: close` clients get close-delimited
-  * responses; SSE replies stream as chunked transfer-encoding with one chunk per event, flushed
-  * immediately, and a terminating chunk so the connection stays reusable. While an SSE reply
-  * streams, a watcher fiber blocks on the socket's read side so a client that silently disconnects
-  * is noticed even when the stream is quiet — that is what lets the MCP layer's finalizers
-  * (`session.releaseGet`, request-queue shutdown) run for abandoned GET streams.
+  * responses; SSE replies stream as chunked transfer-encoding with a terminating chunk so the
+  * connection stays reusable. Response bytes are coalesced: a reply whose frames are already
+  * available goes out as ONE write (head, frames and terminator together), and whatever is pending
+  * is flushed before the thread blocks waiting for the next frame.
+  *
+  * Admission is two-phase. [[App.admit]] judges the request on its head alone — path, method and
+  * the shared header gates — and a refusal is answered without the body ever being read (an unread
+  * declared body then closes the connection). Only an admitted `POST` has its body read, bounded by
+  * `maxBodyBytes` on the wire for declared and chunked bodies alike, after the interim `100
+  * Continue` when the client asked for one.
+  *
+  * Peer liveness: while the thread waits on the handler or on a quiet SSE stream nobody reads the
+  * socket, so a peer that vanishes would go unnoticed until the next write — never, for a quiet GET
+  * channel. Every [[WatchPollMs]] of quiet the thread therefore probes the read side with a 1 ms
+  * read: EOF or an error means the peer is gone, and the pending fiber is interrupted so the MCP
+  * layer's finalizers (`session.releaseGet`, the request queue shutdown) run. Bytes the probe reads
+  * stay buffered as a pipelined request. A request that completes within one poll interval never
+  * pays for a probe. SSE keepalive pings are written from the same wait loop.
   */
 private[fastmcp] object SocketHttpServer:
 
   /** Request line + headers cap; larger heads are rejected with `431`. */
   val MaxHeadBytes: Int = 8 * 1024
 
-  /** Concurrent connection cap — one blocking thread each while idle. Extra connections wait in the
-    * kernel backlog.
+  /** Default concurrent connection cap — one parked thread each while idle. Extra connections wait
+    * in the kernel backlog.
     */
-  val MaxConnections: Int = 256
+  val DefaultMaxConnections: Int = 256
 
   val Backlog: Int = 128
 
-  /** A connection with no request activity (or an SSE stream whose client stays silent after it
-    * ended) is closed after this long.
-    */
+  /** A connection with no request activity is closed after this long. */
   val IdleReadTimeoutMs: Int = 60_000
 
   /** `accept` wakes this often so a shutdown request is honoured promptly even on platforms where
@@ -55,11 +73,17 @@ private[fastmcp] object SocketHttpServer:
     */
   val AcceptPollMs: Int = 500
 
-  /** While an SSE reply streams, the read-side watcher polls this often, so it notices the stream
-    * ending and hands any bytes it buffered (a pipelined request) back to the request loop without
-    * waiting out the idle timeout.
-    */
+  /** How long the connection thread waits on a quiet handler / SSE stream between peer probes. */
   val WatchPollMs: Int = 1_000
+
+  /** Read timeout of one liveness probe. */
+  private val ProbeTimeoutMs = 1
+
+  /** Pending response bytes above this are flushed even when more frames are ready. */
+  private val FlushThresholdBytes = 32 * 1024
+
+  /** On shutdown, how long to wait for connection threads to notice their closed sockets. */
+  private val DrainTimeoutMs = 5_000L
 
   final case class Bound(host: String, port: Int)
 
@@ -67,6 +91,15 @@ private[fastmcp] object SocketHttpServer:
     * only ends by failing, which must surface rather than leave a listener that never answers).
     */
   final case class Started(bound: Bound, loop: Fiber.Runtime[Throwable, Nothing])
+
+  /** What the server needs from the MCP layer (`StreamableHttpHandler` implements both halves). */
+  trait App[-R]:
+
+    /** Headers-only verdict, taken before the body is read. `Some` is the final reply. Pure. */
+    def admit(req: HttpRequest): Option[HttpReply]
+
+    /** The full handler, behind its own error boundary; `req.body` is already in memory. */
+    def handle(req: HttpRequest): URIO[R, HttpReply]
 
   /** Set `FASTMCP_HTTP_DEBUG=1` to print per-connection failures (a peer resetting mid-request, a
     * rejected head, an idle timeout) to stderr; they are otherwise swallowed, as a misbehaving
@@ -76,313 +109,490 @@ private[fastmcp] object SocketHttpServer:
   private val debug: Boolean =
     Option(java.lang.System.getenv("FASTMCP_HTTP_DEBUG")).exists(v => v.nonEmpty && v != "0")
 
-  private def debugLog(message: => String): UIO[Unit] =
-    if debug then ZIO.succeed(java.lang.System.err.println(s"[fastmcp-http] $message"))
-    else ZIO.unit
+  private def debugLog(message: => String): Unit =
+    if debug then java.lang.System.err.println(s"[fastmcp-http] $message")
 
   /** Bind `host:port` (port `0` picks a free port — see the returned [[Bound]]) and fork the accept
-    * loop into the enclosing `Scope`. Closing the scope interrupts the loop, which closes the
-    * listener, and — through fiber supervision — every connection fiber, each of which closes its
-    * socket.
+    * loop into the enclosing `Scope`. Closing the scope closes the listener and every open
+    * connection, which ends their threads and interrupts whatever handler fiber each was waiting
+    * on.
     */
-  def start[R](host: String, port: Int, maxBodyBytes: Int)(
-      handle: HttpRequest => URIO[R, HttpReply]
-  ): ZIO[R & Scope, Throwable, Started] =
+  def start[R](
+      host: String,
+      port: Int,
+      maxBodyBytes: Int,
+      maxConnections: Int,
+      trackFiberRoots: Boolean
+  )(app: App[R]): ZIO[R & Scope, Throwable, Started] =
     for
-      server <- ZIO.acquireRelease(
+      ambient <- ZIO.runtime[R]
+      // Every request runs on this runtime. With `trackFiberRoots = false` its fibers — and the
+      // daemon fibers they fork, which inherit the flag — are not registered in ZIO's global
+      // `Fiber.roots` bag, which costs one `WeakReference` per fiber. See `SocketHttpBackend`.
+      runtime =
+        if trackFiberRoots then ambient
+        else
+          Runtime(
+            ambient.environment,
+            ambient.fiberRefs,
+            RuntimeFlags.disable(ambient.runtimeFlags)(RuntimeFlag.FiberRoots)
+          )
+      executor <- ZIO.blockingExecutor
+      listener <- ZIO.acquireRelease(
         ZIO.attemptBlocking {
-          val s = new ServerSocket()
-          s.setReuseAddress(true)
-          s.bind(new InetSocketAddress(host, port), Backlog)
-          s.setSoTimeout(AcceptPollMs)
-          s
+          val server = new ServerSocket()
+          server.setReuseAddress(true)
+          server.bind(new InetSocketAddress(host, port), Backlog)
+          server.setSoTimeout(AcceptPollMs)
+          new Listener[R](server, runtime, executor, app, maxBodyBytes, maxConnections)
         }
-      )(s => ZIO.attemptBlocking(s.close()).ignore)
-      gate <- TSemaphore.make(MaxConnections.toLong).commit
-      loop <- acceptLoop(server, gate, maxBodyBytes, handle)
-        .tapErrorCause(cause => debugLog(s"accept loop failed: ${cause.prettyPrint}"))
+      )(l => ZIO.attemptBlocking(l.shutdown()).ignore)
+      loop <- ZIO
+        .attemptBlockingCancelable[Any, Nothing](listener.acceptLoop())(
+          ZIO.attemptBlocking(listener.shutdown()).ignore
+        )
+        .tapErrorCause(cause => ZIO.succeed(debugLog(s"accept loop failed: ${cause.prettyPrint}")))
         .forkScoped
-    yield Started(Bound(host, server.getLocalPort), loop)
+    yield Started(Bound(host, listener.port), loop)
 
-  private def acceptLoop[R](
+  /** The listening socket, the connection gate and the set of live connections. */
+  private final class Listener[R](
       server: ServerSocket,
-      gate: TSemaphore,
-      maxBodyBytes: Int,
-      handle: HttpRequest => URIO[R, HttpReply]
-  ): ZIO[R, Throwable, Nothing] =
-    val acceptOne: IO[Throwable, Option[Socket]] =
-      ZIO
-        .attemptBlockingCancelable(server.accept())(ZIO.succeed(server.close()))
-        .asSome
-        .catchSome { case _: SocketTimeoutException => ZIO.none }
-    val step: ZIO[R, Throwable, Unit] =
-      gate.acquire.commit *> acceptOne.foldCauseZIO(
-        cause => gate.release.commit *> ZIO.refailCause(cause),
-        {
-          case None => gate.release.commit
-          case Some(socket) =>
-            // Plain `fork`: connections are children of the accept loop, so ending the loop
-            // (scope close) interrupts them all; per-connection `forkScoped` would pile up
-            // finalizers in the server scope for the life of the process.
-            serveConnection(socket, maxBodyBytes, handle).ensuring(gate.release.commit).fork.unit
-        }
-      )
-    step.forever
+      runtime: Runtime[R],
+      executor: Executor,
+      val app: App[R],
+      val maxBodyBytes: Int,
+      maxConnections: Int
+  ):
+    private val closed = new AtomicBoolean(false)
+    private val gate = new Semaphore(maxConnections)
+    private val live = new ConcurrentHashMap[Connection[R], java.lang.Boolean]()
 
-  private def serveConnection[R](
-      socket: Socket,
-      maxBodyBytes: Int,
-      handle: HttpRequest => URIO[R, HttpReply]
-  ): URIO[R, Unit] =
-    ZIO
-      .scoped {
-        ZIO
-          .acquireRelease(
-            ZIO.attempt {
-              socket.setTcpNoDelay(true)
-              socket.setSoTimeout(IdleReadTimeoutMs)
-              new Connection(socket, maxBodyBytes)
-            }
-          )(_.close)
-          .flatMap(_.run(handle))
-      }
-      // A misbehaving peer (malformed bytes, reset, idle timeout) affects only its own connection.
-      .tapErrorCause(cause => debugLog(s"connection ended: ${cause.prettyPrint}"))
-      .catchAllDefect(_ => ZIO.unit)
-      .ignore
+    def port: Int = server.getLocalPort
 
-  /** Outcome of watching a connection's read side while an SSE reply streams. */
-  private enum Watch:
-    case Dead, Data, Timeout
+    def isClosed: Boolean = closed.get
 
-  /** One accepted socket: the request loop, framing, and response writing. */
+    /** Accept until shut down. Runs on one blocking thread; never returns normally. */
+    @SuppressWarnings(Array("org.wartremover.warts.Var"))
+    def acceptLoop(): Nothing =
+      while !closed.get do
+        if gate.tryAcquire(AcceptPollMs.toLong, TimeUnit.MILLISECONDS) then
+          var handedOff = false
+          try
+            val socket = server.accept()
+            val connection = new Connection[R](socket, this)
+            live.put(connection, java.lang.Boolean.TRUE)
+            try
+              // Re-check after registering: a shutdown that ran in between has already swept
+              // `live` and would otherwise miss this socket.
+              if closed.get then throw new SocketException("listener closed")
+              Unsafe.unsafe(implicit u => executor.submitOrThrow(connection))
+              handedOff = true
+            finally
+              if !handedOff then
+                live.remove(connection)
+                connection.closeSocket()
+          catch case _: SocketTimeoutException => ()
+          finally if !handedOff then gate.release()
+      throw new SocketException("listener closed")
+
+    /** Called by a connection thread as it exits. */
+    def release(connection: Connection[R]): Unit =
+      live.remove(connection)
+      gate.release()
+
+    /** Close the listener and every live connection, then give their threads a moment to finish.
+      * Idempotent.
+      */
+    def shutdown(): Unit =
+      if closed.compareAndSet(false, true) then
+        try server.close()
+        catch case NonFatal(_) => ()
+        val connections = live.keySet().iterator()
+        while connections.hasNext do
+          val connection = connections.next()
+          connection.closeSocket()
+          connection.wake()
+        val deadline = java.lang.System.nanoTime() + DrainTimeoutMs * 1_000_000L
+        while !live.isEmpty && java.lang.System.nanoTime() < deadline do Thread.sleep(2)
+
+    def runSync[A](effect: URIO[R, A]): Exit[Nothing, A] =
+      Unsafe.unsafe(implicit u => runtime.unsafe.run(effect))
+
+    /** Run `effect` on the calling thread until it completes or first suspends. */
+    def runOrFork[A](effect: URIO[R, A]): Either[Fiber.Runtime[Nothing, A], Exit[Nothing, A]] =
+      Unsafe.unsafe(implicit u => runtime.unsafe.runOrFork(effect))
+
+  /** One-shot hand-off from a fiber observer to the connection thread. `poke` wakes the waiter
+    * without a value (shutdown).
+    */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private final class Connection(socket: Socket, maxBodyBytes: Int):
+  private final class Signal[A]:
+    private var value: Option[A] = None
+
+    def set(a: A): Unit = synchronized {
+      value = Some(a)
+      notifyAll()
+    }
+
+    def poke(): Unit = synchronized(notifyAll())
+
+    /** The value, waiting up to `millis` for it (a spurious or poked wake-up returns `None`). */
+    def await(millis: Long): Option[A] = synchronized {
+      if value.isEmpty then wait(math.max(1L, millis))
+      value
+    }
+
+  /** Growable response buffer, reused for every reply on a connection. */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private final class OutBuffer(initial: Int):
+    private var bytes = new Array[Byte](initial)
+    private var length = 0
+
+    def size: Int = length
+
+    private def ensure(extra: Int): Unit =
+      if length + extra > bytes.length then
+        bytes = java.util.Arrays.copyOf(bytes, math.max(bytes.length * 2, length + extra))
+
+    /** Append an ASCII / ISO-8859-1 string (status line, header, chunk size). */
+    def ascii(s: String): Unit =
+      val n = s.length
+      ensure(n)
+      var i = 0
+      while i < n do
+        bytes(length + i) = s.charAt(i).toByte
+        i += 1
+      length += n
+
+    def append(a: Array[Byte]): Unit =
+      ensure(a.length)
+      java.lang.System.arraycopy(a, 0, bytes, length, a.length)
+      length += a.length
+
+    /** Write everything pending in one call and reset; drops a buffer a large reply grew. */
+    def flushTo(out: OutputStream): Unit =
+      if length > 0 then
+        val n = length
+        length = 0
+        out.write(bytes, 0, n)
+        out.flush()
+        if bytes.length > 4 * FlushThresholdBytes then bytes = new Array[Byte](initial)
+
+  private val NoBody: IO[Throwable, String] = ZIO.succeed("")
+
+  /** `scope` + the stream's pull, opened in one synchronous step. */
+  private def openPull(
+      frames: ZStream[Any, Nothing, SseFrame]
+  ): UIO[(Scope.Closeable, ZIO[Any, Option[Nothing], Chunk[SseFrame]])] =
+    Scope.make.flatMap(scope => scope.extend[Any](frames.toPull).map(pull => (scope, pull)))
+
+  /** Run an SSE reply's finalizers without emitting it: the stream is started already halted. Its
+    * `ensuring` hooks are the only thing that interrupts the request's dispatch fiber, shuts its
+    * queue and releases the session's GET slot, so a reply that cannot be delivered must still be
+    * run this way — dropping it would leave every later GET on the session answering 409.
+    */
+  private def abandon(frames: ZStream[Any, Nothing, SseFrame]): UIO[Unit] =
+    Promise.make[Nothing, Unit].flatMap { halted =>
+      halted.succeed(()) *> frames.interruptWhen(halted).runDrain
+    }
+
+  /** One accepted socket: the request loop, framing, and response writing, all on one thread. */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private final class Connection[R](socket: Socket, owner: Listener[R]) extends Runnable:
+    private val input = new ConnectionInput(socket.getInputStream)
+    private val out: OutputStream = socket.getOutputStream
+    private val buf = new OutBuffer(4 * 1024)
 
     /** The TCP peer address — the default owner key for bearer-task buckets. */
     private val peer: Option[String] = Option(socket.getInetAddress).map(_.getHostAddress)
 
-    private val input = new ConnectionInput(socket.getInputStream)
-    private val out: OutputStream = new BufferedOutputStream(socket.getOutputStream, 16 * 1024)
+    /** The signal this thread is currently parked on, for [[wake]]. */
+    @volatile private var parkedOn: Option[Signal[?]] = None
 
-    def close: UIO[Unit] = ZIO.attemptBlocking(socket.close()).ignore
+    /** Whether the SSE reply in progress is chunked — read by the keepalive writer. */
+    private var pingChunked = true
 
-    /** Run blocking socket work; interrupting the fiber closes the socket, which unblocks it. */
-    private def blocking[A](thunk: => A): Task[A] =
-      ZIO.attemptBlockingCancelable(thunk)(close)
+    def closeSocket(): Unit =
+      try socket.close()
+      catch case NonFatal(_) => ()
 
-    def run[R](handle: HttpRequest => URIO[R, HttpReply]): ZIO[R, Throwable, Unit] =
-      handleOne(handle).flatMap(keepAlive => if keepAlive then run(handle) else ZIO.unit)
+    /** Wake the thread if it is waiting on a fiber (shutdown). */
+    def wake(): Unit = parkedOn.foreach(_.poke())
 
-    /** Serve one request; `true` when the connection can carry another. An idle-timeout while
-      * waiting for the next request surfaces as a `SocketTimeoutException` failure, which closes
-      * the connection.
+    override def run(): Unit =
+      try
+        socket.setTcpNoDelay(true)
+        socket.setSoTimeout(IdleReadTimeoutMs)
+        var keepAlive = true
+        while keepAlive do keepAlive = serveOne()
+      catch
+        // A misbehaving peer (reset, idle timeout, a write to a closed socket) affects only its own
+        // connection.
+        case NonFatal(e) => debugLog(s"connection ended: $e")
+      finally
+        closeSocket()
+        owner.release(this)
+
+    /** Serve one request; `true` when the connection can carry another. An idle timeout while
+      * waiting for the next request surfaces as a `SocketTimeoutException`, which closes the
+      * connection.
       */
-    private def handleOne[R](
-        handle: HttpRequest => URIO[R, HttpReply]
-    ): ZIO[R, Throwable, Boolean] =
-      blocking(input.readHead(MaxHeadBytes)).flatMap {
-        case Left(rejection) => reject(rejection).as(false)
-        case Right(None) => ZIO.succeed(false) // clean EOF between requests
+    private def serveOne(): Boolean =
+      input.readHead(MaxHeadBytes) match
+        case Left(rejection) => reject(rejection)
+        case Right(None) => false // clean EOF between requests
         case Right(Some(headBytes)) =>
           Http1.parseHead(headBytes) match
-            case Left(rejection) => reject(rejection).as(false)
-            case Right(head) => dispatch(head, handle)
-      }
+            case Left(rejection) => reject(rejection)
+            case Right(head) => dispatch(head)
 
-    private def dispatch[R](
-        head: Head,
-        handle: HttpRequest => URIO[R, HttpReply]
-    ): ZIO[R, Throwable, Boolean] =
-      head.bodyFraming(maxBodyBytes) match
-        case Left(rejection) => reject(rejection).as(false)
+    private def dispatch(head: Head): Boolean =
+      // Structural framing errors first (contradictory or unsupported headers); the size cap is
+      // judged after admission so the shared gates keep their order (403 → 415 → 413 → 406).
+      head.bodyFraming(Int.MaxValue) match
+        case Left(rejection) => reject(rejection)
         case Right(framing) =>
-          // The body is read lazily: the shared handler forces `request.body` only after its
-          // Host/Origin and Accept guards pass, so a request those guards reject never costs the
-          // read (up to 16 MiB) — the same ordering the zio-http adapter gets from its lazy body.
-          // `100 Continue`, which solicits the body, is sent at that same point; RFC 9110 lets a
-          // server answer on the head alone without ever asking for the body.
-          val consumed = new AtomicBoolean(false)
-          val failed = new AtomicReference[Option[Rejection]](None)
-          for
-            body <- deferredBody(head, framing, consumed, failed).memoize
-            reply <- handle(
-              HttpRequest(head.method, head.path, head.header, head.headerJoined, body, peer)
-            )
-            // A body read that failed mid-way keeps its own status (413 for an over-cap chunked
-            // body, 400 for truncation) rather than the handler's generic 400.
-            finalReply = failed.get.fold(reply)(r =>
-              StreamableHttpHandler.transportError(r.status, r.message)
-            )
-            // A declared body that was never consumed, or failed part-way, leaves unknown bytes on
-            // the socket: close after the reply so they are never parsed as the next request.
-            bodyClean = framing == Framing.Empty || (consumed.get && failed.get.isEmpty)
-            usable <- writeReply(finalReply, head.version, head.wantsClose || !bodyClean)
-          yield usable
+          val request =
+            HttpRequest(head.method, head.path, head.header, head.headerJoined, NoBody, peer)
+          admit(request) match
+            case Some(reply) =>
+              // Answered on the head alone. A declared body that was never read leaves unknown
+              // bytes on the socket: close after the reply so they are never parsed as a request.
+              writeReply(reply, head.version, head.wantsClose || framing != Framing.Empty)
+            case None if head.method != "POST" =>
+              // GET / DELETE carry no body the handler reads; a declared one is left unread.
+              handle(request, head, head.wantsClose || framing != Framing.Empty)
+            case None =>
+              readBody(head, framing) match
+                case Left(rejection) => reject(rejection)
+                case Right(body) =>
+                  handle(request.copy(body = ZIO.succeed(body)), head, head.wantsClose)
 
-    private def deferredBody(
-        head: Head,
-        framing: Framing,
-        consumed: AtomicBoolean,
-        failed: AtomicReference[Option[Rejection]]
-    ): Task[String] =
-      val interim =
-        if head.expectsContinue && framing != Framing.Empty then
-          blocking {
-            writeRaw("HTTP/1.1 100 Continue\r\n\r\n")
-            out.flush()
-          }
-        else ZIO.unit
-      interim *> readBody(framing).flatMap {
-        case Right(body) =>
-          ZIO.succeed(consumed.set(true)).as(body)
-        case Left(rejection) =>
-          ZIO.succeed {
-            consumed.set(true)
-            failed.set(Some(rejection))
-          } *> ZIO.fail(new java.io.IOException(rejection.message))
-      }
+    private def admit(request: HttpRequest): Option[HttpReply] =
+      try owner.app.admit(request)
+      catch
+        case NonFatal(e) =>
+          debugLog(s"admission failed: $e")
+          Some(internalError)
 
-    private def readBody(framing: Framing): Task[Either[Rejection, String]] =
+    private def internalError: HttpReply =
+      StreamableHttpHandler.transportError(500, HttpRequestGuards.InternalErrorMessage)
+
+    private def handle(request: HttpRequest, head: Head, close: Boolean): Boolean =
+      val (exit, peerGone) = awaitFiber(owner.runOrFork(owner.app.handle(request)), None)
+      exit match
+        case Exit.Success(reply) if !peerGone => writeReply(reply, head.version, close)
+        case Exit.Success(reply) =>
+          // The peer vanished while the handler ran, but it still produced a reply: run an SSE
+          // reply's finalizers before dropping it.
+          reply match
+            case sse: HttpReply.Sse =>
+              val _ = owner.runSync(abandon(sse.frames))
+            case _ => ()
+          false
+        case Exit.Failure(cause) =>
+          // Only an interrupt reaches here (the handler carries its own error boundary).
+          if !peerGone then
+            debugLog(s"handler failed: ${cause.prettyPrint}")
+            val _ = writeReply(internalError, head.version, close = true)
+          false
+
+    /** Resolve a `runOrFork`: at once when it ran to completion on this thread, otherwise by
+      * parking until the fiber's observer fires. Every [[WatchPollMs]] of quiet the peer is probed
+      * (and, with `keepAliveMs`, a ping written once the stream has been quiet that long). When the
+      * peer is gone — or the server is shutting down — the fiber is interrupted and its exit still
+      * awaited, so the caller can release whatever it produced. Returns the exit and whether the
+      * peer is gone.
+      */
+    private def awaitFiber[A](
+        started: Either[Fiber.Runtime[Nothing, A], Exit[Nothing, A]],
+        keepAliveMs: Option[Long]
+    ): (Exit[Nothing, A], Boolean) =
+      started match
+        case Right(exit) => (exit, false)
+        case Left(fiber) =>
+          val signal = new Signal[Exit[Nothing, A]]
+          parkedOn = Some(signal)
+          try
+            Unsafe.unsafe(implicit u => fiber.unsafe.addObserver(exit => signal.set(exit)))
+            var lastWrite = java.lang.System.nanoTime()
+            var peerGone = false
+            var result = signal.await(nextWaitMs(keepAliveMs, lastWrite))
+            while result.isEmpty && !peerGone do
+              if owner.isClosed || !probe() then peerGone = true
+              else
+                keepAliveMs.foreach { interval =>
+                  if (java.lang.System.nanoTime() - lastWrite) / 1_000_000L >= interval then
+                    try
+                      appendFrame(SseFrame.Ping, pingChunked)
+                      buf.flushTo(out)
+                      lastWrite = java.lang.System.nanoTime()
+                    catch case _: IOException => peerGone = true
+                }
+                if !peerGone then result = signal.await(nextWaitMs(keepAliveMs, lastWrite))
+            if peerGone then
+              Unsafe.unsafe(implicit u => fiber.unsafe.interrupt(Cause.interrupt(FiberId.None)))
+              // An interrupted fiber still exits (its finalizers run first); wait for that.
+              while result.isEmpty do result = signal.await(WatchPollMs.toLong)
+            (result.getOrElse(Exit.interrupt(FiberId.None)), peerGone)
+          finally parkedOn = None
+
+    private def nextWaitMs(keepAliveMs: Option[Long], lastWriteNanos: Long): Long =
+      keepAliveMs match
+        case None => WatchPollMs.toLong
+        case Some(interval) =>
+          val due = interval - (java.lang.System.nanoTime() - lastWriteNanos) / 1_000_000L
+          math.max(1L, math.min(WatchPollMs.toLong, due))
+
+    /** `true` while the peer still holds its end open. Bytes read here stay buffered as a pipelined
+      * request; more than a request head's worth of unsolicited bytes is treated as a broken peer
+      * rather than buffered without bound.
+      */
+    private def probe(): Boolean =
+      try
+        socket.setSoTimeout(ProbeTimeoutMs)
+        try
+          if input.available > MaxHeadBytes then false
+          else input.fill() >= 0
+        catch
+          case _: SocketTimeoutException => true
+          case _: IOException => false
+        finally socket.setSoTimeout(IdleReadTimeoutMs)
+      catch case _: IOException => false
+
+    private def readBody(head: Head, framing: Framing): Either[Rejection, String] =
+      val max = owner.maxBodyBytes
       framing match
-        case Framing.Empty => ZIO.succeed(Right(""))
+        case Framing.Empty => Right("")
+        case Framing.Length(n) if n > max =>
+          Left(Rejection(413, s"Request body exceeds $max bytes"))
         case Framing.Length(n) =>
-          blocking(input.readExactly(n)).map {
-            case Some(bytes) => Right(new String(bytes, StandardCharsets.UTF_8))
-            case None => Left(Rejection(400, "Request body ended prematurely"))
-          }
+          sendContinue(head)
+          input.readString(n).toRight(Rejection(400, "Request body ended prematurely"))
         case Framing.Chunked =>
-          blocking(input.readChunked(maxBodyBytes))
-            .map(_.map(bytes => new String(bytes, StandardCharsets.UTF_8)))
+          sendContinue(head)
+          input.readChunked(max).map(bytes => new String(bytes, StandardCharsets.UTF_8))
+
+    /** `100 Continue`, which solicits the body, is sent only once the request has been admitted;
+      * RFC 9110 lets a server answer on the head alone without ever asking for the body.
+      */
+    private def sendContinue(head: Head): Unit =
+      if head.expectsContinue then
+        buf.ascii("HTTP/1.1 100 Continue\r\n\r\n")
+        buf.flushTo(out)
 
     /** Transport-level rejection: the same JSON-RPC error body the MCP layer uses, then close. */
-    private def reject(rejection: Rejection): Task[Unit] =
-      writeJson(
+    private def reject(rejection: Rejection): Boolean =
+      val _ = writeJson(
         StreamableHttpHandler.transportError(rejection.status, rejection.message),
         close = true
-      ).unit
+      )
+      false
 
-    private def writeReply(reply: HttpReply, version: Version, close: Boolean): Task[Boolean] =
+    private def writeReply(reply: HttpReply, version: Version, close: Boolean): Boolean =
       reply match
         case HttpReply.Empty(status, headers) =>
-          blocking {
-            writeHead(status, headers :+ ("content-length" -> "0"), close)
-            out.flush()
-          }.as(!close)
+          appendHead(status, headers, close)
+          buf.ascii("content-length: 0\r\n\r\n")
+          buf.flushTo(out)
+          !close
         case json: HttpReply.Json => writeJson(json, close)
-        case HttpReply.Sse(headers, frames) => streamSse(headers, frames, version, close)
+        case sse: HttpReply.Sse => streamSse(sse, version, close)
 
-    private def writeJson(json: HttpReply.Json, close: Boolean): Task[Boolean] =
-      blocking {
-        val bytes = json.body.getBytes(StandardCharsets.UTF_8)
-        writeHead(
-          json.status,
-          json.headers ++ List(
-            "content-type" -> "application/json",
-            "content-length" -> bytes.length.toString
-          ),
-          close
-        )
-        out.write(bytes)
-        out.flush()
-      }.as(!close)
+    private def writeJson(json: HttpReply.Json, close: Boolean): Boolean =
+      val body = json.body.getBytes(StandardCharsets.UTF_8)
+      appendHead(json.status, json.headers, close)
+      buf.ascii("content-type: application/json\r\ncontent-length: ")
+      buf.ascii(Integer.toString(body.length))
+      buf.ascii("\r\n\r\n")
+      buf.append(body)
+      buf.flushTo(out)
+      !close
 
     /** Stream an SSE reply. HTTP/1.1 clients get chunked transfer-encoding and keep the connection;
       * HTTP/1.0 clients get a close-delimited body. Returns whether the connection is still usable
       * for another request.
+      *
+      * Frames are pulled with `runOrFork`: a pull that completes on this thread just appends to the
+      * pending buffer, and the buffer is flushed only when a pull has to wait (or it grows large).
+      * A request whose reply is ready by the time it is pulled therefore leaves as a single write.
       */
-    private def streamSse(
-        headers: List[(String, String)],
-        frames: ZStream[Any, Nothing, SseFrame],
-        version: Version,
-        close: Boolean
-    ): Task[Boolean] =
+    private def streamSse(sse: HttpReply.Sse, version: Version, close: Boolean): Boolean =
       val chunked = version == Version.Http11
       val closeAfter = close || !chunked
-      val stop = new AtomicBoolean(false)
-      for
-        headWritten <- blocking {
-          writeHead(
-            200,
-            headers ++ List(
-              "content-type" -> "text/event-stream",
-              "cache-control" -> "no-cache"
-            ) ++ (if chunked then List("transfer-encoding" -> "chunked") else Nil),
-            closeAfter
-          )
-          out.flush()
-        }.foldCause(_ => false, _ => true)
-        dead <- Promise.make[Nothing, Unit]
-        // If the peer vanished before the head even went out, the stream must STILL run — halted
-        // at once through `dead` — because its finalizers are the only thing that interrupts the
-        // request's dispatch fiber, shuts its queue, and releases the session's GET slot. Skipping
-        // the stream here would leave a `subscriptions/listen` dispatch running forever and every
-        // later GET on the session answering 409.
-        _ <- ZIO.unless(headWritten)(dead.succeed(()))
-        // The read side is otherwise silent while we stream, so a peer that vanishes would go
-        // unnoticed until the next write — never, for a quiet GET channel. Watch it: EOF or an
-        // error completes `dead`, which halts the stream and runs the MCP layer's finalizers.
-        // Short read timeouts while streaming: the watcher re-checks `stop` every poll instead of
-        // sitting in one idle-timeout-long read after the stream has already ended.
-        _ <- ZIO.attempt(socket.setSoTimeout(WatchPollMs)).ignore
-        watcher <- blocking(input.awaitActivity(stop))
-          .tap(outcome => ZIO.when(outcome == Watch.Dead)(dead.succeed(())))
-          .catchAll(_ => dead.succeed(()).as(Watch.Dead))
-          .fork
-        // Run the stream in a fresh fiber and join it: a forked fiber starts ZIO's run loop at
-        // depth zero, so the stream interpreter (merge + schedule + interruptWhen) never inherits
-        // the connection fiber's nesting. On Scala Native that is the difference between running
-        // and a StackOverflowError — ZIO only trampolines at depth 300, and Native frames are
-        // large enough that a keepalive-merged stream started deep in a request overflows the
-        // 1 MiB thread stack.
-        streamed <- frames
-          .interruptWhen(dead)
-          .runForeach(frame => blocking(writeFrame(frame.encode, chunked)))
-          .fork
-          .flatMap(_.join)
-          .foldCauseZIO(
-            cause => if cause.isInterrupted then ZIO.refailCause(cause) else ZIO.succeed(false),
-            _ => ZIO.succeed(true)
-          )
-        clientGone <- dead.isDone
-        usable = headWritten && streamed && !clientGone && !closeAfter
-        _ <- ZIO.when(headWritten && streamed && !clientGone && chunked)(blocking {
-          writeRaw("0\r\n\r\n")
-          out.flush()
-        })
-        _ <- ZIO.succeed(stop.set(true))
-        // A usable connection waits for the watcher to hand back the read side: it returns as
-        // soon as the client sends its next request (bytes stay buffered), or on idle timeout /
-        // EOF, both of which end the connection like any other idle keep-alive would.
-        activity <- if usable then watcher.join else watcher.interrupt.as(Watch.Dead)
-        _ <- ZIO.attempt(socket.setSoTimeout(IdleReadTimeoutMs)).ignore
-      yield usable && activity == Watch.Data
+      val keepAliveMs = sse.keepAlive.map(d => math.max(1L, d.toMillis))
+      pingChunked = chunked
+      owner.runSync(openPull(sse.frames)) match
+        case Exit.Failure(cause) =>
+          debugLog(s"could not open the reply stream: ${cause.prettyPrint}")
+          val _ = writeReply(internalError, version, close = true)
+          false
+        case Exit.Success((scope, pull)) =>
+          var finished = false
+          var broken = false
+          try
+            appendHead(200, sse.headers, closeAfter)
+            buf.ascii("content-type: text/event-stream\r\ncache-control: no-cache\r\n")
+            buf.ascii(if chunked then "transfer-encoding: chunked\r\n\r\n" else "\r\n")
+            while !finished && !broken do
+              val started = owner.runOrFork(pull.either)
+              // About to wait: everything gathered so far (at least the head) goes out now.
+              if started.isLeft then
+                try buf.flushTo(out)
+                catch
+                  case e: IOException =>
+                    // The pull is already running: stop it before the scope closes under it.
+                    started.left.foreach { fiber =>
+                      val _ = owner.runSync(fiber.interrupt)
+                    }
+                    throw e
+              val (exit, peerGone) = awaitFiber(started, keepAliveMs)
+              if peerGone then broken = true
+              else
+                exit match
+                  case Exit.Success(Right(frames)) =>
+                    frames.foreach(frame => appendFrame(frame, chunked))
+                    if buf.size >= FlushThresholdBytes then buf.flushTo(out)
+                  case Exit.Success(Left(_)) => finished = true // end of stream
+                  case Exit.Failure(_) => broken = true
+            if finished then
+              if chunked then buf.ascii("0\r\n\r\n")
+              buf.flushTo(out)
+          catch
+            case e: IOException =>
+              // The peer went away mid-write; the finalizers below still run.
+              debugLog(s"SSE write failed: $e")
+              broken = true
+          finally
+            // Runs the stream's finalizers (dispatch interrupt, queue shutdown, GET-slot release)
+            // on every path: normal end, client disconnect, write failure, shutdown.
+            val _ = owner.runSync(scope.close(Exit.unit))
+          finished && !broken && !closeAfter
 
-    private def writeHead(status: Int, headers: List[(String, String)], close: Boolean): Unit =
-      val head = new StringBuilder(256)
-      head ++= s"HTTP/1.1 $status ${Http1.reason(status)}\r\n"
-      headers.foreach { case (name, value) => head ++= s"$name: $value\r\n" }
-      head ++= s"connection: ${if close then "close" else "keep-alive"}\r\n\r\n"
-      writeRaw(head.toString)
+    private def appendHead(status: Int, headers: List[(String, String)], close: Boolean): Unit =
+      buf.ascii(Http1.statusLine(status))
+      var rest = headers
+      while rest.nonEmpty do
+        val (name, value) = rest.head
+        buf.ascii(name)
+        buf.ascii(": ")
+        buf.ascii(value)
+        buf.ascii("\r\n")
+        rest = rest.tail
+      buf.ascii(if close then "connection: close\r\n" else "connection: keep-alive\r\n")
 
-    private def writeRaw(s: String): Unit =
-      out.write(s.getBytes(StandardCharsets.ISO_8859_1))
-
-    private def writeFrame(encoded: String, chunked: Boolean): Unit =
-      val bytes = encoded.getBytes(StandardCharsets.UTF_8)
+    private def appendFrame(frame: SseFrame, chunked: Boolean): Unit =
+      val bytes = frame.encode.getBytes(StandardCharsets.UTF_8)
       if chunked then
-        writeRaw(Integer.toHexString(bytes.length))
-        writeRaw("\r\n")
-        out.write(bytes)
-        writeRaw("\r\n")
-      else out.write(bytes)
-      out.flush()
+        buf.ascii(Integer.toHexString(bytes.length))
+        buf.ascii("\r\n")
+        buf.append(bytes)
+        buf.ascii("\r\n")
+      else buf.append(bytes)
 
   /** Single-reader buffered view of a socket's input: byte-exact reads of request heads, fixed
-    * lengths, and chunked bodies, plus the SSE-time activity watch. Every method blocks; callers
-    * wrap them in `attemptBlockingCancelable`. Exactly one fiber may be inside at a time — the
-    * request loop hands the reader to the watcher while streaming and joins it before reading the
-    * next head.
+    * lengths, and chunked bodies. Every method blocks; only the connection's own thread calls in.
     */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private final class ConnectionInput(in: InputStream):
@@ -391,7 +601,8 @@ private[fastmcp] object SocketHttpServer:
     private var start = 0
     private var end = 0
 
-    private def available: Int = end - start
+    /** Bytes read from the socket but not yet consumed. */
+    def available: Int = end - start
 
     /** One blocking read appended to the buffer; the count read, or -1 at EOF. Compacts or grows
       * the buffer first, so byte offsets *relative to `start`* stay valid across calls.
@@ -400,8 +611,8 @@ private[fastmcp] object SocketHttpServer:
       if start == end then
         start = 0
         end = 0
-        // Drained: drop a buffer that a large body grew, so one 16 MiB request on a keep-alive
-        // connection does not pin 16 MiB for the connection's whole lifetime.
+        // Drained: drop a buffer that a large body grew, so one large request on a keep-alive
+        // connection does not pin its size for the connection's whole lifetime.
         if buf.length > InitialBufferBytes then buf = new Array[Byte](InitialBufferBytes)
       else if end == buf.length then
         if start > 0 then
@@ -412,34 +623,6 @@ private[fastmcp] object SocketHttpServer:
       val n = in.read(buf, end, buf.length - end)
       if n > 0 then end += n
       n
-
-    /** Block until the peer sends something, closes, or errors — or, once `stop` is set, until the
-      * socket's read timeout fires. Bytes read stay buffered for the next [[readHead]].
-      */
-    def awaitActivity(stop: AtomicBoolean): Watch =
-      var outcome: Option[Watch] = None
-      var idleSince = -1L
-      while outcome.isEmpty do
-        try
-          val n = fill()
-          if n < 0 then outcome = Some(Watch.Dead)
-          else if stop.get then outcome = Some(Watch.Data)
-          else if available > MaxHeadBytes then
-            // More than a request head's worth of unsolicited bytes while we stream is not a
-            // pipelined request: treat the peer as broken rather than buffer without bound.
-            outcome = Some(Watch.Dead)
-          // Otherwise the bytes stay buffered (a pipelined request, served after the stream) and
-          // the watch continues — returning here would leave a peer that vanishes afterwards
-          // undetected, parking the connection (and its permit + GET slot) forever.
-        catch
-          case _: SocketTimeoutException =>
-            if stop.get then
-              if available > 0 then outcome = Some(Watch.Data)
-              else
-                val now = java.lang.System.currentTimeMillis()
-                if idleSince < 0 then idleSince = now
-                else if now - idleSince >= IdleReadTimeoutMs then outcome = Some(Watch.Timeout)
-      outcome.getOrElse(Watch.Dead)
 
     /** Read a request head up to (excluding) its blank-line terminator (`CRLF CRLF`, or bare `LF
       * LF` / `LF CRLF` for lenient clients). `Right(None)` on EOF before any byte.
@@ -488,15 +671,29 @@ private[fastmcp] object SocketHttpServer:
         i += 1
       found
 
-    /** Exactly `n` bytes, or `None` if the peer closed first. */
-    def readExactly(n: Int): Option[Array[Byte]] =
+    /** Wait until `n` bytes are buffered; `false` if the peer closed first. */
+    private def require(n: Int): Boolean =
       var eof = false
       while available < n && !eof do if fill() < 0 then eof = true
-      if available < n then None
+      available >= n
+
+    /** Exactly `n` bytes, or `None` if the peer closed first. */
+    def readExactly(n: Int): Option[Array[Byte]] =
+      if !require(n) then None
       else
         val bytes = java.util.Arrays.copyOfRange(buf, start, start + n)
         start += n
         Some(bytes)
+
+    /** Exactly `n` bytes decoded as UTF-8 straight out of the buffer, or `None` if the peer closed
+      * first.
+      */
+    def readString(n: Int): Option[String] =
+      if !require(n) then None
+      else
+        val text = new String(buf, start, n, StandardCharsets.UTF_8)
+        start += n
+        Some(text)
 
     /** One line up to LF (CR stripped), or `None` at EOF; `Left(400)` past `max` bytes. */
     private def readLine(max: Int): Either[Rejection, Option[String]] =

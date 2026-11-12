@@ -257,7 +257,12 @@ final class McpRouter[R](
       case Some(handler) =>
         val pipeline = Middleware.chain(middlewares, method, handler)
         for
-          fiber <- pipeline(session, params).fork
+          // `forkDaemon`, not `fork`: the handler's lifetime is managed explicitly right below
+          // (awaited, and interrupted when this dispatch is), so it needs no parent scope — and a
+          // scoped `fork` allocates a `WeakReference` to the parent plus a weak child-set entry
+          // per request, which Scala Native's weak-reference registry cannot reclaim at request
+          // rates (the heap grows without bound).
+          fiber <- pipeline(session, params).forkDaemon
           _ <- session.trackInflight(id, method, fiber)
           // Interrupt the handler explicitly when its request-scoped response stream closes. A
           // long-lived subscriptions/listen handler otherwise outlives the dispatch fiber and

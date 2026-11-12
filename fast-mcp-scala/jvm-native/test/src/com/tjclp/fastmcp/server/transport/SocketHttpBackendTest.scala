@@ -379,13 +379,24 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       big.status shouldBe 431
 
       val client = new RawClient(port)
+      // The body is never sent: the shared gates judge the declared length on the head alone.
       client.send(
-        s"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: ${baseSettings.maxRequestBodyBytes + 1}\r\n\r\n"
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" +
+          s"Content-Length: ${baseSettings.maxRequestBodyBytes + 1}\r\n\r\n"
       )
       val reply = client.readReply()
       reply.status shouldBe 413
       reply.header("connection") shouldBe Some("close")
       client.close()
+
+      // Gate order is the shared one (403 → 415 → 413 → 406): without a JSON Content-Type the
+      // same oversized declaration is refused as 415 first.
+      val untyped = new RawClient(port)
+      untyped.send(
+        s"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: ${baseSettings.maxRequestBodyBytes + 1}\r\n\r\n"
+      )
+      untyped.readReply().status shouldBe 415
+      untyped.close()
     }
   }
 

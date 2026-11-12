@@ -4,6 +4,7 @@ package server.transport
 import zio.*
 import zio.http.*
 import zio.http.netty.{ChannelType, NettyConfig}
+import zio.stream.*
 
 import com.tjclp.fastmcp.server.McpServerSettings
 import com.tjclp.fastmcp.server.router.McpRouter
@@ -172,13 +173,33 @@ object JvmHttpBackend extends HttpTransportBackend:
         Response.status(Status.fromInt(status))
       case HttpReply.Json(status, body, _) =>
         Response.json(body).status(Status.fromInt(status))
-      case HttpReply.Sse(_, frames) =>
+      case HttpReply.Sse(_, frames, keepAlive) =>
         Response.fromServerSentEvents(
-          frames.map(f => ServerSentEvent(f.data, eventType = f.event))
+          withKeepAlive(frames.map(f => ServerSentEvent(f.data, eventType = f.event)), keepAlive)
         )
     reply.headers.foldLeft(base) { case (resp, (name, value)) =>
       resp.addHeader(Header.Custom(name, value))
     }
+
+  /** Merge a heartbeat into an SSE stream so proxies / idle timeouts don't kill long-quiet
+    * connections. The `ping` event type is ignored by conforming clients (the TS SDK only parses
+    * `message` events). zio-http 3.11.4 can write an SSE comment frame (a `data` string starting
+    * with `:` is emitted verbatim, no `data:` prefix), but the heartbeat keeps the `ping` event
+    * shape it has had since zio-http 3.4.0 (which had no comment support) so the wire is unchanged
+    * across the bump. Halts with the data stream.
+    */
+  private def withKeepAlive(
+      sse: ZStream[Any, Nothing, ServerSentEvent[String]],
+      keepAlive: Option[Duration]
+  ): ZStream[Any, Nothing, ServerSentEvent[String]] =
+    keepAlive match
+      case None => sse
+      case Some(interval) =>
+        val pings = ZStream.repeatWithSchedule(
+          ServerSentEvent[String]("", eventType = Some("ping")),
+          Schedule.spaced(interval)
+        )
+        sse.mergeHaltLeft(pings)
 
   /** The JVM HTTP seam, in the impl object so it's exportable. `ExportsJvm` re-exports this so
     * `import com.tjclp.fastmcp.*` puts an `HttpTransportBackend` in scope and `runHttp()` /

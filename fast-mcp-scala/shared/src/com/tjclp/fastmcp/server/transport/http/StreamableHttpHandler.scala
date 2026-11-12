@@ -45,6 +45,25 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
 
   private val endpointNoSlash: String = endpoint.stripSuffix("/")
 
+  /** SSE heartbeat interval handed to the backend with every stream (see [[HttpReply.Sse]]). */
+  private val keepAlive: Option[Duration] = settings.keepAliveInterval.map(Duration.fromJava)
+
+  /** Headers-only verdict for backends that read the request body themselves: `Some` is the final
+    * reply — `404` off the endpoint, `405` for an unsupported method, or a POST refused by the
+    * header gates — and the body must not be read. `None` admits the request to [[handle]], which
+    * re-runs the same (pure) gates, so the two can never disagree.
+    */
+  def admit(req: HttpRequest): Option[HttpReply] =
+    if req.path.stripSuffix("/") != endpointNoSlash then Some(HttpReply.Empty(404))
+    else
+      req.method match
+        case "POST" =>
+          HttpRequestGuards
+            .postGate(req.gateHeader, settings, requireSse = store.isDefined)
+            .map(reject)
+        case "GET" | "DELETE" => None
+        case _ => Some(MethodNotAllowed)
+
   /** Full routing for backends without their own router, behind the first-party error boundary:
     * anything off the endpoint is `404`, methods other than POST/GET/DELETE are `405`.
     */
@@ -56,7 +75,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
           case "POST" => post(req)
           case "GET" => get(req)
           case "DELETE" => delete(req)
-          case _ => ZIO.succeed(HttpReply.Empty(405, List("allow" -> "POST, GET, DELETE")))
+          case _ => ZIO.succeed(MethodNotAllowed)
     }
 
   /** POST: one JSON-RPC frame.
@@ -313,7 +332,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         // are forked under Session.runWithoutSink (TaskRouting), so they never hold this queue.
         .ensuring(dispatchFiber.interrupt *> reqQueue.shutdown)
     val unbuffered = if modern then List("X-Accel-Buffering" -> "no") else Nil
-    HttpReply.Sse(unbuffered ++ sessionHeader(session, isNew), withKeepAlive(frames))
+    HttpReply.Sse(unbuffered ++ sessionHeader(session, isNew), frames, keepAlive)
 
   /** Dispatch a 2026-07-28 request without consulting or mutating the legacy session store. */
   private def modernPost(req: HttpRequest, message: JsonRpcMessage): URIO[R, HttpReply] =
@@ -355,45 +374,6 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         )
         ZIO.succeed(HttpReply.Json(400, failure.toJson))
 
-  /** Add a heartbeat to an SSE stream so proxies / idle timeouts don't kill long-quiet connections:
-    * a `ping` frame is emitted whenever the stream has been quiet for `keepAliveInterval`, and the
-    * result ends exactly when the data stream does. The `ping` event type is ignored by conforming
-    * clients (the TS SDK only parses `message` events).
-    *
-    * Deliberately NOT `frames.mergeHaltLeft(ZStream.repeatWithSchedule(...))`: the merge's
-    * halt-and-interrupt path — a data stream that ends at once (an `initialize` reply) while the
-    * schedule-driven side is being pulled — nests ZIO's run loop deeply enough to overflow a Scala
-    * Native thread stack (ZIO trampolines only at depth 300; Native frames are large). Feeding a
-    * queue from one producer fiber and pulling it with a timeout is shallow, costs one fiber
-    * instead of the merge machinery, and — because `Queue.take` is atomic — never drops a frame
-    * when the timeout races an arrival.
-    */
-  private def withKeepAlive(
-      frames: ZStream[Any, Nothing, SseFrame]
-  ): ZStream[Any, Nothing, SseFrame] =
-    settings.keepAliveInterval match
-      case None => frames
-      case Some(interval) =>
-        val quiet = Duration.fromJava(interval)
-        ZStream.unwrapScoped {
-          for
-            // `None` marks the end of the data stream.
-            buffer <- Queue.unbounded[Option[SseFrame]]
-            // The producer runs the data stream (and its finalizers) inside this scope: when the
-            // consumer stops pulling — stream end, client disconnect — the scope closes and the
-            // producer is interrupted, so `ensuring` hooks upstream still run.
-            _ <- (frames.runForeach(frame => buffer.offer(Some(frame))) *> buffer.offer(
-              None
-            )).forkScoped
-          yield ZStream.repeatZIOOption(
-            buffer.take.timeout(quiet).flatMap {
-              case Some(Some(frame)) => ZIO.succeed(frame)
-              case Some(None) => ZIO.fail(None)
-              case None => ZIO.succeed(SseFrame.Ping)
-            }
-          )
-        }
-
   private def isFinalReply(message: JsonRpcMessage, reqId: RequestId): Boolean =
     message match
       case JsonRpcMessage.Success(id, _) => id == reqId
@@ -423,7 +403,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
                   .fromQueue(session.outbound)
                   .map(SseFrame.message)
                   .ensuring(session.releaseGet)
-                HttpReply.Sse(Nil, withKeepAlive(frames))
+                HttpReply.Sse(Nil, frames, keepAlive)
             }
         }
 
@@ -464,6 +444,9 @@ private[fastmcp] object StreamableHttpHandler:
 
   /** Compatibility header for initialization-based Streamable HTTP revisions. */
   val SessionIdHeader = "mcp-session-id"
+
+  private val MethodNotAllowed: HttpReply =
+    HttpReply.Empty(405, List("allow" -> "POST, GET, DELETE"))
 
   /** Startup validation every backend runs before binding (`HttpRequestGuards.validateSettings`).
     */

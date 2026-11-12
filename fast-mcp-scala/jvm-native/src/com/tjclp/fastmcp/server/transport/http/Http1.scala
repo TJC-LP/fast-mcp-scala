@@ -101,15 +101,38 @@ private[fastmcp] object Http1:
   /** Parse a request head (request line + headers, up to and excluding the blank line). Lines may
     * end in CRLF or bare LF. Obsolete line folding is rejected.
     */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
   def parseHead(bytes: Array[Byte]): Either[Rejection, Head] =
     val text = new String(bytes, StandardCharsets.ISO_8859_1)
-    val lines = text.split("\r?\n", -1).toList.dropWhile(_.isEmpty)
-    lines match
-      case Nil => Left(Rejection(400, "Empty request"))
-      case requestLine :: rest =>
-        parseRequestLine(requestLine).flatMap { case (method, target, version) =>
-          parseHeaders(rest.takeWhile(_.nonEmpty), Nil).map(hs => Head(method, target, version, hs))
-        }
+    val length = text.length
+    var pos = 0
+
+    /** The next line without its terminator; advances `pos` past it. */
+    def nextLine(): String =
+      val lf = text.indexOf('\n', pos)
+      val end = if lf < 0 then length else lf
+      val lineEnd = if end > pos && text.charAt(end - 1) == '\r' then end - 1 else end
+      val line = text.substring(pos, lineEnd)
+      pos = if lf < 0 then length else lf + 1
+      line
+
+    var requestLine = ""
+    while requestLine.isEmpty && pos < length do requestLine = nextLine()
+    if requestLine.isEmpty then Left(Rejection(400, "Empty request"))
+    else
+      parseRequestLine(requestLine).flatMap { case (method, target, version) =>
+        var headers: List[(String, String)] = Nil
+        var failure: Option[Rejection] = None
+        var done = false
+        while !done && failure.isEmpty && pos < length do
+          val line = nextLine()
+          if line.isEmpty then done = true
+          else
+            parseHeaderLine(line) match
+              case Left(rejection) => failure = Some(rejection)
+              case Right(header) => headers = header :: headers
+        failure.toLeft(Head(method, target, version, headers.reverse))
+      }
 
   private def parseRequestLine(line: String): Either[Rejection, (String, String, Version)] =
     line.split(' ').toList.filter(_.nonEmpty) match
@@ -121,28 +144,33 @@ private[fastmcp] object Http1:
           case _ => Left(Rejection(400, "Malformed request line"))
       case _ => Left(Rejection(400, "Malformed request line"))
 
-  private def parseHeaders(
-      lines: List[String],
-      acc: List[(String, String)]
-  ): Either[Rejection, List[(String, String)]] =
-    lines match
-      case Nil => Right(acc.reverse)
-      case line :: rest =>
-        if line.charAt(0) == ' ' || line.charAt(0) == '\t' then
-          Left(Rejection(400, "Obsolete header line folding is not supported"))
-        else
-          line.indexOf(':') match
-            case -1 | 0 => Left(Rejection(400, "Malformed header line"))
-            case i =>
-              val name = line.substring(0, i)
-              if !isToken(name) then Left(Rejection(400, "Malformed header name"))
-              else parseHeaders(rest, (asciiLower(name) -> line.substring(i + 1).trim) :: acc)
+  private def parseHeaderLine(line: String): Either[Rejection, (String, String)] =
+    if line.charAt(0) == ' ' || line.charAt(0) == '\t' then
+      Left(Rejection(400, "Obsolete header line folding is not supported"))
+    else
+      line.indexOf(':') match
+        case -1 | 0 => Left(Rejection(400, "Malformed header line"))
+        case i =>
+          val name = line.substring(0, i)
+          if !isToken(name) then Left(Rejection(400, "Malformed header name"))
+          else Right(asciiLower(name) -> line.substring(i + 1).trim)
 
   /** RFC 9110 `token`: one or more tchar. */
   private def isToken(s: String): Boolean =
     s.nonEmpty && s.forall { c =>
       c.isLetterOrDigit || "!#$%&'*+-.^_`|~".indexOf(c.toInt) >= 0
     }
+
+  private val StatusLines: Map[Int, String] =
+    List(100, 200, 202, 400, 403, 404, 405, 406, 409, 413, 415, 431, 500, 501, 503, 505)
+      .map(status => status -> s"HTTP/1.1 $status ${reason(status)}\r\n")
+      .toMap
+
+  /** The `HTTP/1.1 <status> <reason>` line with its CRLF, precomputed for the statuses this server
+    * emits.
+    */
+  def statusLine(status: Int): String =
+    StatusLines.getOrElse(status, s"HTTP/1.1 $status ${reason(status)}\r\n")
 
   /** Reason phrases for the statuses this server emits; unknown codes get an empty phrase. */
   def reason(status: Int): String =
@@ -161,5 +189,6 @@ private[fastmcp] object Http1:
       case 431 => "Request Header Fields Too Large"
       case 500 => "Internal Server Error"
       case 501 => "Not Implemented"
+      case 503 => "Service Unavailable"
       case 505 => "HTTP Version Not Supported"
       case _ => ""

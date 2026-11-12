@@ -5,7 +5,12 @@ import zio.*
 
 import com.tjclp.fastmcp.server.McpServerSettings
 import com.tjclp.fastmcp.server.router.McpRouter
-import com.tjclp.fastmcp.server.transport.http.{SocketHttpServer, StreamableHttpHandler}
+import com.tjclp.fastmcp.server.transport.http.{
+  HttpReply,
+  HttpRequest,
+  SocketHttpServer,
+  StreamableHttpHandler
+}
 
 /** [[HttpTransportBackend]] over `java.net.ServerSocket` — the shared [[StreamableHttpHandler]]
   * served by [[SocketHttpServer]], with no HTTP library underneath. It is the Scala Native HTTP
@@ -16,8 +21,21 @@ import com.tjclp.fastmcp.server.transport.http.{SocketHttpServer, StreamableHttp
   * Semantics are byte-for-byte those of the zio-http backend because both render the same handler;
   * the transport-level differences are the ones listed on [[SocketHttpServer]] (caps, idle timeout,
   * connection gate, plaintext only).
+  *
+  * @param entropy
+  *   the platform backend whose `randomId()` mints session ids
+  * @param maxConnections
+  *   concurrent connection cap (one parked thread per idle connection); further connections wait in
+  *   the kernel backlog
+  * @param trackFiberRoots
+  *   whether request fibers are registered in ZIO's `Fiber.roots` (fiber dumps). `false` on Scala
+  *   Native, where that registration's `WeakReference` per fiber is not reclaimed fast enough
   */
-class SocketHttpBackend(entropy: TransportBackend) extends HttpTransportBackend:
+class SocketHttpBackend(
+    entropy: TransportBackend,
+    maxConnections: Int = SocketHttpServer.DefaultMaxConnections,
+    trackFiberRoots: Boolean = true
+) extends HttpTransportBackend:
 
   override def serveHttp[R](
       router: McpRouter[R],
@@ -40,9 +58,17 @@ class SocketHttpBackend(entropy: TransportBackend) extends HttpTransportBackend:
       handler <- StreamableHttpHandler.make(router, settings, entropy.randomId())
       // Scoped to the server's lifetime, exactly like the zio-http backend forks it.
       _ <- handler.evictIdleSessions.forkScoped
-      // `handler.handle` carries the first-party error boundary (defect → JSON-RPC 500); the body
-      // cap is enforced on the wire here (declared and chunked) and again by the shared gates.
-      started <- SocketHttpServer.start(settings.host, settings.port, settings.maxRequestBodyBytes)(
-        handler.handle
-      )
+      // The server judges each request on its head through `admit` (the shared gates) before it
+      // reads a body, bounds that body at `maxRequestBodyBytes` on the wire, and runs `handle`,
+      // which carries the first-party error boundary (defect → JSON-RPC 500).
+      app = new SocketHttpServer.App[R]:
+        def admit(req: HttpRequest): Option[HttpReply] = handler.admit(req)
+        def handle(req: HttpRequest): URIO[R, HttpReply] = handler.handle(req)
+      started <- SocketHttpServer.start(
+        settings.host,
+        settings.port,
+        settings.maxRequestBodyBytes,
+        maxConnections,
+        trackFiberRoots
+      )(app)
     yield started
