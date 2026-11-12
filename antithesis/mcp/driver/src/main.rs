@@ -80,6 +80,11 @@ struct Driver {
     /// `u64::MAX` while one is running. A session opened before that point may have been evicted
     /// at the cap, including one opened while the flood was still running.
     flooded: Vec<AtomicU64>,
+    /// Per node: the boot id under which a flood last filled its session store (`"?"` when the
+    /// node could not say). The store stays at its cap until the node restarts, so from then on
+    /// every initialize there evicts some session, in an order the driver cannot know: under
+    /// faults it does not know which of its requests reached the server, or when.
+    full_under: Vec<Mutex<Option<String>>>,
     tasks: Mutex<Vec<TaskRec>>,
     /// Rules hold this shared while they act; the eventually takes it exclusively.
     quiet: RwLock<()>,
@@ -257,16 +262,25 @@ impl Driver {
         assert_sometimes!(a.status == -1, "a request gets no answer", &details);
     }
 
-    /// A session answered 404: that is only right if its node restarted since it was opened, or
-    /// the flood rule gave the cap a reason to evict it. When the node cannot say, nothing is
-    /// concluded.
+    /// A session answered 404: that is only right if its node restarted since it was opened, the
+    /// driver deleted it, or the node's session store was at its cap (a flood ran while the session
+    /// existed, or filled the store earlier under the same boot). When the node cannot say,
+    /// nothing is concluded. The details carry the session id: the server logs "evicted session
+    /// <id>" for every cap eviction, which settles a counterexample.
     fn judge_lost_session(&self, s: &Sess) {
         self.forget_session(&s.sid);
         let now = self.boot_of(s.node);
         // Read after the 404: a DELETE or a flood that explains it has been recorded by now.
         let ended = lock(&self.ended).iter().any(|sid| sid == &s.sid);
-        let evictable = self.flooded[s.node].load(Ordering::SeqCst) > s.opened;
-        let details = json!({"node": self.nodes[s.node].name, "opened_under": s.boot, "boot_now": now, "evictable": evictable, "ended_by_driver": ended});
+        let full_under = lock(&self.full_under[s.node]).clone();
+        let store_full = match (&full_under, &s.boot) {
+            (Some(full), Some(boot)) => full == "?" || full == boot,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        let evictable = store_full || self.flooded[s.node].load(Ordering::SeqCst) > s.opened;
+        let details = json!({"node": self.nodes[s.node].name, "sid": s.sid, "opened_under": s.boot, "boot_now": now,
+            "store_full_under": full_under, "evictable": evictable, "ended_by_driver": ended});
         if let (Some(then), Some(now)) = (&s.boot, &now) {
             let restarted = then != now;
             assert_always!(
@@ -703,6 +717,8 @@ impl Driver {
         let Some(_g) = self.enter() else { return };
         // Recorded before the first initialize of the flood is sent.
         self.flooded[node].store(u64::MAX, Ordering::SeqCst);
+        let boot = self.boot_of(node).unwrap_or_else(|| "?".to_owned());
+        *lock(&self.full_under[node]) = Some(boot);
         let mut admitted = 0;
         for _ in 0..FLOOD {
             let (status, opened) = self.open_session(node, Duration::from_secs(3));
@@ -892,6 +908,7 @@ fn startup() -> Driver {
         .collect();
     assert!(!nodes.is_empty(), "MCP_NODES names no node");
     let flooded = nodes.iter().map(|_| AtomicU64::new(0)).collect();
+    let full_under = nodes.iter().map(|_| Mutex::new(None)).collect();
     let driver = Driver {
         http: Client::new(),
         nodes,
@@ -899,6 +916,7 @@ fn startup() -> Driver {
         sessions: Mutex::new(Vec::new()),
         ended: Mutex::new(Vec::new()),
         flooded,
+        full_under,
         tasks: Mutex::new(Vec::new()),
         quiet: RwLock::new(()),
         ending: AtomicBool::new(false),
