@@ -652,6 +652,21 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                   (fiber.interrupt *> reqQueue.shutdown).as(
                     jsonResponse(first.toJson, Map.empty, status)
                   )
+                // The first frame is the final reply: the whole body is known, so answer with a
+                // fixed-length SSE body instead of a `ReadableStream` (JVM twin:
+                // `HttpReply.SseComplete`). Same event bytes; no stream, pull or heartbeat fiber.
+                case None if isFinalReply(first, rpc.id) =>
+                  (ZIO.fiberIdWith(id => fiber.interruptAsFork(id)) *> reqQueue.shutdown).as(
+                    webResponse(
+                      200,
+                      s"event: message\ndata: ${MessageLoop.encodeOutbound(first)}\n\n",
+                      Map(
+                        "content-type" -> "text/event-stream",
+                        "cache-control" -> "no-cache",
+                        "x-accel-buffering" -> "no"
+                      )
+                    )
+                  )
                 case None =>
                   sseResponse(
                     reqQueue,

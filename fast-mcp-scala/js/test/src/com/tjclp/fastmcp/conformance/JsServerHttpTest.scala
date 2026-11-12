@@ -1673,3 +1673,31 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       body should startWith(": ping")
       body should include(s"slept $sleepMs")
   }
+
+  "a 2026-07-28 reply that is complete at once (Bun)" should "be a fixed-length SSE body" in {
+    for
+      _ <- contextServer()
+      resp <- fetchAt(
+        contextPort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders(
+            "mcp-protocol-version" -> "2026-07-28",
+            "mcp-method" -> "tools/call",
+            "mcp-name" -> "whoami"
+          ),
+          body =
+            """{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"whoami","arguments":{"msg":"x"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+        )
+      )
+      body <- text(resp)
+    yield
+      status(resp) shouldBe 200
+      header(resp, "content-type").getOrElse("") should include("text/event-stream")
+      header(resp, "x-accel-buffering") shouldBe Some("no")
+      // A streamed body has no Content-Length; this one is ASCII, so chars == bytes.
+      header(resp, "content-length").map(_.toInt) shouldBe Some(body.length)
+      body should startWith("event: message\ndata: ")
+      body should include(""""id":6""")
+      body should endWith("\n\n")
+  }

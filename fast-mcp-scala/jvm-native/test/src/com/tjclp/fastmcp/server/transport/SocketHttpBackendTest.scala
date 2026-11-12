@@ -270,6 +270,40 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     }
   }
 
+  test("a 2026-07-28 reply that is complete at once is a fixed-length SSE body; the connection stays usable") {
+    withServer() { port =>
+      def modernAdd(id: Int): String =
+        post(
+          s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":40},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}""",
+          extra = List(
+            "Mcp-Protocol-Version" -> "2026-07-28",
+            "Mcp-Method" -> "tools/call",
+            "Mcp-Name" -> "add"
+          )
+        )
+      val client = new RawClient(port)
+      try
+        // Two requests on ONE connection: a wrong Content-Length would desynchronise the second.
+        List(10, 11).foreach { id =>
+          client.send(modernAdd(id))
+          val reply = client.readReply()
+          reply.status shouldBe 200
+          reply.header("content-type") shouldBe Some("text/event-stream")
+          reply.header("cache-control") shouldBe Some("no-cache")
+          reply.header("x-accel-buffering") shouldBe Some("no")
+          reply.header("transfer-encoding") shouldBe None
+          reply.header("connection") shouldBe Some("keep-alive")
+          reply.header("content-length").map(_.toInt) shouldBe
+            Some(reply.body.getBytes(StandardCharsets.UTF_8).length)
+          reply.body should startWith("event: message\ndata: ")
+          reply.body should include(s""""id":$id""")
+          reply.body should include("""{\"sum\":42}""")
+          reply.body should endWith("\n\n")
+        }
+      finally client.close()
+    }
+  }
+
   test("a request reply carries the tool result; a notification gets 202 with no body") {
     withServer() { port =>
       val sid = initSession(port)

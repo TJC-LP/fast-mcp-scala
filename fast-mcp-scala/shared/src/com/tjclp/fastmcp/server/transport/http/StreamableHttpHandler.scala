@@ -348,6 +348,14 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     def shaped(first: JsonRpcMessage): UIO[HttpReply] =
       ModernHttpValidation.errorStatus(first) match
         case Some(status) => abandon.as(HttpReply.Json(status, first.toJson))
+        // The first frame is the final reply: the dispatch has nothing more to say, so the whole
+        // body is known now. Release the request's resources here (the stream's finalizer does it
+        // for a streamed reply) and answer without a stream. The dispatch fiber is past its last
+        // step, so it is signalled rather than awaited: waiting for its exit would park this
+        // request behind a fiber that has nothing left to do.
+        case None if isFinalReply(first, reqId) =>
+          (signalInterrupt(dispatchFiber) *> reqQueue.shutdown)
+            .as(HttpReply.SseComplete(ModernSseHeaders, SseFrame.message(first)))
         case None => ZIO.succeed(sse(Some(first), openedByHeartbeat = false))
     keepAlive match
       case None => reqQueue.take.onInterrupt(abandon).flatMap(shaped)
@@ -390,7 +398,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         // Runs on the normal end of stream too, not just client abort. Task fibers are safe: they
         // are forked under Session.runWithoutSink (TaskRouting), so they never hold this queue.
         .ensuring(dispatchFiber.interrupt *> reqQueue.shutdown)
-    val unbuffered = if modern then List("X-Accel-Buffering" -> "no") else Nil
+    val unbuffered = if modern then ModernSseHeaders else Nil
     HttpReply.Sse(unbuffered ++ sessionHeader(session, isNew), frames, keepAlive)
 
   /** Dispatch a 2026-07-28 request without consulting or mutating the legacy session store. */
@@ -509,6 +517,13 @@ private[fastmcp] object StreamableHttpHandler:
 
   /** Startup validation every backend runs before binding (`HttpRequestGuards.validateSettings`).
     */
+  /** Tell a fiber to stop without waiting for it to exit and without forking a fiber to wait. */
+  private[fastmcp] def signalInterrupt(fiber: Fiber.Runtime[?, ?]): UIO[Unit] =
+    ZIO.fiberIdWith(id => fiber.interruptAsFork(id))
+
+  /** Sent with every 2026-07-28 SSE reply: tells a buffering proxy (nginx) to pass events on. */
+  private val ModernSseHeaders: List[(String, String)] = List("X-Accel-Buffering" -> "no")
+
   def validateSettings(settings: McpServerSettings): IO[IllegalArgumentException, Unit] =
     ZIO
       .fromEither(HttpRequestGuards.validateSettings(settings))

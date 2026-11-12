@@ -173,6 +173,14 @@ object JvmHttpBackend extends HttpTransportBackend:
         Response.status(Status.fromInt(status))
       case HttpReply.Json(status, body, _) =>
         Response.json(body).status(Status.fromInt(status))
+      case HttpReply.SseComplete(_, frame) =>
+        // The whole body is known: a fixed-length response with the content type an SSE stream
+        // carries, instead of zio-http's chunked stream body.
+        Response(
+          Status.Ok,
+          Headers(Header.ContentType(MediaType.text.`event-stream`)),
+          Body.fromString(frame.encode)
+        )
       case HttpReply.Sse(_, frames, keepAlive) =>
         Response.fromServerSentEvents(
           withKeepAlive(frames.map(f => ServerSentEvent(f.data, eventType = f.event)), keepAlive)

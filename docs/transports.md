@@ -92,8 +92,11 @@ and HTTP DELETE are **not used** by the modern path. Closing a response stream i
 dispatch fiber; `subscriptions/listen` uses the same long-lived POST response.
 
 The shape of a modern reply is chosen from the request's first frame: an error that maps to an HTTP
-status is answered as plain JSON with that status (see the table below), anything else opens the
-SSE stream. With `keepAliveInterval` set, that wait is bounded by one interval — a handler that has
+status is answered as plain JSON with that status (see the table below), anything else is answered
+as `text/event-stream`. When that first frame is already the final reply — a call that emitted no
+progress, log or sub-request first, which is most calls — the whole body is known, and it is sent
+with a `Content-Length` rather than as a chunked stream: the same single `message` event, without
+the streaming machinery. Otherwise the SSE stream is opened and carries each frame as it comes. With `keepAliveInterval` set, that wait is bounded by one interval — a handler that has
 produced nothing by then gets its stream opened with a heartbeat, and heartbeats continue until the
 reply, so a proxy in front sees bytes during a long quiet tool call. An error that maps to an HTTP
 status and is raised after the stream opened is delivered in-band (HTTP 200, the JSON-RPC error as

@@ -710,12 +710,26 @@ private[fastmcp] object SocketHttpServer:
           flush()
           !close
         case json: HttpReply.Json => writeJson(json, close)
+        case done: HttpReply.SseComplete => writeSseComplete(done, close)
         case sse: HttpReply.Sse => streamSse(sse, version, close)
 
     private def writeJson(json: HttpReply.Json, close: Boolean): Boolean =
       val body = json.body.getBytes(StandardCharsets.UTF_8)
       appendHead(json.status, json.headers, close)
       buf.ascii("content-type: application/json\r\ncontent-length: ")
+      buf.ascii(Integer.toString(body.length))
+      buf.ascii("\r\n\r\n")
+      buf.append(body)
+      flush()
+      !close
+
+    /** A whole SSE body known up front: one write with a `Content-Length`, valid for HTTP/1.0 and
+      * 1.1 alike, and the connection stays usable.
+      */
+    private def writeSseComplete(done: HttpReply.SseComplete, close: Boolean): Boolean =
+      val body = done.frame.encode.getBytes(StandardCharsets.UTF_8)
+      appendHead(200, done.headers, close)
+      buf.ascii("content-type: text/event-stream\r\ncache-control: no-cache\r\ncontent-length: ")
       buf.ascii(Integer.toString(body.length))
       buf.ascii("\r\n\r\n")
       buf.append(body)

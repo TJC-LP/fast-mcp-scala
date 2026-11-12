@@ -97,6 +97,12 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Changed
 
+- **A reply that is complete at its first frame is sent as a fixed-length body** (TJC-5064), on
+  every HTTP backend. When a 2026-07-28 request's first frame is already its final reply — a call
+  that emitted no progress, log or sub-request first — the response is still `200
+  text/event-stream` with the same single `message` event, but it carries a `Content-Length`
+  instead of being a chunked stream, so no stream is built, pulled or finalized for it. Replies
+  that do emit something first are streamed exactly as before.
 - **A silent 2026-07-28 call opens its SSE reply on the first heartbeat** (#114 D3.4 / D4.8), on
   every HTTP backend. With `keepAliveInterval` set, a modern POST whose handler has produced
   nothing after one interval gets its `text/event-stream` response started with a heartbeat, and

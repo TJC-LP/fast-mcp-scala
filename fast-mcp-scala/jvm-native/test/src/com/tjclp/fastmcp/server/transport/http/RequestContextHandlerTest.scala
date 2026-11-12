@@ -63,6 +63,7 @@ class RequestContextHandlerTest extends AnyFunSuite with Matchers:
   private def frames(reply: HttpReply): List[SseFrame] =
     reply match
       case HttpReply.Sse(_, stream, _) => runUnsafe(stream.runCollect).toList
+      case HttpReply.SseComplete(_, frame) => List(frame)
       case other => fail(s"expected an SSE reply, got $other")
 
   /** The JSON-RPC payloads of an SSE reply, concatenated (heartbeats carry none). */
@@ -278,6 +279,7 @@ class RequestContextHandlerTest extends AnyFunSuite with Matchers:
       )
       .flatMap {
         case HttpReply.Sse(_, stream, _) => stream.runCollect.map(_.map(_.data).mkString("\n"))
+        case HttpReply.SseComplete(_, frame) => ZIO.succeed(frame.data)
         case HttpReply.Json(_, body, _) => ZIO.succeed(body)
         case other => ZIO.fail(new RuntimeException(s"unexpected reply $other"))
       }
@@ -385,6 +387,41 @@ class RequestContextHandlerTest extends AnyFunSuite with Matchers:
     all.lastOption.map(_.data).getOrElse("") should include("-32021")
   }
 
+  // --- a reply that is complete at its first frame needs no stream -------------------------------
+
+  test("a 2026-07-28 call whose first frame is its reply is answered as one complete SSE body") {
+    val handler = makeHandler(McpServerSettings())
+    runUnsafe(handler.post(post(modernHeaders("whoami"), modernCall(70, "whoami")))) match
+      case HttpReply.SseComplete(headers, frame) =>
+        headers should contain("X-Accel-Buffering" -> "no")
+        frame.event shouldBe Some("message")
+        frame.data should include(""""id":70""")
+        frame.data should include("session=request-")
+      case other => fail(s"expected a complete SSE reply, got $other")
+  }
+
+  test("a 2026-07-28 call that emits a notification first still streams, in order") {
+    val handler = makeHandler(McpServerSettings())
+    val body =
+      """{"jsonrpc":"2.0","id":71,"method":"tools/call","params":{"name":"progress-then-done","arguments":{},"_meta":{"progressToken":"p1","io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+    val reply = runUnsafe(handler.post(post(modernHeaders("progress-then-done"), body)))
+    reply match
+      case _: HttpReply.Sse => ()
+      case other => fail(s"expected a streamed SSE reply, got $other")
+    val all = frames(reply)
+    all.size shouldBe 2
+    all.head.data should include("notifications/progress")
+    all.last.data should include("progress-done")
+  }
+
+  test("a legacy session call is still streamed (its response head is not held back)") {
+    val handler = makeHandler(McpServerSettings())
+    val sid = initialize(handler)
+    runUnsafe(handler.post(post(List("mcp-session-id" -> sid), legacyCall(72, "whoami")))) match
+      case _: HttpReply.Sse => ()
+      case other => fail(s"expected a streamed SSE reply, got $other")
+  }
+
   // --- stdio ------------------------------------------------------------------------------------
 
   test("stdio: no headers and no protocol session, whatever the settings list") {
@@ -435,6 +472,10 @@ object RequestContextHandlerTest:
     def slowWhoami(ctx: McpContext): ZIO[Any, Throwable, String] =
       // Read AFTER the pause, i.e. when the creating request is long gone.
       ZIO.sleep(300.millis).as(s"email=${ctx.header("x-forwarded-email").getOrElse("<none>")};")
+
+    @Tool(name = Some("progress-then-done"), description = Some("Reports progress, then answers"))
+    def progressThenDone(ctx: McpContext): ZIO[Any, Throwable, String] =
+      ZIO.foreachDiscard(ctx.progressToken)(t => ctx.sendProgress(t, 0.5)).as("progress-done")
 
     @Tool(name = Some("silent"), description = Some("Says nothing for a while, then answers"))
     def silent(): ZIO[Any, Throwable, String] = ZIO.sleep(1500.millis).as("silent-done")
