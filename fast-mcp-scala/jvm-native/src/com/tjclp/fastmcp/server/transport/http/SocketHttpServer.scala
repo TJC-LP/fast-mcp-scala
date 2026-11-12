@@ -116,6 +116,25 @@ private[fastmcp] object SocketHttpServer:
   /** How often the accept thread looks for connections stuck in a blocked write. */
   private val StallSweepIntervalNanos = 1_000_000_000L
 
+  /** A failed `accept` is retried after a pause that doubles from the first value to the second;
+    * this many failures in a row (about a minute) are taken as a broken listener and end the loop.
+    */
+  private val AcceptRetryMinMs = 10L
+  private val AcceptRetryMaxMs = 1_000L
+  private val AcceptMaxConsecutiveFailures = 70
+
+  /** A reply that leaves request bytes unread is followed by a lingering close: the write side is
+    * shut down and input discarded until the peer closes, goes quiet for [[LingerQuietMs]], or
+    * [[LingerMaxMs]] has passed. The bound is time, not bytes: the discarded bytes cost no memory,
+    * and a byte budget smaller than what the peer is still sending brings back the reset this
+    * exists to avoid.
+    */
+  private val LingerQuietMs = 200
+  private val LingerMaxMs = 5_000L
+
+  /** Socket writes go out in slices this size so the write-stall clock measures progress. */
+  private val WriteSliceBytes = 16 * 1024
+
   /** On shutdown, how long to wait for connection threads to notice their closed sockets. */
   private val DrainTimeoutMs = 5_000L
 
@@ -208,9 +227,17 @@ private[fastmcp] object SocketHttpServer:
 
     def isClosed: Boolean = closed.get
 
-    /** Accept until shut down. Runs on one blocking thread; never returns normally. */
+    /** Accept until shut down. Runs on one blocking thread; never returns normally.
+      *
+      * A failed `accept` is not fatal on its own: running out of file descriptors (`EMFILE` /
+      * `ENFILE`), buffers, or a connection reset before it was accepted are all transient, and
+      * ending the loop on one of them would take the server away from every client. They are logged
+      * and retried with a growing pause; only an unbroken run of failures (a listener that really
+      * is broken) ends the loop, so that case still surfaces instead of leaving a deaf server.
+      */
     @SuppressWarnings(Array("org.wartremover.warts.Var"))
     def acceptLoop(): Nothing =
+      var failures = 0
       while !closed.get do
         // The loop comes round at least every `AcceptPollMs` (gate wait + accept timeout), which
         // makes it the natural place to enforce the write-stall timeout without another thread.
@@ -219,6 +246,7 @@ private[fastmcp] object SocketHttpServer:
           var handedOff = false
           try
             val socket = server.accept()
+            failures = 0
             val connection = new Connection[R](socket, this)
             live.put(connection, java.lang.Boolean.TRUE)
             try
@@ -231,14 +259,21 @@ private[fastmcp] object SocketHttpServer:
               if !handedOff then
                 live.remove(connection)
                 connection.closeSocket()
-          catch case _: SocketTimeoutException => ()
+          catch
+            case _: SocketTimeoutException => ()
+            case e: IOException if !closed.get =>
+              failures += 1
+              if failures >= AcceptMaxConsecutiveFailures then throw e
+              debugLog(s"accept failed ($failures in a row), retrying: $e")
+              Thread.sleep(math.min(AcceptRetryMaxMs, AcceptRetryMinMs << math.min(failures, 7)))
           finally if !handedOff then gate.release()
       throw new SocketException("listener closed")
 
-    /** Close every connection whose current write has been blocked past `writeStallTimeoutMs`: the
-      * peer stopped reading, and a blocking socket write would otherwise hold the connection's slot
-      * until shutdown. Closing the socket fails the write; the thread then exits and releases the
-      * slot. Runs on the accept thread, at most once per [[StallSweepIntervalNanos]].
+    /** Close every connection whose current write slice has been blocked past
+      * `writeStallTimeoutMs`: the peer stopped reading, and a blocking socket write would otherwise
+      * hold the connection's slot until shutdown. Closing the socket fails the write; the thread
+      * then exits and releases the slot. Runs on the accept thread, at most once per
+      * [[StallSweepIntervalNanos]].
       */
     private def reapStalledWrites(): Unit =
       val now = java.lang.System.nanoTime()
@@ -342,12 +377,20 @@ private[fastmcp] object SocketHttpServer:
       java.lang.System.arraycopy(a, 0, bytes, length, a.length)
       length += a.length
 
-    /** Write everything pending in one call and reset; drops a buffer a large reply grew. */
-    def flushTo(out: OutputStream): Unit =
+    /** Write everything pending and reset; drops a buffer a large reply grew. A small reply is one
+      * `write`; a large one goes out in [[WriteSliceBytes]] slices, with `beforeSlice` called ahead
+      * of each so the caller can tell a slow transfer (slices keep completing) from a stalled one.
+      */
+    def flushTo(out: OutputStream, beforeSlice: () => Unit): Unit =
       if length > 0 then
         val n = length
         length = 0
-        out.write(bytes, 0, n)
+        var offset = 0
+        while offset < n do
+          val slice = math.min(WriteSliceBytes, n - offset)
+          beforeSlice()
+          out.write(bytes, offset, slice)
+          offset += slice
         out.flush()
         if bytes.length > 4 * FlushThresholdBytes then bytes = new Array[Byte](initial)
 
@@ -378,12 +421,20 @@ private[fastmcp] object SocketHttpServer:
     private val out: OutputStream = socket.getOutputStream
     private val idleTimeoutMs = owner.config.idleTimeoutMs
 
-    /** `nanoTime` at which the write in progress began, or 0 when this thread is not writing — read
-      * by the accept thread's stalled-write sweep.
+    /** `nanoTime` at which the write slice in progress began, or 0 when this thread is not writing
+      * — read by the accept thread's stalled-write sweep. It is re-stamped before every slice, so
+      * it measures time without progress, not the length of the transfer: a client on a slow link
+      * that is still reading a multi-megabyte reply is never cut off.
       */
     @volatile private var writeStarted = 0L
 
-    /** How long the write in progress has been blocked, or 0 when there is none. */
+    private val stampWrite: () => Unit = () =>
+      writeStarted = math.max(1L, java.lang.System.nanoTime())
+
+    /** Set when a reply left request bytes unread: the connection then gets a lingering close. */
+    private var unreadRequestBytes = false
+
+    /** How long the write slice in progress has been blocked, or 0 when there is none. */
     def writeBlockedNanos(now: Long): Long =
       val started = writeStarted
       if started == 0L then 0L else now - started
@@ -393,8 +444,7 @@ private[fastmcp] object SocketHttpServer:
       */
     private def flush(): Unit =
       if buf.size > 0 then
-        writeStarted = math.max(1L, java.lang.System.nanoTime())
-        try buf.flushTo(out)
+        try buf.flushTo(out, stampWrite)
         finally writeStarted = 0L
     private val buf = new OutBuffer(4 * 1024)
 
@@ -425,8 +475,29 @@ private[fastmcp] object SocketHttpServer:
         // connection.
         case NonFatal(e) => debugLog(s"connection ended: $e")
       finally
+        if unreadRequestBytes then lingerClose()
         closeSocket()
         owner.release(this)
+
+    /** Close after a reply that left request bytes unread (a body refused on its head, a body cut
+      * off by a cap or a deadline, a malformed request). Closing a socket that still holds unread
+      * input makes the kernel send a reset, which can discard the very reply the peer has not read
+      * yet and fails its in-flight send — so the client would see a connection error instead of the
+      * 413 / 403 / 408. Instead: shut down our write side (the peer reads the reply, then EOF), and
+      * discard what it is still sending until it closes, goes quiet, or the time budget runs out.
+      * The slot is held at most [[LingerMaxMs]] longer.
+      */
+    private def lingerClose(): Unit =
+      try
+        socket.shutdownOutput()
+        socket.setSoTimeout(LingerQuietMs)
+        val deadline = java.lang.System.nanoTime() + LingerMaxMs * 1_000_000L
+        var done = false
+        while !done && java.lang.System.nanoTime() < deadline do
+          if input.discard() < 0 then done = true
+      catch
+        // Quiet for LingerQuietMs, reset, or already closed: nothing more to drain.
+        case NonFatal(_) => ()
 
     /** Serve one request; `true` when the connection can carry another. An idle timeout while
       * waiting for the next request surfaces as a `SocketTimeoutException`, which closes the
@@ -455,9 +526,11 @@ private[fastmcp] object SocketHttpServer:
             case Some(reply) =>
               // Answered on the head alone. A declared body that was never read leaves unknown
               // bytes on the socket: close after the reply so they are never parsed as a request.
+              if framing != Framing.Empty then unreadRequestBytes = true
               writeReply(reply, head.version, head.wantsClose || framing != Framing.Empty)
             case None if head.method != "POST" =>
               // GET / DELETE carry no body the handler reads; a declared one is left unread.
+              if framing != Framing.Empty then unreadRequestBytes = true
               handle(request, head, head.wantsClose || framing != Framing.Empty)
             case None =>
               readBody(head, framing) match
@@ -585,6 +658,8 @@ private[fastmcp] object SocketHttpServer:
 
     /** Transport-level rejection: the same JSON-RPC error body the MCP layer uses, then close. */
     private def reject(rejection: Rejection): Boolean =
+      // Whatever the peer was sending (the rest of a malformed head, a body over the cap) is unread.
+      unreadRequestBytes = true
       val _ = writeJson(
         StreamableHttpHandler.transportError(rejection.status, rejection.message),
         close = true
@@ -710,8 +785,19 @@ private[fastmcp] object SocketHttpServer:
     /** `nanoTime` by which the request being read must be complete; armed by its first byte. */
     private var deadline = Long.MaxValue
 
+    /** The deadline was armed by ignorable blank lines only; the request line re-arms it. */
+    private var armedByBlankLines = false
+
     /** Bytes read from the socket but not yet consumed. */
     def available: Int = end - start
+
+    /** Drop everything buffered and one more read's worth; the count read, or -1 at EOF. For the
+      * lingering close, where the bytes are never parsed.
+      */
+    def discard(): Int =
+      start = 0
+      end = 0
+      in.read(buf, 0, buf.length)
 
     /** `true` once the request being read has overrun its deadline. The socket's own read timeout
       * only bounds one read, so a peer sending a byte at a time would otherwise never time out.
@@ -719,11 +805,29 @@ private[fastmcp] object SocketHttpServer:
     def timedOut: Boolean = java.lang.System.nanoTime() > deadline
 
     /** The request has been read (or abandoned): the next one gets a fresh deadline. */
-    def endRequest(): Unit = deadline = Long.MaxValue
+    def endRequest(): Unit =
+      deadline = Long.MaxValue
+      armedByBlankLines = false
 
+    private def freshDeadline(): Long =
+      java.lang.System.nanoTime() + requestReadTimeoutMs.toLong * 1_000_000L
+
+    /** The first byte of the request line starts the request's clock — afresh if only blank lines
+      * had started one.
+      */
     private def armDeadline(): Unit =
+      if deadline == Long.MaxValue || armedByBlankLines then
+        deadline = freshDeadline()
+        armedByBlankLines = false
+
+    /** Skipped blank lines start a clock too, so a peer that sends nothing but an occasional CRLF —
+      * each inside the per-read timeout, none of it a request — cannot hold the connection past
+      * `requestReadTimeoutMs`.
+      */
+    private def armDeadlineForBlankLines(): Unit =
       if deadline == Long.MaxValue then
-        deadline = java.lang.System.nanoTime() + requestReadTimeoutMs.toLong * 1_000_000L
+        deadline = freshDeadline()
+        armedByBlankLines = true
 
     /** One blocking read appended to the buffer; the count read, or -1 at EOF. Compacts or grows
       * the buffer first, so byte offsets *relative to `start`* stay valid across calls.
@@ -754,12 +858,15 @@ private[fastmcp] object SocketHttpServer:
       while result.isEmpty do
         // RFC 9112 §2.2: ignore empty lines received before the request-line, so a stray extra
         // CRLF from a proxy is not taken as an (empty) head terminator.
+        var skippedBlank = false
         while start < end && (buf(start) == '\r' || buf(start) == '\n') do
           start += 1
           scanned = math.max(0, scanned - 1)
+          skippedBlank = true
         // The first byte of a request starts its clock (bytes a liveness probe buffered count
-        // from the moment the request loop gets to them).
+        // from the moment the request loop gets to them); blank lines alone start one as well.
         if available > 0 then armDeadline()
+        else if skippedBlank then armDeadlineForBlankLines()
         headEnd(start + scanned) match
           case Some((headEnd, _)) if headEnd - start > max =>
             result = Some(Left(Rejection(431, s"Request head exceeds $max bytes")))

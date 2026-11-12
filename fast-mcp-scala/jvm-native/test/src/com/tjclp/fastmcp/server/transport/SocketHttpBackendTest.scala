@@ -619,6 +619,75 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     }
   }
 
+  test("a slow client that keeps reading gets its whole large reply, however long it takes") {
+    // The write-stall clock measures time without progress, not the length of the transfer: this
+    // download takes about three times the stall timeout, but bytes keep flowing. (The timeout
+    // is 2 s rather than something tighter because progress on the wire is lumpy: a receiver
+    // only reopens its TCP window after it has drained a good part of its buffer.)
+    val backend = new SocketHttpBackend(summon[TransportBackend], writeStallTimeout = 2.seconds)
+    withServer(baseSettings.copy(stateless = true), backend) { port =>
+      val client = new RawClient(port, readTimeoutMs = 60_000)
+      val bigFrame =
+        """{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"big","arguments":{"megabytes":8}}}"""
+      client.send(post(bigFrame, accept = "application/json"))
+      val (status, headers) = client.readHead()
+      status shouldBe 200
+      val total = headers.getOrElse("content-length", fail("no content-length")).toInt
+      total should be > 8 * 1024 * 1024
+      val slice = 128 * 1024
+      var received = 0
+      while received < total do
+        val n = math.min(slice, total - received)
+        client.readExactly(n).length shouldBe n
+        received += n
+        Thread.sleep(100) // 64+ slices x 100 ms: over 6 s, three times the stall timeout
+      received shouldBe total
+      client.close()
+    }
+  }
+
+  test("a body over the cap that the client is still sending gets its 413, not a reset") {
+    withServer() { port =>
+      val client = new RawClient(port)
+      val declared = baseSettings.maxRequestBodyBytes + 512 * 1024
+      // No `Expect: 100-continue`: the client streams the whole body regardless. The server
+      // refuses on the head, then must keep reading (a lingering close) so its reply survives.
+      client.send(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" +
+          s"Accept: application/json, text/event-stream\r\nContent-Length: $declared\r\n\r\n"
+      )
+      val chunk = "x" * (64 * 1024)
+      var sent = 0
+      while sent < declared do
+        client.send(chunk)
+        sent += chunk.length
+      val reply = client.readReply()
+      reply.status shouldBe 413
+      reply.header("connection") shouldBe Some("close")
+      client.close()
+    }
+  }
+
+  test("a client that sends only blank lines cannot outlast the request-read deadline") {
+    val backend =
+      new SocketHttpBackend(summon[TransportBackend], requestReadTimeout = 400.millis)
+    withServer(backend = backend) { port =>
+      val client = new RawClient(port)
+      // Each CRLF is ignorable and arrives well inside the per-read timeout; without a clock on
+      // blank lines this connection would hold its slot for as long as the client cared to.
+      var i = 0
+      while i < 6 do
+        try client.send("\r\n")
+        catch case _: java.io.IOException => () // already closed by the server: what we want
+        Thread.sleep(150)
+        i += 1
+      val reply = client.readReply()
+      reply.status shouldBe 408
+      client.atEof() shouldBe true
+      client.close()
+    }
+  }
+
   test("a request dribbled in past the request-read deadline is answered 408") {
     val backend =
       new SocketHttpBackend(summon[TransportBackend], requestReadTimeout = 400.millis)
