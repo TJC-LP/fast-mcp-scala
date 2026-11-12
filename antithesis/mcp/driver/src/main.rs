@@ -55,9 +55,9 @@ struct Sess {
     sid: String,
     /// The node's boot id when the session was opened, if a reply has shown it.
     boot: Option<String>,
-    /// The flood rule filled this node's session store after the session was opened, so the cap
-    /// may have evicted it.
-    evictable: bool,
+    /// The driver's sequence number when the session was opened. A flood of the node that
+    /// started later may have evicted it at the cap.
+    opened: u64,
 }
 
 struct TaskRec {
@@ -73,6 +73,11 @@ struct Driver {
     nodes: Vec<Node>,
     seq: AtomicU64,
     sessions: Mutex<Vec<Sess>>,
+    /// Sessions the driver ended itself (DELETE). Workers share sessions, so one may still be
+    /// using a session another has just ended; its 404 is then expected.
+    ended: Mutex<Vec<String>>,
+    /// Per node: the sequence number at which the latest flood of its session store began.
+    flooded: Vec<AtomicU64>,
     tasks: Mutex<Vec<TaskRec>>,
     /// Rules hold this shared while they act; the eventually takes it exclusively.
     quiet: RwLock<()>,
@@ -212,7 +217,7 @@ impl Driver {
         if ack.status != 202 {
             return (a.status, None);
         }
-        (a.status, Some(Sess { node, sid, boot: None, evictable: false }))
+        (a.status, Some(Sess { node, sid, boot: None, opened: id }))
     }
 
     /// A session on `node` for a rule to use: one the driver holds, or a new one.
@@ -256,15 +261,17 @@ impl Driver {
     fn judge_lost_session(&self, s: &Sess) {
         self.forget_session(&s.sid);
         let now = self.boot_of(s.node);
-        let details = json!({"node": self.nodes[s.node].name, "opened_under": s.boot, "boot_now": now, "evictable": s.evictable});
+        // Read after the 404: a DELETE or a flood that explains it has been recorded by now.
+        let ended = lock(&self.ended).iter().any(|sid| sid == &s.sid);
+        let evictable = self.flooded[s.node].load(Ordering::SeqCst) > s.opened;
+        let details = json!({"node": self.nodes[s.node].name, "opened_under": s.boot, "boot_now": now, "evictable": evictable, "ended_by_driver": ended});
         if let (Some(then), Some(now)) = (&s.boot, &now) {
             let restarted = then != now;
             assert_always!(
-                restarted || s.evictable,
-                "a live session is lost only when its node restarted or the session cap evicted it",
+                restarted || evictable || ended,
+                "a live session is lost only when its node restarted, the session cap evicted it, or it was deleted",
                 &details
             );
-            assert_sometimes!(restarted, "a session is lost to a node restart", &details);
         }
     }
 
@@ -308,7 +315,40 @@ impl Driver {
             return None;
         }
         let (frames, pings) = a.messages();
+        let answered = frames.iter().any(|f| f.get("id").and_then(Value::as_u64) == Some(id));
+        if let Some(s) = &sess {
+            // A legacy call answered 200 whose stream ended without a reply: terminating a
+            // session (DELETE, eviction at the cap) interrupts its calls in flight, and by then
+            // the response may already be open, so that is how such a call ends. It is right
+            // only then: the session must be gone. Judged on every legacy call, so the property
+            // is exercised whether or not a call is ever cut.
+            let gone = if answered { None } else { self.session_gone(s) };
+            let details = json!({"node": self.nodes[node].name, "tool": tool, "answered": answered, "session_gone": gone, "body": a.head()});
+            assert_always!(
+                answered || gone != Some(false),
+                "a legacy call ends without a reply only when its session was terminated",
+                &details
+            );
+            assert_sometimes!(!answered && gone == Some(true), "a call in flight is cut by its session's termination", &details);
+            if !answered {
+                return None;
+            }
+        }
         Some((id, a, frames, pings, sess))
+    }
+
+    /// Whether the session is gone (404 to a fresh call). None when the node does not answer.
+    fn session_gone(&self, s: &Sess) -> Option<bool> {
+        let id = self.next();
+        let probe = self.legacy_tool(s, id, "echo", json!({"token": format!("t{id}")}), Value::Null, Duration::from_secs(3));
+        match probe.status {
+            -1 => None,
+            404 => {
+                self.forget_session(&s.sid);
+                Some(true)
+            }
+            _ => Some(false),
+        }
     }
 
     /// Stops faults for good, waits for the nodes, checks what must hold once faults stop, and
@@ -491,18 +531,29 @@ impl Driver {
     #[rule]
     fn task_start(&self, tc: TestCase) {
         let node = tc.draw(gs::integers::<usize>().max_value(self.nodes.len() - 1));
-        let millis = tc.draw(gs::sampled_from(vec![0u64, 200, 1000]));
+        let millis = tc.draw(gs::sampled_from(vec![0u64, 200, 1000, 3000]));
+        // A client that does not declare the tasks extension must be answered directly.
+        let declares = tc.draw(gs::weighted_booleans(0.7));
         let Some(_g) = self.enter() else { return };
-        let meta = json!({"io.modelcontextprotocol/clientCapabilities": {"extensions": {TASKS_EXT: {}}}});
+        let meta = if declares {
+            json!({"io.modelcontextprotocol/clientCapabilities": {"extensions": {TASKS_EXT: {}}}})
+        } else {
+            json!({})
+        };
         let Some((id, a, frames, _, _)) =
             self.call(node, true, 0, "task_echo", json!({"millis": millis}), meta, Duration::from_secs(10))
         else {
             return;
         };
-        let details = json!({"node": self.nodes[node].name, "millis": millis, "body": a.head()});
+        let details = json!({"node": self.nodes[node].name, "millis": millis, "declares": declares, "body": a.head()});
         let reply = frames.iter().find(|f| f.get("id").and_then(Value::as_u64) == Some(id));
         let task_id = reply.and_then(|r| find(r, "taskId")).and_then(Value::as_str).map(str::to_owned);
         assert_sometimes!(task_id.is_some(), "an optional-task tool answers with a task handle", &details);
+        assert_always!(
+            declares || task_id.is_none(),
+            "a client that did not declare the tasks extension is never handed a task",
+            &details
+        );
         match task_id {
             Some(tid) => {
                 let boot = self.boot_of(node);
@@ -523,7 +574,7 @@ impl Driver {
     #[rule(weight = 2.0)]
     fn task_poll(&self, tc: TestCase) {
         let pick = tc.draw(gs::integers::<u64>());
-        let cancel = tc.draw(gs::weighted_booleans(0.1));
+        let cancel = tc.draw(gs::weighted_booleans(0.3));
         let Some(_g) = self.enter() else { return };
         let (node, tid, token, boot, terminal) = {
             let tasks = lock(&self.tasks);
@@ -545,11 +596,18 @@ impl Driver {
         let reply = frames.iter().find(|f| f.get("id").and_then(Value::as_u64) == Some(id));
         let details = json!({"node": self.nodes[node].name, "task": tid, "was": terminal, "status": a.status, "body": a.head()});
         let status = reply.and_then(|r| r.get("result")).and_then(|r| find(r, "status")).and_then(Value::as_str).map(str::to_owned);
+        // A handle the node no longer knows is right only if the node restarted since. When
+        // either boot id is unknown, nothing is concluded.
+        let restarted = match (&status, &boot) {
+            (None, Some(then)) => self.boot_of(node).map(|now| &now != then),
+            _ => None,
+        };
+        assert_always!(
+            status.is_some() || restarted != Some(false),
+            "a task handle stays valid while its node keeps running",
+            &details
+        );
         let Some(status) = status else {
-            // The handle is unknown to the node: right only if the node restarted since.
-            if let (Some(then), Some(now)) = (boot, self.boot_of(node)) {
-                assert_always!(then != now, "a task handle stays valid while its node keeps running", &details);
-            }
             lock(&self.tasks).retain(|t| t.id != tid);
             return;
         };
@@ -586,6 +644,14 @@ impl Driver {
             all[(pick as usize) % all.len()].clone()
         };
         self.forget_session(&s.sid);
+        {
+            // Recorded before the DELETE is sent, so no worker can see its effect unexplained.
+            let mut ended = lock(&self.ended);
+            if ended.len() >= 256 {
+                ended.remove(0);
+            }
+            ended.push(s.sid.clone());
+        }
         let headers = vec![("mcp-session-id", s.sid.clone())];
         let a = self.http.send("DELETE", &self.nodes[s.node].url(), &headers, None, Duration::from_secs(5));
         self.judge(s.node, &a, "DELETE");
@@ -627,9 +693,8 @@ impl Driver {
             return;
         }
         let Some(_g) = self.enter() else { return };
-        for s in lock(&self.sessions).iter_mut().filter(|s| s.node == node) {
-            s.evictable = true;
-        }
+        // Recorded before the first initialize of the flood is sent.
+        self.flooded[node].store(self.next(), Ordering::SeqCst);
         let mut admitted = 0;
         for _ in 0..FLOOD {
             let (status, opened) = self.open_session(node, Duration::from_secs(3));
@@ -816,11 +881,14 @@ fn startup() -> Driver {
         .map(|(name, base)| Node { name: name.trim().to_owned(), base: base.trim().trim_end_matches('/').to_owned() })
         .collect();
     assert!(!nodes.is_empty(), "MCP_NODES names no node");
+    let flooded = nodes.iter().map(|_| AtomicU64::new(0)).collect();
     let driver = Driver {
         http: Client::new(),
         nodes,
         seq: AtomicU64::new(0),
         sessions: Mutex::new(Vec::new()),
+        ended: Mutex::new(Vec::new()),
+        flooded,
         tasks: Mutex::new(Vec::new()),
         quiet: RwLock::new(()),
         ending: AtomicBool::new(false),

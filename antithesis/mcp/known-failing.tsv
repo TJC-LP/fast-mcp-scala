@@ -5,3 +5,4 @@ a chunked body with bare LF framing is refused	find_01AUuNgY4ScFXJjHFvUqnpU7	Soc
 a request with conflicting duplicate routing headers is refused	find_0149aHfa7kCu5REzbDVtikEZ	Duplicate Mcp-Method/Mcp-Name headers resolved first-wins
 a tools/call argument outside the declared input schema is rejected	find_014A3ABnWQhtbo1fNHZ9bx5f	Declared tool input-schema constraints are not enforced
 a tool handler only sees arguments that satisfy its declared input schema	find_014A3ABnWQhtbo1fNHZ9bx5f	The same finding, seen from inside the handler
+a dropped GET stream frees its slot	find_0167FEYnDBDD6wjGCmNA4e2j	GET slot released only by the response stream's finalizer; reproduced on the netty backend when the client closes right after the response head
