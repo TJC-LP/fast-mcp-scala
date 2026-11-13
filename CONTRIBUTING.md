@@ -93,11 +93,105 @@ Every pull request must pass:
   is what `--frozen-lockfile` enforces).
 - **Native stdio smoke** (`native.yml`) — `scripts/native-smoke.sh [binary]` drives a stdio binary
   through the full MCP handshake.
+- **Binary compatibility** (`ci.yml`, job `binary-compat`) — `./mill fast-mcp-scala.mimaCheck`
+  compares the JVM jar with every released 1.x version and fails on any finding that
+  `.github/mima-exclusions` does not list with a reason. See
+  [Binary compatibility](#binary-compatibility).
 - **OSV advisories** (`osv.yml`) — weekly, and on pull requests that change `build.mill` or
   `fast-mcp-scala/package.mill`: `scripts/osv-scan.sh` queries OSV.dev for the production classpath
   of the three published modules and fails on any advisory rated MODERATE or higher (or of unknown
   severity). The rule and the `.github/osv-ignore` format for an accepted advisory are documented
   in the script header; run it locally with `scripts/osv-scan.sh`.
+
+## Binary compatibility
+
+A jar compiled against any released 1.x version must link against the current sources. Two things
+check that, both on the JVM artifact:
+
+```bash
+./mill fast-mcp-scala.mimaCheck                    # MiMa against every released 1.x version
+./mill fast-mcp-scala.jvm.test.testOnly com.tjclp.fastmcp.compat.BinaryCompatibilityTest
+```
+
+- **`mimaCheck`** runs [MiMa](https://github.com/lightbend-labs/mima) between the current jar and
+  each version in `Versions.binaryCompatBaselines` (`build.mill`, the one place the previous
+  versions are stated). Mill resolves MiMa (`Versions.mimaCore`) and the released jars itself; no
+  other tool is needed. The report prints one line per finding: `accepted` when
+  `.github/mima-exclusions` lists it, `OPEN` when it does not. Any `OPEN` line fails the task.
+- **`BinaryCompatibilityTest`** is the link-time proof and runs with the JVM tests. It calls
+  `fast-mcp-scala/compat/client`, a small program compiled against the released
+  `Versions.binaryCompatClient` jar, on the current classes, and it looks up every old signature
+  by its exact JVM descriptor. `downstream.SourceCompatibilityTest` checks from outside the
+  `com.tjclp.fastmcp` package that the same call shapes still compile and mean the same.
+
+### When you change a public signature
+
+Adding a parameter to a public constructor or method, or a field to a case class, removes the old
+JVM signature. Keep it:
+
+1. Add the new parameter **at the end**, with a default. The positional default getters
+   (`$default$N`) and extractor positions of the existing parameters then keep their meaning.
+2. Add a forwarder with the old parameter list, marked `private[fastmcp]`. That is public in
+   bytecode, so old jars link, and invisible to source code, so no call becomes ambiguous. For a
+   case class this is three forwarders: a secondary constructor, an `apply` in the companion, and
+   a `copy`. The constructor and `apply` give the new field its default; `copy` passes the new
+   field of `this` on. Copy the shape from `LimitSettings` in `McpServerSettings.scala`.
+3. Give each forwarder a one-line comment: binary compatibility with which release, and which
+   signature.
+4. Add the old signature to `BinaryCompatibilityTest`.
+5. Run `mimaCheck`. It reports the forwarder as `MethodNoLongerCheckedProblem`: the member links,
+   but MiMa will not check it against a baseline in which it is already package-private. List it
+   under "Hidden forwarders" in `.github/mima-exclusions`.
+
+A new abstract member on a trait users implement (`McpServerCore`) breaks their classes. Give it a
+default implementation. If the default cannot do the work, make it fail with a message that names
+the implementation.
+
+Do not use `@unroll` for this: it is experimental in Scala 3.9, and the library does not ask its
+users for `-experimental`.
+
+### Adding an exclusion
+
+An exclusion is for a finding that cannot break a program compiled against a release. Add one line
+to `.github/mima-exclusions`, with the two names exactly as the report prints them and the reason:
+
+```
+<ProblemType> <member>  # <why no program compiled against a release can hit this>
+```
+
+A line without a reason fails the check. So does a line that matches no finding, so the file
+cannot collect stale entries. A real break (a removed or changed public signature with no
+forwarder) belongs in a major release, not in this file.
+
+### What MiMa does not see
+
+- **Members that are `private[fastmcp]` in the baseline.** MiMa skips them. That is why no
+  version is ever removed from `binaryCompatBaselines` before 2.0: a forwarder added for 1.0.1
+  is checked only by the comparison against 1.0.1, where the signature was public. A member that
+  was already `private[fastmcp]` in every release is not API and may change.
+- **Generic signatures.** A finding that only says the generic signature differs
+  (`IncompatibleSignatureProblem`) is printed and not counted: the erased signature is the same,
+  so linking is unaffected, and scalac writes that attribute differently in an incremental build.
+- **What macro-generated code calls.** Code expanded by the annotation and schema macros calls
+  run-time helpers in `com.tjclp.fastmcp.macros` (`MacroUtils.injectSchemaMetadata`,
+  `invokeFunctionWithArgs`, the `inline$...` accessors). `MacroUtils` is `private[macros]`, so
+  MiMa skips it, yet a jar compiled against a release still calls it. These signatures are pinned
+  in `BinaryCompatibilityTest`; treat them as public.
+- **`Mirror`-derived type classes.** A type class that a jar derived from the `Mirror` of a case
+  class (a JSON codec for `LimitSettings`, say) knows the fields of the release it was compiled
+  against. After a field is added, its encoder omits the new field and its decoder fails in
+  `fromProduct`. Recompiling fixes it. `BinaryCompatibilityTest` pins this as a known limit.
+- **Behaviour.** A signature can stay while its meaning changes. Reordering parameters of the
+  same type, or changing a default, links and silently does something else. New parameters go at
+  the end, and a changed default is a CHANGELOG entry.
+- **Scala.js and Scala Native.** MiMa reads JVM class files. The two other artifacts are built
+  from the same `shared/` sources, where every forwarder lives, so they follow the JVM result;
+  their platform trees (`js/src`, `native/src`) are not checked by any tool.
+
+### After a release
+
+Append the released version to `Versions.binaryCompatBaselines`. Leave
+`Versions.binaryCompatClient` where it is.
 
 ## Consuming a local build
 
