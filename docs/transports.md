@@ -180,7 +180,7 @@ check. The query string is not part of the path: `/mcp?x=1` is the endpoint, and
 ignored. Because the match is exact, `runHttp()` refuses at startup an `httpEndpoint` that no
 request path could equal: one containing `?`, `#`, `%`, whitespace or a control character, a
 `.` / `..` segment, or any character a client would percent-encode (non-ASCII, `"`, `<`, `[`,
-`\\` and the like). Letters, digits and `-._~!$&'()*+,;=:@` are what a path segment may hold.
+`\` and the like). Letters, digits and `-._~!$&'()*+,;=:@` are what a path segment may hold.
 
 What each backend compares is the path as its HTTP layer hands it over. The socket backend
 compares the request target exactly as written. zio-http normalises the target first — it decodes
