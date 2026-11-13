@@ -298,6 +298,14 @@ case "$PLATFORM" in
     fi
     ;;
 esac
+# A clean SIGTERM is not an error: the server must not log its own shutdown interrupt at ERROR
+# (GH #114 D3.13 — `level=ERROR ... InterruptedException: Interrupted by thread zio-fiber-…`, one
+# line per shutdown, which trips log alerting on hosted deployments).
+if grep -q "level=ERROR.*InterruptedException" "$LOG"; then
+  echo "$PLATFORM FAIL: the server logged its shutdown interrupt at ERROR (suite verdict: $RC)" >&2
+  grep -m1 "level=ERROR.*InterruptedException" "$LOG" | cut -c1-400 >&2
+  exit 1
+fi
 if [ "$PLATFORM" = "native" ]; then
   # Native binaries can shed threads on GraalVM UnsupportedFeatureError while the suite still
   # passes on the surviving event loops — treat any such error as a failure.

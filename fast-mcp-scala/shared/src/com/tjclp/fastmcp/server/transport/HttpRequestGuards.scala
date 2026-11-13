@@ -111,8 +111,8 @@ private[fastmcp] object HttpRequestGuards:
     "/" + settings.httpEndpoint.stripPrefix("/")
 
   /** Whether a request path (query string already removed) names the MCP endpoint: an exact,
-    * case-sensitive string match. `/mcp/`, `/MCP` and `/mcp/extra` are not `/mcp`. Anything else
-    * is 404 on every backend, before any other gate.
+    * case-sensitive string match. `/mcp/`, `/MCP` and `/mcp/extra` are not `/mcp`. Anything else is
+    * 404 on every backend, before any other gate.
     */
   def pathMatches(path: String, settings: McpServerSettings): Boolean =
     path == endpointPath(settings)
@@ -120,16 +120,17 @@ private[fastmcp] object HttpRequestGuards:
   /** Why `httpEndpoint` can never be matched by [[pathMatches]], if so. The endpoint is compared
     * with the request path as written, so a `?` or `#` (never part of a path), a `%` (an escape a
     * backend or proxy may or may not decode before the comparison), whitespace or a control
-    * character (not sendable in a request line), and a `.` / `..` segment (resolved away by
-    * clients and by Bun before the server sees the path) each make a route that silently answers
-    * 404 to every request: refused at startup instead.
+    * character (not sendable in a request line), and a `.` / `..` segment (resolved away by clients
+    * and by Bun before the server sees the path) each make a route that silently answers 404 to
+    * every request: refused at startup instead.
     */
   def invalidEndpoint(httpEndpoint: String): Option[String] =
     def refuse(what: String) =
       Some(s"httpEndpoint '$httpEndpoint' can never match a request path: it contains $what")
     if httpEndpoint.exists(ch => ch.isWhitespace || Character.isISOControl(ch)) then
       refuse("whitespace or a control character")
-    else if httpEndpoint.indexOf('?') >= 0 then refuse("'?' (a query string is not part of the path)")
+    else if httpEndpoint.indexOf('?') >= 0 then
+      refuse("'?' (a query string is not part of the path)")
     else if httpEndpoint.indexOf('#') >= 0 then refuse("'#'")
     else if httpEndpoint.indexOf('%') >= 0 then
       refuse("'%' (percent-escapes are compared as written; write the path unescaped)")
@@ -180,8 +181,9 @@ private[fastmcp] object HttpRequestGuards:
 
   /** The gate of every request that is not a POST, on headers only and in this order: 403
     * host/origin → 405 for a method the endpoint does not serve ([[allowedMethods]]; `Allow` lists
-    * them) → 405 for a GET or DELETE that declares MCP 2026-07-28, which has neither (`Allow: POST`). `None`
-    * admits a GET or DELETE to the legacy session adapter. `method` is the upper-case token.
+    * them) → 405 for a GET or DELETE that declares MCP 2026-07-28, which has neither (`Allow:
+    * POST`). `None` admits a GET or DELETE to the legacy session adapter. `method` is the
+    * upper-case token.
     */
   def nonPostGate(
       method: String,
@@ -280,8 +282,8 @@ private[fastmcp] object HttpRequestGuards:
   def acceptAllows(accept: Option[String], mediaType: String): Boolean =
     accept.map(_.trim).filter(_.nonEmpty).forall(acceptQuality(_, mediaType).exists(_ > 0.0))
 
-  /** The 2026-07-28 `Accept` rule: the header is required and must make both `application/json`
-    * and `text/event-stream` acceptable.
+  /** The 2026-07-28 `Accept` rule: the header is required and must make both `application/json` and
+    * `text/event-stream` acceptable.
     */
   def modernAcceptOk(accept: Option[String]): Boolean =
     accept.exists { value =>
@@ -291,11 +293,12 @@ private[fastmcp] object HttpRequestGuards:
 
   /** RFC 9110 §12.5.1: the quality `accept` gives `mediaType` (a lower-case `type/subtype`), or
     * `None` when no media range matches it. The most specific matching range decides — the exact
-    * type over its subtype wildcard (`text/` + `*`) over the any-type wildcard — so `text/event-stream;q=0` next to the
-    * any-type wildcard refuses event streams while accepting everything else. Ranges are compared case-insensitively and
-    * their other parameters are ignored; a weight is `q=` followed by a number in 0..1, `q=0`
-    * meaning "not acceptable". A weight that does not parse counts as 1 (the range was listed), and
-    * among equally specific ranges the highest weight wins.
+    * type over its subtype wildcard (`text/` + `*`) over the any-type wildcard — so
+    * `text/event-stream;q=0` next to the any-type wildcard refuses event streams while accepting
+    * everything else. Ranges are compared case-insensitively and their other parameters are
+    * ignored; a weight is `q=` followed by a number in 0..1, `q=0` meaning "not acceptable". A
+    * weight that does not parse counts as 1 (the range was listed), and among equally specific
+    * ranges the highest weight wins.
     */
   def acceptQuality(accept: String, mediaType: String): Option[Double] =
     val slash = mediaType.indexOf('/')

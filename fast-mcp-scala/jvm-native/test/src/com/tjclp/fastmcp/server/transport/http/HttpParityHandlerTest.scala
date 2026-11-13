@@ -4,6 +4,7 @@ package server.transport.http
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import zio.*
+import zio.json.*
 
 import com.tjclp.fastmcp.{*, given}
 import com.tjclp.fastmcp.server.transport.TransportBackend
@@ -28,8 +29,12 @@ class HttpParityHandlerTest extends AnyFunSuite with Matchers:
   private val modernDiscoverFrame =
     """{"jsonrpc":"2.0","id":7,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"t","version":"1.0"}}}}"""
 
-  private def makeHandler(settings: McpServerSettings = McpServerSettings()) =
+  private def makeHandler(
+      settings: McpServerSettings = McpServerSettings(),
+      register: McpServer[Any] => ZIO[Any, Throwable, Any] = _ => ZIO.unit
+  ) =
     val server = McpServer.typed[Any]("ParityT", "0.1.0", settings)
+    val _ = runUnsafe(register(server))
     runUnsafe(
       server.buildRouter.flatMap { router =>
         StreamableHttpHandler.make(router, server.settings, summon[TransportBackend].randomId())
@@ -400,4 +405,109 @@ class HttpParityHandlerTest extends AnyFunSuite with Matchers:
     bodyOf(reply) should include(""""code":-32022""")
     bodyOf(reply) should include(""""supported":["2026-07-28"]""")
     bodyOf(reply) should include(""""requested":"2025-11-25"""")
+  }
+
+  // --- D6.19: a request that ends without a reply is logged ------------------------------------
+
+  case class HoldArgs(note: Option[String] = None)
+  given JsonDecoder[HoldArgs] = DeriveJsonDecoder.gen[HoldArgs]
+
+  /** A tool that parks until it is interrupted, and says when it started. */
+  private final class Held:
+    val started: Promise[Nothing, Unit] = runUnsafe(Promise.make[Nothing, Unit])
+
+    val tool: McpTool[HoldArgs, String] = McpTool
+      .withSchema[HoldArgs, String](
+        name = "hold",
+        inputSchema =
+          ToolInputSchema.unsafeFromJsonString("""{"type":"object","properties":{}}"""),
+        description = Some("Parks until interrupted")
+      )
+      .contextual((_, _) => started.succeed(()) *> ZIO.never)
+
+  private val holdFrame =
+    """{"jsonrpc":"2.0","id":"client-chosen-id-7","method":"tools/call","params":{"name":"hold","arguments":{}}}"""
+
+  /** Everything logged at WARN or above while `effect` and the fibers it forks run. */
+  private final class Captured:
+    private val seen =
+      new java.util.concurrent.atomic.AtomicReference[List[(LogLevel, String)]](Nil)
+
+    val logger: ZLogger[String, Unit] = new ZLogger[String, Unit]:
+      def apply(
+          trace: Trace,
+          fiberId: FiberId,
+          logLevel: LogLevel,
+          message: () => String,
+          cause: Cause[Any],
+          context: FiberRefs,
+          spans: List[LogSpan],
+          annotations: Map[String, String]
+      ): Unit =
+        val entry = (logLevel, message())
+        val _ = seen.updateAndGet(entry :: _)
+
+    def warnings: List[String] =
+      seen.get().collect { case (level, message) if level >= LogLevel.Warning => message }
+
+  /** Start a `hold` call on a fresh session and wait until its handler runs. Returns the session
+    * id and the fiber that reads the call's reply to its end.
+    */
+  private def startHeldCall(
+      handler: StreamableHttpHandler[Any],
+      held: Held,
+      captured: Captured
+  ): (String, Fiber.Runtime[Throwable, String]) =
+    val sid = openSession(handler)
+    val call = handler
+      .post(request("POST", postHeaders + ("mcp-session-id" -> sid), holdFrame))
+      .flatMap {
+        case sse: HttpReply.Sse => sse.frames.runCollect.map(_.map(_.encode).mkString)
+        case HttpReply.SseComplete(_, frame) => ZIO.succeed(frame.encode)
+        case other => ZIO.succeed(other.toString)
+      }
+      .provideLayer(Runtime.addLogger(captured.logger))
+    val fiber = runUnsafe(call.forkDaemon)
+    runUnsafe(held.started.await.timeoutFail(new RuntimeException("hold never started"))(10.seconds))
+    (sid, fiber)
+
+  test("a request whose session is deleted mid-flight gets no reply, and the server says so at WARN") {
+    val held = new Held
+    val captured = new Captured
+    val handler = makeHandler(register = _.tool(held.tool))
+    val (sid, call) = startHeldCall(handler, held, captured)
+    handle(handler, request("DELETE", Map("mcp-session-id" -> sid))).status shouldBe 200
+    val body = runUnsafe(
+      call.join.timeoutFail(new RuntimeException("the reply stream never ended"))(10.seconds)
+    )
+    // The stream ended without the call's result or an error for it.
+    body should not include "client-chosen-id-7"
+    val warnings = captured.warnings
+    warnings should have size 1
+    warnings.head should include("Request 'tools/call' ended without a reply")
+    warnings.head should include(s"session $sid was terminated")
+    // The request id is a client-chosen string: it is not written to the log.
+    warnings.head should not include "client-chosen-id-7"
+  }
+
+  test("a request the client cancels gets no reply and no WARN") {
+    val held = new Held
+    val captured = new Captured
+    val handler = makeHandler(register = _.tool(held.tool))
+    val (sid, call) = startHeldCall(handler, held, captured)
+    val cancel = handle(
+      handler,
+      request(
+        "POST",
+        postHeaders + ("mcp-session-id" -> sid),
+        """{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"client-chosen-id-7"}}"""
+      )
+    )
+    cancel.status shouldBe 202
+    val body = runUnsafe(
+      call.join.timeoutFail(new RuntimeException("the reply stream never ended"))(10.seconds)
+    )
+    body should not include "client-chosen-id-7"
+    captured.warnings shouldBe Nil
+    runUnsafe(handler.session(sid)) shouldBe defined
   }

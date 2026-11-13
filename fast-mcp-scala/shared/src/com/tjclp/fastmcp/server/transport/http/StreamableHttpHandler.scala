@@ -75,8 +75,8 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         case _ => nonPostError(req)
 
   /** Full routing, behind the first-party error boundary: anything off the endpoint is `404` (an
-    * exact path match, see [[endpoint]]); on it, every method meets the Host/Origin guard first
-    * and a method the endpoint does not serve is then `405` with an `Allow` header.
+    * exact path match, see [[endpoint]]); on it, every method meets the Host/Origin guard first and
+    * a method the endpoint does not serve is then `405` with an `Allow` header.
     */
   def handle(req: HttpRequest): URIO[R, HttpReply] =
     guarded {
@@ -189,18 +189,18 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       // Unreachable: without a store `nonPostGate` has already refused the method.
       case (None, None) => ZIO.succeed(HttpReply.Empty(405))
       case (None, Some(sessions)) =>
-            HttpRequestGuards.sessionId(req.gateHeader) match
-              case None => ZIO.succeed(reject(HttpRequestGuards.SessionRequired))
-              case Some(id) =>
-                // One uninterruptible step: a session that left the store can no longer be reached
-                // by id, so a DELETE whose client goes away mid-way must still terminate it.
-                sessions
-                  .modify(all => (all.get(id), all - id))
-                  .flatMap {
-                    case Some(session) => session.terminate.as(HttpReply.Empty(200))
-                    case None => ZIO.succeed(transportError(404, s"Session not found: $id"))
-                  }
-                  .uninterruptible
+        HttpRequestGuards.sessionId(req.gateHeader) match
+          case None => ZIO.succeed(reject(HttpRequestGuards.SessionRequired))
+          case Some(id) =>
+            // One uninterruptible step: a session that left the store can no longer be reached
+            // by id, so a DELETE whose client goes away mid-way must still terminate it.
+            sessions
+              .modify(all => (all.get(id), all - id))
+              .flatMap {
+                case Some(session) => session.terminate.as(HttpReply.Empty(200))
+                case None => ZIO.succeed(transportError(404, s"Session not found: $id"))
+              }
+              .uninterruptible
 
   /** The idle-session sweeper for this handler's store — a no-op on the stateless adapter. Fork it
     * scoped to the listener's lifetime (never per request).

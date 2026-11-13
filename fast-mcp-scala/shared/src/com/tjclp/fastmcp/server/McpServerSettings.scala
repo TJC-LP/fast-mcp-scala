@@ -284,6 +284,11 @@ case class McpServerSettings(
     // automatically for a loopback bind (see `allowedHosts`).
     host: String = "127.0.0.1",
     port: Int = 8000,
+    // The MCP endpoint path. A request is on the endpoint when its path equals this string exactly
+    // (a leading slash is added when missing): no trailing-slash or case tolerance, and the query
+    // string is not part of the path. Anything else is 404. A value no request path can equal —
+    // one containing `?`, `#`, `%`, whitespace or a `.` / `..` segment — fails `runHttp()` at
+    // startup.
     httpEndpoint: String = "/mcp",
     // If true, advertise templates via the resources/templates/list endpoint.
     // If false, rely on clients that derive templates from resource URIs containing `{}`.
@@ -320,7 +325,9 @@ case class McpServerSettings(
     // `Some(names)` = exactly these names, whatever the bind address: a request whose `Host`
     // hostname (port ignored; a verbatim `host:port` entry also matches) is not listed is refused
     // with 403. List the public name when a reverse proxy forwards its own `Host` to a loopback
-    // listener. `Some(Set.empty)` is read as `None`.
+    // listener. `Some(Set.empty)` is read as `None`. IPv6 literals keep their brackets, exactly
+    // as they appear in a `Host` header: `Some(Set("[::1]"))`, never `Some(Set("::1"))` (an
+    // unbracketed entry matches no request).
     //
     // In both forms a present `Origin` header is matched as a FULL origin (scheme://host:port,
     // default port per scheme): it must appear in `allowedOrigins`, or its hostname must be an

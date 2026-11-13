@@ -915,8 +915,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   private def sessionIdHeader(req: js.Dynamic): Option[String] =
     HttpRequestGuards.sessionId(headerOf(req))
 
-  /** The shared 405 for `method` (fallback of the per-mode handlers; `handleFetch` normally
-    * answers it first).
+  /** The shared 405 for `method` (fallback of the per-mode handlers; `handleFetch` normally answers
+    * it first).
     */
   private def methodNotAllowed(method: String, settings: McpServerSettings): js.Dynamic =
     HttpRequestGuards
