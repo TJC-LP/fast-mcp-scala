@@ -535,7 +535,7 @@ impl Driver {
         };
         let no_entries = Vec::new();
         let baseline = manifest.baselines.get(baseline_of(&node.name)).unwrap_or(&no_entries);
-        let judgement = conformance::judge(suite, manifest, baseline, &run.scenarios);
+        let judgement = conformance::judge(suite, manifest, baseline, &run.scenarios, &run.finished);
 
         let failures = |checks: &[conformance::Check]| -> Vec<Value> {
             checks

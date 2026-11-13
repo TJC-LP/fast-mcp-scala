@@ -188,7 +188,10 @@ and `scripts/conformance.sh` agree:
   scenario only counts `FAILURE`, so here the first property is stricter than the exit code. A
   skipped check counts because the scenarios skip their checks when the server does not declare
   the extension or `directoryRead: true`; the fixture declares both, so a skip means a scenario
-  stopped testing something. A scenario with no result file fails too. The property that compares
+  stopped testing something. A scenario with no `SUCCESS` check fails as well (the script's
+  `passed > 0`), and so does one whose harness run ended with no result file. A scenario that was
+  never started, or was stopped at the deadline, gets no per-scenario property, as in the other
+  modes: the suite's own property already fails. The property that compares
   the driver's reading with the exit code compares the `FAILURE` checks only for this mode.
 
 Unit tests in the driver cover these rules (`cargo test` in `mcp/driver`).
