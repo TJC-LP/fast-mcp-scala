@@ -83,3 +83,9 @@ jobs:
             [ -s "$f" ] || { echo "::error::$f is empty — the harness printed no scenario lines, so the parity diff would be vacuous"; exit 1; }
           done
           diff -u jvm-2026.txt native-2026.txt
+
+      # The three Skills extension scenarios (SEP-2640), which neither run above includes. The
+      # script fails on any FAILURE, WARNING or SKIPPED check, the same gate conformance.yml holds
+      # the JVM, Bun and Scala Native servers to.
+      - name: Conformance (skills extension scenarios)
+        run: ./scripts/conformance.sh native 8080 skills

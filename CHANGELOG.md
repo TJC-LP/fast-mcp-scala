@@ -453,6 +453,21 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   `tasks-*` scenarios, `json-schema-2020-12` and `http-custom-header-server-validation` call.
   Twelve of the thirteen unscored scenarios pass on the JVM and on Bun; `tasks-mrtr-composition`
   does not (see above). The scored results are unchanged: 73/73 active, 37/37 for 2026-07-28.
+- **The Skills extension's conformance scenarios are part of the gate** (TJC-2367). The pinned
+  harness (`0.2.0-alpha.12`) ships `sep-2640-skills-enumeration`, `sep-2640-skills-manifest` and
+  `sep-2640-skills-directory`. Its active suite and its 2026-07-28 requirement set do not include
+  them, so nothing ran them automatically.
+  - `scripts/conformance.sh <platform> <port> skills` is a third mode. It runs the harness once
+    for each scenario and fails on any failed, warning or skipped check.
+  - `ConformanceServer.register` mounts the `SkillsServer` example's catalog, so the JVM, Bun,
+    Scala Native and GraalVM servers serve the same skills. The fixture now declares the skills
+    extension and lists the skill files in `resources/list`. The scored results are unchanged:
+    73/73 active, 37/37 for 2026-07-28.
+  - Result on the JVM, Bun, Scala Native and the GraalVM image: 32/32, 6/6 and 7/7 checks, no
+    warnings, none skipped. It was the first run of these scenarios on anything but the JVM.
+  - `conformance.yml` runs the mode for the JVM, Bun and Scala Native on every pull request, and
+    `native.yml` runs it against the GraalVM image. The Antithesis workload runs it against a
+    node once faults have stopped, as a third drawn mode (`antithesis/README.md`).
 
 - **A parameter or input field with a Scala default is no longer advertised as `required`**
   (TJC-5117, #116 C2.6). Before, a default alone left the name in the `required` array of the

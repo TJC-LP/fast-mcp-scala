@@ -2,7 +2,7 @@
 #
 # Run the official MCP conformance server suites against fast-mcp-scala.
 #
-#   scripts/conformance.sh [jvm|js|native|scala-native] [port] [active|2026]
+#   scripts/conformance.sh [jvm|js|native|scala-native] [port] [active|2026|skills]
 #
 # Boots the cross-platform ConformanceServer (com.tjclp.fastmcp.examples.conformance.*) over
 # streamable HTTP, then drives it with the official harness installed from the committed,
@@ -14,7 +14,12 @@
 # the 2025-11-25 wire — with the per-platform baseline; "2026" runs `--requirements 2026-07-28` —
 # exactly the scenarios that revision requires, frozen at its release (37 scored; extension/pending
 # scenarios are reported but not scored by the harness) — and is the only mode that sends
-# 2026-07-28 requests. CI runs both modes on every platform (conformance.yml, native.yml).
+# 2026-07-28 requests; "skills" runs the three Skills extension scenarios (SEP-2640:
+# sep-2640-skills-enumeration, -manifest, -directory), which neither of the other modes includes.
+# The harness takes one --scenario per run, so that mode starts it three times against the same
+# server and fails when any check of any scenario is a FAILURE, a WARNING or SKIPPED, when a
+# scenario writes no checks, or when the harness exits non-zero. CI runs all three modes on every platform
+# (conformance.yml, native.yml).
 #
 # Requires: a JDK (jvm) and Bun >= 1.4 (every platform). Bun resolution order: $FAST_MCP_BUN when
 # set (must be executable — a bad pin is an error, never a silent fallback), else the Mill-managed
@@ -204,12 +209,49 @@ start_scala_native() {
   SRV_PID=$!
 }
 
+# The Skills extension scenarios (SEP-2640) of the pinned harness. They are tagged [extension]: the
+# active suite and the 2026-07-28 requirement set leave them out, so they are named here.
+SKILLS_SCENARIOS="sep-2640-skills-enumeration sep-2640-skills-manifest sep-2640-skills-directory"
+
+# Run each skills scenario and judge it from the checks.json the harness writes. The harness's own
+# exit code is 0 for a scenario that only warns, so the result file is what is gated on: every
+# check must be SUCCESS (INFO entries carry no verdict). A SKIPPED check fails the mode too: the
+# scenarios skip their checks when the server does not declare the extension or directoryRead, and
+# the fixture declares both, so a skip means the gate stopped testing something.
+run_skills() {
+  local out rc=0 scenario
+  out="$(mktemp -d -t fmcp-conf-skills.XXXXXX)"
+  for scenario in $SKILLS_SCENARIOS; do
+    local dir="$out/$scenario" hrc=0
+    mkdir -p "$dir"
+    run_harness server --url "$URL" --scenario "$scenario" -o "$dir" || hrc=$?
+    python3 - "$scenario" "$dir" "$hrc" <<'PY' || rc=1
+import glob, json, sys
+scenario, directory, harness_rc = sys.argv[1], sys.argv[2], int(sys.argv[3])
+files = glob.glob(f"{directory}/server-{scenario}-*/checks.json")
+checks = [c for f in files for c in json.load(open(f))]
+count = lambda status: sum(1 for c in checks if c.get("status") == status)
+passed, failed, warned, skipped = count("SUCCESS"), count("FAILURE"), count("WARNING"), count("SKIPPED")
+print(f"skills: {scenario}: {passed} passed, {failed} failed, {warned} warnings, {skipped} skipped (harness exit {harness_rc})")
+for c in checks:
+    if c.get("status") in ("FAILURE", "WARNING", "SKIPPED"):
+        print(f"skills:   {c.get('status')} {c.get('id')}: {c.get('errorMessage', '')}")
+ok = harness_rc == 0 and passed > 0 and failed == 0 and warned == 0 and skipped == 0
+if not files:
+    print(f"skills:   the harness wrote no checks.json for {scenario}")
+sys.exit(0 if ok else 1)
+PY
+  done
+  rm -rf "$out"
+  return "$rc"
+}
+
 case "$PLATFORM" in
   jvm) start_jvm ;;
   js) start_js ;;
   native) start_native ;;
   scala-native) start_scala_native ;;
-  *) echo "usage: $0 [jvm|js|native|scala-native] [port] [active|2026]" >&2; exit 2 ;;
+  *) echo "usage: $0 [jvm|js|native|scala-native] [port] [active|2026|skills]" >&2; exit 2 ;;
 esac
 
 echo "→ waiting for $URL" >&2
@@ -234,7 +276,11 @@ case "$MODE" in
     echo "→ conformance 2026-07-28 requirements ($PLATFORM)" >&2
     run_harness server --url "$URL" --requirements 2026-07-28
     ;;
-  *) echo "usage: $0 [jvm|js|native|scala-native] [port] [active|2026]" >&2; exit 2 ;;
+  skills)
+    echo "→ conformance skills extension scenarios ($PLATFORM)" >&2
+    run_skills
+    ;;
+  *) echo "usage: $0 [jvm|js|native|scala-native] [port] [active|2026|skills]" >&2; exit 2 ;;
 esac
 RC=$?
 set -e

@@ -52,13 +52,17 @@ guide's [Deliberate boundaries](./2026-07-28-upgrade.md#deliberate-boundaries).
   expected-failure baseline; the `2026` mode runs `--requirements 2026-07-28`, exactly the
   scenarios that revision requires (37 scored, 118 checks; the harness reports but never scores
   extension and pending scenarios, so the `tasks-*` extension scenarios move no gate in either
-  mode), and is the only run that sends 2026-07-28 requests. Baselines live in
+  mode), and is the only run of the two that sends 2026-07-28 requests; the `skills` mode runs the
+  three Skills extension scenarios (`sep-2640-skills-enumeration`, `-manifest`, `-directory`: 32, 6
+  and 7 checks at the 2026-07-28 wire), one harness run each, and fails on any failed, warning or
+  skipped check. Baselines live in
   [`conformance/`](../conformance/) and are kept **empty** on every platform, so any regression
-  fails the gate. [`conformance.yml`](../.github/workflows/conformance.yml) runs both modes on
-  every PR for the JVM and Bun — **73/73** active checks and **37/37** scored 2026-07-28 scenarios
-  on each; [`native.yml`](../.github/workflows/native.yml) runs the same server as a GraalVM native
-  image: the active suite against the unchanged JVM baseline, and the 2026-07-28 run as a
-  scenario-by-scenario parity diff against the JVM.
+  fails the gate. [`conformance.yml`](../.github/workflows/conformance.yml) runs all three modes on
+  every PR for the JVM, Bun and Scala Native — **73/73** active checks, **37/37** scored 2026-07-28
+  scenarios and **45/45** skills checks on each; [`native.yml`](../.github/workflows/native.yml)
+  runs the same server as a GraalVM native image: the active suite against the unchanged JVM
+  baseline, the 2026-07-28 run as a scenario-by-scenario parity diff against the JVM, and the
+  skills mode.
 - **Harness pin.** The suite version is pinned in [`conformance/package.json`](../conformance/package.json)
   (currently `0.2.0-alpha.12`) and frozen
   by the integrity-hashed [`conformance/bun.lock`](../conformance/bun.lock); the script installs it

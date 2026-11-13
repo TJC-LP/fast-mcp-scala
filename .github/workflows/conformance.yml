@@ -3,15 +3,19 @@ name: Conformance
 # Runs the official MCP conformance server harness (pinned in conformance/package.json + bun.lock,
 # installed with bun install --frozen-lockfile) against the fast-mcp-scala ConformanceServer over
 # streamable HTTP, on all three platforms — the JVM (ZIO HTTP), Scala.js on Bun (Bun.serve), and
-# Scala Native (the java.net.ServerSocket backend, as a linked LLVM binary) — and in both
+# Scala Native (the java.net.ServerSocket backend, as a linked LLVM binary) — and in all three
 # scripts/conformance.sh modes:
 #   * active — the harness's active suite: 31 scenarios / 73 checks, every one at the 2025-11-25
 #     wire, checked against conformance/baseline-<platform>.yml (every baseline is empty;
 #     scala-native reuses baseline-jvm.yml);
 #   * 2026   — `--requirements 2026-07-28`: the scenarios that revision requires (37 scored, 118
 #     checks; extension/pending scenarios are reported but never scored), the only lane that sends
-#     2026-07-28 requests. No baseline file: the harness's own verdict is the gate.
-# native.yml runs the same two modes against the GraalVM HTTP image.
+#     2026-07-28 requests. No baseline file: the harness's own verdict is the gate;
+#   * skills — the three Skills extension scenarios (SEP-2640: sep-2640-skills-enumeration,
+#     -manifest, -directory; 32 + 6 + 7 checks, at the 2026-07-28 wire). The harness tags them
+#     [extension], so neither mode above runs them. One harness run per scenario; the script
+#     fails on any FAILURE, WARNING or SKIPPED check.
+# native.yml runs the same three modes against the GraalVM HTTP image.
 on:
   pull_request:
   push:
@@ -28,7 +32,7 @@ jobs:
       fail-fast: false
       matrix:
         platform: [jvm, js, scala-native]
-        mode: [active, "2026"]
+        mode: [active, "2026", skills]
         include:
           # Share the ci.yml Scala Native toolchain cache (nativelib/javalib/clib NIR jars) instead
           # of churning the JDK-matrix cache.
@@ -50,7 +54,8 @@ jobs:
 
       # Boots the server, drives it with the pinned harness in the matrix mode, and exits with the
       # harness verdict (active: against the empty per-platform baseline — scala-native reuses
-      # baseline-jvm.yml; 2026: the scored scenarios).
+      # baseline-jvm.yml; 2026: the scored scenarios; skills: every check of the three Skills
+      # extension scenarios).
       - name: Run MCP conformance ${{ matrix.mode }} (${{ matrix.platform }})
         env:
           PLATFORM: ${{ matrix.platform }}

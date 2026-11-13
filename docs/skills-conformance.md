@@ -16,7 +16,7 @@ limitations found. It is the evidence behind the ✅ in [spec-coverage.md](./spe
 | Historical SEP (design rationale) — `modelcontextprotocol/modelcontextprotocol`, `docs/seps/2640-skills-extension.mdx` | `main` as of 2026-10-10 (`c518f7a9`); the only change since 2026-09-15 repairs links after the ext-skills archive move (#3366) | consulted for rationale only; where it differs from the stable page the stable page wins (see [Differences](#differences-between-sources)) |
 | Agent Skills specification — `agentskills.io/specification` | `agentskills/agentskills` `docs/specification.mdx` at `69ef37e9` (2026-08-09, still `main` head on 2026-10-10; `agentskills.io` itself was not reachable through the development session's egress proxy, so the page was read from the source repository) | `name` 1–64 `[a-z0-9-]`, no leading/trailing/consecutive hyphen, matches parent directory; `description` 1–1024; `compatibility` ≤ 500; `metadata` string → string; `allowed-tools` string (experimental) |
 | Base protocol — MCP 2026-07-28 | as already implemented by this repository (`core/wire`, `WireMapping.completeResult`) | `Result.resultType`, `CacheableResult.ttlMs/cacheScope`, `PaginatedResult.nextCursor`, `Resource`, `Cursor` |
-| Upstream conformance — `modelcontextprotocol/conformance` | `main` commit **`c37eec888e1c6ff140af79987a40008548b7cc5f`** (2026-10-01, "chore: bump version to 0.2.0-alpha.12 (#503)"); the skills scenarios `src/scenarios/server/skills/{enumeration,manifest,directory,helpers}.ts` and `src/seps/sep-2640.yaml` are byte-identical to the revision first run (`7169291e`, 2026-09-11, PR #330) | the published npm **`0.2.0-alpha.12`** (2026-10-01) is the first release that bundles the skills scenarios; `0.2.0-alpha.11`, which `conformance/package.json` pins for the base-protocol gate, has none. Both the published alpha.12 and the source head were run (see below) |
+| Upstream conformance — `modelcontextprotocol/conformance` | `main` commit **`c37eec888e1c6ff140af79987a40008548b7cc5f`** (2026-10-01, "chore: bump version to 0.2.0-alpha.12 (#503)"); the skills scenarios `src/scenarios/server/skills/{enumeration,manifest,directory,helpers}.ts` and `src/seps/sep-2640.yaml` are byte-identical to the revision first run (`7169291e`, 2026-09-11, PR #330) | the published npm **`0.2.0-alpha.12`** (2026-10-01) is the first release that bundles the skills scenarios, and it is the version `conformance/package.json` pins. The repository's gate runs them on every platform (see [Upstream conformance scenarios](#upstream-conformance-scenarios)) |
 | Threat model — `ext-skills/docs/archive/threat-model.md` (moved from `docs/threat-model.md` in #146) | same repository commit `167da6c` (content unchanged apart from the move) | host-side; informs the "host responsibilities" section of `docs/skills.md` and the security tests |
 | scala-yaml | `org.virtuslab::scala-yaml:0.3.3` (JVM `_3`, `_sjs1_3`, `_native0.5_3`) | new production dependency, see [Dependencies](#dependencies) |
 
@@ -114,7 +114,7 @@ approve anything.
 | Scala.js / Bun | production Node stdin callbacks (`JsTransportBackend.wireStdin`) | 2025-11-25 | `SkillsJsTest` |
 | Scala.js / Bun | `Bun.serve` stateless HTTP | 2026-07-28 | `SkillsJsTest` |
 | Scala Native | real `StdioLoop` on the Native runtime | 2025-11-25 | `SkillsNativeTest` |
-| JVM HTTP fixture ⇐ **upstream conformance scenarios** `sep-2640-skills-*` (published `0.2.0-alpha.12` and conformance `main` c37eec8 from source) | HTTP | as negotiated by the harness (2026-07-28) | see next section |
+| JVM (ZIO HTTP), Scala.js / Bun (`Bun.serve`), Scala Native (socket backend) and the GraalVM image ⇐ **upstream conformance scenarios** `sep-2640-skills-*` (pinned `0.2.0-alpha.12`) | HTTP | as negotiated by the harness (2026-07-28) | `scripts/conformance.sh <platform> <port> skills`, see next section |
 
 Commands (this checkout, Mill 1.1.8; the JVM launcher was used because the native Mill launcher
 cannot trust the session's egress proxy CA):
@@ -133,45 +133,72 @@ this feature.
 
 ## Upstream conformance scenarios
 
-The pinned harness (`conformance/package.json`, `0.2.0-alpha.11`) contains no skills scenarios, so
-the existing `scripts/conformance.sh` gate is untouched (73/73 active, 37/37 2026 — the skills
-extension does not change any of those scenarios' inputs). The `#330` scenarios were run against
-`com.tjclp.fastmcp.examples.SkillsHttpServer` (`127.0.0.1:8091`) from two harnesses: the
-**published `@modelcontextprotocol/conformance@0.2.0-alpha.12`** (2026-10-01, the first release
-that bundles them) and a source checkout of `modelcontextprotocol/conformance` `main` at `c37eec8`
-(the first run, on 2026-09-15, used the source checkout at `7169291`; the scenario files are
-identical between the two commits):
+The pinned harness (`conformance/package.json`, `0.2.0-alpha.12`) ships three server scenarios for
+this extension. They are part of the repository's conformance gate on every platform.
+
+The harness tags them `[extension]`. Its active suite and its `--requirements 2026-07-28` set do
+not include them, so the `active` and `2026` modes of `scripts/conformance.sh` never ran them.
+The script has a third mode, `skills`, that names them:
+
+```bash
+scripts/conformance.sh jvm 8077 skills            # JVM, ZIO HTTP
+scripts/conformance.sh js 8078 skills             # Scala.js on Bun
+scripts/conformance.sh scala-native 8079 skills   # Scala Native, socket backend
+scripts/conformance.sh native 8080 skills         # the GraalVM image
+```
+
+The harness accepts one scenario name per run, not a glob. The mode starts the harness three
+times against the same server and reads the `checks.json` each run writes. It fails when a check
+is a `FAILURE`, a `WARNING` or `SKIPPED`, when a scenario writes no checks, or when the harness
+exits non-zero. The harness's own exit code for a single scenario counts failures only, which is
+why the mode reads the result file. A skipped check fails the mode because the scenarios skip
+their checks when the server does not declare the extension or `directoryRead: true`. The fixture
+declares both, so a skip would mean a scenario stopped testing something. There is no baseline
+file for this mode.
+
+Where it runs:
+
+- `.github/workflows/conformance.yml` runs the `skills` mode for the JVM, Bun and Scala Native
+  servers on every pull request, next to the `active` and `2026` modes.
+- `.github/workflows/native.yml` runs it against the GraalVM HTTP image.
+- The Antithesis workload runs the three scenarios against a node once faults have stopped, as
+  one of three drawn modes (`antithesis/README.md`).
+
+**Fixture.** The scenarios hardcode no URI. They discover skills through `skills/list` and
+`resources/list`. The shared conformance fixture, `ConformanceServer.register`, mounts the catalog
+of the `SkillsServer` example: `SkillsServer.skills` (a skill with files, a subdirectory and an
+empty directory, a nested skill, an unlisted skill) and the dynamic provider `DailyReportSkills`.
+`ConformanceServer` is in the shared sources, so the JVM, Bun, Scala Native and GraalVM servers
+serve the same catalog. Mounting it declares the extension with `directoryRead: true` and adds
+the skill files to `resources/list`. No scenario of the active suite or of the 2026-07-28
+requirement set changed its result: 73/73 active checks and all 37 scored 2026-07-28 scenarios,
+as before, with empty baselines.
+
+`com.tjclp.fastmcp.examples.SkillsHttpServer` (JVM, `127.0.0.1:8091`) serves the same catalog on
+its own and is still useful for running one scenario by hand:
 
 ```bash
 ./mill fast-mcp-scala.jvm.runMain com.tjclp.fastmcp.examples.SkillsHttpServer &
-# published harness: a scratch directory with {"dependencies":{"@modelcontextprotocol/conformance":"0.2.0-alpha.12"}}
-# and `bun install`; one scenario per run (the harness accepts names, not globs):
-bun node_modules/.bin/conformance server --scenario sep-2640-skills-enumeration --url http://127.0.0.1:8091/mcp
-bun node_modules/.bin/conformance server --scenario sep-2640-skills-manifest    --url http://127.0.0.1:8091/mcp
-bun node_modules/.bin/conformance server --scenario sep-2640-skills-directory   --url http://127.0.0.1:8091/mcp
-# source checkout (git clone, `bun install`): the same three with `bun run src/index.ts server …`
+# after one `scripts/conformance.sh` run has installed the pinned harness into conformance/node_modules:
+(cd conformance && node_modules/.bin/conformance server --scenario sep-2640-skills-directory --url http://127.0.0.1:8091/mcp)
 ```
 
-Scenarios and their checks, with the outcome observed on 2026-10-10 on **both** harnesses
-(identical to the 2026-09-15 run; the harness negotiated 2026-07-28, so the cache-attribute checks
-were scored, not skipped, and the `wire-schema-valid` check validated every message against the
-2026-07-28 JSON schema):
+Scenarios and their checks. The harness negotiates 2026-07-28, so the cache-attribute checks are
+scored, not skipped, and the `wire-schema-valid` check validates every message against the
+2026-07-28 JSON schema. Outcome of the `skills` mode on 2026-11-12, identical on the JVM, Bun,
+Scala Native and the GraalVM image:
 
 | Scenario | Checks | Outcome |
 |---|---|---|
-| `sep-2640-skills-enumeration` | capability inline / empty-object / requires-resources / commits-to-methods; `skills/list` implemented, pagination, entry atomic, cache attributes; entry `uri`/`frontmatter`/`resources` required, uri = name, `skill://` scheme (SHOULD), completeness, containment, digest format, size, limits, reserved metadata prefix, naming rules, authority reg-name, unique names (SHOULD); `skills/get` implemented, entry shape, cache attributes, no cursor, unknown → `-32602`; read-back: `SKILL.md` present, frontmatter parses, entry frontmatter identical; wire schema valid | **32/32 passed, 0 failed, 0 warnings** (alpha.12 and source) |
-| `sep-2640-skills-manifest` | `SKILL.md` mimeType, resource name/description = frontmatter, final segment = name, `_meta` prefix, wire schema valid | **6/6 passed, 0 failed, 0 warnings** (alpha.12 and source) |
-| `sep-2640-skills-directory` | `directoryRead` flag, method registered, result shape, subdirectory mimeType, non-directory → `-32602`, pagination, wire schema valid | **7/7 passed, 0 failed, 0 warnings** (alpha.12 and source) |
+| `sep-2640-skills-enumeration` | capability inline / empty-object / requires-resources / commits-to-methods; `skills/list` implemented, pagination, entry atomic, cache attributes; entry `uri`/`frontmatter`/`resources` required, uri = name, `skill://` scheme (SHOULD), completeness, containment, digest format, size, limits, reserved metadata prefix, naming rules, authority reg-name, unique names (SHOULD); `skills/get` implemented, entry shape, cache attributes, no cursor, unknown → `-32602`; read-back: `SKILL.md` present, frontmatter parses, entry frontmatter identical; wire schema valid | **32/32 passed, 0 failed, 0 warnings, 0 skipped** |
+| `sep-2640-skills-manifest` | `SKILL.md` mimeType, resource name/description = frontmatter, final segment = name, `_meta` prefix, wire schema valid | **6/6 passed, 0 failed, 0 warnings, 0 skipped** |
+| `sep-2640-skills-directory` | `directoryRead` flag, method registered, result shape, subdirectory mimeType, non-directory → `-32602`, pagination, wire schema valid | **7/7 passed, 0 failed, 0 warnings, 0 skipped** |
 
-Bumping `conformance/package.json` to `0.2.0-alpha.12` would let the repository's own gate carry
-these scenarios, but `scripts/conformance.sh` scores only the base-protocol suites (`active` and
-`--requirements 2026-07-28`, where extension scenarios are reported, never scored), and the bump
-touches 25 upstream commits of unrelated scenario changes (`tools.ts` grew by ~200 lines) whose
-effect on the 73/73 baseline has not been measured. It is left as a deliberate, separate
-maintainer step, as the file's own comment asks.
-
-The harness accepts scenario names, not globs (`--scenario sep-2640-skills-enumeration`, one run
-per scenario).
+History. The scenarios were first run by hand against `SkillsHttpServer` on 2026-09-15 from a
+source checkout of `modelcontextprotocol/conformance` (`7169291`), and again on 2026-10-10 from
+the published `0.2.0-alpha.12` and from `main` at `c37eec8`, with the same three outcomes. At
+that time the repository pinned `0.2.0-alpha.11`, which has no skills scenarios. The pin moved to
+alpha.12 with the tasks extension fixtures (TJC-2367), and the `skills` mode followed.
 
 Where a check is a SHOULD, the fixture is designed to satisfy it (`skill://` scheme, unique names,
 `text/markdown`, no `_meta`). The scenario code's own expectation of `-32602` for unknown skills and

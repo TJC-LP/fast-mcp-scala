@@ -83,7 +83,7 @@ Examples: [`SkillsServer`](../fast-mcp-scala/shared/src/com/tjclp/fastmcp/exampl
 (in-memory skill with text, binary, nested directory, empty directory, a nested skill, an unlisted
 skill and a dynamic provider, next to a `@Tool`; cross-platform),
 [`SkillsHttpServer`](../fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/SkillsHttpServer.scala)
-(the same catalog over HTTP; the conformance fixture) and
+(the same catalog over HTTP; the conformance gate serves this catalog from `ConformanceServer`) and
 [`SkillDirectoryServer`](../fast-mcp-scala/jvm/src/com/tjclp/fastmcp/examples/SkillDirectoryServer.scala)
 (JVM: publish an on-disk skill directory).
 
