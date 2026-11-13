@@ -5,7 +5,7 @@ import zio.json.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.{*, given}
-import com.tjclp.fastmcp.core.{Fnv1a, LoggingLevel, ProgressToken}
+import com.tjclp.fastmcp.core.{Fnv1a, LoggingLevel, ProgressToken, TaskSupport}
 import com.tjclp.fastmcp.core.wire.{
   Completion,
   CreateMessageRequestParams,
@@ -45,7 +45,9 @@ object ConformanceServer:
       stateless = false,
       loggingEnabled = true,
       resourcesSubscribe = true,
-      allowedHosts = Some(Set("127.0.0.1", "localhost", "[::1]"))
+      allowedHosts = Some(Set("127.0.0.1", "localhost", "[::1]")),
+      // The tasks extension scenarios (SEP-2663) need the extension declared and its methods served.
+      tasks = TaskSettings(enabled = true)
     )
 
   // 1x1 red PNG (matches the reference server's image fixture); audio bytes are not validated.
@@ -71,6 +73,17 @@ object ConformanceServer:
   given JsonDecoder[TwoArgs] = DeriveJsonDecoder.gen[TwoArgs]
   given JsonDecoder[EmbedArg] = DeriveJsonDecoder.gen[EmbedArg]
   given JsonDecoder[TemplateId] = DeriveJsonDecoder.gen[TemplateId]
+
+  // Tasks extension fixtures (SEP-2663) and SEP-2243 / SEP-2106 fixtures.
+  case class GreetArgs(name: String)
+  case class SlowComputeArgs(seconds: Double = 0, label: Option[String] = None)
+  case class ConfirmDeleteArgs(filename: String)
+  case class RegionArgs(region: String)
+
+  given JsonDecoder[GreetArgs] = DeriveJsonDecoder.gen[GreetArgs]
+  given JsonDecoder[SlowComputeArgs] = DeriveJsonDecoder.gen[SlowComputeArgs]
+  given JsonDecoder[ConfirmDeleteArgs] = DeriveJsonDecoder.gen[ConfirmDeleteArgs]
+  given JsonDecoder[RegionArgs] = DeriveJsonDecoder.gen[RegionArgs]
 
   private def schema(s: String): ToolInputSchema = ToolInputSchema.unsafeFromJsonString(s)
   private val EmptySchema = schema("""{"type":"object","properties":{}}""")
@@ -555,6 +568,169 @@ object ConformanceServer:
       }
   )
 
+  // ---- tasks extension fixtures (io.modelcontextprotocol/tasks, SEP-2663) ----
+  //
+  // Names, arguments and behaviour are the ones the harness's `tasks-*` scenarios document under
+  // "Required server fixtures". They are appended after the tools above so the scenarios that call
+  // `tools[0]` with empty arguments keep the tool they always had.
+
+  private val ConfirmSchema: Json = json(
+    """{"type":"object","properties":{"confirm":{"type":"boolean"}},"required":["confirm"]}"""
+  )
+
+  private val NameConfirmSchema: Json = json(
+    """{"type":"object","properties":{"name":{"type":"string"},"confirm":{"type":"boolean"}}}"""
+  )
+
+  private val taskTools: List[McpTool[?, ?]] = List(
+    // Sync-only: never a task, whatever the client declares.
+    McpTool.withSchema[GreetArgs, String](
+      name = "greet",
+      description = Some("Tasks fixture: synchronous greeting, never run as a task"),
+      inputSchema = schema(
+        """{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"""
+      )
+    )(args => s"Hello, ${args.name}!"),
+    // Task-supporting: a task for a client that declared the extension, synchronous otherwise.
+    // The sleep is a ZIO effect, so `tasks/cancel` interrupts it and the task ends `cancelled`.
+    McpTool
+      .withSchema[SlowComputeArgs, String](
+        name = "slow_compute",
+        description = Some("Tasks fixture: sleeps `seconds` seconds, then returns a result"),
+        inputSchema = schema(
+          """{"type":"object","properties":{"seconds":{"type":"number","minimum":0},"label":{"type":"string"}}}"""
+        )
+      )((args: SlowComputeArgs) =>
+        ZIO
+          .sleep(Duration.fromMillis((args.seconds * 1000).toLong))
+          .as(s"slow_compute finished: ${args.label.getOrElse("unlabelled")}"): Task[String]
+      )
+      .withTaskSupport(TaskSupport.Optional),
+    // Task required: a client without the extension gets -32021. The tool itself reports a tool
+    // execution error, which a task records as `completed` with `result.isError`.
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "failing_job",
+        description = Some("Tasks fixture: task-only tool that ends in a tool execution error"),
+        inputSchema = EmptySchema
+      )((_: NoArgs) =>
+        ZIO.sleep(1.second) *>
+          ZIO.fail(new RuntimeException("failing_job always fails")): Task[String]
+      )
+      .withTaskSupport(TaskSupport.Required),
+    // A JSON-RPC error raised by the handler: the task ends `failed` with that error inlined.
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "protocol_error_job",
+        description = Some("Tasks fixture: ends in a JSON-RPC (protocol) error"),
+        inputSchema = EmptySchema
+      )((_: NoArgs) =>
+        ZIO.fail(McpError.internalError("protocol_error_job always fails")): Task[String]
+      )
+      .withTaskSupport(TaskSupport.Optional),
+    // One elicitation from inside a task: the task waits in `input_required`.
+    McpTool
+      .withSchema[ConfirmDeleteArgs, String](
+        name = "confirm_delete",
+        description = Some("Tasks fixture: asks for confirmation from inside a task"),
+        inputSchema = schema(
+          """{"type":"object","properties":{"filename":{"type":"string"}},"required":["filename"]}"""
+        )
+      )
+      .contextual { (args, ctxOpt) =>
+        withCtx(ctxOpt) { ctx =>
+          ctx
+            .elicit(
+              ElicitRequestParams(
+                message = s"Delete ${args.filename}?",
+                requestedSchema = ConfirmSchema
+              )
+            )
+            .map(r => s"confirm_delete ${args.filename}: action=${r.action}")
+        }
+      }
+      .withTaskSupport(TaskSupport.Optional),
+    // Two elicitations asked at once: both keys are outstanding until each is answered.
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "multi_input",
+        description = Some("Tasks fixture: asks two questions at once from inside a task"),
+        inputSchema = EmptySchema
+      )
+      .contextual { (_, ctxOpt) =>
+        withCtx(ctxOpt) { ctx =>
+          rawInputResponses(ctx).flatMap { responses =>
+            val keys = List("first_input", "second_input")
+            if keys.forall(responses.contains) then ZIO.succeed("multi_input: both inputs received")
+            else
+              ZIO.fail(
+                McpError.inputRequired(
+                  List(
+                    "first_input" -> elicitationRequest("First input?", NameConfirmSchema),
+                    "second_input" -> elicitationRequest("Second input?", NameConfirmSchema)
+                  ),
+                  None
+                )
+              )
+          }
+        }
+      }
+      .withTaskSupport(TaskSupport.Optional),
+    // MRTR first, then a task (SEP-2663 "Composition with Multi Round-Trip Requests"): the name is
+    // gathered with an InputRequiredResult on the request itself, and the final round is a task.
+    McpTool
+      .withSchema[NoArgs, String](
+        name = "test_tool_with_task",
+        description = Some("Tasks fixture: gathers a name over MRTR, then runs as a task"),
+        inputSchema = EmptySchema
+      )
+      .contextual { (_, ctxOpt) =>
+        withCtx(ctxOpt) { ctx =>
+          rawInputResponses(ctx).flatMap { responses =>
+            acceptedString(responses, "user_name", "name") match
+              case Some(name) => ZIO.succeed(s"Hello, $name! (from a task)")
+              case None =>
+                ZIO.fail(
+                  McpError.inputRequired(
+                    "user_name",
+                    elicitationRequest("What is your name?", stringSchema("name"))
+                  )
+                )
+          }
+        }
+      }
+      .withTaskSupport(TaskSupport.Required)
+  )
+
+  // ---- JSON Schema 2020-12 (SEP-1613, SEP-2106) and x-mcp-header (SEP-2243) fixtures ----
+
+  private val schemaTools: List[McpTool[?, ?]] = List(
+    // The schema is the one the `json-schema-2020-12` scenario prints; `tools/list` must return
+    // every keyword unchanged.
+    McpTool.withSchema[Json, String](
+      name = "json_schema_2020_12_tool",
+      description = Some("Tool with JSON Schema 2020-12 features"),
+      inputSchema = schema(
+        """{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object",
+          |"$defs":{"address":{"$anchor":"addressDef","type":"object","properties":{"street":{"type":"string"},"city":{"type":"string"}}}},
+          |"properties":{"name":{"type":"string"},"address":{"$ref":"#/$defs/address"},
+          |"contactMethod":{"type":"string","enum":["phone","email"]},"phone":{"type":"string"},"email":{"type":"string"}},
+          |"allOf":[{"anyOf":[{"required":["phone"]},{"required":["email"]}]}],
+          |"if":{"properties":{"contactMethod":{"const":"phone"}},"required":["contactMethod"]},
+          |"then":{"required":["phone"]},"else":{"required":["email"]},
+          |"additionalProperties":false}""".stripMargin
+      )
+    )(_ => "json_schema_2020_12_tool called"),
+    // One string argument mirrored into the `Mcp-Param-Region` request header.
+    McpTool.withSchema[RegionArgs, String](
+      name = "test_x_mcp_header",
+      description = Some("Tool whose `region` argument is mirrored into Mcp-Param-Region"),
+      inputSchema = schema(
+        """{"type":"object","properties":{"region":{"type":"string","x-mcp-header":"Region"}},"required":["region"]}"""
+      )
+    )(args => s"region=${args.region}")
+  )
+
   private val Sep1034Schema: Json = json(
     """{"type":"object","properties":{
       |"name":{"type":"string","description":"User name","default":"John Doe"},
@@ -690,7 +866,7 @@ object ConformanceServer:
   /** Register the full active surface (tools, prompts, resources, completion) on a server. */
   def register(server: McpServer[Any]): ZIO[Any, Throwable, Unit] =
     for
-      _ <- ZIO.foreachDiscard(tools)(server.tool(_))
+      _ <- ZIO.foreachDiscard(tools ++ taskTools ++ schemaTools)(server.tool(_))
       _ <- ZIO.foreachDiscard(prompts)(server.prompt(_))
       _ <- ZIO.foreachDiscard(staticResources)(server.resource(_))
       _ <- ZIO.foreachDiscard(templateResources)(server.resource(_))
