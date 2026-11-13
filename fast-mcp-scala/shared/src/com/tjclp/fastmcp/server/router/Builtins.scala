@@ -396,10 +396,12 @@ final class Builtins[R](
       modern <- session.currentRequestContext
       legacyInfo <- session.clientInfo
       legacyCaps <- session.clientCapabilities
-    yield McpContext.withSession(
+      headers <- RequestHeaders.current
+    yield McpContext.forRequest(
       session,
       modern.flatMap(_.clientInfo).orElse(legacyInfo),
       modern.map(_.clientCapabilities).orElse(legacyCaps),
       requestMeta.orElse(modern.map(_.meta)),
-      modern.flatMap(_.requestState)
+      modern.flatMap(_.requestState),
+      headers
     )

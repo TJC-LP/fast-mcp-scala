@@ -14,6 +14,22 @@ class McpContextTest extends AnyFunSuite with Matchers {
     context.sessionId shouldBe None
     context.getClientInfo shouldBe None
     context.getClientCapabilities shouldBe None
+    context.protocolSessionId shouldBe None
+    context.headers shouldBe empty
+    context.header("x-forwarded-email") shouldBe None
+  }
+
+  test("a context built for a session without an HTTP request has no headers") {
+    val session = zio.Unsafe.unsafe { implicit u =>
+      zio.Runtime.default.unsafe
+        .run(com.tjclp.fastmcp.server.router.Session.make("stdio"))
+        .getOrThrowFiberFailure()
+    }
+    val context = McpContext.withSession(session)
+
+    context.sessionId shouldBe Some("stdio")
+    context.protocolSessionId shouldBe None
+    context.headers shouldBe empty
   }
 
   test("a context snapshots the client info / capabilities it is built with") {

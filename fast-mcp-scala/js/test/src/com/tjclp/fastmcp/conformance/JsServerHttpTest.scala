@@ -87,6 +87,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   override def afterAll(): Unit =
     if bunServer != null then bunServer.stop()
     keepAliveHandle.foreach(_.stop())
+    contextHandle.foreach(_.stop())
     idleTimeoutHandle.foreach(_.stop())
     super.afterAll()
 
@@ -702,6 +703,24 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     )
     val thrown = intercept[IllegalArgumentException](server.startStatelessHttp())
     thrown.getMessage should include("allowedOrigins")
+    Future.successful(succeed)
+  }
+
+  it should "refuse to start on a contextHeaders entry that is not a header name" in {
+    // On Bun, `Headers.get` throws for such a name, so without this check every POST would
+    // answer 500 on a server that started normally.
+    val server = com.tjclp.fastmcp.server.McpServer(
+      "JsHttpBadContextHeaderServer",
+      "0.1.0",
+      McpServerSettings(
+        host = "127.0.0.1",
+        port = 38940,
+        stateless = true,
+        contextHeaders = Set("x-forwarded-email:")
+      )
+    )
+    val thrown = intercept[IllegalArgumentException](server.startStatelessHttp())
+    thrown.getMessage should include("contextHeaders")
     Future.successful(succeed)
   }
 
@@ -1511,4 +1530,164 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       raced.map(_._2).distinct.size shouldBe 16
       alive.count(_ == 200) shouldBe 2 // the cap held
     checked.andThen { case _ => handle.stop() }
+  }
+
+  // --- request context: allow-listed headers, protocolSessionId, reply opening on a heartbeat ---
+  // Bun twin of `RequestContextHandlerTest` (the JVM / Scala Native handler test).
+
+  private val contextPort = 38939
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private var contextHandle: Option[BunHttpHandle] = None
+
+  private val whoamiTool = McpTool
+    .withSchema[PingArgs, String](
+      name = "whoami",
+      inputSchema = pingSchema,
+      description = Some("Reports what the context says of the caller")
+    )
+    .contextual { (_, context) =>
+      val ctx = context.get
+      val email = ctx.header("X-Forwarded-eMail").getOrElse("<none>")
+      val token = ctx.header("x-forwarded-access-token").getOrElse("<none>")
+      val authorization = ctx.header("Authorization").getOrElse("<none>")
+      val names = ctx.headers.keys.toList.sorted.mkString(",")
+      s"email=$email;token=$token;authorization=$authorization;names=$names;" +
+        s"protocolSession=${ctx.protocolSessionId.getOrElse("<none>")};"
+    }
+
+  private def contextServer(): Future[BunHttpHandle] =
+    contextHandle match
+      case Some(handle) => Future.successful(handle)
+      case None =>
+        val server = com.tjclp.fastmcp.server.McpServer(
+          "JsHttpContextServer",
+          "0.1.0",
+          McpServerSettings(
+            host = "127.0.0.1",
+            port = contextPort,
+            httpEndpoint = "/mcp",
+            stateless = false,
+            keepAliveInterval = Some(java.time.Duration.ofMillis(keepAliveMs.toLong)),
+            contextHeaders = Set("X-Forwarded-Email", "x-forwarded-access-token")
+          )
+        )
+        runZio(server.tool(whoamiTool) *> server.tool(sleepTool).unit).map { _ =>
+          val handle = server.startStatefulHttp()
+          contextHandle = Some(handle)
+          handle
+        }
+
+  private def contextInit(): Future[String] =
+    for
+      resp <- fetchAt(
+        contextPort,
+        js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyInitBody)
+      )
+      _ <- text(resp)
+      sid = header(resp, "mcp-session-id").getOrElse(fail("initialize did not mint a session"))
+      ack <- fetchAt(
+        contextPort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("mcp-session-id" -> sid),
+          body = """{"jsonrpc":"2.0","method":"notifications/initialized"}"""
+        )
+      )
+      _ <- text(ack)
+    yield sid
+
+  private def legacyWhoami(sid: String, id: Int, extra: (String, String)*): Future[String] =
+    fetchAt(
+      contextPort,
+      js.Dynamic.literal(
+        method = "POST",
+        headers = jsonHeaders((("mcp-session-id" -> sid) +: extra)*),
+        body =
+          s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"whoami","arguments":{"msg":"x"}}}"""
+      )
+    ).flatMap(text)
+
+  private def modernWhoami(id: Int, extra: (String, String)*): Future[String] =
+    fetchAt(
+      contextPort,
+      js.Dynamic.literal(
+        method = "POST",
+        headers = jsonHeaders(
+          (List(
+            "mcp-protocol-version" -> "2026-07-28",
+            "mcp-method" -> "tools/call",
+            "mcp-name" -> "whoami"
+          ) ++ extra)*
+        ),
+        body =
+          s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"whoami","arguments":{"msg":"x"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+      )
+    ).flatMap(text)
+
+  "contextHeaders (Bun)" should "show each legacy call the headers of its own request" in {
+    for
+      _ <- contextServer()
+      sid <- contextInit()
+      first <- legacyWhoami(
+        sid,
+        2,
+        "X-Forwarded-Email" -> "ada@example.com",
+        "X-Forwarded-Access-Token" -> "token-one"
+      )
+      // The proxy rotated the forwarded token during the session's life.
+      second <- legacyWhoami(sid, 3, "X-Forwarded-Access-Token" -> "token-two")
+    yield
+      first should include("email=ada@example.com")
+      first should include("token=token-one")
+      first should include(s"protocolSession=$sid;")
+      second should include("token=token-two")
+      second should not include "token-one"
+      second should include("email=<none>")
+  }
+
+  it should "show a 2026-07-28 call its allow-listed headers and nothing else" in {
+    for
+      _ <- contextServer()
+      out <- modernWhoami(
+        4,
+        "X-FORWARDED-EMAIL" -> "grace@example.com",
+        "authorization" -> "Bearer not-listed"
+      )
+    yield
+      out should include("email=grace@example.com")
+      out should include("names=x-forwarded-email;")
+      out should include("authorization=<none>")
+      out should not include "not-listed"
+      out should include("protocolSession=<none>;")
+  }
+
+  "a silent 2026-07-28 call (Bun)" should "open its SSE reply at the first heartbeat, then deliver" in {
+    val sleepMs = 8 * keepAliveMs
+    for
+      _ <- contextServer()
+      started = js.Date.now()
+      resp <- fetchAt(
+        contextPort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders(
+            "mcp-protocol-version" -> "2026-07-28",
+            "mcp-method" -> "tools/call",
+            "mcp-name" -> "sleep"
+          ),
+          // No progress token: the handler emits nothing until its reply.
+          body =
+            s"""{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"sleep","arguments":{"millis":$sleepMs},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+        )
+      )
+      headersAfterMs = js.Date.now() - started
+      body <- withTimeout(text(resp), sleepMs + 5000, "silent modern call")
+    yield
+      status(resp) shouldBe 200
+      header(resp, "content-type").getOrElse("") should include("text/event-stream")
+      // The response head arrived at the first heartbeat, long before the tool answered.
+      headersAfterMs should be < (sleepMs - 2 * keepAliveMs).toDouble
+      body should startWith(": ping")
+      body should include(s"slept $sleepMs")
   }

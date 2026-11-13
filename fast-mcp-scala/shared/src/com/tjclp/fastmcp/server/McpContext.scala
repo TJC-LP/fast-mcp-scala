@@ -19,7 +19,7 @@ import com.tjclp.fastmcp.core.wire.{
   ProgressNotificationParams
 }
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError}
-import com.tjclp.fastmcp.server.router.Session
+import com.tjclp.fastmcp.server.router.{RequestHeaders, Session}
 
 /** Platform-independent MCP request context handed to handlers as `Option[McpContext]`.
   *
@@ -33,11 +33,40 @@ open class McpContext private[fastmcp] (
     private val clientInfoSnapshot: Option[Implementation] = None,
     private val clientCapabilitiesSnapshot: Option[ClientCapabilities] = None,
     private val requestMeta: Option[Map[String, Json]] = None,
-    private val requestStateSnapshot: Option[String] = None
+    private val requestStateSnapshot: Option[String] = None,
+    private val requestHeaders: Map[String, String] = Map.empty
 ):
 
-  /** The legacy connection/session id, or the ephemeral request id used by the modern transport. */
+  /** The legacy connection/session id, or a stand-in: the ephemeral request id used by the modern
+    * transport, `"stateless"` on the legacy stateless adapter, `"stdio"` on stdio. Use
+    * [[protocolSessionId]] for "the protocol session, if there is one".
+    */
   def sessionId: Option[String] = session.map(_.sessionId)
+
+  /** The MCP protocol session this request belongs to: the value of `Mcp-Session-Id` on a durable
+    * legacy (pre-2026-07-28) streamable-HTTP session. `None` for a 2026-07-28 request, for legacy
+    * stateless mode and for stdio — none of which has a protocol session, whatever [[sessionId]]
+    * returns for them.
+    */
+  def protocolSessionId: Option[String] = session.filter(_.isProtocolSession).map(_.sessionId)
+
+  /** The HTTP request headers the server allow-listed in `McpServerSettings.contextHeaders`, keyed
+    * by lower-cased name. Empty unless the server lists names, and always empty on stdio.
+    *
+    * The values are those of the HTTP request that carried this call — read per request, so a
+    * header that changes between two calls of one legacy session is seen with its new value. A
+    * header sent more than once appears as its `", "`-joined value. A task keeps the headers of the
+    * request that created it.
+    *
+    * These are whatever the peer sent. They are trustworthy only when a proxy in front of the
+    * server sets or strips them; a client that reaches the server directly can send any header.
+    */
+  def headers: Map[String, String] = requestHeaders
+
+  /** One allow-listed request header, matched case-insensitively. See [[headers]]. */
+  def header(name: String): Option[String] =
+    if requestHeaders.isEmpty then None
+    else requestHeaders.get(RequestHeaders.normaliseName(name))
 
   /** The client's declared identity from per-request metadata or legacy `initialize`, if known. */
   def getClientInfo: Option[Implementation] = clientInfoSnapshot
@@ -285,3 +314,21 @@ object McpContext:
       requestState: Option[String] = None
   ): McpContext =
     new McpContext(Some(session), clientInfo, clientCapabilities, requestMeta, requestState)
+
+  /** [[withSession]] plus the request's allow-listed HTTP headers (the built-in handlers' form). */
+  private[fastmcp] def forRequest(
+      session: Session,
+      clientInfo: Option[Implementation],
+      clientCapabilities: Option[ClientCapabilities],
+      requestMeta: Option[Map[String, Json]],
+      requestState: Option[String],
+      requestHeaders: Map[String, String]
+  ): McpContext =
+    new McpContext(
+      Some(session),
+      clientInfo,
+      clientCapabilities,
+      requestMeta,
+      requestState,
+      requestHeaders
+    )

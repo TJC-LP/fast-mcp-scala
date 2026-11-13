@@ -247,6 +247,26 @@ def echoLogged(@Param("Note to echo") note: String, ctx: McpContext): ZIO[Any, T
   ctx.sendLogMessage(LoggingLevel.Info, Json.Str(s"echo: $note")).as(note)
 ```
 
+Behind an authenticating proxy, a handler can read the identity the proxy forwards. List the header
+names in `McpServerSettings.contextHeaders` (nothing is exposed unless listed) and read them with
+`ctx.header(name)` / `ctx.headers`; `ctx.protocolSessionId` is the `Mcp-Session-Id` of a legacy
+session and `None` everywhere else:
+
+```scala 3 raw
+object MyServer extends McpServerApp[Http, MyServer.type]:
+  override def settings = McpServerSettings(
+    contextHeaders = Set("x-forwarded-email", "x-forwarded-access-token")
+  )
+
+  @Tool(name = Some("whoami"), description = Some("Who is calling"))
+  def whoami(ctx: McpContext): String =
+    ctx.header("x-forwarded-email").getOrElse("anonymous")
+```
+
+The values are whatever the request carried, read per request and never logged by the library; they
+are trustworthy only when the proxy sets or strips those headers
+([details](docs/transports.md#request-headers-in-handlers-contextheaders)).
+
 Typed contracts use the builder's `.contextual` — `McpTool[In, Out](name = "echo").contextual { (in, ctx) => ... }` — whose handler receives `(In, Option[McpContext])`. Runnable demo: [`ContextEchoServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContextEchoServer.scala).
 
 ## Transports

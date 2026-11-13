@@ -214,6 +214,23 @@ class HttpRequestGuardsTest extends AnyFunSuite with Matchers:
     HttpRequestGuards.validateSettings(McpServerSettings(maxSessions = None)) shouldBe Right(())
   }
 
+  test("validateSettings: contextHeaders entries must be HTTP header names") {
+    // Surrounding whitespace is trimmed; case does not matter.
+    HttpRequestGuards.validateSettings(
+      McpServerSettings(contextHeaders = Set("X-Forwarded-Email", " x-forwarded-access-token "))
+    ) shouldBe Right(())
+    // A trailing colon, an inner space, an empty entry: none can ever match a header, and on Bun
+    // looking one up throws on every request.
+    val bad = HttpRequestGuards.validateSettings(
+      McpServerSettings(contextHeaders = Set("x-forwarded-email:", "x forwarded user", "", "ok"))
+    )
+    bad.isLeft shouldBe true
+    bad.left.getOrElse("") should include("contextHeaders")
+    bad.left.getOrElse("") should include("'x-forwarded-email:'")
+    bad.left.getOrElse("") should include("'x forwarded user'")
+    bad.left.getOrElse("") should not include "'ok'"
+  }
+
   test(
     "validateSettings: rejects unparseable origins, non-positive body cap and non-positive cap"
   ) {
