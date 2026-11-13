@@ -272,7 +272,7 @@ workload time, 300 s for the eventually's own checks, and 300 s for each planned
 - One suite against one node per timeline. Coverage of all nine combinations comes from many
   timelines; the nine sometimes-properties show whether a test run got there.
 - The scenarios the 2026-07-28 requirement set does not score (the tasks extension, three pending
-  ones) are run and logged, and assert nothing. Eleven of them fail against this server. The
+  ones) are run and logged, and assert nothing. One of them fails against this server (`tasks-mrtr-composition`, a SHOULD in the tasks extension). The
   requirement set says of all thirteen that the harness's own reference fixture cannot pass them
   yet.
 - The harness reaches the node through a relay inside the driver, on loopback. The bytes are the
