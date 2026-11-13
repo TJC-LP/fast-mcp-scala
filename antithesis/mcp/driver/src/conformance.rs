@@ -190,20 +190,33 @@ impl Judgement {
 /// with a `FAILURE` check and 0 otherwise. The gate is stricter, as in `scripts/conformance.sh`:
 /// a check fails when its status is `FAILURE`, `WARNING` or `SKIPPED`. The scenarios skip their
 /// checks when the server does not declare the extension or `directoryRead`; the fixture declares
-/// both, so a skipped check means the scenario stopped testing something. A scenario of
-/// [`SKILLS_SCENARIOS`] with no result at all fails too.
-pub fn judge(suite: Suite, manifest: &Manifest, baseline: &[String], scenarios: &[Scenario]) -> Judgement {
+/// both, so a skipped check means the scenario stopped testing something. A scenario with no
+/// `SUCCESS` check fails as well (the script's `passed > 0`): the harness exits 0 for it. A
+/// scenario of `expected` with no result at all fails too. `expected` names the scenarios whose
+/// harness process ran to its end ([`Run::finished`]): one that was never started, or was stopped
+/// at the deadline, gets no verdict, as in the other suites, where the suite's own property and
+/// the per-node `sometimes` already record a harness that did not run.
+pub fn judge(suite: Suite, manifest: &Manifest, baseline: &[String], scenarios: &[Scenario], expected: &[String]) -> Judgement {
     let mut out = Judgement::default();
     match suite {
         Suite::Skills => {
             out.exit_counts_failures_only = true;
             let fails = |c: &Check| matches!(c.status.as_str(), "FAILURE" | "WARNING" | "SKIPPED");
-            for s in scenarios {
-                let failed: Vec<Check> = s.checks.iter().filter(|c| fails(c)).cloned().collect();
+            // A scenario stopped at the deadline leaves a directory with no `checks.json`, which
+            // `read_results` reads as a failed check: it is not in `expected` and gets no verdict.
+            for s in scenarios.iter().filter(|s| expected.contains(&s.name)) {
+                let mut failed: Vec<Check> = s.checks.iter().filter(|c| fails(c)).cloned().collect();
+                if !s.checks.iter().any(|c| c.status == "SUCCESS") {
+                    failed.push(Check {
+                        id: s.name.clone(),
+                        status: NO_SUCCESS.to_owned(),
+                        error: Some("the scenario recorded no successful check".to_owned()),
+                    });
+                }
                 out.verdicts.push(Verdict { scenario: s.name.clone(), checks: s.checks.len(), scored: true, reason: None, failed, excused: Vec::new() });
             }
-            for name in SKILLS_SCENARIOS {
-                if !scenarios.iter().any(|s| s.name == name) {
+            for name in expected {
+                if !scenarios.iter().any(|s| s.name == *name) {
                     let missing = Check {
                         id: name.to_owned(),
                         status: "FAILURE".to_owned(),
@@ -287,6 +300,10 @@ fn collapse(checks: &[Check]) -> Vec<Check> {
     out
 }
 
+/// The status of the check the driver adds to a skills scenario that recorded no `SUCCESS`
+/// check. It is not a harness status: the harness exits 0 for such a scenario.
+pub const NO_SUCCESS: &str = "NO_SUCCESS";
+
 /// A harness run as the driver saw it.
 #[derive(Debug)]
 pub struct Run {
@@ -297,6 +314,9 @@ pub struct Run {
     pub problem: Option<String>,
     pub seconds: f64,
     pub scenarios: Vec<Scenario>,
+    /// The scenarios of a single-scenario suite ([`Suite::Skills`]) whose harness process ran to
+    /// its end and gave an exit code. Empty for the other suites.
+    pub finished: Vec<String>,
     /// The end of the harness's own output.
     pub log_tail: String,
     /// Where the result files and the harness's output are.
@@ -306,7 +326,7 @@ pub struct Run {
 impl Run {
     /// A run that could not even be attempted.
     pub fn not_started(problem: String) -> Run {
-        Run { exit: None, problem: Some(problem), seconds: 0.0, scenarios: Vec::new(), log_tail: String::new(), dir: PathBuf::new() }
+        Run { exit: None, problem: Some(problem), seconds: 0.0, scenarios: Vec::new(), finished: Vec::new(), log_tail: String::new(), dir: PathBuf::new() }
     }
 }
 
@@ -326,6 +346,7 @@ pub fn run(suite: Suite, home: &Path, node: &str, upstream: &str, baseline: Opti
         problem: Some(problem),
         seconds: started.elapsed().as_secs_f64(),
         scenarios: Vec::new(),
+        finished: Vec::new(),
         log_tail: String::new(),
         dir,
     };
@@ -362,6 +383,7 @@ pub fn run(suite: Suite, home: &Path, node: &str, upstream: &str, baseline: Opti
     };
     let mut problem = None;
     let mut exit: Option<i32> = Some(0);
+    let mut finished: Vec<String> = Vec::new();
     for args in &invocations {
         let (out, err) = match log.try_clone().and_then(|a| Ok((a, log.try_clone()?))) {
             Ok(pair) => pair,
@@ -390,6 +412,9 @@ pub fn run(suite: Suite, home: &Path, node: &str, upstream: &str, baseline: Opti
                 }
             }
         };
+        if let (Suite::Skills, Some(_), Some(name)) = (suite, code, args.get(1)) {
+            finished.push(name.clone());
+        }
         exit = match (exit, code) {
             (Some(worst), Some(code)) => Some(worst.max(code)),
             _ => None,
@@ -406,7 +431,7 @@ pub fn run(suite: Suite, home: &Path, node: &str, upstream: &str, baseline: Opti
         let chars: Vec<char> = text.chars().collect();
         chars[chars.len().saturating_sub(1500)..].iter().collect()
     };
-    Run { exit, problem, seconds: started.elapsed().as_secs_f64(), scenarios: read_results(&dir), log_tail: tail, dir }
+    Run { exit, problem, seconds: started.elapsed().as_secs_f64(), scenarios: read_results(&dir), finished, log_tail: tail, dir }
 }
 
 /// Reads `<dir>/server-<scenario>-<timestamp>/checks.json` for every scenario, in the order they
@@ -541,6 +566,10 @@ mod tests {
         }
     }
 
+    fn skills() -> Vec<String> {
+        SKILLS_SCENARIOS.iter().map(|s| (*s).to_owned()).collect()
+    }
+
     fn failed(j: &Judgement) -> Vec<String> {
         j.unexpected().iter().map(|v| v.scenario.clone()).collect()
     }
@@ -553,23 +582,23 @@ mod tests {
             scenario("c", vec![check("c", "WARNING")]),
             scenario("d", vec![check("d", "INFO"), check("d2", "SKIPPED")]),
         ];
-        let j = judge(Suite::Active, &manifest(), &[], &run);
+        let j = judge(Suite::Active, &manifest(), &[], &run, &[]);
         assert_eq!(failed(&j), ["b", "c"]);
         assert_eq!(j.exit_code(), 1);
-        assert_eq!(judge(Suite::Active, &manifest(), &[], &run[..1]).exit_code(), 0);
+        assert_eq!(judge(Suite::Active, &manifest(), &[], &run[..1], &[]).exit_code(), 0);
     }
 
     #[test]
     fn a_baselined_scenario_is_excused_and_stale_once_it_passes() {
         let baseline = ["b".to_owned()];
         let failing = [scenario("b", vec![check("b", "FAILURE")])];
-        let j = judge(Suite::Active, &manifest(), &baseline, &failing);
+        let j = judge(Suite::Active, &manifest(), &baseline, &failing, &[]);
         assert!(failed(&j).is_empty());
         assert_eq!(j.verdicts[0].excused, ["b"]);
         assert_eq!(j.exit_code(), 0);
 
         let passing = [scenario("b", vec![check("b", "SUCCESS")])];
-        let j = judge(Suite::Active, &manifest(), &baseline, &passing);
+        let j = judge(Suite::Active, &manifest(), &baseline, &passing, &[]);
         assert_eq!(j.stale, ["b"]);
         assert_eq!(j.exit_code(), 1);
     }
@@ -578,7 +607,7 @@ mod tests {
     fn a_baselined_check_excuses_only_that_check() {
         let baseline = ["s:known".to_owned()];
         let run = [scenario("s", vec![check("known", "SUCCESS"), check("known", "FAILURE"), check("other", "FAILURE")])];
-        let j = judge(Suite::Active, &manifest(), &baseline, &run);
+        let j = judge(Suite::Active, &manifest(), &baseline, &run, &[]);
         assert_eq!(failed(&j), ["s"]);
         assert_eq!(j.verdicts[0].failed.len(), 1);
         assert_eq!(j.verdicts[0].failed[0].id, "other");
@@ -586,13 +615,13 @@ mod tests {
         assert!(j.stale.is_empty());
 
         let fixed = [scenario("s", vec![check("known", "SUCCESS"), check("other", "SUCCESS")])];
-        let j = judge(Suite::Active, &manifest(), &baseline, &fixed);
+        let j = judge(Suite::Active, &manifest(), &baseline, &fixed, &[]);
         assert_eq!(j.stale, ["s:known"]);
         assert_eq!(j.exit_code(), 1);
 
         // A baselined check that never ran is tolerated.
         let absent = [scenario("s", vec![check("other", "SUCCESS")])];
-        assert_eq!(judge(Suite::Active, &manifest(), &baseline, &absent).exit_code(), 0);
+        assert_eq!(judge(Suite::Active, &manifest(), &baseline, &absent, &[]).exit_code(), 0);
     }
 
     #[test]
@@ -602,14 +631,14 @@ mod tests {
             scenario("tasks-lifecycle", vec![check("y", "FAILURE")]),
             scenario("unlisted", vec![check("z", "FAILURE")]),
         ];
-        let j = judge(Suite::Requirements, &manifest(), &[], &run);
+        let j = judge(Suite::Requirements, &manifest(), &[], &run, &[]);
         assert!(failed(&j).is_empty());
         assert_eq!(j.exit_code(), 0);
         assert_eq!(j.verdicts[1].reason.as_deref(), Some("extension"));
         assert_eq!(j.verdicts[2].reason.as_deref(), Some("not scored"));
 
         let broken = [scenario("tools-list", vec![check("x", "FAILURE")])];
-        let j = judge(Suite::Requirements, &manifest(), &[], &broken);
+        let j = judge(Suite::Requirements, &manifest(), &[], &broken, &[]);
         assert_eq!(failed(&j), ["tools-list"]);
         assert_eq!(j.exit_code(), 1);
     }
@@ -619,7 +648,7 @@ mod tests {
         let all = |status: &str| -> Vec<Scenario> {
             SKILLS_SCENARIOS.iter().map(|s| scenario(s, vec![check("x", "SUCCESS"), check("y", status), check("z", "INFO")])).collect()
         };
-        let j = judge(Suite::Skills, &manifest(), &[], &all("SUCCESS"));
+        let j = judge(Suite::Skills, &manifest(), &[], &all("SUCCESS"), &skills());
         assert!(j.passes());
         assert_eq!(j.exit_code(), 0);
         assert_eq!(j.verdicts.len(), 3);
@@ -627,20 +656,47 @@ mod tests {
 
         // The harness exits 0 for a warning and for a skipped check; the gate does not pass.
         for status in ["WARNING", "SKIPPED"] {
-            let j = judge(Suite::Skills, &manifest(), &[], &all(status));
+            let j = judge(Suite::Skills, &manifest(), &[], &all(status), &skills());
             assert!(!j.passes(), "{status}");
             assert_eq!(j.exit_code(), 0, "{status}");
             assert_eq!(failed(&j), SKILLS_SCENARIOS);
         }
-        let j = judge(Suite::Skills, &manifest(), &[], &all("FAILURE"));
+        let j = judge(Suite::Skills, &manifest(), &[], &all("FAILURE"), &skills());
         assert!(!j.passes());
         assert_eq!(j.exit_code(), 1);
 
         // A scenario the harness left no result for fails, and so does the exit code.
         let two = &all("SUCCESS")[..2];
-        let j = judge(Suite::Skills, &manifest(), &[], two);
+        let j = judge(Suite::Skills, &manifest(), &[], two, &skills());
         assert_eq!(failed(&j), [SKILLS_SCENARIOS[2]]);
         assert_eq!(j.exit_code(), 1);
+
+        // A scenario that was never started (the one before it hit the deadline) gets no verdict.
+        let j = judge(Suite::Skills, &manifest(), &[], two, &skills()[..2]);
+        assert!(j.passes());
+        assert_eq!(j.verdicts.len(), 2);
+        let j = judge(Suite::Skills, &manifest(), &[], &[], &[]);
+        assert!(j.verdicts.is_empty());
+
+        // One stopped mid-run left a result the harness would count as a failure: no verdict.
+        let mut run = all("SUCCESS");
+        run[2] = scenario(SKILLS_SCENARIOS[2], vec![check(SKILLS_SCENARIOS[2], "FAILURE")]);
+        let j = judge(Suite::Skills, &manifest(), &[], &run, &skills()[..2]);
+        assert!(j.passes());
+        assert_eq!(j.verdicts.len(), 2);
+    }
+
+    #[test]
+    fn a_skills_scenario_with_no_successful_check_fails() {
+        // The harness exits 0 for both; `scripts/conformance.sh skills` requires `passed > 0`.
+        for checks in [vec![], vec![check("z", "INFO")]] {
+            let run: Vec<Scenario> = SKILLS_SCENARIOS.iter().map(|s| scenario(s, checks.clone())).collect();
+            let j = judge(Suite::Skills, &manifest(), &[], &run, &skills());
+            assert!(!j.passes());
+            assert_eq!(j.exit_code(), 0);
+            assert_eq!(failed(&j), SKILLS_SCENARIOS);
+            assert!(j.verdicts.iter().all(|v| v.failed.len() == 1 && v.failed[0].status == NO_SUCCESS));
+        }
     }
 
     #[test]
@@ -648,10 +704,10 @@ mod tests {
         let good = [scenario("tools-list", vec![check("x", "SUCCESS")])];
         let bad = [scenario("tools-list", vec![check("x", "FAILURE")])];
         for suite in [Suite::Active, Suite::Requirements] {
-            assert!(judge(suite, &manifest(), &[], &good).passes());
-            assert!(!judge(suite, &manifest(), &[], &bad).passes());
+            assert!(judge(suite, &manifest(), &[], &good, &[]).passes());
+            assert!(!judge(suite, &manifest(), &[], &bad, &[]).passes());
         }
-        let stale = judge(Suite::Active, &manifest(), &["tools-list".to_owned()], &good);
+        let stale = judge(Suite::Active, &manifest(), &["tools-list".to_owned()], &good, &[]);
         assert!(!stale.passes());
         assert_eq!(stale.exit_code(), 1);
     }
