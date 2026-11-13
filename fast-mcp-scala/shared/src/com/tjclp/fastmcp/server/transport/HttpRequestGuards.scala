@@ -1,5 +1,6 @@
 package com.tjclp.fastmcp.server.transport
 
+import com.tjclp.fastmcp.core.{ErrorCodes, Protocol}
 import com.tjclp.fastmcp.server.McpServerSettings
 import com.tjclp.fastmcp.server.router.RequestHeaders
 
@@ -10,9 +11,12 @@ import com.tjclp.fastmcp.server.router.RequestHeaders
   *
   * Request order on every backend:
   * {{{
-  * path 404 → hostGate 403 → Content-Type 415 → declared Content-Length 413 → Accept 406 →
-  *   body read (platform byte cap → 413) → bodyTooLarge 413 → parseFrame → dispatch →
-  *   any defect → JSON-RPC 500 (guarded)
+  * path 404 (pathMatches) → hostGate 403 → method 405 (nonPostGate) →
+  *   POST: Content-Type 415 → declared Content-Length 413 → Accept 406 →
+  *     body read (platform byte cap → 413) → bodyTooLarge 413 → parseFrame → dispatch →
+  *     any defect → JSON-RPC 500 (guarded)
+  *   GET / DELETE: 2026-07-28 header 405 → (GET: mcp-protocol-version 400 → Accept 406) →
+  *     missing mcp-session-id 400 → unknown session 404
   * }}}
   * A header-less legacy `initialize` is dispatched on a session that is not stored yet, and only a
   * successful one then meets the session cap:
@@ -23,10 +27,41 @@ import com.tjclp.fastmcp.server.router.RequestHeaders
   */
 private[fastmcp] object HttpRequestGuards:
 
-  /** A transport-level refusal: HTTP status + message for the JSON-RPC error body (404 → -32001,
-    * anything else → -32000, as every backend's `errorResponse` already maps).
+  /** A transport-level refusal: HTTP status + message for the JSON-RPC error body. `code` is the
+    * JSON-RPC error code when the refusal has one of its own; `None` is the status mapping every
+    * backend applies ([[errorCode]]: 404 → -32001, anything else → -32000). `allow`, non-empty for
+    * a 405, is the `Allow` response header.
     */
-  final case class Rejection(status: Int, message: String)
+  final case class Rejection(
+      status: Int,
+      message: String,
+      code: Option[Int] = None,
+      allow: List[String] = Nil
+  ):
+
+    /** The JSON-RPC error code of the reply body. */
+    def errorCode: Int = code.getOrElse(HttpRequestGuards.errorCode(status))
+
+    /** The response headers this refusal adds (`Allow` on a 405). */
+    def headers: List[(String, String)] =
+      if allow.isEmpty then Nil else List("allow" -> allow.mkString(", "))
+
+  /** The JSON-RPC code of a transport-level error body: `404` carries
+    * [[ErrorCodes.SessionNotFound]], every other status [[ErrorCodes.TransportError]].
+    */
+  def errorCode(status: Int): Int =
+    if status == 404 then ErrorCodes.SessionNotFound else ErrorCodes.TransportError
+
+  /** Compatibility header for initialization-based Streamable HTTP revisions. */
+  val SessionIdHeader: String = "mcp-session-id"
+
+  /** 400 for a GET or DELETE on the legacy adapter that names no session (spec 2025-11-25: a
+    * request without the id SHOULD be answered 400; an unknown id is 404).
+    */
+  val SessionRequired: Rejection = Rejection(400, s"$SessionIdHeader header is required")
+
+  /** The one Accept refusal of a 2026-07-28 POST, whichever check finds it. */
+  val ModernAcceptMessage: String = "Accept must include application/json and text/event-stream"
 
   val InternalErrorMessage: String = "Internal server error"
   val SessionLimitMessage: String = "Session limit reached; retry later"
@@ -41,7 +76,8 @@ private[fastmcp] object HttpRequestGuards:
     * parse as `scheme://host[:port]`, `dnsRebindingProtection = false` must not be combined with an
     * allow-list (which of the two was meant?), `maxRequestBodyBytes` must be positive and not
     * exceed `limits.maxFrameChars`, `maxSessions`, when set, must be positive (use `None` to
-    * disable the cap), and every `contextHeaders` entry must be an HTTP field name.
+    * disable the cap), every `contextHeaders` entry must be an HTTP field name, and `httpEndpoint`
+    * must be a path a request can actually name ([[invalidEndpoint]]).
     */
   def validateSettings(settings: McpServerSettings): Either[String, Unit] =
     val bad = HostGuard.invalidOrigins(settings.allowedOrigins.getOrElse(Set.empty))
@@ -66,7 +102,41 @@ private[fastmcp] object HttpRequestGuards:
     // ever sees it; `limits.maxFrameChars` is the transport-independent backstop.
     else if settings.maxRequestBodyBytes > settings.limits.maxFrameChars then
       Left("maxRequestBodyBytes must not exceed limits.maxFrameChars")
-    else Right(())
+    else invalidEndpoint(settings.httpEndpoint).toLeft(())
+
+  /** The path requests are matched against: `httpEndpoint` with a leading slash (`/mcp` for both
+    * `"/mcp"` and `"mcp"`).
+    */
+  def endpointPath(settings: McpServerSettings): String =
+    "/" + settings.httpEndpoint.stripPrefix("/")
+
+  /** Whether a request path (query string already removed) names the MCP endpoint: an exact,
+    * case-sensitive string match. `/mcp/`, `/MCP` and `/mcp/extra` are not `/mcp`. Anything else is
+    * 404 on every backend, before any other gate.
+    */
+  def pathMatches(path: String, settings: McpServerSettings): Boolean =
+    path == endpointPath(settings)
+
+  /** Why `httpEndpoint` can never be matched by [[pathMatches]], if so. The endpoint is compared
+    * with the request path as written, so a `?` or `#` (never part of a path), a `%` (an escape a
+    * backend or proxy may or may not decode before the comparison), whitespace or a control
+    * character (not sendable in a request line), and a `.` / `..` segment (resolved away by clients
+    * and by Bun before the server sees the path) each make a route that silently answers 404 to
+    * every request: refused at startup instead.
+    */
+  def invalidEndpoint(httpEndpoint: String): Option[String] =
+    def refuse(what: String) =
+      Some(s"httpEndpoint '$httpEndpoint' can never match a request path: it contains $what")
+    if httpEndpoint.exists(ch => ch.isWhitespace || Character.isISOControl(ch)) then
+      refuse("whitespace or a control character")
+    else if httpEndpoint.indexOf('?') >= 0 then
+      refuse("'?' (a query string is not part of the path)")
+    else if httpEndpoint.indexOf('#') >= 0 then refuse("'#'")
+    else if httpEndpoint.indexOf('%') >= 0 then
+      refuse("'%' (percent-escapes are compared as written; write the path unescaped)")
+    else if httpEndpoint.split('/').exists(seg => seg == "." || seg == "..") then
+      refuse("a '.' or '..' segment")
+    else None
 
   /** What every backend logs at WARN once, before binding. Today: a non-loopback bind address with
     * no allow-list, where the Host/Origin guard has nothing to go on and is therefore off. Startup
@@ -91,10 +161,82 @@ private[fastmcp] object HttpRequestGuards:
     if HostGuard.isAllowed(header("host"), header("origin"), settings) then None
     else Some(Rejection(403, HostRefusedMessage))
 
+  /** The `mcp-session-id` of a request on the legacy adapter. A header that is present but empty
+    * (or blank) names no session and counts as absent. `header` is the gates' joined lookup, so an
+    * id sent twice is one `", "`-joined value that matches no session (404) on every backend.
+    */
+  def sessionId(header: String => Option[String]): Option[String] =
+    header(SessionIdHeader).map(_.trim).filter(_.nonEmpty)
+
+  /** The methods the endpoint serves, in `Allow` order. POST always; GET only where a standalone
+    * server→client stream exists (`pushChannel`: the zio-http and socket backends, not Bun) and
+    * DELETE unless `disallowDelete` — both only on the legacy session adapter, which
+    * `settings.stateless` turns off.
+    */
+  def allowedMethods(settings: McpServerSettings, pushChannel: Boolean): List[String] =
+    if settings.stateless then List("POST")
+    else
+      List("POST") ++ (if pushChannel then List("GET") else Nil) ++
+        (if settings.disallowDelete then Nil else List("DELETE"))
+
+  /** The gate of every request that is not a POST, on headers only and in this order: 403
+    * host/origin → 405 for a method the endpoint does not serve ([[allowedMethods]]; `Allow` lists
+    * them) → 405 for a GET or DELETE that declares MCP 2026-07-28, which has neither (`Allow:
+    * POST`). `None` admits a GET or DELETE to the legacy session adapter. `method` is the
+    * upper-case token.
+    */
+  def nonPostGate(
+      method: String,
+      header: String => Option[String],
+      settings: McpServerSettings,
+      pushChannel: Boolean
+  ): Option[Rejection] =
+    hostGate(header, settings).orElse {
+      val allow = allowedMethods(settings, pushChannel)
+      def refuse(why: String) =
+        Some(Rejection(405, s"$why (allowed: ${allow.mkString(", ")})", allow = allow))
+      if !allow.contains(method) then
+        method match
+          case "GET" if settings.stateless =>
+            refuse("GET is not supported: the stateless transport has no server-to-client stream")
+          case "GET" =>
+            refuse(
+              "GET is not supported: there is no standalone server-to-client stream; " +
+                "server-to-client messages ride the response to each POST"
+            )
+          case "DELETE" if settings.stateless =>
+            refuse("DELETE is not supported: the stateless transport has no session to end")
+          case "DELETE" => refuse("DELETE is disabled on this server")
+          case other => refuse(s"Method $other is not allowed on the MCP endpoint")
+      else if method != "POST" && header("mcp-protocol-version").exists(Protocol.isStatelessVersion)
+      then
+        // What this revision may use here is POST alone, whatever the legacy adapter also serves.
+        Some(
+          Rejection(
+            405,
+            s"$method is not used by MCP ${Protocol.LatestProtocolVersion}: send each message as a POST",
+            allow = List("POST")
+          )
+        )
+      else None
+    }
+
+  /** Whether the `mcp-protocol-version` header puts a POST on the 2026-07-28 path (the header half
+    * of `ModernHttpValidation.isModern`; the body can only be consulted once it has been read).
+    */
+  def declaresModern(header: String => Option[String]): Boolean =
+    header("mcp-protocol-version").exists(v => !Protocol.LegacyProtocolVersions.contains(v))
+
   /** POST gate, evaluated on headers only (before any body read or session state), in this order:
-    * 403 host/origin → 415 media type → 413 declared Content-Length → 406 Accept. `requireSse`
-    * additionally demands `text/event-stream` in `Accept` (streamable transport: replies stream as
-    * SSE).
+    * 403 host/origin → 415 media type → 413 declared Content-Length → 406 Accept.
+    *
+    * `Accept` on a legacy POST is lenient: an absent header passes, and a present one must allow
+    * `application/json` — and `text/event-stream` too when `requireSse` (streamable transport:
+    * replies stream as SSE). A POST whose `mcp-protocol-version` header declares 2026-07-28 is held
+    * to that revision's rule instead: the header is required and must allow both media types,
+    * whatever `requireSse` says, and the refusal carries the header-mismatch code (`-32020`) with
+    * [[ModernAcceptMessage]] — the same reply `ModernHttpValidation` gives a request it finds
+    * modern only after reading the body, so the 406 of a modern request has one shape.
     */
   def postGate(
       header: String => Option[String],
@@ -102,13 +244,17 @@ private[fastmcp] object HttpRequestGuards:
       requireSse: Boolean
   ): Option[Rejection] =
     hostGate(header, settings).orElse {
+      val accept = header("accept")
       if !isJsonContentType(header("content-type")) then
         Some(Rejection(415, "Content-Type must be application/json"))
       else if declaredLengthExceeds(header("content-length"), settings) then
         Some(bodyTooLargeRejection(settings))
-      else if !acceptsAny(header("accept"), List("application/json", "application/*")) then
+      else if declaresModern(header) then
+        if modernAcceptOk(accept) then None
+        else Some(Rejection(406, ModernAcceptMessage, code = Some(ErrorCodes.HeaderMismatch)))
+      else if !acceptAllows(accept, "application/json") then
         Some(Rejection(406, "Accept must allow application/json"))
-      else if requireSse && !acceptsAny(header("accept"), List("text/event-stream", "text/*")) then
+      else if requireSse && !acceptAllows(accept, "text/event-stream") then
         Some(Rejection(406, "Accept must allow text/event-stream"))
       else None
     }
@@ -130,15 +276,56 @@ private[fastmcp] object HttpRequestGuards:
       mediaType.equalsIgnoreCase("application/json") && charsetOk
     }
 
-  /** Absent `Accept` passes (header-less clients); present → must include one of `types` or the
-    * any-type wildcard.
+  /** The lenient (pre-2026-07-28) `Accept` rule: an absent or blank header passes (header-less
+    * clients); a present one must make `mediaType` acceptable ([[acceptQuality]] above zero).
     */
-  def acceptsAny(accept: Option[String], types: List[String]): Boolean =
-    accept match
-      case None => true
-      case Some(a) =>
-        val lower = a.toLowerCase
-        lower.contains("*/*") || types.exists(lower.contains)
+  def acceptAllows(accept: Option[String], mediaType: String): Boolean =
+    accept.map(_.trim).filter(_.nonEmpty).forall(acceptQuality(_, mediaType).exists(_ > 0.0))
+
+  /** The 2026-07-28 `Accept` rule: the header is required and must make both `application/json` and
+    * `text/event-stream` acceptable.
+    */
+  def modernAcceptOk(accept: Option[String]): Boolean =
+    accept.exists { value =>
+      acceptQuality(value, "application/json").exists(_ > 0.0) &&
+      acceptQuality(value, "text/event-stream").exists(_ > 0.0)
+    }
+
+  /** RFC 9110 §12.5.1: the quality `accept` gives `mediaType` (a lower-case `type/subtype`), or
+    * `None` when no media range matches it. The most specific matching range decides — the exact
+    * type over its subtype wildcard (`text/` + `*`) over the any-type wildcard — so
+    * `text/event-stream;q=0` next to the any-type wildcard refuses event streams while accepting
+    * everything else. Ranges are compared case-insensitively and their other parameters are
+    * ignored; a weight is `q=` followed by a number in 0..1, `q=0` meaning "not acceptable". A
+    * weight that does not parse counts as 1 (the range was listed), and among equally specific
+    * ranges the highest weight wins.
+    */
+  def acceptQuality(accept: String, mediaType: String): Option[Double] =
+    val slash = mediaType.indexOf('/')
+    val typeWildcard = if slash < 0 then mediaType else mediaType.substring(0, slash) + "/*"
+    var bestRank = 0
+    var best = Option.empty[Double]
+    accept.split(',').foreach { element =>
+      val parts = element.split(';')
+      // `"".split(';')` is an empty array: an empty list element names no range.
+      val range = parts.headOption.fold("")(_.trim.toLowerCase)
+      val rank =
+        if range == mediaType then 3
+        else if range == typeWildcard then 2
+        else if range == "*/*" then 1
+        else 0
+      if rank > 0 && rank >= bestRank then
+        val q = parts.iterator
+          .drop(1)
+          .map(_.trim.toLowerCase)
+          .collectFirst { case p if p.startsWith("q=") => p.substring(2).trim }
+          .flatMap(_.toDoubleOption)
+          .filter(w => w >= 0.0 && w <= 1.0)
+          .getOrElse(1.0)
+        if rank > bestRank || best.forall(_ < q) then best = Some(q)
+        bestRank = rank
+    }
+    best
 
   /** True when a parseable `Content-Length` declares more bytes than `maxRequestBodyBytes`. An
     * absent or garbage header passes here — the platform byte cap and [[bodyTooLarge]] cover it.

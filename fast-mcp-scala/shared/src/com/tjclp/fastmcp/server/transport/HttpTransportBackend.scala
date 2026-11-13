@@ -25,8 +25,13 @@ import com.tjclp.fastmcp.server.router.McpRouter
   *   - bound the request body at `settings.maxRequestBodyBytes` in the platform server AND apply
   *     `postGate` (403 → 415 → 413 → 406) before reading the body or touching session state, then
   *     `bodyTooLarge` before `MessageLoop.parseFrame`;
-  *   - `hostGate` on GET/DELETE — the guard is on by default for a loopback bind address (see
-  *     [[HostGuard]]), so a backend must never skip it because no allow-list was configured;
+  *   - match the endpoint with `pathMatches` (exact; anything else is an empty 404), and put every
+  *     request that is not a POST through `nonPostGate`: the Host/Origin guard first — it is on by
+  *     default for a loopback bind address (see [[HostGuard]]), so a backend must never skip it
+  *     because no allow-list was configured, nor for a method it does not serve — then 405 with
+  *     `Allow` for a method outside `allowedMethods`;
+  *   - read `mcp-session-id` through `sessionId` (an empty header is absent) and answer a GET or
+  *     DELETE without one with `SessionRequired` (400);
   *   - dispatch a header-less legacy `initialize` on a session that is NOT stored, and store it
   *     only when the dispatch succeeded: a failed one (undecodable params, `clientInfo` /
   *     `capabilities` over the `ClientRetention` budget) returns no `mcp-session-id` and leaves the

@@ -30,6 +30,18 @@ object Protocol:
 
   def isStatelessVersion(version: String): Boolean = version == LatestProtocolVersion
 
+  /** `data.supported` of a `-32022` answer to a request in the 2026-07-28 shape that asked for
+    * `requested`. An unknown version is told every version the server speaks, as `server/discover`
+    * advertises them — a client that mis-sent the version must not conclude the server is
+    * 2026-07-28 only. A legacy version written in the 2026-07-28 shape (per-request `_meta`) is
+    * told the one version that shape is valid for: the server does speak the requested version,
+    * through `initialize`, and listing it as supported next to "unsupported" would contradict the
+    * error.
+    */
+  private[fastmcp] def supportedVersionsFor(requested: String): List[String] =
+    if LegacyProtocolVersions.contains(requested) then List(LatestProtocolVersion)
+    else SupportedProtocolVersions
+
   /** JSON-RPC version string embedded in every request/response. */
   val JsonRpcVersion: String = "2.0"
 

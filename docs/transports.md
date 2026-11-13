@@ -91,9 +91,9 @@ loopback bind gets it without any setting.
 **Binding loopback alone does not protect against browser-originated requests.** A loopback bind
 keeps other machines out; a web page open in a browser on the same machine can still reach the
 port. What tells such a page apart is the `Host` (and `Origin`) it sends, so the HTTP transport
-checks both on every request — POST, GET and DELETE, before the body is read or any session state
-is touched — and answers **403** (`-32000`, `Host/Origin not allowed (DNS-rebinding protection)`)
-when the check fails.
+checks both on every request to the endpoint — whatever its method, before the method is judged,
+the body is read or any session state is touched — and answers **403** (`-32000`,
+`Host/Origin not allowed (DNS-rebinding protection)`) when the check fails.
 
 | `host` (bind address) | `allowedHosts` | Guard |
 |---|---|---|
@@ -106,7 +106,12 @@ The rules, identical on every backend (zio-http, the socket backend, `Bun.serve`
 
 - **`Host`** must parse as one `host[:port]` authority whose hostname is an allowed name. The port
   is not compared, so a forwarded port (`ssh -L 9000:127.0.0.1:8000`, an IDE port-forward) keeps
-  working. A request with no `Host` passes: that is not something a browser can do.
+  working, but it must be a port: a `Host` whose port is not 1–65535 in decimal digits
+  (`localhost:99999`, `localhost:abc`) and a `Host` sent more than once are refused. A request
+  with no `Host` passes: that is not something a browser can do.
+- **IPv6 literals are written with their brackets** in `allowedHosts`, exactly as they appear in a
+  `Host` header: `Set("[::1]")`. An unbracketed entry (`Set("::1")`) matches no request, so every
+  request is refused.
 - **`Origin`**, when present, must be the same origin as the request's `Host` (same host and
   port), or be listed in `allowedOrigins`. A page on another loopback port
   (`http://localhost:3000`), `Origin: null`, and malformed values are refused. A request with no
@@ -156,12 +161,47 @@ reply, so a proxy in front sees bytes during a long quiet tool call. An error th
 status and is raised after the stream opened is delivered in-band (HTTP 200, the JSON-RPC error as
 the final event). Without `keepAliveInterval` the reply waits for the first frame.
 
-Modern Streamable HTTP is identical on the JVM (ZIO HTTP) and Bun (`Bun.serve`). Both backends
-serve plaintext HTTP/1.1 only — there is no TLS setting by design; terminate TLS and authentication
-at a reverse proxy in front of the MCP endpoint. Neither backend adds CORS headers or answers an
-`OPTIONS` preflight: a browser-hosted client on another origin needs a CORS-terminating proxy in
-front of the endpoint (and its origin listed in `allowedOrigins`; see
-[Host / Origin validation](#host--origin-validation)).
+Modern Streamable HTTP is identical on the JVM (ZIO HTTP), the socket backend and Bun
+(`Bun.serve`). Every backend serves plaintext HTTP/1.1 only — there is no TLS setting by design;
+terminate TLS and authentication at a reverse proxy in front of the MCP endpoint.
+
+**There is no CORS handling.** No backend adds `Access-Control-*` headers, and an `OPTIONS`
+preflight is answered 405 like any other method the endpoint does not serve: a browser-hosted
+client on another origin needs a CORS-terminating proxy in front of the endpoint (and its origin
+listed in `allowedOrigins`; see [Host / Origin validation](#host--origin-validation)).
+
+### The endpoint: path and methods
+
+**Path.** A request is on the MCP endpoint when its path **equals** `httpEndpoint` (default
+`/mcp`; a setting without the leading slash, `"mcp"`, means the same) — an exact, case-sensitive
+match on every backend. A trailing slash (`/mcp/`), another case (`/MCP`), a longer path
+(`/mcp/extra`) and a prefixed one (`/api/mcp`) are all **404** with an empty body, before any other
+check. The query string is not part of the path: `/mcp?x=1` is the endpoint, and the query is
+ignored. Because the match is exact, `runHttp()` refuses at startup an `httpEndpoint` that no
+request path could equal: one containing `?`, `#`, `%`, whitespace or a control character, or a
+`.` / `..` segment.
+
+What each backend compares is the path as its HTTP layer hands it over. The socket backend
+compares the request target exactly as written. zio-http normalises the target first — it decodes
+percent-escapes, drops empty segments and resolves `.` segments — so `/%6dcp`, `//mcp` and
+`/./mcp` reach the endpoint there and are 404 on the socket backend; Bun resolves `.` / `..`
+segments (`/./mcp` is the endpoint) and leaves escapes and empty segments alone. A client that
+writes the path plainly sees no difference, and a proxy in front should route the plain path only.
+
+**Methods.** After the path, every request meets the Host/Origin guard (403), and only then is its
+method judged. A method the endpoint does not serve is **405** with an `Allow` header listing the
+ones it does and a JSON-RPC `-32000` body that names the method (a `HEAD` gets the status and
+headers only):
+
+| Mode | `Allow` |
+|---|---|
+| legacy session adapter, zio-http and socket backends | `POST, GET, DELETE` (`POST, GET` with `disallowDelete`) |
+| legacy session adapter, Bun (no standalone GET stream) | `POST, DELETE` (`POST` with `disallowDelete`) |
+| `stateless = true`, every backend | `POST` |
+| a GET or DELETE carrying `MCP-Protocol-Version: 2026-07-28` | `POST` (that revision uses neither) |
+
+So `PUT`, `PATCH`, `OPTIONS`, `HEAD` and `TRACE` are 405 everywhere, as is a GET on Bun or on the
+stateless adapter. Before 1.1.0 zio-http answered these methods 404 without running the guard.
 
 ### Request requirements and error mapping
 
@@ -170,12 +210,21 @@ parameters are allowed, but a `charset` other than utf-8 is refused); anything e
 415 before the body is read or a session is minted. Modern POST requests must
 additionally include:
 
-- an `Accept` header listing both `application/json` and `text/event-stream`
+- an `Accept` header that allows both `application/json` and `text/event-stream`
 - `MCP-Protocol-Version: 2026-07-28`
 - `Mcp-Method`, and for tool calls, resource reads, and prompt gets also `Mcp-Name`
 
 The protocol version and client capabilities are repeated in every request's `params._meta`.
 Schema-driven `Mcp-Param-*` values may be supplied through `x-mcp-header`.
+
+`Accept` is read as RFC 9110 defines it, not searched for a substring: media ranges are compared
+whole and case-insensitively, `type/*` and `*/*` are honoured, the most specific range that
+matches decides, and `q=0` means "not acceptable" — `Accept: */*;q=0` allows nothing, and
+`application/json, text/event-stream;q=0` does not allow an event stream. On a legacy POST an
+absent `Accept` passes, and a present one must allow `application/json` (and `text/event-stream`
+too unless `stateless = true`); a refusal is 406 with `-32000`. A POST that declares 2026-07-28
+must send the header and allow both types; every way of failing that is the same reply: 406,
+`-32020`, `Accept must include application/json and text/event-stream`.
 
 Each of `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and every `Mcp-Param-*` must appear
 **once**. A request that carries one of them more than once is refused as a header/body mismatch
@@ -190,18 +239,27 @@ joined string.
 | Condition | HTTP | JSON-RPC code |
 |---|---|---|
 | `Host`/`Origin` refused by the Host/Origin guard (automatic on a loopback bind, or `allowedHosts` / `allowedOrigins`) | 403 | `-32000` |
+| Path is not the endpoint | 404 | none (empty body) |
+| Method the endpoint does not serve (`Allow` lists the ones it does) | 405 | `-32000` |
 | Missing or wrong `Content-Type` (any POST; a non-utf-8 `charset` counts as wrong) | 415 | `-32000` |
+| `Accept` does not allow the reply types — legacy POST or GET | 406 | `-32000` |
+| `Accept` absent or not allowing both reply types — 2026-07-28 POST | 406 | `-32020` |
+| Legacy GET or DELETE without an `Mcp-Session-Id` (an empty header counts as absent) | 400 | `-32000` |
+| Legacy request naming a session that does not exist | 404 | `-32001` |
 | Body larger than `maxRequestBodyBytes` | 413 | `-32000` on first-party paths; netty and Bun answer an empty 413 when they refuse the body first |
 | Frame over `limits` (`maxFrameChars` / `maxDepth` / `maxObjectFields` / `maxArrayElements` / `maxValues` / `maxNumberDigits` / `maxNumberExponent`) | 400 | `-32700` |
 | Header/body mismatch, or a routing header sent more than once | 400 | `-32020` |
 | Missing required client capability | 400 | `-32021` |
-| Unsupported protocol version (answer carries `data.supported`) | 400 | `-32022` |
+| Unsupported protocol version (`data.supported` lists every version the server speaks) | 400 | `-32022` |
 | Unknown request method | 404 | `-32601` |
 
 The admission gates run in a fixed order on every backend, on headers first and before any session
-state is touched: unknown path 404 → Host/Origin guard 403 → `Content-Type` 415 →
+state is touched: unknown path 404 → Host/Origin guard 403 → method 405 → `Content-Type` 415 →
 declared `Content-Length` over `maxRequestBodyBytes` 413 → `Accept` 406 → body read (platform byte
 cap, then a first-party post-read check → 413) → frame limits (`-32700`, HTTP 400) → dispatch. A
+legacy GET or DELETE continues after the method check with: a 2026-07-28 version header 405 → (GET
+only: unsupported `MCP-Protocol-Version` 400 → `Accept` 406) → missing `Mcp-Session-Id` 400 →
+unknown session 404. A
 legacy `initialize` meets the session cap (`maxSessions`) only after it has succeeded — see
 [The legacy session store](#the-legacy-session-store). Any transport or
 handler-construction defect on the way is answered by a fixed JSON-RPC 500 boundary
@@ -274,8 +332,16 @@ GET stream while capacity is free. DELETE, idle eviction, and cap eviction all g
 running legacy tasks are released. Activity is stamped when a request arrives, not while it runs,
 so a call that outlasts `sessionIdleTimeout` on an otherwise quiet session can be evicted
 mid-flight and never answered (a `-32001` reply is tracked for 1.0.1) — keep the timeout above
-your longest call, or poll through Tasks. An empty `mcp-session-id` header counts as an unknown
-session on the JVM (404) and as a missing header on Bun (400).
+your longest call, or poll through Tasks. When that happens the server logs a WARN naming the
+method and the session (`Request 'tools/call' ended without a reply: session … was terminated
+while it ran`); a request the client cancelled itself is not logged at WARN.
+
+A GET or DELETE without an `Mcp-Session-Id` is answered **400** (`-32000`,
+`mcp-session-id header is required`), as is any POST other than `initialize`; an id the store does
+not hold is **404** (`-32001`). An empty or blank `Mcp-Session-Id` header counts as absent on every
+backend, and one sent more than once is read as its `", "`-joined value, which names no session
+(404). Before 1.1.0 a session-less GET or DELETE was 405, and the JVM looked an empty id up and
+answered 404.
 
 A GET stream's slot (one stream per session; a second GET is answered 409) is given back when the
 stream ends, when the client disconnects, and when the reply is never streamed at all — a client
@@ -402,7 +468,7 @@ no reply (it fails with its timeout). A JVM client whose GET stream falls more t
 |---|---|---|
 | `host` | `127.0.0.1` | Bind address. Changed in 0.5.0 from `0.0.0.0` per the spec's bind-localhost guidance; set `"0.0.0.0"` explicitly for containers or external exposure — and then set `allowedHosts` / `allowedOrigins` too: a non-loopback bind is not guarded automatically, and startup logs a WARN until an allow-list is set. See [Host / Origin validation](#host--origin-validation). |
 | `port` | `8000` | Listen port. |
-| `httpEndpoint` | `/mcp` | JSON-RPC endpoint path. |
+| `httpEndpoint` | `/mcp` | JSON-RPC endpoint path, matched exactly (no trailing slash, case-sensitive; the query string is ignored). Must not contain `?`, `#`, `%`, whitespace or a `.` / `..` segment — `runHttp()` fails at startup otherwise. See [The endpoint: path and methods](#the-endpoint-path-and-methods). |
 | `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless. |
 | `disallowDelete` | `false` | Legacy adapter: answer 405 to HTTP DELETE instead of terminating the session. |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity. Live legacy GET streams are exempt from the periodic sweep but become evictable at the `maxSessions` cap once idle this long; `None` disables both. |
@@ -671,5 +737,13 @@ is plaintext only because `javax.net.ssl` is absent from the Scala Native javali
 | Legacy GET push stream | ✅ | 405 | ✅ |
 
 Node and Deno parity for the HTTP listener is a follow-up; only the `Bun.serve(...)` entry point is
-Bun-specific today. `httpEndpoint` is matched as an exact path on Bun; the JVM additionally accepts
-a trailing slash (`/mcp/`). Both ignore the query string.
+Bun-specific today. `httpEndpoint` is matched as an exact path on every backend, and the query
+string is ignored ([The endpoint: path and methods](#the-endpoint-path-and-methods)).
+
+One Bun-only refusal: Bun builds a URL from the request line and the `Host` header before the
+server sees the request, and a `Host` it cannot parse (`Host: 127.0.0.1:99999`, `localhost:abc`)
+leaves no URL to read the path from. With the Host/Origin guard on — the default on a loopback
+bind — that `Host` is refused by the guard itself, 403, as on the JVM. With the guard off (a
+non-loopback bind with no allow-list, or `dnsRebindingProtection = false`) Bun answers 400
+`-32000` `Malformed request URL`, where the JVM backends, which do not build a URL, serve the
+request.

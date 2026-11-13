@@ -446,6 +446,61 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Changed
 
+- **HTTP refusals are the same on every backend** (GH #114, TJC-2360). zio-http, the socket
+  backend and Bun disagreed on a handful of requests that are refused either way; they now take
+  the same decisions from the shared `HttpRequestGuards`. Requests that were served before are
+  served as before, with two exceptions marked *(was served)* below. Reference: "The endpoint:
+  path and methods" and "Request requirements and error mapping" in `docs/transports.md`.
+  - **GET or DELETE without `Mcp-Session-Id`: 400**, `-32000`, `mcp-session-id header is
+    required`. Before: 405 with an empty body (zio-http, socket) or a text body (Bun DELETE). The
+    2025-11-25 spec asks for 400 here; an unknown id is still 404. On Bun a GET stays 405: it has
+    no standalone stream.
+  - **An empty `Mcp-Session-Id` header counts as absent** on every backend: 400 for a GET, a
+    DELETE and any POST but `initialize`. Before, zio-http and the socket backend looked the empty
+    id up and answered 404 `Session not found: `; Bun already answered 400. An `initialize`
+    carrying an empty header now opens a session *(was 404 on the JVM backends)*. A session id
+    sent in two header lines is read as one joined value and is 404 everywhere (the JVM backends
+    used the first line).
+  - **The endpoint path is matched exactly.** `/mcp/` is **404** on zio-http and the socket
+    backend, as it always was on Bun *(was served on the JVM backends)*. The query string is
+    ignored everywhere (`/mcp?x=1` is the endpoint). zio-http still normalises the request target
+    before the match (`/%6dcp`, `//mcp`, `/./mcp` reach the endpoint there); the socket backend
+    compares it as written.
+  - **Other methods are 405, after the Host/Origin guard.** `PUT`, `PATCH`, `OPTIONS`, `HEAD`,
+    `TRACE` on the endpoint: zio-http answered **404** and never ran the guard; it now answers 403
+    for a refused `Host`/`Origin` and otherwise **405**. All backends send an `Allow` header naming
+    what the endpoint serves in its mode (`POST, GET, DELETE`; `POST, DELETE` on Bun; `POST` with
+    `stateless = true`; without `DELETE` under `disallowDelete`) and a JSON-RPC `-32000` body that
+    names the method; a `HEAD` gets headers only. Before, the 405 bodies were empty (zio-http,
+    socket), `text/plain` (`Method Not Allowed`, Bun) or said `No standalone GET stream; …` for a
+    PUT (Bun), and only the socket backend sent `Allow`, for these methods alone.
+  - **A GET or DELETE with a refused `Host`/`Origin` on the stateless adapter: 403.** Before: 405
+    on zio-http and the socket backend, which skipped the guard there; Bun already answered 403.
+  - **A GET or DELETE declaring `MCP-Protocol-Version: 2026-07-28`** is still 405, now with
+    `Allow: POST` and a body saying that revision does not use the method.
+  - **`Accept` is parsed, not searched** (RFC 9110 §12.5.1): whole media ranges, `type/*` and
+    `*/*`, the most specific matching range decides, and `q=0` means not acceptable. `Accept:
+    */*;q=0`, `application/json;q=0, text/event-stream` and a look-alike such as
+    `application/json-patch+json` are now **406** *(were served)*. `application/*, text/*` is
+    accepted on a 2026-07-28 POST, which used to honour only `*/*`.
+  - **A 2026-07-28 POST has one 406**: `-32020`, `Accept must include application/json and
+    text/event-stream`, whether the header is absent or allows only one of the two types. Before,
+    an absent header gave that reply while `Accept: application/json` alone gave `-32000` `Accept
+    must allow text/event-stream` from the legacy gate. The reply is now sent before the body is
+    read, so its `id` is `null`. Legacy POSTs keep `-32000` and their two messages.
+  - **`-32022` lists every supported version.** `data.supported` of an unsupported-version error
+    is the list `server/discover` advertises (`2026-07-28` and the five legacy revisions), on HTTP
+    and stdio, for requests and notifications. Before: `["2026-07-28"]`, which told a legacy
+    client that mis-sent the header that the server was 2026-07-28 only. One case keeps the short
+    list: a legacy version written in the 2026-07-28 request shape (`_meta` and header both say
+    `2025-11-25`), where the requested version is itself supported, just not in that shape.
+  - **Bun's 404 for a path that is not the endpoint has an empty body**, like the other backends
+    (it carried `Not Found` as `text/plain`).
+  - **`httpEndpoint` is validated at startup.** A value containing `?`, `#`, `%`, whitespace, a
+    control character or a `.` / `..` segment made a route no request could reach (every request
+    404); `runHttp()` now fails with `Invalid HTTP settings: httpEndpoint '…' can never match a
+    request path`. On Bun `httpEndpoint = "mcp"` (no leading slash) is now the same as `"/mcp"`,
+    as on the JVM; before, it matched nothing there.
 - **The Tasks extension's requests follow SEP-2663** (TJC-2367). These change replies on
   2026-07-28 requests when `TaskSettings(enabled = true)`; nothing changes for legacy sessions or
   with tasks off.
@@ -575,6 +630,19 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   `RouterBuilder.build` and `Builtins` take an optional `SkillRegistry`.
 
 ### Fixed
+
+- **A request that ends without a reply is logged** (GH #114, TJC-2360). When a legacy session is
+  terminated while one of its requests is still running — HTTP DELETE, `sessionIdleTimeout`, or
+  eviction at the `maxSessions` cap — that request gets no response, and until now nothing in the
+  server log said so. The router logs one WARN per such request: `Request 'tools/call' ended
+  without a reply: session <id> was terminated while it ran …`. It names the method and the
+  session, never the request id or its arguments. A request the client cancelled itself
+  (`notifications/cancelled`) is logged at DEBUG only.
+- **A clean SIGTERM does not log at ERROR** (GH #114). 1.0.0 was seen logging one `level=ERROR
+  … InterruptedException: Interrupted by thread "zio-fiber-…"` line per shutdown of an HTTP
+  server. It does not reproduce on this tree (`McpServerApp[Http]` and a plain `runHttp()`, with
+  and without an open GET stream); `scripts/conformance.sh` now fails a run whose server log
+  holds such a line, so it cannot come back unnoticed.
 
 - **A process frozen for longer than five seconds no longer turns a streamed reply into an empty
   `200`** (TJC-5133). The handler releases a streamed reply that no backend has started within

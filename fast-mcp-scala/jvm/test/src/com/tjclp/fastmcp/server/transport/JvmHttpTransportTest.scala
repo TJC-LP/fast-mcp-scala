@@ -364,7 +364,10 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     resp.status shouldBe Status.BadRequest
     val body = bodyOf(resp)
     body should include(""""code":-32022""")
-    body should include(""""supported":["2026-07-28"]""")
+    // Every version the server speaks, as server/discover advertises them (D3.15).
+    body should include(
+      """"supported":["2026-07-28","2025-11-25","2025-06-18","2025-03-26","2024-11-05","2024-10-07"]"""
+    )
     body should include(""""requested":"2099-01-01"""")
     body should not include "-32602"
     body should not include "_meta"
@@ -965,9 +968,82 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     }
   }
 
-  test("streamable endpoint returns 405 for a modern-style GET without a legacy session") {
+  test("streamable endpoint returns 400 for a GET or DELETE without a legacy session (D3.14)") {
     val routes = buildRoutes(stateless = false)
-    run(routes, Request.get(URL(Path.root / "mcp"))).status shouldBe Status.MethodNotAllowed
+    for req <- List(Request.get(URL(Path.root / "mcp")), Request.delete(URL(Path.root / "mcp"))) do
+      val resp = run(routes, req)
+      resp.status shouldBe Status.BadRequest
+      bodyOf(resp) should include("mcp-session-id header is required")
+    // A GET that declares 2026-07-28 has no stream to open at all: 405, Allow: POST.
+    val modern = run(
+      routes,
+      Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom("mcp-protocol-version", "2026-07-28"))
+    )
+    modern.status shouldBe Status.MethodNotAllowed
+    modern.rawHeader("allow") shouldBe Some("POST")
+  }
+
+  test("zio-http routes: exact endpoint path, and every method reaches the shared gates (C3.7, D3.16)") {
+    val routes = buildRoutes(stateless = false)
+    def initTo(path: Path, query: Option[String] = None): Response =
+      val url = query.fold(URL(path))(q => URL(path).addQueryParams(q))
+      run(
+        routes,
+        Request
+          .post(url, Body.fromString(initFrame))
+          .addHeader(Header.Custom("content-type", "application/json"))
+          .addHeader(Header.Custom("accept", "application/json, text/event-stream"))
+      )
+    initTo(Path.root / "mcp").status shouldBe Status.Ok
+    initTo(Path.root / "mcp", Some("x=1")).status shouldBe Status.Ok
+    initTo((Path.root / "mcp").addTrailingSlash).status shouldBe Status.NotFound
+    initTo(Path.root / "MCP").status shouldBe Status.NotFound
+    initTo(Path.root / "mcp" / "extra").status shouldBe Status.NotFound
+    initTo(Path.root / "api" / "mcp").status shouldBe Status.NotFound
+    for method <- List(Method.PUT, Method.PATCH, Method.OPTIONS, Method.HEAD, Method.TRACE) do
+      withClue(s"$method: ") {
+        val base = Request(method = method, url = URL(Path.root / "mcp"))
+        val resp = run(routes, base)
+        resp.status shouldBe Status.MethodNotAllowed
+        resp.rawHeader("allow") shouldBe Some("POST, GET, DELETE")
+        if method != Method.HEAD then
+          bodyOf(resp) should include(s"Method ${method.name} is not allowed on the MCP endpoint")
+        // The Host/Origin guard is consulted before the method (it never was for these methods).
+        run(routes, base.addHeader(Header.Custom("host", "evil.example.com"))).status shouldBe
+          Status.Forbidden
+        // Off the endpoint nothing but 404 is said, whatever the method or Host.
+        run(routes, Request(method = method, url = URL(Path.root / "other"))).status shouldBe
+          Status.NotFound
+      }
+  }
+
+  test("stateless: GET and DELETE with a refused Host are 403, not 405 (C3.7)") {
+    val routes = buildRoutes(stateless = true)
+    for req <- List(Request.get(URL(Path.root / "mcp")), Request.delete(URL(Path.root / "mcp"))) do
+      run(routes, req.addHeader(Header.Custom("host", "evil.example.com"))).status shouldBe
+        Status.Forbidden
+      val allowed = run(routes, req)
+      allowed.status shouldBe Status.MethodNotAllowed
+      allowed.rawHeader("allow") shouldBe Some("POST")
+  }
+
+  test("an empty mcp-session-id is a missing one: 400, never a 404 lookup of the empty id (C3.6)") {
+    val routes = buildRoutes(stateless = false)
+    val emptyPost = post(routes, listFrame, Some(""))
+    emptyPost.status shouldBe Status.BadRequest
+    bodyOf(emptyPost) should include("mcp-session-id header is required")
+    for req <- List(Request.get(URL(Path.root / "mcp")), Request.delete(URL(Path.root / "mcp"))) do
+      val resp = run(routes, req.addHeader(Header.Custom(SessionIdHeader, "")))
+      resp.status shouldBe Status.BadRequest
+      bodyOf(resp) should not include "Session not found"
+    // A session id sent twice is one joined value on every backend: it names no session.
+    val sid = initSid(routes)
+    val twice = Request
+      .delete(URL(Path.root / "mcp"))
+      .addHeader(Header.Custom(SessionIdHeader, sid))
+      .addHeader(Header.Custom(SessionIdHeader, sid))
+    run(routes, twice).status shouldBe Status.NotFound
+    bodyOf(post(routes, listFrame, Some(sid))) should include("tools")
   }
 
   test("modern capability failures use HTTP 400 with -32021") {

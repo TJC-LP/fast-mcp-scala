@@ -230,7 +230,7 @@ final class McpRouter[R](
           McpError
             .unsupportedProtocolVersion(
               context.protocolVersion,
-              List(Protocol.LatestProtocolVersion)
+              Protocol.supportedVersionsFor(context.protocolVersion)
             )
             .toErrorObject
         )
@@ -311,7 +311,8 @@ final class McpRouter[R](
                 case Some(err) =>
                   hooks.onError(method, err, session).as(Some(Failure(Some(id), err.toErrorObject)))
                 case None =>
-                  if cause.isInterruptedOnly then ZIO.none // cancelled — emit no response
+                  // The handler was stopped from outside this dispatch: no response is emitted.
+                  if cause.isInterruptedOnly then endedWithoutReply(session, method).as(None)
                   else
                     val err = McpError.internalError(
                       Option(cause.squashWith(identity).getMessage).getOrElse("internal error")
@@ -320,6 +321,26 @@ final class McpRouter[R](
                       .onError(method, err, session)
                       .as(Some(Failure(Some(id), err.toErrorObject)))
         yield resp
+
+  /** Say why a request got no reply. Its handler was interrupted by something other than the
+    * request's own transport going away (that interrupts the dispatch itself and never gets here):
+    *   - the session was terminated while the request ran — HTTP DELETE, idle eviction or eviction
+    *     at the `maxSessions` cap. The client is left waiting for a reply that will not come, and
+    *     until this line nothing in the server log said so: WARN.
+    *   - the client cancelled it (`notifications/cancelled`), which asks for exactly this: DEBUG.
+    * The method is logged, never the request id or any params: the id is a client-chosen string.
+    */
+  private def endedWithoutReply(session: Session, method: String): UIO[Unit] =
+    session.isTerminated.flatMap { terminated =>
+      if terminated then
+        ZIO.logWarning(
+          s"Request '$method' ended without a reply: session ${session.sessionId} was terminated " +
+            "while it ran (DELETE, idle timeout or session-cap eviction). The client receives no " +
+            "response for it; raise sessionIdleTimeout above the longest call, or run long calls " +
+            "as tasks."
+        )
+      else ZIO.logDebug(s"Request '$method' was cancelled by the client; no reply is sent")
+    }
 
   private def dispatchNotification(session: Session, method: String, params: Json): URIO[R, Unit] =
     if method == NotificationMethods.Cancelled then handleCancellation(session, params)

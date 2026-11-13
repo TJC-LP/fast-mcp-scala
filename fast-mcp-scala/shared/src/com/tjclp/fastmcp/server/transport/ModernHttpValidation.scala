@@ -10,10 +10,11 @@ import com.tjclp.fastmcp.server.router.{McpRouter, RequestContext}
   *
   * The platform supplies header lookup as a `String => Option[String]` (the same seam
   * [[HttpHeaderValidation]] uses) and maps the returned `Int` status codes onto its own response
-  * type. Note the platform backends apply a lenient pre-2026 Accept gate first (absent header =
-  * accept anything, wildcard subtypes honored); this object's Accept check is the strict 2026-07-28
-  * one — header required, only the literal `*"/"*` wildcard, and both `application/json` and
-  * `text/event-stream` demanded. Unifying the two is deliberately out of scope here.
+  * type. The `Accept` rule of this revision — the header is required and must allow both
+  * `application/json` and `text/event-stream` — is `HttpRequestGuards.modernAcceptOk`. A request
+  * whose `mcp-protocol-version` header declares 2026-07-28 already met it in
+  * `HttpRequestGuards.postGate`, before its body was read; the check here covers a request that is
+  * modern only by its body. Both refuse with 406, `-32020` and the same message.
   */
 private[fastmcp] object ModernHttpValidation:
 
@@ -75,17 +76,15 @@ private[fastmcp] object ModernHttpValidation:
   ): Either[(Int, McpError), Unit] =
     requestedVersion(header, rpc) match
       case Some(version) if !Protocol.SupportedProtocolVersions.contains(version) =>
+        // `data.supported` is every version the server speaks (`Protocol.supportedVersionsFor`).
         Left(
-          400 -> McpError.unsupportedProtocolVersion(version, List(Protocol.LatestProtocolVersion))
+          400 -> McpError
+            .unsupportedProtocolVersion(version, Protocol.supportedVersionsFor(version))
         )
       case _ => Right(())
 
   private def acceptOk(header: String => Option[String]): Boolean =
-    header("accept").exists { value =>
-      val lower = value.toLowerCase
-      (lower.contains("*/*") || lower.contains("application/json")) &&
-      (lower.contains("*/*") || lower.contains("text/event-stream"))
-    }
+    HttpRequestGuards.modernAcceptOk(header("accept"))
 
   private def contentTypeOk(header: String => Option[String]): Boolean =
     header("content-type").exists(_.toLowerCase.contains("application/json"))
@@ -104,21 +103,17 @@ private[fastmcp] object ModernHttpValidation:
       _ <- Either.cond(
         acceptOk(header),
         (),
-        406 -> McpError.headerMismatch(
-          "Accept must include application/json and text/event-stream"
-        )
+        406 -> McpError.headerMismatch(HttpRequestGuards.ModernAcceptMessage)
       )
       _ <- singleVersionHeader(header)
       version <- header("mcp-protocol-version").toRight(
         400 -> McpError.headerMismatch("Missing required MCP-Protocol-Version header")
       )
+      // Only an unknown version gets here (a legacy one is not routed to this path by its header).
       _ <- Either.cond(
         version == Protocol.LatestProtocolVersion,
         (),
-        400 -> McpError.unsupportedProtocolVersion(
-          version,
-          List(Protocol.LatestProtocolVersion)
-        )
+        400 -> McpError.unsupportedProtocolVersion(version, Protocol.supportedVersionsFor(version))
       )
       _ <- router.validateHttpMethod(notification.method, header).left.map(400 -> _)
     yield ()
@@ -141,9 +136,7 @@ private[fastmcp] object ModernHttpValidation:
       _ <- Either.cond(
         acceptOk(header),
         (),
-        406 -> McpError.headerMismatch(
-          "Accept must include application/json and text/event-stream"
-        )
+        406 -> McpError.headerMismatch(HttpRequestGuards.ModernAcceptMessage)
       )
       _ <- singleVersionHeader(header)
       _ <- supportedVersion(header, rpc)
@@ -161,12 +154,14 @@ private[fastmcp] object ModernHttpValidation:
           "MCP-Protocol-Version header does not match request metadata"
         )
       )
+      // A legacy version written in the 2026-07-28 request shape (`_meta` and header agree on it):
+      // `supported` names the one version this shape is valid for (`Protocol.supportedVersionsFor`).
       _ <- Either.cond(
         context.protocolVersion == Protocol.LatestProtocolVersion,
         (),
         400 -> McpError.unsupportedProtocolVersion(
           context.protocolVersion,
-          List(Protocol.LatestProtocolVersion)
+          Protocol.supportedVersionsFor(context.protocolVersion)
         )
       )
       _ <- router.validateHttpHeaders(rpc, header).left.map(400 -> _)
