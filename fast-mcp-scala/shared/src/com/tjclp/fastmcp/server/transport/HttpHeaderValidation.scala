@@ -108,7 +108,8 @@ private[fastmcp] object HttpHeaderValidation:
       case "tools/call" | "prompts/get" => "name"
       case "resources/read" => "uri"
       case _ => ""
-    if sourceField.isEmpty then Right(())
+    if isTaskMethod(request.method) then validateTaskName(request, header)
+    else if sourceField.isEmpty then Right(())
     else
       val expected = request.params
         .flatMap(JsonFields.get(_, sourceField))
@@ -117,6 +118,25 @@ private[fastmcp] object HttpHeaderValidation:
         case None =>
           Left(McpError.headerMismatch(s"Header mismatch: body is missing `$sourceField`"))
         case Some(value) => matchRequired(header("mcp-name"), value, "Mcp-Name", decode = true)
+
+  private def isTaskMethod(method: String): Boolean =
+    method == "tasks/get" || method == "tasks/update" || method == "tasks/cancel"
+
+  /** Tasks extension (SEP-2663, "Streamable HTTP: Routing Headers"): on `tasks/get`, `tasks/update`
+    * and `tasks/cancel` the client sets `Mcp-Name` to `params.taskId`, so an intermediary can route
+    * the request to the instance that holds the task. It is checked like the other `Mcp-Name`
+    * sources: required, and equal to the body value. A request whose body has no string `taskId` is
+    * left to the method's own handler, which refuses it with `-32602`.
+    */
+  private def validateTaskName(
+      request: JsonRpcMessage.Request,
+      header: String => Option[String]
+  ): Either[McpError, Unit] =
+    request.params
+      .flatMap(JsonFields.get(_, "taskId"))
+      .collect { case Json.Str(value) => value } match
+      case None => Right(())
+      case Some(taskId) => matchRequired(header("mcp-name"), taskId, "Mcp-Name", decode = true)
 
   private def validateToolHeaders(
       request: JsonRpcMessage.Request,
@@ -266,7 +286,13 @@ private[fastmcp] object HttpHeaderValidation:
           .map(_ => McpError.headerMismatch("Malformed Base64 header sentinel"))
           .flatMap { bytes =>
             val decoded = new String(bytes, StandardCharsets.UTF_8)
-            if java.util.Arrays.equals(bytes, decoded.getBytes(StandardCharsets.UTF_8)) then
+            // The JDK decoder accepts a payload whose `=` padding is missing and one whose unused
+            // trailing bits are set. Only the canonical encoding of the bytes is a valid value
+            // (SEP-2243 lists `=?base64?SGVsbG8?=` as "Invalid Base64 padding: MUST reject"), and
+            // two spellings of one value must not both pass a check an intermediary also makes.
+            if Base64.getEncoder.encodeToString(bytes) != payload then
+              Left(McpError.headerMismatch("Malformed Base64 header sentinel"))
+            else if java.util.Arrays.equals(bytes, decoded.getBytes(StandardCharsets.UTF_8)) then
               Right(decoded)
             else Left(McpError.headerMismatch("Base64 header value is not valid UTF-8"))
           }
