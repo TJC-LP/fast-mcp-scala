@@ -16,24 +16,38 @@ object MyServer extends McpServerApp[Stdio, MyServer.type]:
 ```
 
 Newline-delimited JSON-RPC over stdin/stdout, the transport Claude Desktop and the MCP Inspector
-use. One durable session per process; shutdown is EOF-driven (the client closing stdin ends the
-loop). On the JVM and in GraalVM images SIGTERM/SIGINT take effect only after that EOF — the main
-fiber is parked in a blocking `System.in.read` that interruption cannot unblock — so a host must
-close the child's stdin before signalling it (the TypeScript SDK does; `Ctrl-C`, `timeout` and
-`docker stop` stall until stdin closes); Scala Native and Bun/Node exit on the signal at once. An
-interruptible reader is tracked for 1.0.1. Each inbound frame is dispatched in its own fiber, so a
+use. One durable session per process. Each inbound frame is dispatched in its own fiber, so a
 handler awaiting a server→client round trip (roots, sampling, elicitation) cannot deadlock the
-loop; replies may therefore be written in a different order from the requests — correlate by `id`,
-and wait for the `initialize` result before pipelining further requests. A frame is a
-newline-terminated line: do not rely on trailing bytes without a `\n` being dispatched (the JVM
-and Bun drop them), and until the 1.0.1 fix the JVM may drop the replies to frames still in flight
-when stdin closes — wait for every reply before closing the pipe (Scala Native and Bun answer
-them). The stdio lifecycle (`StdioLoop`: session, single-writer stdout, outbound drainer, EOF
-teardown) is shared by the JVM and Scala Native backends; the Scala.js backend drives Node's
-callback IO directly. Because `runStdio()` has no reachable call path into the HTTP stack,
-stdio-only programs never link zio-http or netty; exclude `dev.zio:zio-http_3` from the dependency
-(netty reaches the JVM artifact only through zio-http, so that one exclusion sheds both) to keep
-them off the classpath too. That is what makes small GraalVM images possible
+loop; replies may therefore be written in a different order from the requests — correlate by `id`.
+
+The lifecycle is the same on the JVM (and GraalVM images), Bun and Scala Native:
+
+- **End of stdin drains.** When the client closes stdin, every frame the server has already read
+  is dispatched and its reply written before `runStdio()` returns and the process exits. A client
+  may write its last request and close the pipe at once. The wait is bounded by
+  `McpServerSettings.stdioDrainTimeout` (five seconds by default): a handler still running then is
+  interrupted and its request gets no reply, so a handler that never finishes cannot keep the
+  process alive. Background task bodies (the Tasks extension) are not waited for. A handler that
+  is waiting for the client's answer to a server→client request fails at once, since no answer can
+  arrive any more.
+- **The last line is a frame with or without its newline.** Trailing bytes without a `\n` are
+  dispatched and answered at end of stdin.
+- **`initialize` is answered before the next frame is read.** A client may write `initialize`,
+  `notifications/initialized` and its first requests in one burst; none of them is answered
+  `-32600 Server not initialized`. A request that carries its own protocol version in `_meta`
+  (MCP 2026-07-28) needs no handshake at all.
+- **SIGTERM and SIGINT end the server while stdin is still open.** `Ctrl-C`, `timeout`, a
+  supervisor and `docker stop` work without the host closing stdin first. In-flight handlers are
+  interrupted; nothing is drained. On the JVM stdin is read on a dedicated daemon thread, because a
+  thread blocked in `System.in.read` cannot be interrupted; Bun and Scala Native end on the signal
+  by the runtime's default action.
+
+The stdio lifecycle (`StdioLoop`: session, single-writer stdout, outbound drainer, drain at end of
+stdin) is shared by the JVM and Scala Native backends; the Scala.js backend implements the same
+contract on Node's callback IO. Because `runStdio()` has no reachable call path into the HTTP
+stack, stdio-only programs never link zio-http or netty; exclude `dev.zio:zio-http_3` from the
+dependency (netty reaches the JVM artifact only through zio-http, so that one exclusion sheds both)
+to keep them off the classpath too. That is what makes small GraalVM images possible
 (see [native-image.md](./native-image.md)).
 
 ### stdout is the wire — log to stderr
@@ -72,7 +86,9 @@ ever swapped. Before 1.0.0 the stdio runner installed no logger at all, so ZIO l
 stdout — if you relied on that, override `bootstrap` with a stdout logger of your own. The ZIO
 runtime itself has two stdout prints outside the logger — the `gracefulShutdownTimeout` expiry
 warning and the notice it prints when a logger throws — both unreachable at the defaults
-(`gracefulShutdownTimeout` is infinite), so leave that default alone on stdio.
+(`gracefulShutdownTimeout` is infinite). Overriding `gracefulShutdownTimeout` on a stdio app can
+therefore print a `**** WARNING ****` line to stdout when the timeout expires; leave the default
+alone and bound shutdown with `stdioDrainTimeout`, which never prints.
 
 ## HTTP
 
@@ -479,6 +495,7 @@ no reply (it fails with its timeout). A JVM client whose GET stream falls more t
 | `allowedHosts` | `None` (automatic) | The `Host` names of the DNS-rebinding/CSRF guard ([Host / Origin validation](#host--origin-validation)). `None` is **automatic**: on a loopback bind the guard is on for `localhost`, `127.0.0.1`, `[::1]` and the bound address; on any other bind it is off and startup warns. `Some(names)` uses exactly those names on any bind address (`Some(Set.empty)` reads as `None`). With the guard on: the `Host` value must parse as one `host[:port]` authority and its hostname (or the verbatim `host:port`) must be listed — the port itself is not compared; a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, a `Host` or `Origin` sent more than once (seen as its `", "`-joined value), and malformed `Host`/`Origin` ports are refused (403), with or without the other header. IPv6 entries are written bracketed, exactly as they appear in the `Host` header: `Set("[::1]")`, not `Set("::1")`. |
 | `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted in addition to the request's own authority **when `allowedHosts` is also set**; with `allowedOrigins` alone only the listed origins pass (the request's own authority is then refused 403 too), and the `Host` is held to the automatic loopback names on a loopback bind and not checked on any other bind. Malformed entries fail `runHttp()` at startup. |
 | `dnsRebindingProtection` | `true` | The explicit opt-out of the Host/Origin guard (since 1.1.0). `false` accepts every `Host` and `Origin` and silences the non-loopback startup warning; it must not be combined with `allowedHosts` / `allowedOrigins` (`runHttp()` fails at startup). Prefer listing the proxied name in `allowedHosts`. |
+| `stdioDrainTimeout` | 5 s | Stdio only (since 1.1.0): how long the server waits at end of stdin for the replies to frames it has already read; a handler still running then is interrupted. Zero interrupts without waiting; a negative value is refused at construction. See [stdio](#stdio) |
 | `maxRequestBodyBytes` | `1 MiB` | Request body cap on every backend; larger bodies get 413 before decoding (empty 413 on the wire from netty/Bun, JSON-RPC `-32000` on first-party paths); must not exceed `limits.maxFrameChars`. This is the cap a large `sampling/createMessage` or elicitation *result* meets over HTTP (a legacy client then waits out its 60 s request timeout): raise it together with `limits.maxFrameChars` — see [Input limits](#input-limits). |
 | `maxSessions` | `Some(1000)` | Cap on stored legacy sessions. A session is stored only for an `initialize` that succeeded, and keeps at most 256 JSON values / 16 KiB of text from it, so the store's worst case is `maxSessions` × the per-session budget (about 100 MiB at the defaults). At the cap a client holding more sessions than the newcomer's gives one up; among clients holding their share, the longest-idle session without a live GET is evicted, else the longest-idle GET-holding session idle longer than `sessionIdleTimeout`; 503 only if nobody qualifies. Unauthenticated initializes can evict idle sessions — front non-loopback deployments with auth. `None` disables. See [The legacy session store](#the-legacy-session-store). |
 | `loggingEnabled` | `false` | Advertise logging; modern clients use per-request `_meta` levels, legacy clients `logging/setLevel`. |

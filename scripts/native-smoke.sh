@@ -61,9 +61,9 @@ await_id() {
   fail "timed out waiting for reply id=$1"
 }
 
-# Requests are fed through a FIFO in two phases: the stdio loop dispatches each frame in its own
-# fiber, so post-handshake requests must not be written until the initialize reply has landed
-# (otherwise they race the handshake and get -32600 "Server not initialized").
+# Requests are fed through a FIFO in two phases, handshake first. The server no longer needs that
+# (since 1.1.0 it answers initialize before it reads the next frame); the phases keep the
+# transcript readable when a reply is missing.
 mkfifo "$WORK/in"
 echo "→ driving server over stdio" >&2
 if [ -n "${NATIVE_SMOKE_CMD:-}" ]; then
@@ -131,6 +131,35 @@ jq -es 'map(select(.id == 6))[0].result.resources | length > 0' \
   <"$OUT" >/dev/null || fail "resources/list empty"
 jq -es 'map(select(.id == 7))[0].result.contents[0].text | length > 0' \
   <"$OUT" >/dev/null || fail "resources/read static://welcome unreadable"
+
+# SIGTERM while stdin is still open must end the server (GH #113): through 1.0.x a JVM or GraalVM
+# stdio server sat in a blocking System.in.read and ignored the signal until its stdin closed, so
+# Ctrl-C, `timeout` and `docker stop` hung. A second run: handshake, then TERM with the FIFO held
+# open. Skipped with NATIVE_SMOKE_CMD, where the pid is the wrapping shell's.
+if [ -z "${NATIVE_SMOKE_CMD:-}" ]; then
+  OUT="$WORK/out-sigterm"
+  mkfifo "$WORK/in-sigterm"
+  "$BIN" <"$WORK/in-sigterm" >"$OUT" 2>"$ERR" &
+  SRV_PID=$!
+  exec 3>"$WORK/in-sigterm"
+  printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"native-smoke","version":"0.0.0"}}}' >&3
+  await_id 1
+  kill -TERM "$SRV_PID"
+  EXITED=""
+  for _ in $(seq 1 20); do
+    kill -0 "$SRV_PID" 2>/dev/null || { EXITED=1; break; }
+    sleep 0.25
+  done
+  if [ -z "$EXITED" ]; then
+    kill -9 "$SRV_PID" 2>/dev/null || true
+    fail "server did not exit within 5s of SIGTERM while stdin was open"
+  fi
+  wait "$SRV_PID" 2>/dev/null || true
+  SRV_PID=""
+  exec 3>&-
+  echo "→ SIGTERM with stdin open: exited" >&2
+fi
 
 # The seam-split regression guard: a stdio binary must not contain the HTTP stack. A handful of
 # stray matches is tolerated for robustness across GraalVM versions; a re-coupled seam shows up
