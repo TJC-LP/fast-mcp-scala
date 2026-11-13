@@ -199,7 +199,7 @@ Unit tests in the driver cover these rules (`cargo test` in `mcp/driver`).
 Time. In the local loop on an ARM workstation, where the driver's x86-64 Node runs under
 emulation, the active suite took 6 to 11 s against a node and the requirement set 7 to 12 s.
 Without emulation (the host's own Node against the same server started on the host) the active
-suite took 1 to 2 s and the requirement set 3 s. A timeline runs one suite against one node.
+suite took 1 to 2 s and the requirement set 3 s. A timeline runs all three suites against one node, the drawn suite first.
 
 **Regression probes for security findings.** The `probe` rule and two in-server assertions state
 hardened behaviour that Claude Security findings showed was missing. They failed on the code
