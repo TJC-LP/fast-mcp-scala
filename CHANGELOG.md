@@ -51,8 +51,10 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     or — failing both — 5 seconds after the reply was built if its stream has still not been
     started. A stream first run after that is empty.
   - On the zio-http backend a streamed reply is tied to the request's scope, so a connection that
-    closes before the stream starts releases them at once. The socket backend already released a
-    reply it could not deliver. Both are built on the shared handler, where the bound lives.
+    closes before the stream starts releases them at once. The socket backend releases a reply it
+    cannot deliver through the same explicit hook; it used to run the stream already halted, which
+    frees them only if the stream has registered its finalizers by then. Both are built on the
+    shared handler, where the bound lives.
   - The handler is uninterruptible from the moment it forks a request's dispatch until it hands
     the reply back, except while it waits for the first frame; leaving that wait without a reply
     stops the dispatch.
