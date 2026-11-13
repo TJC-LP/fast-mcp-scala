@@ -35,11 +35,33 @@ object MessageLoop:
       session: Session,
       frame: String
   ): URIO[R, Option[String]] =
-    parseFrame(frame, router.limits) match
+    dispatchParsed(router, session, parseFrame(frame, router.limits))
+
+  /** The second half of [[handleFrame]], for a transport that has to look at the parsed frame
+    * before it decides how to run it (stdio answers `initialize` before it reads on).
+    */
+  private[fastmcp] def dispatchParsed[R](
+      router: McpRouter[R],
+      session: Session,
+      parsed: Either[JsonRpcMessage, JsonRpcMessage]
+  ): URIO[R, Option[String]] =
+    parsed match
       case Right(message) =>
         router.dispatch(session, message).map(_.map(_.toJson))
       case Left(parseFailure) =>
         ZIO.some(parseFailure.toJson)
+
+  /** True when stdio must finish this frame before it reads the next one: the legacy `initialize`
+    * request. Every other frame is dispatched concurrently, so a pipelined client — `initialize`,
+    * `notifications/initialized` and a first request written in one burst — would otherwise race
+    * its own handshake and be told `-32600 Server not initialized`. A request that carries its own
+    * protocol version (MCP 2026-07-28) never waits for a handshake; one named `initialize` is
+    * answered `-32601` and costs nothing to run in line.
+    */
+  private[fastmcp] def isOrderedStdioFrame(
+      parsed: Either[JsonRpcMessage, JsonRpcMessage]
+  ): Boolean =
+    parsed.exists(isInitialize)
 
   /** Parse one frame under `limits`. `Left` carries the ready-to-send JSON-RPC parse-error response
     * (null id, per JSON-RPC).
@@ -92,8 +114,10 @@ object MessageLoop:
   /** Internal frame offered to a per-request SSE queue when its dispatch ends without a final reply
     * — a `notifications/cancelled` interruption emits no response, and the stream's
     * `takeUntil(isFinalReply)` would otherwise hold the HTTP connection open forever. Offered by
-    * the transports' `ensuring` on the dispatch fiber and filtered out of the stream; only
-    * per-request queues ever carry it (stdio's outbound path cannot see it).
+    * the transports' `ensuring` on the dispatch fiber and filtered out of the stream. The stdio
+    * loops offer it to the session's outbound channel once, after the last reply at stdin EOF, to
+    * tell the stdout writer that everything queued before it has been written. It never reaches the
+    * wire.
     */
   private[fastmcp] val CloseSentinel: JsonRpcMessage =
     Notification("$fastmcp/internal/close", None)

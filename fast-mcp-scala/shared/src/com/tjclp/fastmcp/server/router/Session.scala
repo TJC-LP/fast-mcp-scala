@@ -78,6 +78,10 @@ final class Session private (
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   @volatile private var outboundClosed: Boolean = false
 
+  /** Set once the transport can no longer deliver a client message ([[closeInbound]]). */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  @volatile private var inboundClosed: Boolean = false
+
   /** When the client was last active (transports touch on every request), in milliseconds on the
     * MONOTONIC clock ([[Session.monotonicMs]]) — comparable only with another reading of that
     * clock, never with wall-clock time. Drives idle eviction and the eviction order at the session
@@ -313,12 +317,27 @@ final class Session private (
       id <- nextServerRequestId
       promise <- Promise.make[McpError, Json]
       _ <- pendingRef.update(_ + (id -> promise))
+      // Registered first, checked second: `closeInbound` sets the flag and then fails what is
+      // registered, so a request racing it is failed by one side or the other.
+      _ <- ZIO.when(inboundClosed)(promise.fail(Session.inboundClosedError(method)))
       result <-
         (send(JsonRpcMessage.Request(id, method, params)) *>
           promise.await.timeoutFail(
             McpError.internalError(s"Server request '$method' timed out")
           )(timeout)).ensuring(pendingRef.update(_ - id))
     yield result
+
+  /** The client can no longer answer (stdin reached EOF): fail every server→client request still
+    * waiting for its response, and every later one at once, instead of leaving the handler to wait
+    * out its own timeout for a frame that cannot arrive. Idempotent.
+    */
+  private[fastmcp] def closeInbound: UIO[Unit] =
+    ZIO.succeed { inboundClosed = true } *>
+      pendingRef
+        .getAndSet(Map.empty)
+        .flatMap(pending =>
+          ZIO.foreachDiscard(pending.values)(_.fail(Session.inboundClosedError("request")))
+        )
 
   /** Resolve a pending server→client request with the client's response. No-op if the id is unknown
     * or already completed (so stray/duplicate responses are harmless).
@@ -338,6 +357,9 @@ object Session:
     * embedders): the default of `LimitSettings.maxOutboundMessages`.
     */
   val DefaultOutboundCapacity: Int = 256
+
+  private def inboundClosedError(method: String): McpError =
+    McpError.internalError(s"Server $method failed: the client closed its input stream")
 
   /** Milliseconds on the monotonic clock (`System.nanoTime`, available on the JVM, Scala.js and
     * Scala Native): the clock of [[Session.lastSeen]] and of every "how long idle" comparison in

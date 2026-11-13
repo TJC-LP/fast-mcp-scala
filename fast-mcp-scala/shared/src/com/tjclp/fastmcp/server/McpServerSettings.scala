@@ -274,7 +274,8 @@ case class SkillSettings(
 /** Settings for an MCP server. HTTP-specific fields (`host`, `port`, `httpEndpoint`, `stateless`,
   * `keepAliveInterval`, `sessionIdleTimeout`, `disallowDelete`, `allowedHosts`, `allowedOrigins`,
   * `maxRequestBodyBytes`, `maxSessions`, `contextHeaders`, `dnsRebindingProtection`) are ignored
-  * under stdio transports. `limits`, `tasks` and `validateToolInput` apply on every transport.
+  * under stdio transports; `stdioDrainTimeout` applies to stdio only. `limits`, `tasks` and
+  * `validateToolInput` apply on every transport.
   */
 case class McpServerSettings(
     // Spec: HTTP servers SHOULD bind to localhost by default (DNS-rebinding surface). Deployments
@@ -409,8 +410,15 @@ case class McpServerSettings(
     // startup). Meant for a loopback listener behind a reverse proxy that forwards a `Host` you
     // cannot enumerate; when you can, list it in `allowedHosts` instead and keep the guard. With it
     // off, a web page open in a browser on the same machine can reach the server (DNS rebinding).
-    dnsRebindingProtection: Boolean = true
+    dnsRebindingProtection: Boolean = true,
+    // Stdio only: how long the server waits, after stdin reaches EOF, for the replies to frames it
+    // has already read. Every such frame is dispatched and answered before `runStdio()` returns;
+    // a handler still running when this time is up is interrupted, so one that never finishes
+    // cannot keep the process alive. Background task bodies (the Tasks extension) are not waited
+    // for. Zero interrupts in-flight handlers at EOF without waiting. Must not be negative.
+    stdioDrainTimeout: java.time.Duration = McpServerSettings.DefaultStdioDrainTimeout
 ):
+  require(!stdioDrainTimeout.isNegative, "McpServerSettings.stdioDrainTimeout must be >= 0")
 
   /** The Host/Origin guard these settings resolve to (`transport.HostGuard`), computed once per
     * settings value so that no request re-derives it.
@@ -583,6 +591,9 @@ object McpServerSettings:
 
   // 1.0.x had no explicit companion, and the synthetic one printed as the class name.
   override def toString: String = "McpServerSettings"
+
+  /** Default of [[McpServerSettings.stdioDrainTimeout]]: five seconds. */
+  val DefaultStdioDrainTimeout: java.time.Duration = java.time.Duration.ofSeconds(5)
 
   // Binary compatibility with 1.0.1: the 17-field `apply`.
   private[fastmcp] def apply(
