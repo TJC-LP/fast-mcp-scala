@@ -179,8 +179,8 @@ match on every backend. A trailing slash (`/mcp/`), another case (`/MCP`), a lon
 check. The query string is not part of the path: `/mcp?x=1` is the endpoint, and the query is
 ignored. Because the match is exact, `runHttp()` refuses at startup an `httpEndpoint` that no
 request path could equal: one containing `?`, `#`, `%`, whitespace or a control character, a
-`.` / `..` segment, or any character a client would percent-encode (non-ASCII, `"`, `<`, `[`,
-`\` and the like). Letters, digits and `-._~!$&'()*+,;=:@` are what a path segment may hold.
+`.` / `..` segment, or a character every client percent-encodes (non-ASCII, `"`, `<`, `>`, `^`,
+`` ` ``, `{`, `}`) or rewrites (`\`).
 The last rule is a WARN, not a failure, on the zio-http backend: it decodes the request path, so
 such an endpoint is served there (and it worked in 1.0.x).
 
@@ -471,7 +471,7 @@ no reply (it fails with its timeout). A JVM client whose GET stream falls more t
 |---|---|---|
 | `host` | `127.0.0.1` | Bind address. Changed in 0.5.0 from `0.0.0.0` per the spec's bind-localhost guidance; set `"0.0.0.0"` explicitly for containers or external exposure — and then set `allowedHosts` / `allowedOrigins` too: a non-loopback bind is not guarded automatically, and startup logs a WARN until an allow-list is set. See [Host / Origin validation](#host--origin-validation). |
 | `port` | `8000` | Listen port. |
-| `httpEndpoint` | `/mcp` | JSON-RPC endpoint path, matched exactly (no trailing slash, case-sensitive; the query string is ignored). Letters, digits, `/` and `-._~!$&'()*+,;=:@` only, and no `.` / `..` segment — `runHttp()` fails at startup otherwise. See [The endpoint: path and methods](#the-endpoint-path-and-methods). |
+| `httpEndpoint` | `/mcp` | JSON-RPC endpoint path, matched exactly (no trailing slash, case-sensitive; the query string is ignored). Must not contain `?`, `#`, `%`, whitespace, a `.` / `..` segment, or (socket and Bun backends) non-ASCII or any of ``"<>^`{}\`` — `runHttp()` fails at startup otherwise. See [The endpoint: path and methods](#the-endpoint-path-and-methods). |
 | `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless. |
 | `disallowDelete` | `false` | Legacy adapter: answer 405 to HTTP DELETE instead of terminating the session. |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity. Live legacy GET streams are exempt from the periodic sweep but become evictable at the `maxSessions` cap once idle this long; `None` disables both. |

@@ -501,7 +501,7 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     (it carried `Not Found` as `text/plain`).
   - **`httpEndpoint` is validated at startup.** A value containing `?`, `#`, `%`, whitespace, a
     control character, a `.` / `..` segment or, on the socket and Bun backends, a character
-    clients percent-encode (non-ASCII, `"`, `<`, `[` ...; zio-http decodes the path and serves
+    every client percent-encodes (non-ASCII, `"`, `<`, `>`, `^`, `{`, `}` ...; zio-http decodes the path and serves
     such an endpoint, so there it is a WARN) made a route no request could reach (every request
     404); `runHttp()` now fails with `Invalid HTTP settings: httpEndpoint '…' can never match a
     request path`. On Bun `httpEndpoint = "mcp"` (no leading slash) is now the same as `"/mcp"`,

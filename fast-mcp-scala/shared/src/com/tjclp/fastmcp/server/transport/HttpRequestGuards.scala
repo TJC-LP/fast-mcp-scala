@@ -168,17 +168,13 @@ private[fastmcp] object HttpRequestGuards:
     else None
 
   private def encodedChar(httpEndpoint: String): Option[String] =
-    // What is left must be a character a path carries as written (RFC 3986 `pchar`, plus the
-    // separator). Anything else — non-ASCII, `"`, `<`, `[`, `\\` ... — is percent-encoded by
-    // clients and by Bun's URL parser, and the endpoint is compared as written.
-    httpEndpoint.find(ch => !pathChar(ch)).map { ch =>
-      s"'$ch' (clients percent-encode it, and the path is compared as written; use letters, " +
-        "digits and -._~!$&'()*+,;=:@ only)"
+    // What every client percent-encodes in a path, and Bun's URL parser too: the WHATWG path
+    // percent-encode set (non-ASCII, `"`, `<`, `>`, `^`, `` ` ``, `{`, `}`), and `\`, which that
+    // parser turns into `/`. `[`, `]` and `|` are left alone: an RFC 3986 client encodes them, a
+    // WHATWG one (`fetch`) sends them as written, so such an endpoint is reachable.
+    httpEndpoint.find(ch => ch > 0x7e || "\"<>^`{}\\".indexOf(ch.toInt) >= 0).map { ch =>
+      s"'$ch' (clients percent-encode it, and the path is compared as written)"
     }
-
-  private def pathChar(ch: Char): Boolean =
-    (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
-      "/-._~!$&'()*+,;=:@".indexOf(ch.toInt) >= 0
 
   /** What every backend logs at WARN once, before binding. Today: a non-loopback bind address with
     * no allow-list, where the Host/Origin guard has nothing to go on and is therefore off. Startup
