@@ -32,14 +32,14 @@ of them, newest first.
 | Per-request log level | ✅ (opt-in) |
 | Deprecated Roots, Sampling, Logging legacy surfaces | ✅ (compatibility only) |
 | Cancellation (`notifications/cancelled`) | ✅ |
-| Tasks extension | ✅ (opt-in; no task `input_required` production yet). Known SEP-2663 deviations, all 1.0.1 items: `tasks/get`/`update`/`cancel` are served without the `io.modelcontextprotocol/tasks` client capability; `Mcp-Name: <taskId>` is not validated on the tasks-namespace methods; a legacy `params.task` on a 2026-07-28 request is rejected `-32602` rather than ignored; `tasks/cancel` on a terminal task answers `-32602` rather than an idempotent empty ack; the 2025-11-25 `tasks` capability advertises only `requests.tools.call`. Details in the [1.0.0 gate ledger](./2026-07-28-upgrade.md#100-gate-ledger). |
+| Tasks extension | ✅ (opt-in). Tasks wait for input in `input_required` and resume on `tasks/update`; `tasks/get`/`update`/`cancel` require the `io.modelcontextprotocol/tasks` client capability (`-32021`) and a matching `Mcp-Name: <taskId>` over HTTP; a legacy `params.task` on a 2026-07-28 request is ignored; `tasks/cancel` and `tasks/update` are acknowledgements. Open: MRTR on the creating request followed by a task (SEP-2663 "Composition with Multi Round-Trip Requests") is not supported — such a tool asks from inside the task; `notifications/tasks` on `subscriptions/listen` is not emitted; the 2025-11-25 `tasks` capability advertises only `requests.tools.call`. Reference: [tasks.md](./tasks.md). |
 | Skills extension (`io.modelcontextprotocol/skills`, SEP-2640: `skills/list`, `skills/get`, `resources/directory/read`, skill files as resources) | ✅ (declared when a skill/provider is registered or `SkillSettings.enabled`); stable page `ext-skills@d866efdb`; both protocol eras; pinned sources and requirement-to-test matrix in [skills-conformance.md](./skills-conformance.md) |
 | DNS-rebinding / browser-origin protection (`allowedHosts`, `allowedOrigins`) | ✅ (on by default for a loopback bind; a non-loopback bind needs `allowedHosts` and warns at startup without it; opt-out `dnsRebindingProtection = false`) |
 | Input limits (`limits: LimitSettings`) + HTTP body / session caps (`maxRequestBodyBytes`, `maxSessions`) | ✅ (on by default) |
 | Legacy session idle eviction + SSE keepalives | ✅ |
 
-The deliberately unimplemented pieces (no dynamic subscription publishers, no `input_required`
-task suspension, no task-status notifications for modern bearer tasks — legacy 2025-11-25 sessions
+The deliberately unimplemented pieces (no dynamic subscription publishers, no MRTR-then-task
+composition, no task-status notifications for modern bearer tasks — legacy 2025-11-25 sessions
 do receive `notifications/tasks/status` — no authorization server) are enumerated in the upgrade
 guide's [Deliberate boundaries](./2026-07-28-upgrade.md#deliberate-boundaries).
 
@@ -60,7 +60,7 @@ guide's [Deliberate boundaries](./2026-07-28-upgrade.md#deliberate-boundaries).
   image: the active suite against the unchanged JVM baseline, and the 2026-07-28 run as a
   scenario-by-scenario parity diff against the JVM.
 - **Harness pin.** The suite version is pinned in [`conformance/package.json`](../conformance/package.json)
-  (currently `0.2.0-alpha.11`, the first release carrying the 2026-07-28 scenario set) and frozen
+  (currently `0.2.0-alpha.12`) and frozen
   by the integrity-hashed [`conformance/bun.lock`](../conformance/bun.lock); the script installs it
   with `bun install --frozen-lockfile` (Bun ≥ 1.4) and runs the installed binary, never `bunx`.
   Bumps are deliberate and recorded in the upgrade guide's gate ledger.
