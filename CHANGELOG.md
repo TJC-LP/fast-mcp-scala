@@ -354,6 +354,9 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     request's `inputResponses`, so what precedes `continueAsTask` must be safe to repeat.
   - Nothing changes for a tool that does not call `withDeferredTask`, for the annotation path
     (`@Tool` cannot defer), or for 2025-11-25 sessions.
+  - Only `McpServer` can register a deferred tool. On another `McpServerCore` (one built by a
+    custom `McpServerCoreFactory`) the registration fails with an `UnsupportedOperationException`
+    naming the tool.
   - The conformance scenario `tasks-mrtr-composition` passes with it (fixture
     `test_tool_with_task`), on the JVM, Bun and Scala Native. Reference: `docs/tasks.md` §
     "Input first, then a task".
@@ -497,7 +500,8 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - **Bun's 404 for a path that is not the endpoint has an empty body**, like the other backends
     (it carried `Not Found` as `text/plain`).
   - **`httpEndpoint` is validated at startup.** A value containing `?`, `#`, `%`, whitespace, a
-    control character or a `.` / `..` segment made a route no request could reach (every request
+    control character, a `.` / `..` segment or a character clients percent-encode (non-ASCII,
+    `"`, `<`, `[` ...) made a route no request could reach (every request
     404); `runHttp()` now fails with `Invalid HTTP settings: httpEndpoint '…' can never match a
     request path`. On Bun `httpEndpoint = "mcp"` (no leading slash) is now the same as `"/mcp"`,
     as on the JVM; before, it matched nothing there.

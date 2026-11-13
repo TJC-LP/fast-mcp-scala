@@ -355,14 +355,14 @@ class HttpRequestGuardsTest extends AnyFunSuite with Matchers:
   }
 
   test("validateSettings (C3.11): an httpEndpoint no request path can equal is refused at startup") {
-    for bad <- List("/mcp?x=1", "/mcp#frag", "/m%63p", "/a%2Fb", "/my mcp", "/mcp\t", "/mcp\n", "/./mcp", "/a/../mcp", "/mcp/.")
+    for bad <- List("/mcp?x=1", "/mcp#frag", "/m%63p", "/a%2Fb", "/my mcp", "/mcp\t", "/mcp\n", "/./mcp", "/a/../mcp", "/mcp/.", "/mcp-ü", "/mcp\"x", "/a<b>", "/a[1]", "/a\\b", "/a|b", "/a{b}", "/a^b", "/a`b")
     do
       withClue(s"'$bad': ") {
         val verdict = HttpRequestGuards.validateSettings(McpServerSettings(httpEndpoint = bad))
         verdict.isLeft shouldBe true
         verdict.left.getOrElse("") should include("httpEndpoint")
       }
-    for good <- List("/mcp", "mcp", "/api/v1/mcp", "/mcp/", "/", "/m.c.p", "/mcp-2_x~y", "/..mcp")
+    for good <- List("/mcp", "mcp", "/api/v1/mcp", "/mcp/", "/", "/m.c.p", "/mcp-2_x~y", "/..mcp", "/a:b@c", "/a!$&'()*+,;=b")
     do
       withClue(s"'$good': ") {
         HttpRequestGuards.validateSettings(McpServerSettings(httpEndpoint = good)) shouldBe

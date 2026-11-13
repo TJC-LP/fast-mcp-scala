@@ -238,6 +238,9 @@ How it works, and what follows from it:
   that did not declare the extension gets `-32021` before the handler runs, as for any required
   tool. `Optional`: for such a client `continueAsTask` returns `false` and the handler finishes
   on the request. `Forbidden` (the default): the same, for every client.
+- **Register it on the `McpServer`.** A deferred tool mounted on another `McpServerCore` (one a
+  custom `McpServerCoreFactory` builds, for instance a wrapper around a server) fails to register
+  with an `UnsupportedOperationException`: the flag cannot reach the server through it.
 - **A handler that returns without calling `continueAsTask` answers the request** with an
   ordinary result, also when its task support is `Required`. The specification allows that: a
   server may always answer with the standard result.

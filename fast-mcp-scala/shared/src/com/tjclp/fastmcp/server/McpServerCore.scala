@@ -73,16 +73,19 @@ trait McpServerCore[R]:
       options = options
     )
 
-  /** Registration of a typed contract: [[tool]] plus `McpTool.withDeferredTask`. The default drops
-    * the flag, for an implementation that has no tasks; [[McpServer]] records it.
+  /** Registration of a typed contract: [[tool]] plus `McpTool.withDeferredTask`. [[McpServer]]
+    * records the flag. The default cannot: an implementation that is not an `McpServer` (a core
+    * from a custom `McpServerCoreFactory`, say one that wraps a server) has no way to receive it,
+    * so a deferred tool fails to register there instead of silently creating its task up front.
     */
   private[fastmcp] def registerTool[R1 >: R](
       definition: ToolDefinition,
       handler: ContextualToolHandler[R1],
       options: ToolRegistrationOptions,
-      @unused deferTask: Boolean
+      deferTask: Boolean
   ): ZIO[Any, Throwable, McpServerCore[R]] =
-    tool(definition, handler, options)
+    if deferTask then ZIO.fail(McpServerCore.deferredTaskUnsupported(this, definition.name))
+    else tool(definition, handler, options)
 
   def tool[In, Out, R1 >: R](
       contract: McpTool.WithEnv[In, Out, R1]
@@ -337,6 +340,19 @@ object McpServerCore:
   /** The failure the default `skills` / `removeSkills` / `skillProvider` return on an
     * implementation that does not override them.
     */
+  /** The failure of registering a `McpTool.withDeferredTask` tool on an implementation that is not
+    * an [[McpServer]].
+    */
+  private[server] def deferredTaskUnsupported(
+      server: McpServerCore[?],
+      tool: String
+  ): UnsupportedOperationException =
+    new UnsupportedOperationException(
+      s"${server.getClass.getName} cannot register tool '$tool': it was built with " +
+        "McpTool.withDeferredTask, which only McpServer supports (added in fast-mcp-scala " +
+        "1.1.0). Register the tool on the McpServer itself, or drop withDeferredTask."
+    )
+
   private[server] def skillsUnsupported(
       server: McpServerCore[?],
       method: String

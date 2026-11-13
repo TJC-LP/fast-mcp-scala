@@ -136,7 +136,20 @@ private[fastmcp] object HttpRequestGuards:
       refuse("'%' (percent-escapes are compared as written; write the path unescaped)")
     else if httpEndpoint.split('/').exists(seg => seg == "." || seg == "..") then
       refuse("a '.' or '..' segment")
-    else None
+    else
+      // What is left must be a character a path carries as written (RFC 3986 `pchar`, plus the
+      // separator). Anything else — non-ASCII, `"`, `<`, `[`, `\\` ... — is percent-encoded by
+      // clients and by Bun's URL parser, and the endpoint is compared as written.
+      httpEndpoint.find(ch => !pathChar(ch)).flatMap { ch =>
+        refuse(
+          s"'$ch' (clients percent-encode it, and the path is compared as written; use letters, " +
+            "digits and -._~!$&'()*+,;=:@ only)"
+        )
+      }
+
+  private def pathChar(ch: Char): Boolean =
+    (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+      "/-._~!$&'()*+,;=:@".indexOf(ch.toInt) >= 0
 
   /** What every backend logs at WARN once, before binding. Today: a non-loopback bind address with
     * no allow-list, where the Host/Origin guard has nothing to go on and is therefore off. Startup
