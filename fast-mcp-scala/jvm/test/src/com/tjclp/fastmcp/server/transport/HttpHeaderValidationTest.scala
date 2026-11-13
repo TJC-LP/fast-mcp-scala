@@ -50,6 +50,74 @@ class HttpHeaderValidationTest extends AnyFunSuite with Matchers:
     mismatch.message should include("does not match")
   }
 
+  test("a Base64 sentinel whose padding is missing is malformed (SEP-2243: invalid padding)") {
+    // "Hello" is `SGVsbG8=`; the JDK decoder also accepts the unpadded spelling.
+    HttpHeaderValidation.validate(
+      toolsCall.copy(params = Some(Json.Obj("name" -> Json.Str("Hello")))),
+      Map("mcp-method" -> "tools/call", "mcp-name" -> "=?base64?SGVsbG8=?=").get,
+      Map.empty
+    ) shouldBe Right(())
+    val unpadded = HttpHeaderValidation.validate(
+      toolsCall.copy(params = Some(Json.Obj("name" -> Json.Str("Hello")))),
+      Map("mcp-method" -> "tools/call", "mcp-name" -> "=?base64?SGVsbG8?=").get,
+      Map.empty
+    )
+    val err = unpadded.left.getOrElse(fail("expected Left"))
+    err.code shouldBe -32020
+    err.message shouldBe "Malformed Base64 header sentinel"
+  }
+
+  test("a Base64 sentinel that is not the canonical encoding of its bytes is malformed") {
+    // `YWR=` decodes to "ad" like `YWQ=` does, with unused trailing bits set; `YWRk` is "add".
+    val err = validate("=?base64?YWR=?=").left.getOrElse(fail("expected Left"))
+    err.code shouldBe -32020
+    err.message shouldBe "Malformed Base64 header sentinel"
+    // The URL-safe alphabet is not Base64 as the sentinel defines it.
+    validate("=?base64?YWRk_-?=").isLeft shouldBe true
+  }
+
+  private def taskRequest(method: String, params: Json): JsonRpcMessage.Request =
+    JsonRpcMessage.Request(RequestId.NumId(7), method, Some(params))
+
+  private def validateTask(
+      method: String,
+      params: Json,
+      mcpName: Option[String]
+  ): Either[McpError, Unit] =
+    val headers = Map("mcp-method" -> method) ++ mcpName.map("mcp-name" -> _)
+    HttpHeaderValidation.validate(taskRequest(method, params), headers.get, Map.empty)
+
+  test("tasks/get, tasks/update and tasks/cancel require Mcp-Name to equal params.taskId") {
+    val update = Json.Obj("taskId" -> Json.Str("task-1"), "inputResponses" -> Json.Obj())
+    val byId = Json.Obj("taskId" -> Json.Str("task-1"))
+    for (method, params) <- List("tasks/get" -> byId, "tasks/cancel" -> byId, "tasks/update" -> update)
+    do
+      withClue(method) {
+        validateTask(method, params, Some("task-1")) shouldBe Right(())
+        validateTask(method, params, Some("  task-1  ")).isLeft shouldBe true
+        val mismatch = validateTask(method, params, Some("task-2"))
+        mismatch.left.toOption.map(_.code) shouldBe Some(-32020)
+        mismatch.left.toOption.map(_.message).getOrElse("") should include("Mcp-Name")
+        val missing = validateTask(method, params, None)
+        missing.left.toOption.map(_.code) shouldBe Some(-32020)
+        missing.left.toOption.map(_.message).getOrElse("") should include("missing required")
+      }
+  }
+
+  test("the task id in Mcp-Name may use the Base64 sentinel") {
+    val params = Json.Obj("taskId" -> Json.Str("tâche"))
+    validateTask("tasks/get", params, Some("=?base64?dMOiY2hl?=")) shouldBe Right(())
+    validateTask("tasks/get", params, Some("=?base64?dGFjaGU=?=")).isLeft shouldBe true
+  }
+
+  test("a task request without a string taskId is left to its handler; other methods need no Mcp-Name") {
+    validateTask("tasks/get", Json.Obj(), None) shouldBe Right(())
+    validateTask("tasks/get", Json.Obj("taskId" -> Json.Num(BigDecimal(1))), None) shouldBe Right(())
+    // Removed from 2026-07-28 and answered -32601 by the router: no name source.
+    validateTask("tasks/result", Json.Obj("taskId" -> Json.Str("task-1")), None) shouldBe Right(())
+    validateTask("tools/list", Json.Obj(), None) shouldBe Right(())
+  }
+
   private def repeated(names: String*): Option[String] =
     HttpHeaderValidation.repeatedHeader(names.iterator)
 

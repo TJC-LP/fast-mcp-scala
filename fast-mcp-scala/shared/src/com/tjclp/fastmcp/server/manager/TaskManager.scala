@@ -2,6 +2,7 @@ package com.tjclp.fastmcp
 package server.manager
 
 import zio.{System as _, Task as _, *}
+import zio.json.ast.Json
 
 import core.*
 import jsonrpc.{McpError, McpErrorCarrier}
@@ -9,8 +10,22 @@ import server.TaskSettings
 
 private[fastmcp] final case class TaskSnapshot(
     task: Task,
-    outcome: Option[Exit[Throwable, Any]]
+    outcome: Option[Exit[Throwable, Any]],
+    /** The requests a task in `input_required` is waiting on, in the order it asked them; empty in
+      * every other status.
+      */
+    inputRequests: List[(String, Json)] = Nil
 )
+
+/** What the body of a task uses to ask its client for input (Tasks extension, SEP-2663). */
+private[fastmcp] trait TaskInput:
+
+  /** Put the task in `input_required` showing `requests` (key -> the server-to-client request) on
+    * `tasks/get`, and wait until `tasks/update` has delivered a response for every key. The task is
+    * `working` again when this returns. Interrupted like the rest of the body by `tasks/cancel`,
+    * the TTL sweep and shutdown.
+    */
+  def await(requests: List[(String, Json)]): IO[Throwable, Map[String, Json]]
 
 /** Which store pool a task is charged to. Legacy protocol sessions can be minted freely by any
   * client, so their tasks are counted apart from modern bearer tasks: a legacy-session flood can
@@ -73,7 +88,13 @@ private final case class TaskEntry(
       */
     bytes: Long,
     /** Monotonic insertion number; breaks millisecond ties so eviction is FIFO among equals. */
-    seq: Long = 0L
+    seq: Long = 0L,
+    /** `input_required` only: the requests still unanswered, in the order the task asked them. */
+    inputRequests: List[(String, Json)] = Nil,
+    /** `input_required` only: the responses delivered so far for the current set of requests. */
+    inputAnswers: Map[String, Json] = Map.empty,
+    /** `input_required` only: completed with [[inputAnswers]] once no request is outstanding. */
+    inputWaiter: Option[Promise[Nothing, Map[String, Json]]] = None
 ):
 
   def toTask: Task = Task(
@@ -133,6 +154,17 @@ private final case class TaskStore(
       entries = entries.updated(next.taskId, next),
       owners = owners.updated(prev.ownerKey, bump(owners.get(prev.ownerKey), dRunning, 0, dBytes)),
       pools = pools.updated(prev.pool, bump(pools.get(prev.pool), dRunning, 0, dBytes))
+    )
+
+  /** Replace a running entry by another running state of the same task (`working` <->
+    * `input_required`), adjusting its byte charge. The running and stored counts do not change.
+    */
+  def recharge(prev: TaskEntry, next: TaskEntry): TaskStore =
+    val dBytes = next.bytes - prev.bytes
+    copy(
+      entries = entries.updated(next.taskId, next),
+      owners = owners.updated(prev.ownerKey, bump(owners.get(prev.ownerKey), 0, 0, dBytes)),
+      pools = pools.updated(prev.pool, bump(pools.get(prev.pool), 0, 0, dBytes))
     )
 
   def remove(es: Iterable[TaskEntry]): TaskStore =
@@ -361,15 +393,40 @@ class TaskManager[R] private[manager] (
       run: ZIO[R, Throwable, Any],
       onStatusChange: Task => UIO[Unit]
   ): ZIO[R, Throwable, CreateTaskResult] =
+    createInteractive(scope, requestedTtlMs, requestBytes, _ => run, onStatusChange)
+
+  /** [[createSized]] for a body that may ask its client for input: `run` is handed the task's
+    * [[TaskInput]]. Each wait puts the task in `input_required`; it stays a running task (it holds
+    * its fiber and its request) and counts against the running caps until it is terminal.
+    */
+  private[fastmcp] def createInteractive(
+      scope: TaskScope,
+      requestedTtlMs: Option[Long],
+      requestBytes: Long,
+      run: TaskInput => ZIO[R, Throwable, Any],
+      onStatusChange: Task => UIO[Unit]
+  ): ZIO[R, Throwable, CreateTaskResult] =
     if requestBytes > settings.maxRequestBytes then
       ZIO.fail(new TaskRequestTooLarge(settings.maxRequestBytes))
-    else createAdmitted(scope, requestedTtlMs, math.max(requestBytes, 0L), run, onStatusChange)
+    else
+      createAdmitted(
+        scope,
+        requestedTtlMs,
+        math.max(requestBytes, 0L),
+        taskId =>
+          run(
+            new TaskInput:
+              def await(requests: List[(String, Json)]): IO[Throwable, Map[String, Json]] =
+                awaitInput(taskId, requests)
+          ),
+        onStatusChange
+      )
 
   private def createAdmitted(
       scope: TaskScope,
       requestedTtlMs: Option[Long],
       requestBytes: Long,
-      run: ZIO[R, Throwable, Any],
+      run: String => ZIO[R, Throwable, Any],
       onStatusChange: Task => UIO[Unit]
   ): ZIO[R, Throwable, CreateTaskResult] =
     ZIO.uninterruptibleMask { _ =>
@@ -399,7 +456,7 @@ class TaskManager[R] private[manager] (
         wrapped =
           ZIO.acquireReleaseExitWith(ZIO.unit)((_, exit: Exit[Throwable, Any]) =>
             recordTerminal(taskId, exit, promise, onStatusChange)
-          )(_ => start.await.flatMap(go => if go then run else ZIO.interrupt).interruptible)
+          )(_ => start.await.flatMap(go => if go then run(taskId) else ZIO.interrupt).interruptible)
         fiber <- wrapped.forkDaemon
         result <- registerOrRollback(
           taskId,
@@ -632,7 +689,7 @@ class TaskManager[R] private[manager] (
         case None => ZIO.none
         case Some(entry) if entry.status.isTerminal =>
           entry.result.await.exit.map(outcome => Some(TaskSnapshot(entry.toTask, Some(outcome))))
-        case Some(entry) => ZIO.some(TaskSnapshot(entry.toTask, None))
+        case Some(entry) => ZIO.some(TaskSnapshot(entry.toTask, None, entry.inputRequests))
     }
 
   /** List all tasks visible to `sessionId`, in `createdAt` descending order.
@@ -700,6 +757,127 @@ class TaskManager[R] private[manager] (
         case None => ZIO.fail(new TaskNotFoundError(taskId))
         case Some(entry) => entry.result.await
     }
+
+  // ------- input_required -------
+
+  /** Estimated bytes one input request or response keeps reachable. */
+  private def inputBytes(key: String, value: Json): Long =
+    RetainedBytes.MapEntry + RetainedBytes.ofText(key) +
+      RetainedBytes.ofJson(value, settings.maxRequestBytes)
+
+  /** [[TaskInput.await]] for the task `taskId`, called on that task's own fiber.
+    *
+    * The requests are charged to the task like the request that created it: the task's whole charge
+    * stays within `maxRequestBytes`, and the owner's and the pool's byte budgets are met by
+    * evicting stale results or not at all. A wait that does not fit fails, and with it the task.
+    */
+  private def awaitInput(
+      taskId: String,
+      requests: List[(String, Json)]
+  ): IO[Throwable, Map[String, Json]] =
+    val asked = requests.distinctBy(_._1)
+    if asked.isEmpty then ZIO.succeed(Map.empty)
+    else
+      for
+        waiter <- Promise.make[Nothing, Map[String, Json]]
+        nowMs <- ZIO.succeed(System.currentTimeMillis())
+        nowMono <- ZIO.succeed(TaskManager.monotonicMs())
+        parked <- storeRef.modify { s =>
+          s.entries.get(taskId) match
+            case Some(entry) if !entry.status.isTerminal =>
+              val extra =
+                asked.foldLeft(0L)((sum, request) => sum + inputBytes(request._1, request._2))
+              if entry.bytes + extra > settings.maxRequestBytes then
+                (Left(new TaskInputRequestTooLarge(taskId, settings.maxRequestBytes)), s)
+              else
+                val cutoff = nowMono - settings.minResultRetentionMs
+                fitBytes(s, entry.ownerKey, entry.pool, cutoff, extra, Some(taskId)) match
+                  case Left(budget) => (Left(budget), s)
+                  case Right(fitted) =>
+                    val next = entry.copy(
+                      status = TaskStatus.InputRequired,
+                      statusMessage = Some("The task is waiting for input."),
+                      lastUpdatedAtMs = nowMs,
+                      lastUpdatedMonoMs = nowMono,
+                      bytes = entry.bytes + extra,
+                      inputRequests = asked,
+                      inputAnswers = Map.empty,
+                      inputWaiter = Some(waiter)
+                    )
+                    (Right(()), fitted.recharge(entry, next))
+            // Swept or released while the body was running: its fiber is being interrupted.
+            case _ => (Left(new TaskNotFoundError(taskId)), s)
+        }
+        _ <- ZIO.fromEither(parked)
+        answers <- waiter.await
+      yield answers
+
+  /** Deliver `tasks/update` responses to a bearer task.
+    *
+    * `Left` only for an id that names no task ([[TaskNotFoundError]]), for a response that is not a
+    * JSON object ([[TaskInputResponseInvalid]]), and for responses that do not fit the byte bounds
+    * ([[TaskInputResponseTooLarge]], [[TaskByteBudgetExceeded]]); nothing is stored then. Otherwise
+    * the update is accepted: a response whose key is outstanding is recorded and its request is no
+    * longer shown, and every other key is ignored — a key never issued, one already answered, or
+    * any key when the task is not waiting for input. The task resumes when no request is
+    * outstanding; a partial set of responses leaves it in `input_required`.
+    */
+  private[fastmcp] def offerInput(
+      taskId: String,
+      responses: Map[String, Json]
+  ): UIO[Either[Throwable, Unit]] =
+    type Wake = Option[(Promise[Nothing, Map[String, Json]], Map[String, Json])]
+    val nowMs = System.currentTimeMillis()
+    val nowMono = TaskManager.monotonicMs()
+    storeRef
+      .modify[(Either[Throwable, Unit], Wake)] { s =>
+        visible(s.entries, taskId, None) match
+          case None => ((Left(new TaskNotFoundError(taskId)), None), s)
+          case Some(entry) if entry.status != TaskStatus.InputRequired => ((Right(()), None), s)
+          case Some(entry) =>
+            val accepted = entry.inputRequests.collect {
+              case (key, request) if responses.contains(key) => (key, request, responses(key))
+            }
+            val malformed = accepted.collectFirst {
+              case (key, _, response) if response.asObject.isEmpty => key
+            }
+            if accepted.isEmpty then ((Right(()), None), s)
+            else if malformed.isDefined then
+              ((Left(new TaskInputResponseInvalid(malformed.getOrElse(""))), None), s)
+            else
+              // A response takes the place of the request it answers in the task's charge.
+              val delta = accepted.foldLeft(0L) { case (sum, (key, request, response)) =>
+                sum + inputBytes(key, response) - inputBytes(key, request)
+              }
+              if entry.bytes + delta > settings.maxRequestBytes then
+                ((Left(new TaskInputResponseTooLarge(settings.maxRequestBytes)), None), s)
+              else
+                val cutoff = nowMono - settings.minResultRetentionMs
+                fitBytes(s, entry.ownerKey, entry.pool, cutoff, delta, Some(taskId)) match
+                  case Left(budget) => ((Left(budget), None), s)
+                  case Right(fitted) =>
+                    val answers = entry.inputAnswers ++ accepted.map(a => a._1 -> a._3)
+                    val remaining = entry.inputRequests.filterNot(r => responses.contains(r._1))
+                    val resumed = remaining.isEmpty
+                    val next = entry.copy(
+                      status = if resumed then TaskStatus.Working else TaskStatus.InputRequired,
+                      statusMessage =
+                        if resumed then Some("The operation is now in progress.")
+                        else entry.statusMessage,
+                      lastUpdatedAtMs = nowMs,
+                      lastUpdatedMonoMs = nowMono,
+                      bytes = entry.bytes + delta,
+                      inputRequests = remaining,
+                      // Once resumed the answers belong to the task's fiber, not to the entry.
+                      inputAnswers = if resumed then Map.empty else answers,
+                      inputWaiter = if resumed then None else entry.inputWaiter
+                    )
+                    val wake = if resumed then entry.inputWaiter.map(_ -> answers) else None
+                    ((Right(()), wake), fitted.recharge(entry, next))
+      }
+      .flatMap { case (outcome, wake) =>
+        ZIO.foreachDiscard(wake)((waiter, answers) => waiter.succeed(answers)).as(outcome)
+      }
 
   // ------- lifecycle -------
 
@@ -836,7 +1014,10 @@ class TaskManager[R] private[manager] (
                 lastUpdatedAtMs = nowMs,
                 lastUpdatedMonoMs = nowMono,
                 fiber = None,
-                bytes = as.bytes
+                bytes = as.bytes,
+                inputRequests = Nil,
+                inputAnswers = Map.empty,
+                inputWaiter = None
               )
             val cutoff = nowMono - settings.minResultRetentionMs
             val kept = s.markTerminal(entry, terminal(settled))
@@ -928,6 +1109,38 @@ final class TaskResultDiscarded(val taskId: String, val setting: String, val lim
     )
     with McpErrorCarrier:
   def toMcpError: McpError = McpError(ErrorCodes.CapacityExceeded, getMessage)
+
+/** A task's body asked for input (`input_required`) whose requests, with the request the task
+  * already keeps, are larger than `TaskSettings.maxRequestBytes`. The task ends `failed`. A
+  * condition of the tool's own requests, so `-32603`.
+  */
+final class TaskInputRequestTooLarge(val taskId: String, val limitBytes: Long)
+    extends RuntimeException(
+      "The task's input requests were not kept: with its request they are larger than " +
+        s"TaskSettings.maxRequestBytes = $limitBytes estimated bytes"
+    )
+    with McpErrorCarrier:
+  def toMcpError: McpError = McpError.internalError(getMessage)
+
+/** `tasks/update` responses that, with what the task already keeps, are larger than
+  * `TaskSettings.maxRequestBytes`. The request's own fault, so `-32602`; nothing is stored and the
+  * task keeps waiting.
+  */
+final class TaskInputResponseTooLarge(val limitBytes: Long)
+    extends RuntimeException(
+      "tasks/update: the responses are too large to keep for the task " +
+        s"(TaskSettings.maxRequestBytes = $limitBytes estimated bytes)"
+    )
+    with McpErrorCarrier:
+  def toMcpError: McpError = McpError.invalidParams(getMessage)
+
+/** A `tasks/update` response for an outstanding request that is not a JSON object. `-32602`;
+  * nothing is stored and the task keeps waiting.
+  */
+final class TaskInputResponseInvalid(val key: String)
+    extends RuntimeException(s"tasks/update: the response for `$key` must be an object")
+    with McpErrorCarrier:
+  def toMcpError: McpError = McpError.invalidParams(getMessage)
 
 /** Unknown / cross-session task id from `tasks/result`. Maps to JSON-RPC `-32602` so it agrees with
   * `tasks/get`'s "Unknown task" error.

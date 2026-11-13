@@ -9,9 +9,10 @@ return immediately and collect the result later. They are the official
 
 A client declares the extension in its per-request capabilities; the server may then return a flat
 `resultType: "task"` bearer handle without per-call augmentation. Clients poll `tasks/get`, cancel
-with `tasks/cancel`, and use `tasks/update` only when a task is waiting for input. `tasks/list`,
-`tasks/result`, and `params.task` belong to the 2025-11-25 compatibility adapter and are rejected
-on modern requests.
+with `tasks/cancel`, and use `tasks/update` only when a task is waiting for input. `tasks/list`
+and `tasks/result` belong to the 2025-11-25 compatibility adapter and are rejected (`-32601`) on
+modern requests. A 2025-11-25 `params.task` on a modern `tools/call` is ignored: it neither
+creates a task nor fails the call.
 
 ## Enabling per server
 
@@ -40,7 +41,7 @@ val server = McpServer(
 | `minResultRetentionMs` | `30 000` | A terminal result younger than this is never evicted by a cap (only by its own TTL), so a client always gets at least 30 s to collect it. |
 | `sweepIntervalMs` | `1 000` | Upper bound on the single TTL sweeper's sleep; TTLs are honoured within this slack, measured on the monotonic clock. |
 | `ownerKey` | `TaskOwnerKey.Transport` | How modern bearer tasks are bucketed per client: `Transport` uses the transport-supplied peer address; `TaskOwnerKey.Custom(f)` derives a key (an authenticated principal) behind a reverse proxy. |
-| `maxRequestBytes` | 2 MiB | What one running task may keep of the request that created it (estimated bytes, see [Memory bounds](#memory-bounds)). A larger request is refused with `-32602` before anything is started. |
+| `maxRequestBytes` | 2 MiB | What one running task may keep of the request that created it (estimated bytes, see [Memory bounds](#memory-bounds)), together with the input requests it is waiting on and the responses it has been given. A larger request is refused with `-32602` before anything is started. |
 | `maxResultBytes` | 8 MiB | One stored result or failure (estimated bytes). A task whose result is larger ends `failed` and the result is not kept. |
 | `maxBytesPerOwner` | 16 MiB | Everything the store holds for one owner: the request of each running task plus each stored result. Must be ≥ `maxRequestBytes` and ≥ `maxResultBytes`. |
 | `maxBytesTotal` | 128 MiB | The same budget per pool (legacy-session tasks and modern bearer tasks are separate pools, so the store as a whole holds at most twice this). Must be ≥ `maxBytesPerOwner`. |
@@ -56,6 +57,12 @@ estimate of the data it keeps reachable:
   id, and any allow-listed HTTP headers (`contextHeaders`). That is measured when the task is
   created. Above `maxRequestBytes` the request is refused with `-32602`; a tool whose task support
   is optional still accepts it as an ordinary synchronous call (do not ask for a task).
+- **While a task waits for input** it also keeps the requests it shows on `tasks/get` and the
+  responses `tasks/update` has delivered; a response takes the place of the request it answers.
+  They are charged to the same task: request, outstanding input requests and gathered responses
+  together stay within `maxRequestBytes`, and within the owner and pool budgets below. A
+  `tasks/update` that does not fit is refused (`-32602` for `maxRequestBytes`, `-32003` for a
+  budget) and stores nothing; input requests that do not fit fail the task.
 - **Once a task is terminal** its entry keeps the result only — not the task's fiber, and nothing
   of the request. The request's charge is swapped for the result's. A result or failure above
   `maxResultBytes` is not kept: the task ends `failed` with a message naming the setting.
@@ -112,6 +119,76 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
 Modern `tools/list` does not expose the removed `execution.taskSupport` field; legacy clients still
 see and use it.
 
+## Waiting for input (`input_required`)
+
+A tool asks its client for input the same way inside a task as outside one: `McpContext.elicit`,
+`createMessage`, `listRoots` or `sendRequest`. Outside a task the call ends the request with an
+`input_required` result and the client retries the request with `inputResponses` (MRTR). Inside a
+2026-07-28 task there is no reply left to give, so the task waits instead:
+
+1. The task's status becomes `input_required`. `tasks/get` returns `inputRequests`: every request
+   the task is still waiting on, keyed by an opaque id.
+2. The client sends `tasks/update` with `inputResponses` for some or all of those keys. The reply
+   is an empty acknowledgement (`resultType: "complete"`), never the task.
+3. A partial set is accepted: the answered keys leave `inputRequests` and the task stays in
+   `input_required` until none is outstanding.
+4. The task is `working` again and the tool runs again from the start, with every response
+   gathered so far available to it — the same replay a client retry causes. Calls that were
+   answered return their response; the tool continues from there. It may ask again later, with
+   new keys, any number of times.
+
+```scala 3 raw
+val confirmDelete = McpTool[DeleteArgs, String](name = "confirm_delete")
+  .contextual { (args, context) =>
+    ZIO
+      .fromOption(context)
+      .orElseFail(new IllegalStateException("no request context"))
+      .flatMap(_.elicit(ElicitRequestParams(s"Delete ${args.filename}?", confirmSchema)))
+      .map(answer => s"${args.filename}: ${answer.action}")
+  }
+  .withTaskSupport(TaskSupport.Optional)
+```
+
+Rules the server applies:
+
+- **Write the tool so that a replay is safe.** Everything before a question runs once per
+  attempt. Do the work that must happen once after the last question, or make it idempotent.
+  This is the rule MRTR already sets for tools outside tasks.
+- **A key is asked once.** Keys are derived from the request's content, so the same question gets
+  the same key on every attempt and is answered from the gathered responses. A tool that fails an
+  attempt asking only for keys it already has responses for cannot make progress: the task ends
+  `failed` (`-32603`).
+- **Keys that are not outstanding are ignored**: a key never issued, one already answered, or any
+  key sent to a task that is not waiting. The update is still acknowledged. A response for an
+  outstanding key that is not a JSON object is refused with `-32602`.
+- **`requestState`** a tool passes to `sendRequest` is kept by the server between attempts and
+  handed to the next one (`McpContext.getRequestState`). It is never part of `tasks/get` or of the
+  task handle.
+- **A waiting task is a running task.** It keeps its fiber and its request, counts against
+  `maxConcurrentPerSession` and `maxConcurrentTotal`, can be cancelled, and is interrupted when
+  its TTL passes. A client that never answers holds one running slot until then.
+- **Anyone who holds the task id can answer.** `tasks/update` is authorized like `tasks/get`: by
+  possession of the id. Put authorization in front of the endpoint.
+- Legacy (2025-11-25) sessions are not affected: there a tool's request is a real server-to-client
+  request, and no task enters `input_required`.
+
+Not supported: gathering input over MRTR on the creating request and only then returning a task
+(SEP-2663, "Composition with Multi Round-Trip Requests"). A tool that may run as a task and asks
+for input always asks from inside the task.
+
+## Extension requests
+
+On 2026-07-28 requests:
+
+- `tasks/get`, `tasks/update` and `tasks/cancel` need the `io.modelcontextprotocol/tasks`
+  extension in the request's client capabilities. Without it the answer is `-32021`, whether or
+  not the id names a task.
+- An id that names no task is `-32602` on all three.
+- `tasks/cancel` and `tasks/update` are acknowledgements. Cancelling a task that is already
+  terminal, or updating a task that is not waiting for input, is acknowledged and changes nothing.
+- Over HTTP the `Mcp-Name` header must equal `params.taskId` on all three (`-32020` when it is
+  missing or different), as it must equal the tool name on `tools/call`.
+
 ## Transport and security policy
 
 Modern task IDs are **bearer handles**, so task creation and polling work over stdio and both HTTP
@@ -157,8 +234,9 @@ still fill a pool, so pair the peer-address key with edge rate limiting.
   when the body finishes; on Scala.js a running synchronous body cannot be interrupted at all.
   Write long task bodies as ZIO effects (`ZIO.sleep`, streams, `attemptBlockingInterrupt` on the
   JVM) so they stop promptly; a grace-bounded cancel is tracked for 1.0.1.
-- The server creates working / completed / failed / cancelled tool tasks. It implements
-  `tasks/update` validation but does **not yet** suspend a task in `input_required`.
+- The server creates working / input_required / completed / failed / cancelled tool tasks. See
+  [Waiting for input](#waiting-for-input-input_required) for what `input_required` does and does
+  not cover.
 - `notifications/tasks/status` is emitted on legacy (2025-11-25) sessions on every terminal
   transition, as that revision's Tasks surface specifies; modern bearer tasks do not emit it —
   the 2026-07-28 extension moved status to polling (`tasks/get`). These boundaries are listed in

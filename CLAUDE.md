@@ -248,7 +248,7 @@ approves anything — see "Host responsibilities" in `docs/skills.md`.
 
 ### Tasks (experimental, off by default)
 
-MCP Tasks are the official **`io.modelcontextprotocol/tasks` extension** (MCP 2026-07-28). A client declares the extension in its per-request capabilities; the server may return a flat `resultType: "task"` bearer handle, and the client polls `tasks/get`, cancels with `tasks/cancel`, and uses `tasks/update` only when a task waits for input. `params.task`, `tasks/list`, and `tasks/result` belong to the 2025-11-25 compatibility adapter and are rejected on modern requests. Full reference: `docs/tasks.md`.
+MCP Tasks are the official **`io.modelcontextprotocol/tasks` extension** (MCP 2026-07-28). A client declares the extension in its per-request capabilities; the server may return a flat `resultType: "task"` bearer handle, and the client polls `tasks/get`, cancels with `tasks/cancel`, and uses `tasks/update` only when a task waits for input. `tasks/list` and `tasks/result` belong to the 2025-11-25 compatibility adapter and are rejected (`-32601`) on modern requests; a 2025-11-25 `params.task` on a modern `tools/call` is ignored (SEP-2663: never an opt-in, never an error). Modern `tasks/get|update|cancel` need the extension in the request's capabilities (`-32021` without it), take `Mcp-Name: <taskId>` over HTTP (`-32020`), and `tasks/cancel` / `tasks/update` are acknowledgements (an error only for an unknown id). Full reference: `docs/tasks.md`.
 
 **Enable per server**:
 
@@ -311,8 +311,16 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   bounded by `limits.maxOutboundMessages` (256): stdio back-pressures (`Session.makeDrained`),
   legacy JVM HTTP sessions drop the oldest (`makeProtocolSession`), sessions with no reader — Bun
   HTTP, 2026-07-28 HTTP requests, legacy stateless (`makeRequestScoped`) — buffer nothing.
-- Not yet implemented: `input_required` suspension. `notifications/tasks/status` is emitted on
-  legacy (2025-11-25) sessions only — never for modern bearer tasks, which are polled via `tasks/get`.
+- `input_required` (modern bearer tasks only): a tool that asks its client for input from inside a
+  task (`ctx.elicit` / `createMessage` / `listRoots` / `sendRequest`) parks the task; `tasks/get`
+  shows `inputRequests`, `tasks/update` delivers `inputResponses` (subsets accepted, keys that are
+  not outstanding ignored), and the task re-runs the tool with everything gathered so far — the
+  MRTR replay, driven by the store (`TaskMiddleware.runWithInput`, `TaskManager.createInteractive`
+  / `offerInput`). Requests and responses are charged to `maxRequestBytes` and the byte budgets; a
+  key is asked once per task. Not implemented: MRTR on the creating request followed by a task
+  (SEP-2663 composition; `tasks-mrtr-composition` is the one unscored scenario that fails).
+- `notifications/tasks/status` is emitted on legacy (2025-11-25) sessions only — never for modern
+  bearer tasks, which are polled via `tasks/get`.
 
 ### Cross-Platform Architecture
 
@@ -371,6 +379,7 @@ Key test classes:
 - `UriTemplateMatcherTest` / `ResourceUriLimitTest` / `DecodePathTest` - linear-time template matcher, `maxUriChars` + `maxSubscriptionsPerSession`, guarded argument decoding
 - `RequestContextHandlerTest` (JVM + Native, `jvm-native/test`) and the `contextHeaders (Bun)` block of `JsServerHttpTest` - allow-listed request headers, `protocolSessionId`, the modern reply opening on the first heartbeat
 - `HostGuardTest` / `HttpRequestGuardsTest` / `HttpHeaderValidationTest` - full-origin guard truth table, POST gate order + settings invariants, header sentinel handling
+- `TaskExtensionDispatchTest` (JVM), `TaskInputRequiredJsTest` (JS), `TaskInputRequiredNativeTest` (Native) - the 2026-07-28 Tasks extension at the router: `-32021` gate, ignored `params.task`, acknowledgement-only cancel/update, `input_required` (partial answers, several rounds, byte bounds)
 - `TaskManagerSpec` / `TaskTransportGuardTest` / `LifecycleSoakTest` - task store bounds, sweeper hygiene, `Session.terminate`, interruption atomicity, per-client buckets
 - `TaskMemoryBoundsTest` / `RetainedBytesTest` / `SessionOutboundBoundTest` (JVM), `JsSessionOutboundTest` (JS) - task store byte budgets and what a terminal entry keeps reachable, the size estimator, the bounded out-of-request channel per transport
 - `OverloadBindingTest` / `OverloadNegativeTest` (JVM) and `OverloadBindingJsTest` (JS) - exact-overload binding, duplicate-registration and non-literal diagnostics
@@ -381,7 +390,7 @@ Key test classes:
 ## CI/CD
 
 - **CI** (`.github/workflows/ci.yml`): Runs on PRs and main pushes, tests on the LTS JDKs 17, 21, 25
-- **Conformance** (`.github/workflows/conformance.yml`): official `@modelcontextprotocol/conformance` harness (pinned in `conformance/package.json` + `conformance/bun.lock`, currently `0.2.0-alpha.11`; frozen install, needs Bun ≥ 1.4) against the JVM, Bun and Scala Native (`scripts/conformance.sh scala-native`, held to `baseline-jvm.yml`) servers in both `scripts/conformance.sh` modes on every PR — the active suite (73/73 checks, 31 scenarios, all at the 2025-11-25 wire) with expected-failure baselines at `conformance/baseline-{jvm,js}.yml` kept EMPTY (any regression fails the gate), and the 2026-07-28 requirements run (37/37 scored scenarios; the only lane that sends 2026-07-28 requests; extension/pending scenarios are reported but never scored). `native.yml` runs both against the GraalVM HTTP image (the 2026 run as a JVM-vs-native parity diff). Run locally via `scripts/conformance.sh {jvm|js|native|scala-native} [port] [active|2026]`.
+- **Conformance** (`.github/workflows/conformance.yml`): official `@modelcontextprotocol/conformance` harness (pinned in `conformance/package.json` + `conformance/bun.lock`, currently `0.2.0-alpha.12`; frozen install, needs Bun ≥ 1.4) against the JVM, Bun and Scala Native (`scripts/conformance.sh scala-native`, held to `baseline-jvm.yml`) servers in both `scripts/conformance.sh` modes on every PR — the active suite (73/73 checks, 31 scenarios, all at the 2025-11-25 wire) with expected-failure baselines at `conformance/baseline-{jvm,js}.yml` kept EMPTY (any regression fails the gate), and the 2026-07-28 requirements run (37/37 scored scenarios; the only lane that sends 2026-07-28 requests; the 13 extension/pending scenarios are reported but never scored — `ConformanceServer` enables tasks and carries their fixtures, and 12 of the 13 pass on JVM and Bun, all but `tasks-mrtr-composition`). `native.yml` runs both against the GraalVM HTTP image (the 2026 run as a JVM-vs-native parity diff). Run locally via `scripts/conformance.sh {jvm|js|native|scala-native} [port] [active|2026]`.
 - The harness is executed from `conformance/node_modules/.bin`. To bump: edit the version in `conformance/package.json`, run `"$(./mill --no-server show fast-mcp-scala.js.bunExecutable | tr -d '"')" install --cwd conformance`, remove `conformance/node_modules`, and review the `bun.lock` diff (it, not package.json, is what `--frozen-lockfile` enforces).
 - **Binary compatibility** (`ci.yml` job `binary-compat`, also a release gate): `./mill fast-mcp-scala.mimaCheck` runs MiMa on the JVM jar against every release in `Versions.binaryCompatBaselines` and fails on any finding without a reasoned line in `.github/mima-exclusions`; old signatures stay as `private[fastmcp]` forwarders, proved at link time by `BinaryCompatibilityTest` (a client compiled against the released 1.0.1 jar, `fast-mcp-scala/compat/client`) — rules in `CONTRIBUTING.md`, "Binary compatibility".
 - **Release** (`.github/workflows/release.yml`): Triggered by `v*` tags, publishes to Maven Central; `workflow_dispatch` with a `version` input is a maintainer-run dry run (tests + `publishLocal` of the three artifacts on the runner; the Sonatype step and the GitHub release run only on a tag push). Three jobs (verify → publish → github-release); no cache restore; every action is SHA-pinned; the Mill launcher distribution is verified against `.github/mill-dist.sha256` in every CI job — bumping `.mill-version` requires adding the new dists' SHA-256 lines there in the same PR (CI prints the exact line and the Maven Central `.sha1` cross-check recipe).

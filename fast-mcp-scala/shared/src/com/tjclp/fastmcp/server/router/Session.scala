@@ -244,6 +244,20 @@ final class Session private (
       )
     }
 
+  /** Run `zio` under the current request's id with `context` in place of the request's own, and
+    * with a fresh MRTR occurrence cell. This is how a task re-runs its tool with the input it has
+    * gathered through `tasks/update`: the handler sees those responses exactly as it would see the
+    * `inputResponses` of a client retry.
+    */
+  private[fastmcp] def rebindRequest[R, E, A](context: RequestContext)(
+      zio: ZIO[R, E, A]
+  ): ZIO[R, E, A] =
+    Ref.make(Map.empty[String, Int]).flatMap { occurrences =>
+      requestContextRef.locally(Some(context))(
+        inputKeyOccurrencesRef.locally(Some(occurrences))(zio)
+      )
+    }
+
   def currentRequestContext: UIO[Option[RequestContext]] = requestContextRef.get
   def currentRequestId: UIO[Option[RequestId]] = requestIdRef.get
 

@@ -323,6 +323,23 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Added
 
+- **Tasks wait for input: `input_required`** (TJC-2366, TJC-2367). A tool that asks its client
+  for input from inside a 2026-07-28 task (`McpContext.elicit`, `createMessage`, `listRoots`,
+  `sendRequest`) now puts the task in `input_required`. `tasks/get` returns the outstanding
+  `inputRequests`; `tasks/update` delivers `inputResponses` and is acknowledged with an empty
+  result. A subset of the keys is accepted and leaves the task waiting on the rest; keys that are
+  not outstanding are ignored. When nothing is outstanding the task runs the tool again with every
+  response gathered so far, as a client MRTR retry would, and it may ask again later. Before, such
+  a task ended `completed` with an `input_required` result that no request could answer.
+  - No new public API: the tool is written as it is for MRTR, and must be safe to replay.
+  - Input requests and responses are charged to the task: with its request they stay within
+    `TaskSettings.maxRequestBytes` and the owner and pool byte budgets. A waiting task is a running
+    task for the caps and the TTL.
+  - A key is asked once per task; a tool that asks again for a key it was given fails the task.
+  - Legacy (2025-11-25) sessions are unchanged. Gathering input over MRTR on the creating request
+    and then returning a task (SEP-2663 "Composition with Multi Round-Trip Requests") is not
+    supported. Reference: `docs/tasks.md` § "Waiting for input".
+
 - **Allow-listed HTTP request headers on `McpContext`** (#130): `McpServerSettings.contextHeaders:
   Set[String]` (default empty) names the request headers a handler may read through
   `McpContext.header(name)` and `McpContext.headers` (lower-cased names, listed entries only).
@@ -410,6 +427,32 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   `docs/skills-conformance.md`).
 
 ### Changed
+
+- **The Tasks extension's requests follow SEP-2663** (TJC-2367). These change replies on
+  2026-07-28 requests when `TaskSettings(enabled = true)`; nothing changes for legacy sessions or
+  with tasks off.
+  - `tasks/get`, `tasks/update` and `tasks/cancel` are answered `-32021` (missing required client
+    capability, naming `extensions["io.modelcontextprotocol/tasks"]`) when the request does not
+    declare the extension. Before, they were served.
+  - `tasks/cancel` on a task that is already terminal is acknowledged with an empty result.
+    Before: `-32602`. An unknown task id is still `-32602`.
+  - `tasks/update` on a task that is not waiting for input is acknowledged and ignored. Before:
+    `-32602`.
+  - A 2025-11-25 `params.task` on a `tools/call` is ignored. Before: `-32602`. It never creates a
+    task: that still depends only on the tool's `taskSupport` and the request's capabilities.
+  - Over HTTP, `Mcp-Name` must equal `params.taskId` on `tasks/get`, `tasks/update` and
+    `tasks/cancel`; a missing or different header is `400` with `-32020`. Before, the header was
+    not read on these methods. Clients that follow SEP-2663 already send it.
+- **A Base64 header value must be canonical** (TJC-2367). `Mcp-Name` and `Mcp-Param-*` values in
+  the `=?base64?...?=` form are accepted only when the payload is the standard Base64 encoding of
+  its bytes, padding included. A payload without its `=` padding (`=?base64?SGVsbG8?=`, which
+  SEP-2243 lists as "invalid padding: MUST reject") or with unused trailing bits set was decoded
+  before and is now refused with `-32020`.
+- **The conformance fixture covers the unscored 2026-07-28 scenarios** (TJC-2367).
+  `ConformanceServer` enables the Tasks extension and registers the tools the harness's ten
+  `tasks-*` scenarios, `json-schema-2020-12` and `http-custom-header-server-validation` call.
+  Twelve of the thirteen unscored scenarios pass on the JVM and on Bun; `tasks-mrtr-composition`
+  does not (see above). The scored results are unchanged: 73/73 active, 37/37 for 2026-07-28.
 
 - **A parameter or input field with a Scala default is no longer advertised as `required`**
   (TJC-5117, #116 C2.6). Before, a default alone left the name in the `required` array of the
