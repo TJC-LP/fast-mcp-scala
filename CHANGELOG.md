@@ -652,7 +652,10 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     Background task bodies are not waited for. A handler waiting for the client's answer to a
     server→client request (roots, sampling, elicitation) fails at once at EOF instead of waiting
     out its own timeout, and what handlers pushed to the client before they finished is written
-    before the process ends.
+    before the process ends. An answer the client wrote just before it closed stdin still reaches
+    its handler: client responses are processed in the order read, before the session stops
+    accepting them. A request to the client issued after stdin closed fails without being
+    written. An open `subscriptions/listen` ends at EOF and does not hold the exit.
   - **A final line without a newline is a frame.** Bun discarded it; the JVM parsed it and then
     lost the reply to the race above; Scala Native usually answered it. All three answer it.
   - **SIGTERM and SIGINT end a JVM or GraalVM stdio server while its stdin is open.** The main

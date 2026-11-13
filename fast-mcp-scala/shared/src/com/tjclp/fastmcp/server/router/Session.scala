@@ -82,6 +82,15 @@ final class Session private (
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   @volatile private var inboundClosed: Boolean = false
 
+  private val inboundClosedSignal: Promise[Nothing, Unit] =
+    Unsafe.unsafe(implicit unsafe => Promise.unsafe.make[Nothing, Unit](FiberId.None))
+
+  /** Completes when [[closeInbound]] has run; never on a transport that does not close its inbound
+    * side (HTTP). A handler that owes no reply and would otherwise wait for ever
+    * (`subscriptions/listen`) ends on it, so it does not hold the stdio drain at EOF.
+    */
+  private[fastmcp] def awaitInboundClosed: UIO[Unit] = inboundClosedSignal.await
+
   /** When the client was last active (transports touch on every request), in milliseconds on the
     * MONOTONIC clock ([[Session.monotonicMs]]) — comparable only with another reading of that
     * clock, never with wall-clock time. Drives idle eviction and the eviction order at the session
@@ -319,9 +328,11 @@ final class Session private (
       _ <- pendingRef.update(_ + (id -> promise))
       // Registered first, checked second: `closeInbound` sets the flag and then fails what is
       // registered, so a request racing it is failed by one side or the other.
-      _ <- ZIO.when(inboundClosed)(promise.fail(Session.inboundClosedError(method)))
+      closed <- ZIO.succeed(inboundClosed)
+      _ <- ZIO.when(closed)(promise.fail(Session.inboundClosedError(method)))
       result <-
-        (send(JsonRpcMessage.Request(id, method, params)) *>
+        // A request the client can no longer answer is not written either.
+        (ZIO.unless(closed)(send(JsonRpcMessage.Request(id, method, params))) *>
           promise.await.timeoutFail(
             McpError.internalError(s"Server request '$method' timed out")
           )(timeout)).ensuring(pendingRef.update(_ - id))
@@ -332,7 +343,7 @@ final class Session private (
     * out its own timeout for a frame that cannot arrive. Idempotent.
     */
   private[fastmcp] def closeInbound: UIO[Unit] =
-    ZIO.succeed { inboundClosed = true } *>
+    ZIO.succeed { inboundClosed = true } *> inboundClosedSignal.succeed(()) *>
       pendingRef
         .getAndSet(Map.empty)
         .flatMap(pending =>

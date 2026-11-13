@@ -185,7 +185,10 @@ private[fastmcp] object StdioLoop:
       ZIO.foreachDiscard(state.running)(_.interruptFork) *>
         ZIO.foreachDiscard(state.running)(_.await).interruptible.timeout(SettleTimeout).exit
     }
-    drained.flatMap(done => if done then flushOutbound else interruptHandlers) *>
+    // After a drain that timed out, what the handlers pushed before they were interrupted is
+    // still written; after an interruption nothing is.
+    drained.flatMap(done => ZIO.unless(done)(interruptHandlers)) *>
+      ZIO.unless(interrupted)(flushOutbound) *>
       // Nothing writes server-pushed messages from here on, so the session stops buffering them
       // and releases any emitter still waiting for the writer.
       drainer.interruptFork *> session.closeOutbound

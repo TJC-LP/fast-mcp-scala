@@ -61,7 +61,16 @@ object MessageLoop:
   private[fastmcp] def isOrderedStdioFrame(
       parsed: Either[JsonRpcMessage, JsonRpcMessage]
   ): Boolean =
-    parsed.exists(isInitialize)
+    parsed.exists(message => isInitialize(message) || isClientResponse(message))
+
+  /** The client's answer to a server→client request (sampling, roots, elicitation). It only
+    * completes a waiting promise, so it runs in line: at stdin EOF every answer already read has
+    * reached its handler before the session stops accepting answers ([[Session.closeInbound]]).
+    */
+  private def isClientResponse(message: JsonRpcMessage): Boolean =
+    message match
+      case _: Success | Failure(Some(_), _) => true
+      case _ => false
 
   /** Parse one frame under `limits`. `Left` carries the ready-to-send JSON-RPC parse-error response
     * (null id, per JSON-RPC).

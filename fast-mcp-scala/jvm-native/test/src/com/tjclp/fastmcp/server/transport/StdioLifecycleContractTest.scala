@@ -188,6 +188,77 @@ class StdioLifecycleContractTest extends AnyFunSuite with Matchers:
     reply should include("the client closed its input stream")
   }
 
+  private def rootsServer: Task[McpRouter[Any]] =
+    val server = McpServer.typed[Any]("StdioLifecycle", "0.1.0", McpServerSettings())
+    server.tool(
+      McpTool[NoArgs, String](name = "roots").contextual { (_, ctx) =>
+        ctx match
+          case Some(c) => c.listRoots().map(_.roots.size.toString)
+          case None => ZIO.fail(McpError.internalError("no context"))
+      }
+    ) *> server.buildRouter
+
+  test("EOF: the client's answer written just before it closes stdin reaches the handler") {
+    val replies = runUnsafe(
+      ZIO.foreach((1 to 25).toList) { _ =>
+        for
+          router <- rootsServer
+          session <- Session.makeDrained("stdio-lifecycle", Session.DefaultOutboundCapacity)
+          seen <- Ref.make(Chunk.empty[String])
+          asked <- Promise.make[Nothing, String]
+          emit = (line: String) =>
+            seen.update(_ :+ line) *> ZIO.when(line.contains("roots/list"))(asked.succeed(line)).unit
+          // The answer is the last frame: stdin ends right behind it.
+          answer = ZStream.fromZIO(asked.await.map { request =>
+            val id = request.split("\"id\":")(1).takeWhile(c => c != ',' && c != '}')
+            s"""{"jsonrpc":"2.0","id":$id,"result":{"roots":[{"uri":"file:///a"},{"uri":"file:///b"}]}}"""
+          })
+          in = ZStream.fromIterable(handshake :+ call(2, "roots")) ++ answer
+          _ <- StdioLoop.run(router, session, in, emit, NoDrainLimit)
+          written <- seen.get
+        yield replyTo(written, 2).getOrElse(s"no reply in: $written")
+      }
+    )
+    replies.filterNot(reply => reply.contains("2") && !reply.contains("closed its input")) shouldBe empty
+    replies.filter(_.contains("isError\":true")) shouldBe empty
+  }
+
+  test("EOF: an open subscriptions/listen does not hold the drain") {
+    val listen =
+      """{"jsonrpc":"2.0","id":7,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+    val written = runUnsafe(
+      for
+        router <- serverWith(McpServerSettings(), echo)
+        session <- Session.makeDrained("stdio-lifecycle", Session.DefaultOutboundCapacity)
+        seen <- Ref.make(Chunk.empty[String])
+        acknowledged <- Promise.make[Nothing, Unit]
+        emit = (line: String) =>
+          seen.update(_ :+ line) *>
+            ZIO.when(line.contains("subscriptions/acknowledged"))(acknowledged.succeed(())).unit
+        // No drain limit: a listen handler that held the drain would hit the hard test timeout.
+        _ <- StdioLoop.run(router, session, framesThen(List(listen), acknowledged.await), emit, NoDrainLimit)
+        written <- seen.get
+      yield written
+    )
+    written.count(_.contains("subscriptions/acknowledged")) shouldBe 1
+    replyTo(written, 7) shouldBe None
+  }
+
+  test("a server-to-client request issued after stdin closed fails and is not written") {
+    val (failure, queued) = runUnsafe(
+      for
+        session <- Session.makeDrained("stdio-lifecycle", Session.DefaultOutboundCapacity)
+        _ <- session.closeInbound
+        failure <- session.sendRequest("roots/list", None, 30.seconds).flip.mapError(_ =>
+          new RuntimeException("the request was answered")
+        )
+        queued <- session.outbound.size
+      yield (failure, queued)
+    )
+    failure.message should include("the client closed its input stream")
+    queued shouldBe 0
+  }
+
   // --- 2. the final frame without a newline ----------------------------------------------------
 
   test("a final frame without a newline is dispatched and answered") {

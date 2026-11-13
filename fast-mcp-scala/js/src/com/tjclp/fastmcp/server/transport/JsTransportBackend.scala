@@ -127,9 +127,17 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     var ended = false
     val idle = Unsafe.unsafe(implicit unsafe => Promise.unsafe.make[Nothing, Unit](FiberId.None))
 
+    // Completed once stdin has ended and every ordered frame read (`initialize`, a client's
+    // answer to a server→client request) has run: only then may the session stop accepting answers.
+    val orderedDone =
+      Unsafe.unsafe(implicit unsafe => Promise.unsafe.make[Nothing, Unit](FiberId.None))
+
     def settleIfIdle(): Unit =
-      if ended && !initializing && held.isEmpty && inFlight.isEmpty then
-        val _ = Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.fork(idle.succeed(())))
+      if ended && !initializing && held.isEmpty then
+        val _ =
+          Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.fork(orderedDone.succeed(())))
+        if inFlight.isEmpty then
+          val _ = Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.fork(idle.succeed(())))
 
     def run(line: String): Unit =
       val parsed = MessageLoop.parseFrame(line, router.limits)
@@ -219,7 +227,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         // server→client request is failed now. Then wait for the replies owed, up to the drain
         // timeout; what is still running after it is interrupted and given a moment to finish.
         done(
-          session.closeInbound *>
+          orderedDone.await *> session.closeInbound *>
             idle.await.timeout(drainTimeout).flatMap {
               case Some(_) => ZIO.unit
               case None => interruptInFlight *> idle.await.timeout(StdioLoop.SettleTimeout).unit

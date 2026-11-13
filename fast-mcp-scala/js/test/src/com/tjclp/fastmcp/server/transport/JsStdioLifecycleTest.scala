@@ -60,8 +60,12 @@ class JsStdioLifecycleTest extends AsyncFlatSpec with Matchers:
       callbacks: js.Dictionary[js.Function1[js.Any, Unit]],
       val written: Ref[Chunk[String]],
       val finished: Promise[Throwable, Unit],
-      val interruptInFlight: UIO[Unit]
+      val interruptInFlight: UIO[Unit],
+      val session: Session
   ):
+    /** The next message a handler pushed outside a reply (`serveStdio`'s writer is not wired). */
+    def pushed: UIO[String] = session.outbound.take.map(MessageLoop.encodeOutbound)
+
     def data(text: String): UIO[Unit] = ZIO.succeed(callbacks("data")(text))
     def end: UIO[Unit] = ZIO.succeed(callbacks("end")(js.undefined))
 
@@ -98,7 +102,7 @@ class JsStdioLifecycleTest extends AsyncFlatSpec with Matchers:
           line => written.update(_ :+ line),
           drainTimeout
         )
-        new Wired(callbacks, written, finished, interruptInFlight)
+        new Wired(callbacks, written, finished, interruptInFlight, session)
       }
     yield wired
 
@@ -224,6 +228,61 @@ class JsStdioLifecycleTest extends AsyncFlatSpec with Matchers:
     ) { written =>
       val reply = replyTo(written, 2).getOrElse(fail(s"no reply to the roots call in: $written"))
       reply should include("the client closed its input stream")
+    }
+  }
+
+  it should "deliver the client's answer written just before stdin ends to the handler" in {
+    run(
+      for
+        router <- {
+          val server = McpServer.typed[Any]("JsStdioLifecycle", "0.1.0", McpServerSettings())
+          server.tool(
+            McpTool[NoArgs, String](name = "roots").contextual { (_, ctx) =>
+              ctx match
+                case Some(c) => c.listRoots().map(_.roots.size.toString)
+                case None => ZIO.fail(McpError.internalError("no context"))
+            }
+          ) *> server.buildRouter
+        }
+        wired <- wire(router)
+        _ <- wired.data(handshake + call(2, "roots") + "\n")
+        request <- wired.pushed.repeatUntil(_.contains("roots/list"))
+        id = request.split("\"id\":")(1).takeWhile(c => c != ',' && c != '}')
+        // The answer and `end` arrive back to back, with nothing run in between.
+        _ <- ZIO.succeed {
+          val runtime = Runtime.default
+          Unsafe.unsafe { implicit unsafe =>
+            runtime.unsafe.run(
+              wired.data(
+                s"""{"jsonrpc":"2.0","id":$id,"result":{"roots":[{"uri":"file:///a"}]}}""" + "\n"
+              ) *> wired.end
+            )
+          }
+        }
+        _ <- wired.finished.await
+        written <- wired.written.get
+      yield written
+    ) { written =>
+      val reply = replyTo(written, 2).getOrElse(fail(s"no reply to the roots call in: $written"))
+      reply should not include "the client closed its input stream"
+      reply should not include "isError\":true"
+    }
+  }
+
+  it should "not let an open subscriptions/listen hold the drain" in {
+    val listen =
+      """{"jsonrpc":"2.0","id":7,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+    run(
+      for
+        router <- routerWith(McpServerSettings(), echo)
+        wired <- wire(router)
+        _ <- wired.data(listen + "\n")
+        _ <- wired.pushed.repeatUntil(_.contains("subscriptions/acknowledged"))
+        // No drain limit: a listen handler that held the drain would never finish.
+        written <- wired.endAndWait
+      yield written
+    ) { written =>
+      replyTo(written, 7) shouldBe None
     }
   }
 
