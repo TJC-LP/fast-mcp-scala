@@ -7,6 +7,7 @@ import zio.json.*
 
 import com.tjclp.fastmcp.{*, given}
 import com.tjclp.fastmcp.core.{TaskSupport, ToolInputSchema}
+import com.tjclp.fastmcp.examples.conformance.ConformanceServer
 import com.tjclp.fastmcp.server.TaskSettings
 
 /** Assertions the server under test makes about itself. Each method is one Antithesis property;
@@ -128,8 +129,15 @@ final class SutTools(probe: Probe, val bootId: String):
     }
   }
 
+  /** The workload's own tools, and next to them the fixture of the official conformance harness
+    * (`ConformanceServer`: tools named `test_*`, prompts, resources, a completion handler). The
+    * driver runs the harness against this same server once faults have stopped, so the fixture
+    * has to live on the server that went through them. No name is shared between the two sets.
+    */
   def register(server: McpServer[Any]): ZIO[Any, Throwable, Unit] =
-    ZIO.foreachDiscard(List(echo, whoami, progress, slow, taskEcho, color, stats))(server.tool(_))
+    ZIO.foreachDiscard(List(echo, whoami, progress, slow, taskEcho, color, stats))(
+      server.tool(_)
+    ) *> ConformanceServer.register(server)
 
 object SutTools:
 
@@ -152,6 +160,9 @@ object SutTools:
       keepAliveInterval = Some(java.time.Duration.ofMillis(500)),
       contextHeaders = Set(UserHeader),
       loggingEnabled = true,
+      // The harness's resources-subscribe and resources-unsubscribe scenarios need it
+      // (`ConformanceServer.settings` sets it too).
+      resourcesSubscribe = true,
       // Small enough that the driver's floods reach the cap and eviction runs.
       maxSessions = Some(32),
       tasks = TaskSettings(enabled = true)
