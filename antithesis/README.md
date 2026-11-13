@@ -52,6 +52,8 @@ is judged against exactly one request. Its rules:
 - A streamed reply delivers its notifications in order and then its result.
 - A well-formed call is answered 200; a malformed request is refused with a 4xx; the server never
   answers 500.
+- Every JSON-RPC message a node sends is valid against the specification's JSON Schema for the
+  protocol version of the request (below).
 - A live session is lost only when its node restarted, the driver deleted it, or the node's
   session store was at its cap; a deleted session answers 404; an initialize at the cap is
   admitted or refused with 503. Once a flood has filled a node's store, the driver cannot tell
@@ -72,6 +74,50 @@ Assertions inside the server (`mcp/sut`: the Antithesis Java SDK on the JVM, the
 JSON-lines format on Bun) cover what no reply shows: a tool
 handler only sees arguments that satisfy its declared input schema, and the branch where a handler
 is interrupted before it finishes is reached.
+
+**Every reply against the specification's JSON Schema.** Each definite HTTP answer the driver
+gets, on every rule and while faults are active, is split into its JSON-RPC messages (one for a
+JSON body, one per event for a stream), and each message is validated against the
+specification's own schema: `schema/2026-07-28/schema.json` for a request sent on the 2026-07-28
+path, `schema/2025-11-25/schema.json` for one on a legacy session. The two files are vendored in
+`mcp/driver/schema/`; `SOURCE.md` there names the commit of the specification repository they
+come from and their checksums. They are compiled into the driver.
+
+Which definition a message is held to follows the message, the way the harness's own
+`wire-schema-valid` check picks it (`mcp/driver/src/wire.rs`): a notification by its `method`
+(`notifications/progress` gives `ProgressNotification`); a result by the method of its request
+(`tools/call` gives `CallToolResult`, `initialize` gives `InitializeResult`) and then the whole
+message as a `JSONRPCResultResponse`; an error as a `JSONRPCErrorResponse`, or as the definition
+for its code where the schema has one. Formats such as `uri` are checked.
+
+| Property | What it says |
+|---|---|
+| `a JSON-RPC message a node sends is valid against the specification's JSON Schema for its protocol version` | The message has no schema violation. The details carry the node, the version, the request's method, the violations and the message. |
+| `an error response a node sends has a request id or none, never null` | Fails today, on every node, and is listed in `known-failing.tsv`. See below. |
+
+The second property exists because of one deviation the first check found at once. A request
+whose id the server cannot read (a body that is not JSON, a refusal before the body is looked
+at: wrong `Content-Type`, unknown session, missing session header) is answered with
+`"id": null`. JSON-RPC 2.0 requires exactly that. The specification's schema does not allow it:
+`JSONRPCErrorResponse.id` is a `RequestId`, a string or an integer, and may be left out, and null
+is neither. The library does this on purpose (`JsonRpc.scala`: "a parse error before the id is
+known carries `null`"), and the official TypeScript SDK sends the same. So that this one
+disagreement cannot keep the main property red and hide anything else, such a message is checked
+against the schema without its `id`, and the null itself is the subject of the second property.
+Whether the library should leave the id out instead is an open decision; if the answer is no,
+delete the second property.
+
+What this check does not cover:
+
+- HTTP status codes and headers, and whether a result is the right answer. Other properties
+  judge those.
+- Results of the tasks extension. Under 2026-07-28 the core schema has no definition for a task
+  handle (`resultType: "task"`) or for `tasks/get` and `tasks/cancel`, so those are only held to
+  the JSON-RPC envelope and the fields every result has.
+- Answers with no HTTP status (a dropped connection, a client timeout, a stream cut before its
+  end) and bodies that are not JSON. They carry no message.
+- The requests the driver itself sends, and the raw-socket probes of the `probe` rule, which
+  only read the status line.
 
 **The official conformance harness, once faults have stopped.** The last thing the eventually
 does is run `@modelcontextprotocol/conformance` against one node, so the server that is checked
@@ -137,9 +183,10 @@ and `scripts/conformance.sh` agree:
 
 Unit tests in the driver cover these rules (`cargo test` in `mcp/driver`).
 
-Time. In the local loop, where the driver's x86-64 Node runs under emulation on an ARM
-workstation, a suite takes 6 to 9 s against a node. On an x86-64 host it takes 1 to 3 s. A
-timeline runs one suite against one node.
+Time. In the local loop on an ARM workstation, where the driver's x86-64 Node runs under
+emulation, the active suite took 6 to 11 s against a node and the requirement set 7 to 12 s.
+Without emulation (the host's own Node against the same server started on the host) the active
+suite took 1 to 2 s and the requirement set 3 s. A timeline runs one suite against one node.
 
 **Regression probes for security findings.** The `probe` rule and two in-server assertions state
 hardened behaviour that Claude Security findings showed was missing. They failed on the code
@@ -155,8 +202,9 @@ before the fixes (TJC-5087) and pass since; a failure now is a regression.
 | `a dropped GET stream frees its slot` | A GET slot was released only by the response stream's finalizer |
 
 `mcp/known-failing.tsv` lists properties that are expected to fail because their fix has not
-landed. It is empty. When a probe is written before its fix, add a line there and remove it with
-the fix; any other failing property is a new result to triage.
+landed. It has one line: the null id on error responses (above), which is a decision to make
+rather than a security finding. When a probe is written before its fix, add a line there and
+remove it with the fix; any other failing property is a new result to triage.
 
 **Faults.** The `resilient` profile, with the driver excluded. Each node is a single server with
 in-memory sessions and tasks, so it is not meant to survive being killed.
@@ -193,7 +241,8 @@ antithesis/mcp/scripts/launch.sh 12        # 12 compute hours on Antithesis
   and so are any lines in `known-failing.tsv`.
 - In the local loop the harness runs both suites against all three nodes, and `local.sh` prints
   one line per run with its exit code, counts and duration. The harness's output and result files
-  land in `mcp/out/<timestamp>/conformance/<suite>-<node>/`.
+  land in `mcp/out/<timestamp>/conformance/<suite>-<node>/`. It also prints how many messages
+  were checked against the specification's schema.
 - `launch.sh` needs `ANTITHESIS_API_KEY` and `ANTITHESIS_REPOSITORY` in the environment (or a
   `snouty login`) and a registry login for that repository. Check the compute budget before each
   launch; the script only passes the number on.
