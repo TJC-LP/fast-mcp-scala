@@ -13,6 +13,7 @@ import com.tjclp.fastmcp.core.wire.{
   SamplingMessage,
   TextResourceContents
 }
+import com.tjclp.fastmcp.examples.SkillsServer
 import com.tjclp.fastmcp.jsonrpc.McpError
 
 /** Cross-platform MCP "everything" server mirroring the conformance harness's reference
@@ -863,9 +864,20 @@ object ConformanceServer:
     )(a => s"""{"id":"${a.id}","templateTest":true,"data":"Data for ID: ${a.id}"}""")
   )
 
-  /** Register the full active surface (tools, prompts, resources, completion) on a server. */
+  // ---- skills extension fixture (io.modelcontextprotocol/skills, SEP-2640) ----
+  //
+  // The harness's `sep-2640-skills-*` scenarios hardcode no URI: they discover skills through
+  // `skills/list` and `resources/list`. The catalog is the one the `SkillsServer` example
+  // publishes, because it has every shape the scenarios look for: a skill with a subdirectory
+  // (the directory scenario needs an `inode/directory` child), a nested skill, an unlisted skill
+  // and a dynamic provider. Registering it declares the extension with `directoryRead: true` and
+  // adds the skill files to `resources/list`. No scored scenario depends on the size of that list.
+
+  /** Register the full active surface (tools, prompts, resources, completion, skills). */
   def register(server: McpServer[Any]): ZIO[Any, Throwable, Unit] =
     for
+      _ <- server.skills(SkillsServer.skills)
+      _ <- ZIO.foreachDiscard(SkillsServer.skillProviders)(server.skillProvider(_))
       _ <- ZIO.foreachDiscard(tools ++ taskTools ++ schemaTools)(server.tool(_))
       _ <- ZIO.foreachDiscard(prompts)(server.prompt(_))
       _ <- ZIO.foreachDiscard(staticResources)(server.resource(_))

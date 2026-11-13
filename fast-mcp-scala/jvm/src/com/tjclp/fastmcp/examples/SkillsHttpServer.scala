@@ -4,13 +4,17 @@ package examples
 import com.tjclp.fastmcp.*
 
 /** The [[SkillsServer]] catalog over streamable HTTP (JVM). Same skills, same tool, same dynamic
-  * provider — this is the fixture `docs/skills-conformance.md` runs the upstream
-  * `sep-2640-skills-*` conformance scenarios against:
+  * provider.
+  *
+  * The conformance gate does not use this server: `scripts/conformance.sh <platform> <port> skills`
+  * runs the upstream `sep-2640-skills-*` scenarios against `ConformanceServer`, which mounts the
+  * same catalog on every platform (`docs/skills-conformance.md`). This one is for running a
+  * scenario by hand, one name per run:
   *
   * {{{
   *   ./mill fast-mcp-scala.jvm.runMain com.tjclp.fastmcp.examples.SkillsHttpServer
-  *   # then, from a checkout of modelcontextprotocol/conformance:
-  *   npm start -- server --scenario 'sep-2640-skills-*' --url http://127.0.0.1:8091/mcp
+  *   # then, with the pinned harness installed in conformance/node_modules:
+  *   node_modules/.bin/conformance server --scenario sep-2640-skills-directory --url http://127.0.0.1:8091/mcp
   * }}}
   *
   * Binds `127.0.0.1:8091` (override with `FAST_MCP_SKILLS_PORT`).
