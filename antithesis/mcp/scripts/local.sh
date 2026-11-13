@@ -6,6 +6,11 @@
 #
 # CONTAINER_ENGINE picks the engine (default podman). Evidence lands in a fresh directory under
 # antithesis/mcp/out/ (git-ignored).
+#
+# Once the eventually's own checks are done the driver runs the official conformance harness.
+# Here it runs both suites against every node; DRIVER_CONFORMANCE_NODE (a node's name, or `all`)
+# and DRIVER_CONFORMANCE_SUITE (`active`, `2026`, `all`, `off`) narrow that, and setting either to
+# the empty string lets the driver draw it, as on Antithesis.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,6 +42,8 @@ done
 code="$("${engine}" inspect -f '{{.State.ExitCode}}' driver)"
 
 "${compose[@]}" cp driver:/tmp/sdk.jsonl "${out}/sdk.jsonl" || true
+# The conformance harness's own output and result files, one directory per suite and node.
+"${compose[@]}" cp driver:/tmp/conformance "${out}/conformance" || true
 for svc in mcp-netty mcp-socket mcp-bun; do
   "${compose[@]}" cp "${svc}:/tmp/sdk.jsonl" "${out}/sdk-${svc}.jsonl" || true
 done
@@ -47,6 +54,9 @@ done
 "${compose[@]}" down -v >/dev/null 2>&1
 
 echo "local.sh: driver exit code ${code}; evidence in ${out}"
+echo "local.sh: the conformance harness:"
+grep -a 'driver: conformance:' "${out}/driver.log" | sed 's/^.*driver: conformance: /  /' || echo "  (it did not run)"
+grep -a 'driver: wire:' "${out}/driver.log" | sed 's/^.*driver: wire: /local.sh: /' || true
 echo "local.sh: assertions that would fail in a run (see known-failing.tsv for the expected ones):"
 jq -rs '[.[].antithesis_assert // empty] | group_by(.message)[]
   | select(if .[0].assert_type == "sometimes" then any(.hit and .condition) | not

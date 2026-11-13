@@ -1,3 +1,3 @@
-# Properties expected to fail, each with the finding it regression-tests. Empty since the fixes of
-# TJC-5087: every property is expected to pass. Add a line when a probe is written before its fix.
+# Properties expected to fail, each with the finding it regression-tests or the decision it waits
+# for. Add a line when a probe is written before its fix, and remove it with the fix.
 # property message	finding	note

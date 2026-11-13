@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 antithesis_sdk = "0.3.0"
 hegeltest = { version = "0.52.1", features = ["static-engine"] }
+jsonschema = { version = "=0.60.2", default-features = false }
 serde_json = "1"
 ureq = { version = "2", default-features = false }
 

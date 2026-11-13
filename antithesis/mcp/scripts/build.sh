@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds the workload's images: stages the server's jars and links its Bun bundle with Mill, then
-# builds every image in the compose file.
+# Builds the workload's images: stages the server's jars and links its Bun bundle with Mill, stages
+# the conformance harness's pin for the driver image, then builds every image in the compose file.
 #
 #   antithesis/mcp/scripts/build.sh [extra compose files...]
 #
@@ -38,6 +38,17 @@ js="$(stage fast-mcp-scala.antithesisSutJs.stage)"
 [ -f "${js}/main.js.map" ] || { echo "build.sh: the Bun stage task produced nothing at '${js}'" >&2; exit 1; }
 mkdir -p "${here}/sut/stage/js"
 cp "${js}/main.js" "${js}/main.js.map" "${here}/sut/stage/js/"
+
+# The driver image installs the official conformance harness from the repository's pin: the
+# package file, its lock, and the expected-failure baselines. Its build context is
+# antithesis/mcp/driver, so they are copied in.
+echo "build.sh: staging the conformance harness's pin (conformance/package.json, bun.lock, baselines)" >&2
+[ -s "${root}/conformance/bun.lock" ] || { echo "build.sh: conformance/bun.lock is missing" >&2; exit 1; }
+rm -rf "${here}/driver/stage"
+mkdir -p "${here}/driver/stage/conformance"
+cp "${root}/conformance/package.json" "${root}/conformance/bun.lock" \
+  "${root}/conformance/baseline-jvm.yml" "${root}/conformance/baseline-js.yml" \
+  "${here}/driver/stage/conformance/"
 
 files=(-f "${here}/config/docker-compose.yaml")
 for extra in "$@"; do files+=(-f "${extra}"); done

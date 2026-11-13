@@ -24,3 +24,8 @@ services:
     environment:
       ANTITHESIS_SDK_LOCAL_OUTPUT: /tmp/sdk.jsonl
       DRIVER_EVENTUALLY_AFTER_S: ${DRIVER_EVENTUALLY_AFTER_S:-90}
+      # Which node and suite the conformance harness runs against. Here: every node, both suites,
+      # so one local run shows all of it. Set either to the empty string to let the driver draw,
+      # as it does on Antithesis.
+      DRIVER_CONFORMANCE_NODE: ${DRIVER_CONFORMANCE_NODE-all}
+      DRIVER_CONFORMANCE_SUITE: ${DRIVER_CONFORMANCE_SUITE-all}
