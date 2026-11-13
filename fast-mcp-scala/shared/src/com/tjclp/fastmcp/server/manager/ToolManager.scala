@@ -68,6 +68,10 @@ case class ToolInputValidation(enforced: Boolean, unenforced: List[String])
   *   / `runStdio[R]()` entry.
   */
 class ToolManager[R](validateInput: Boolean = true) extends Manager[ToolDefinition]:
+
+  // Binary compatibility with 1.0.x: the no-argument constructor. `validateInput` takes its default.
+  private[fastmcp] def this() = this(true)
+
   // Thread-safe storage for registered tools - public for direct access in examples
   val tools = new ConcurrentHashMap[String, (ToolDefinition, ContextualToolHandler[R])]()
 
