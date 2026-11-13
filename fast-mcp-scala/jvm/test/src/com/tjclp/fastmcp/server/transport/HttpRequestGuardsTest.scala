@@ -354,6 +354,27 @@ class HttpRequestGuardsTest extends AnyFunSuite with Matchers:
     HttpRequestGuards.pathMatches("/mcp", slashed) shouldBe false
   }
 
+  test("a backend that decodes paths serves an endpoint clients percent-encode, with a WARN") {
+    for encoded <- List("/mcp-ü", "/a[1]", "/a|b")
+    do
+      withClue(s"'$encoded': ") {
+        val settings = McpServerSettings(httpEndpoint = encoded)
+        HttpRequestGuards.validateSettings(settings).isLeft shouldBe true
+        HttpRequestGuards.validateSettings(settings, decodedPaths = true) shouldBe Right(())
+        HttpRequestGuards.encodedEndpointWarning(encoded).isDefined shouldBe true
+      }
+    // What no backend can match stays refused, and a plain endpoint has no warning.
+    for bad <- List("/mcp?x=1", "/m%63p", "/my mcp", "/a/../mcp")
+    do
+      withClue(s"'$bad': ") {
+        HttpRequestGuards
+          .validateSettings(McpServerSettings(httpEndpoint = bad), decodedPaths = true)
+          .isLeft shouldBe true
+        HttpRequestGuards.encodedEndpointWarning(bad) shouldBe None
+      }
+    HttpRequestGuards.encodedEndpointWarning("/mcp") shouldBe None
+  }
+
   test("validateSettings (C3.11): an httpEndpoint no request path can equal is refused at startup") {
     for bad <- List("/mcp?x=1", "/mcp#frag", "/m%63p", "/a%2Fb", "/my mcp", "/mcp\t", "/mcp\n", "/./mcp", "/a/../mcp", "/mcp/.", "/mcp-ü", "/mcp\"x", "/a<b>", "/a[1]", "/a\\b", "/a|b", "/a{b}", "/a^b", "/a`b")
     do

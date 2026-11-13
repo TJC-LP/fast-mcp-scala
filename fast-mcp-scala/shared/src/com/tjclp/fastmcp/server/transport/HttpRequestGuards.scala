@@ -80,6 +80,17 @@ private[fastmcp] object HttpRequestGuards:
     * must be a path a request can actually name ([[invalidEndpoint]]).
     */
   def validateSettings(settings: McpServerSettings): Either[String, Unit] =
+    validateSettings(settings, decodedPaths = false)
+
+  /** [[validateSettings]] for a backend whose HTTP layer hands over the request path
+    * percent-decoded (`decodedPaths`, zio-http): an endpoint with a character clients
+    * percent-encode does match there, so it is not refused ([[encodedEndpointWarning]] says what to
+    * log instead).
+    */
+  private[fastmcp] def validateSettings(
+      settings: McpServerSettings,
+      decodedPaths: Boolean
+  ): Either[String, Unit] =
     val bad = HostGuard.invalidOrigins(settings.allowedOrigins.getOrElse(Set.empty))
     val badHeaders = RequestHeaders.invalidNames(settings.contextHeaders)
     val listed =
@@ -102,7 +113,10 @@ private[fastmcp] object HttpRequestGuards:
     // ever sees it; `limits.maxFrameChars` is the transport-independent backstop.
     else if settings.maxRequestBodyBytes > settings.limits.maxFrameChars then
       Left("maxRequestBodyBytes must not exceed limits.maxFrameChars")
-    else invalidEndpoint(settings.httpEndpoint).toLeft(())
+    else
+      invalidEndpoint(settings.httpEndpoint)
+        .filterNot(_ => decodedPaths && structuralProblem(settings.httpEndpoint).isEmpty)
+        .toLeft(())
 
   /** The path requests are matched against: `httpEndpoint` with a leading slash (`/mcp` for both
     * `"/mcp"` and `"mcp"`).
@@ -125,8 +139,23 @@ private[fastmcp] object HttpRequestGuards:
     * every request: refused at startup instead.
     */
   def invalidEndpoint(httpEndpoint: String): Option[String] =
-    def refuse(what: String) =
-      Some(s"httpEndpoint '$httpEndpoint' can never match a request path: it contains $what")
+    structuralProblem(httpEndpoint).orElse(encodedChar(httpEndpoint)).map { what =>
+      s"httpEndpoint '$httpEndpoint' can never match a request path: it contains $what"
+    }
+
+  /** The WARN for a backend that receives decoded paths and so serves an endpoint with a character
+    * clients percent-encode: the same settings fail at startup on the other backends.
+    */
+  private[fastmcp] def encodedEndpointWarning(httpEndpoint: String): Option[String] =
+    if structuralProblem(httpEndpoint).nonEmpty then None
+    else
+      encodedChar(httpEndpoint).map { what =>
+        s"httpEndpoint '$httpEndpoint' contains $what. This backend decodes the request path and " +
+          "serves it; the socket and Bun backends refuse the same setting at startup."
+      }
+
+  private def structuralProblem(httpEndpoint: String): Option[String] =
+    def refuse(what: String) = Some(what)
     if httpEndpoint.exists(ch => ch.isWhitespace || Character.isISOControl(ch)) then
       refuse("whitespace or a control character")
     else if httpEndpoint.indexOf('?') >= 0 then
@@ -136,16 +165,16 @@ private[fastmcp] object HttpRequestGuards:
       refuse("'%' (percent-escapes are compared as written; write the path unescaped)")
     else if httpEndpoint.split('/').exists(seg => seg == "." || seg == "..") then
       refuse("a '.' or '..' segment")
-    else
-      // What is left must be a character a path carries as written (RFC 3986 `pchar`, plus the
-      // separator). Anything else — non-ASCII, `"`, `<`, `[`, `\\` ... — is percent-encoded by
-      // clients and by Bun's URL parser, and the endpoint is compared as written.
-      httpEndpoint.find(ch => !pathChar(ch)).flatMap { ch =>
-        refuse(
-          s"'$ch' (clients percent-encode it, and the path is compared as written; use letters, " +
-            "digits and -._~!$&'()*+,;=:@ only)"
-        )
-      }
+    else None
+
+  private def encodedChar(httpEndpoint: String): Option[String] =
+    // What is left must be a character a path carries as written (RFC 3986 `pchar`, plus the
+    // separator). Anything else — non-ASCII, `"`, `<`, `[`, `\\` ... — is percent-encoded by
+    // clients and by Bun's URL parser, and the endpoint is compared as written.
+    httpEndpoint.find(ch => !pathChar(ch)).map { ch =>
+      s"'$ch' (clients percent-encode it, and the path is compared as written; use letters, " +
+        "digits and -._~!$&'()*+,;=:@ only)"
+    }
 
   private def pathChar(ch: Char): Boolean =
     (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||

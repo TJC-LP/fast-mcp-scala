@@ -639,10 +639,19 @@ impl Driver {
         }
     }
 
-    /// The harness runs the eventually makes: the drawn node and suite, unless
+    /// The harness runs the eventually makes: every suite against the drawn node, unless
     /// `DRIVER_CONFORMANCE_NODE` / `DRIVER_CONFORMANCE_SUITE` say otherwise (the local loop).
     fn conformance_plan(&self, drawn_node: usize, drawn_suite: Suite) -> Vec<(usize, Suite)> {
-        let suites = if self.harness.suite.is_some() { self.harness.suites() } else { vec![drawn_suite] };
+        // Without a configured suite: all three, the drawn one first. One drawn suite per
+        // timeline left a node/suite pair unvisited in a whole run (27e04e91: the active suite
+        // never ran against bun), because the timelines of a run share most of their draws.
+        let suites = if self.harness.suite.is_some() {
+            self.harness.suites()
+        } else {
+            let all = [Suite::Active, Suite::Requirements, Suite::Skills];
+            let first = all.iter().position(|s| *s == drawn_suite).unwrap_or(0);
+            (0..all.len()).map(|i| all[(first + i) % all.len()]).collect()
+        };
         let nodes: Vec<usize> = match self.harness.node.as_deref() {
             None => vec![drawn_node],
             Some("all") => (0..self.nodes.len()).collect(),

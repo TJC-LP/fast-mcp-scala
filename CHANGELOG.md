@@ -500,8 +500,9 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - **Bun's 404 for a path that is not the endpoint has an empty body**, like the other backends
     (it carried `Not Found` as `text/plain`).
   - **`httpEndpoint` is validated at startup.** A value containing `?`, `#`, `%`, whitespace, a
-    control character, a `.` / `..` segment or a character clients percent-encode (non-ASCII,
-    `"`, `<`, `[` ...) made a route no request could reach (every request
+    control character, a `.` / `..` segment or, on the socket and Bun backends, a character
+    clients percent-encode (non-ASCII, `"`, `<`, `[` ...; zio-http decodes the path and serves
+    such an endpoint, so there it is a WARN) made a route no request could reach (every request
     404); `runHttp()` now fails with `Invalid HTTP settings: httpEndpoint '…' can never match a
     request path`. On Bun `httpEndpoint = "mcp"` (no leading slash) is now the same as `"/mcp"`,
     as on the JVM; before, it matched nothing there.

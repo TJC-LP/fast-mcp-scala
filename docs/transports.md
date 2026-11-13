@@ -181,6 +181,8 @@ ignored. Because the match is exact, `runHttp()` refuses at startup an `httpEndp
 request path could equal: one containing `?`, `#`, `%`, whitespace or a control character, a
 `.` / `..` segment, or any character a client would percent-encode (non-ASCII, `"`, `<`, `[`,
 `\` and the like). Letters, digits and `-._~!$&'()*+,;=:@` are what a path segment may hold.
+The last rule is a WARN, not a failure, on the zio-http backend: it decodes the request path, so
+such an endpoint is served there (and it worked in 1.0.x).
 
 What each backend compares is the path as its HTTP layer hands it over. The socket backend
 compares the request target exactly as written. zio-http normalises the target first — it decodes

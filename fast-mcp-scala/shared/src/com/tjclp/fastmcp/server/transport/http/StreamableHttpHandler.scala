@@ -788,10 +788,23 @@ private[fastmcp] object StreamableHttpHandler:
     * non-loopback bind address with no Host/Origin allow-list).
     */
   def validateSettings(settings: McpServerSettings): IO[IllegalArgumentException, Unit] =
+    validateSettings(settings, decodedPaths = false)
+
+  /** As above, for a backend whose HTTP layer hands over the request path percent-decoded
+    * (zio-http): an `httpEndpoint` with a character clients percent-encode is served there, so it
+    * is a WARN and not a startup failure.
+    */
+  private[fastmcp] def validateSettings(
+      settings: McpServerSettings,
+      decodedPaths: Boolean
+  ): IO[IllegalArgumentException, Unit] =
+    val warnings = HttpRequestGuards.startupWarnings(settings) ++
+      (if decodedPaths then HttpRequestGuards.encodedEndpointWarning(settings.httpEndpoint).toList
+       else Nil)
     ZIO
-      .fromEither(HttpRequestGuards.validateSettings(settings))
+      .fromEither(HttpRequestGuards.validateSettings(settings, decodedPaths))
       .mapError(msg => new IllegalArgumentException(s"Invalid HTTP settings: $msg")) *>
-      ZIO.foreachDiscard(HttpRequestGuards.startupWarnings(settings))(ZIO.logWarning(_))
+      ZIO.foreachDiscard(warnings)(ZIO.logWarning(_))
 
   /** Build a handler, allocating the durable session store unless `settings.stateless`. `randomId`
     * is the platform CSPRNG (`TransportBackend.randomId()`): session ids are bearer handles and
