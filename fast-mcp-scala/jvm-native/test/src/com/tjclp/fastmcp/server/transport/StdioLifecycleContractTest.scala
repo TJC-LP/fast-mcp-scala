@@ -219,8 +219,8 @@ class StdioLifecycleContractTest extends AnyFunSuite with Matchers:
         yield replyTo(written, 2).getOrElse(s"no reply in: $written")
       }
     )
-    replies.filterNot(reply => reply.contains("2") && !reply.contains("closed its input")) shouldBe empty
-    replies.filter(_.contains("isError\":true")) shouldBe empty
+    // Every run got the client's answer: the tool reports the two roots it was sent.
+    replies.filterNot(_.contains(""""text":"2"""")) shouldBe empty
   }
 
   test("EOF: an open subscriptions/listen does not hold the drain") {

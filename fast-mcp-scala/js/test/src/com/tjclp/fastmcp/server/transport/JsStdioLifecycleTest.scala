@@ -264,8 +264,7 @@ class JsStdioLifecycleTest extends AsyncFlatSpec with Matchers:
       yield written
     ) { written =>
       val reply = replyTo(written, 2).getOrElse(fail(s"no reply to the roots call in: $written"))
-      reply should not include "the client closed its input stream"
-      reply should not include "isError\":true"
+      reply should include(""""text":"1"""")
     }
   }
 
