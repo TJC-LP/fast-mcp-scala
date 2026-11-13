@@ -144,9 +144,10 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - **What a client or server author can notice** — each of these was accepted before because the
     decoder was more lenient than the schema, and is now rejected because the schema says so:
     a string where the schema says `integer` / `number` (`"5"`), or any other JSON type mismatch;
-    a call that omits a member listed in `required`, including a parameter or field that has a
-    Scala default but is not marked `@Param(..., required = false)` (mark it to keep it optional)
-    and an `Option` parameter annotated `@Param(required = true)`; arguments sent to a tool that
+    a call that omits a member listed in `required`, including an `Option` or defaulted parameter
+    annotated `@Param(required = true)` (a parameter or input field with a Scala default is not in
+    `required` otherwise, so omitting it is still accepted and the default is applied — see
+    *Changed*, TJC-5117); arguments sent to a tool that
     takes none (its derived schema says `additionalProperties: false`); an explicit `null` for an
     `Option` parameter whose `@Param(schema = ...)` override does not admit `null`; any value a
     custom decoder accepts but the advertised schema does not describe (give the type a matching
@@ -370,6 +371,41 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Changed
 
+- **A parameter or input field with a Scala default is no longer advertised as `required`**
+  (TJC-5117, #116 C2.6). Before, a default alone left the name in the `required` array of the
+  tool's `inputSchema`, and only `@Param(required = false)` removed it. The handler applied the
+  default either way, so the schema was stricter than the tool. With the schema now enforced
+  (TJC-5087) that would have refused a call the tool can serve. The schema now says what the
+  handler does:
+  - `@Tool` methods: a parameter with a default is optional, with or without a `@Param`.
+  - Case classes used as tool input (a typed tool's `In`, a case-class parameter of a `@Tool`
+    method, and case classes nested inside either, including in collections): a field with a
+    default is optional.
+  - `@Prompt` methods: an argument with a default is advertised with `required: false`.
+  - `@Param(required = true)` on a defaulted parameter or field keeps it required. `Option`
+    parameters are unchanged (optional unless `required = true`).
+  - Output schemas are unchanged: under `.withOutputSchema` a field of `Out` with a default stays
+    in `required`, because the encoder always writes it.
+  - `JsonSchemaMacro.schemaForType` follows the input rule. `schemaForFunctionArgs` called on its
+    own still lists a defaulted top-level parameter (it cannot see whether a handler applies the
+    default); the `@Tool` processor removes it.
+
+  For a server author: `tools/list` and `prompts/list` change for every tool or prompt that has a
+  defaulted parameter not already marked `required = false`. The `required` array gets shorter,
+  or disappears when nothing is left in it. No code change is needed, and `required = false` can be
+  dropped where a default is present. If a field must be sent although it has a default, write
+  `@Param("...", required = true)`. If an input type has a hand-written `JsonDecoder` that does not
+  fill in the default, do the same or supply a `McpSchema` / `McpInputCodec`: the schema cannot
+  see what a hand-written decoder does.
+
+  For a client: a call that omits a defaulted argument is accepted and the default is applied,
+  as the handler always did. A client that sends every argument sees no difference. A client that
+  caches or compares tool schemas sees the changed `required` arrays.
+- **`required` lists parameters in declaration order** (TJC-5117, #116 C2.23). On the annotation
+  path, and for a typed tool whose `In` has a `@Param` field, `required` was sorted alphabetically
+  (`p`, `p10`, `p11`, `p2`). It now follows the order of `properties`, which is the order the
+  parameters or fields are declared in. The set of names is the same; only the order changes. A
+  name in `required` that has no entry in `properties` goes last.
 - **A reply that is complete at its first frame is sent as a fixed-length body** (TJC-5064), on
   every HTTP backend and on both protocol paths. When a request's first frame is already its final
   reply — a call that emitted no progress, log or sub-request first — the response is still `200

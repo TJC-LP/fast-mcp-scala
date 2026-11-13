@@ -510,14 +510,16 @@ class ToolInputValidationTest extends AnyFunSuite with Matchers:
     calls.get() shouldBe 0
   }
 
-  test("a defaulted field is optional only when the schema says so (required = false)") {
+  test("a defaulted field is optional without `required = false`, and the default is applied") {
     val server = McpServer("Defaults")
     runUnsafe(server.tool(McpTool[Defaulted, String](name = "defaulted")(d => s"${d.a}:${d.s}")))
-    // A default alone leaves the field in the advertised `required` list, and the list is enforced.
-    val omitted = call(server, "defaulted", "a" -> num(1))
-    omitted.left.toOption.map(_.getMessage) shouldBe
-      Some("Invalid arguments for tool 'defaulted': missing required property 's'")
+    // A default alone takes the field out of the advertised `required` list (TJC-5117), so the
+    // enforced schema lets the call through and the decoder fills the default.
+    rendered(call(server, "defaulted", "a" -> num(1))) shouldBe "1:x"
     rendered(call(server, "defaulted", "a" -> num(1), "s" -> Json.Str("y"))) shouldBe "1:y"
+    // The field without a default is still required and enforced.
+    call(server, "defaulted", "s" -> Json.Str("y")).left.toOption.map(_.getMessage) shouldBe
+      Some("Invalid arguments for tool 'defaulted': missing required property 'a'")
   }
 
   test("a sealed-trait parameter validates through its derived oneOf") {

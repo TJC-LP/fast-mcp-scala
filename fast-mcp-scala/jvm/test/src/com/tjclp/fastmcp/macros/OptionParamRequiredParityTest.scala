@@ -92,15 +92,13 @@ class OptionParamRequiredParityTest extends AnyFunSuite:
     assert(disagreements.isEmpty, disagreements.mkString("\n"))
   }
 
-  // DEFERRED to 1.0.1 (C2.23): `required` is re-sorted alphabetically (MacroUtils `.sorted`) while
-  // `properties` keep declaration order. Cosmetic; folded into the C2.6 `required`/defaults change.
+  // C2.23 (TJC-5117): `required` used to be re-sorted alphabetically (MacroUtils `.sorted`) while
+  // `properties` kept declaration order.
   test("`required` lists parameters in declaration order, like `properties`") {
-    pendingUntilFixed {
-      val properties = h.propertyNames("declared_order")
-      val required = h.required("declared_order")
-      assert(properties == List("b", "a", "c"), s"properties order: $properties")
-      assert(required == properties, s"required $required does not follow properties $properties")
-    }
+    val properties = h.propertyNames("declared_order")
+    val required = h.required("declared_order")
+    assert(properties == List("b", "a", "c"), s"properties order: $properties")
+    assert(required == properties, s"required $required does not follow properties $properties")
   }
 
   test("typed contract: an Option field with a bare @Param is not required") {

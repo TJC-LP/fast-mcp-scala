@@ -6,10 +6,10 @@ import org.scalatest.funsuite.AnyFunSuite
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
 
-/** Every parameter here is `@Param(required = false)` WITH a Scala default — the only spelling the
-  * macro accepts for an optional non-`Option` parameter (ToolProcessor.scala:120-133). The
-  * advertised schema therefore drops `p` from `required`; a client that honours the schema omits
-  * `p` and expects the Scala default to apply.
+/** Every parameter here is `@Param(required = false)` WITH a Scala default — until TJC-5117 the
+  * only spelling that made a non-`Option` parameter optional (a default alone now does; see
+  * `DefaultedNotRequiredTest`). The advertised schema drops `p` from `required`; a client that
+  * honours the schema omits `p` and expects the Scala default to apply.
   */
 object DefaultOmissionTools:
 
