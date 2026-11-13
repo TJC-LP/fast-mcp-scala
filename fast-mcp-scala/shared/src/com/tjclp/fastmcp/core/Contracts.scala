@@ -354,7 +354,8 @@ final case class McpTool[In, Out] private (
     definition: ToolDefinition,
     handler: (In, Option[McpContext]) => ZIO[Any, Throwable, Out],
     private[fastmcp] val decoder: McpDecoder[In],
-    private[fastmcp] val encoder: McpEncoder[Out]
+    private[fastmcp] val encoder: McpEncoder[Out],
+    private[fastmcp] val deferTask: Boolean
 ):
 
   /** Opt this tool into experimental MCP Tasks. Without this call the tool defaults to
@@ -363,6 +364,25 @@ final case class McpTool[In, Out] private (
     */
   def withTaskSupport(value: TaskSupport): McpTool[In, Out] =
     copy(definition = definition.copy(taskSupport = Some(value)))
+
+  /** Start every call of this tool as an ordinary request and create its task only where the
+    * handler calls [[com.tjclp.fastmcp.server.McpContext.continueAsTask]] (SEP-2663, "Composition
+    * with Multi Round-Trip Requests").
+    *
+    * Without this, a tool whose task support is `Optional` or `Required` becomes a task before its
+    * handler runs, so whatever it asks its client is asked from inside the task (status
+    * `input_required`, `tasks/get` / `tasks/update`). With it, the handler first runs on the
+    * request: what it asks before `continueAsTask` ends the request with an `input_required` result
+    * and the client retries with `inputResponses` (MRTR), and no task exists until the hand-off. A
+    * handler that returns without calling `continueAsTask` answers the request with an ordinary
+    * result.
+    *
+    * It changes when the task is created, not whether one may be: combine it with
+    * [[withTaskSupport]]. It has no effect on a tool whose task support is `Forbidden`, on a server
+    * with tasks off, or for a 2025-11-25 client, which asks for a task per call (`params.task`) and
+    * has no MRTR.
+    */
+  def withDeferredTask: McpTool[In, Out] = copy(deferTask = true)
 
   /** Advertise a derived `outputSchema` on `tools/list` and emit conforming `structuredContent` on
     * every call (the spec requires the two together). Needs an `Out` the schema macro can derive —
@@ -382,12 +402,18 @@ object McpTool:
       definition: ToolDefinition,
       handler: (In, Option[McpContext]) => ZIO[R, Throwable, Out],
       private[fastmcp] val decoder: McpDecoder[In],
-      private[fastmcp] val encoder: McpEncoder[Out]
+      private[fastmcp] val encoder: McpEncoder[Out],
+      private[fastmcp] val deferTask: Boolean
   ):
 
     /** Opt this tool into experimental MCP Tasks. */
     def withTaskSupport(value: TaskSupport): WithEnv[In, Out, R] =
       copy(definition = definition.copy(taskSupport = Some(value)))
+
+    /** Create the task only where the handler calls
+      * [[com.tjclp.fastmcp.server.McpContext.continueAsTask]] (see [[McpTool.withDeferredTask]]).
+      */
+    def withDeferredTask: WithEnv[In, Out, R] = copy(deferTask = true)
 
     /** Advertise a derived `outputSchema` and emit conforming `structuredContent` (see
       * [[McpTool.withOutputSchema]]).
@@ -404,23 +430,23 @@ object McpTool:
 
     /** Attach a pure handler `In => Out`. */
     def apply(handler: In => Out): McpTool[In, Out] =
-      new McpTool(definition, (in, _) => ZIO.attempt(handler(in)), decoder, encoder)
+      new McpTool(definition, (in, _) => ZIO.attempt(handler(in)), decoder, encoder, false)
 
     /** Attach an effectful handler `In => F[Out]` for any `F` with a given [[ToHandlerEffect]]. */
     def apply[F[_]](handler: In => F[Out])(using
         effect: ToHandlerEffect[F, Any]
     ): McpTool[In, Out] =
-      new McpTool(definition, (in, _) => effect.lift(handler(in)), decoder, encoder)
+      new McpTool(definition, (in, _) => effect.lift(handler(in)), decoder, encoder, false)
 
     /** Attach a pure contextual handler that sees the optional [[McpContext]]. */
     def contextual(handler: (In, Option[McpContext]) => Out): McpTool[In, Out] =
-      new McpTool(definition, (in, ctx) => ZIO.attempt(handler(in, ctx)), decoder, encoder)
+      new McpTool(definition, (in, ctx) => ZIO.attempt(handler(in, ctx)), decoder, encoder, false)
 
     /** Attach an effectful contextual handler. */
     def contextual[F[_]](
         handler: (In, Option[McpContext]) => F[Out]
     )(using effect: ToHandlerEffect[F, Any]): McpTool[In, Out] =
-      new McpTool(definition, (in, ctx) => effect.lift(handler(in, ctx)), decoder, encoder)
+      new McpTool(definition, (in, ctx) => effect.lift(handler(in, ctx)), decoder, encoder, false)
 
   /** Environment-aware builder produced by the three-type-argument factory. */
   final class EnvBuilder[In, Out, R] private[McpTool] (
@@ -429,23 +455,23 @@ object McpTool:
 
     /** Attach a pure handler `In => Out`. */
     def apply(handler: In => Out): WithEnv[In, Out, R] =
-      new WithEnv(definition, (in, _) => ZIO.attempt(handler(in)), decoder, encoder)
+      new WithEnv(definition, (in, _) => ZIO.attempt(handler(in)), decoder, encoder, false)
 
     /** Attach an effectful handler `In => F[Out]` for any `F` with a given [[ToHandlerEffect]]. */
     def apply[F[_]](handler: In => F[Out])(using
         effect: ToHandlerEffect[F, R]
     ): WithEnv[In, Out, R] =
-      new WithEnv(definition, (in, _) => effect.lift(handler(in)), decoder, encoder)
+      new WithEnv(definition, (in, _) => effect.lift(handler(in)), decoder, encoder, false)
 
     /** Attach a pure contextual handler that sees the optional [[McpContext]]. */
     def contextual(handler: (In, Option[McpContext]) => Out): WithEnv[In, Out, R] =
-      new WithEnv(definition, (in, ctx) => ZIO.attempt(handler(in, ctx)), decoder, encoder)
+      new WithEnv(definition, (in, ctx) => ZIO.attempt(handler(in, ctx)), decoder, encoder, false)
 
     /** Attach an effectful contextual handler. */
     def contextual[F[_]](
         handler: (In, Option[McpContext]) => F[Out]
     )(using effect: ToHandlerEffect[F, R]): WithEnv[In, Out, R] =
-      new WithEnv(definition, (in, ctx) => effect.lift(handler(in, ctx)), decoder, encoder)
+      new WithEnv(definition, (in, ctx) => effect.lift(handler(in, ctx)), decoder, encoder, false)
 
   /** Primary factory. Returns a [[Builder]]; apply it with your handler lambda:
     *
@@ -595,7 +621,7 @@ object McpTool:
       decoder: McpDecoder[In],
       encoder: McpEncoder[Out]
   ): McpTool[In, Out] =
-    new McpTool(definition, handler, decoder, encoder)
+    new McpTool(definition, handler, decoder, encoder, false)
 
   /** Internal environment-aware constructor used by macros. */
   @targetName("unsafeFromDefinitionWithEnv")
@@ -605,7 +631,7 @@ object McpTool:
       decoder: McpDecoder[In],
       encoder: McpEncoder[Out]
   ): WithEnv[In, Out, R] =
-    new WithEnv(definition, handler, decoder, encoder)
+    new WithEnv(definition, handler, decoder, encoder, false)
 
 /** Shared typed contract for an MCP prompt.
   *

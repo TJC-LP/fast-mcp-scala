@@ -120,7 +120,7 @@ final class TaskMiddleware[R](
                       scope = scope,
                       requestedTtlMs = ttl,
                       requestBytes = retainedBytes(params, None, None, headers),
-                      run = next(session, params),
+                      run = TaskHandoff.inTask(next(session, params)),
                       onStatusChange = task => session.send(statusNotification(task))
                     )
                   )
@@ -165,39 +165,59 @@ final class TaskMiddleware[R](
           case TaskSupport.Required if !clientSupportsTasks =>
             ZIO.fail(TaskMiddleware.missingTasksCapability)
           case TaskSupport.Optional if !clientSupportsTasks => next(session, params)
+          // Deferred creation (`McpTool.withDeferredTask`): the call starts as an ordinary
+          // request, so an attempt that asks for input ends with an `input_required` result on
+          // the request itself and no task exists. Only an attempt whose handler reaches
+          // `McpContext.continueAsTask` creates one — SEP-2663 (Task Creation): a server "SHOULD
+          // resolve all MRTR exchanges synchronously before responding with a CreateTaskResult".
+          // An attempt that ends any other way is the reply, as for a tool that never is a task.
+          case TaskSupport.Optional | TaskSupport.Required if toolManager.isTaskDeferred(name) =>
+            TaskHandoff.offered(next(session, params)).catchSome {
+              case signal if McpError.isTaskHandoff(signal) =>
+                createModern(session, params, next, context)
+            }
           case TaskSupport.Optional | TaskSupport.Required =>
-            // Bucket per client: only the transport-supplied key is trusted by default;
-            // `clientInfo` / `_meta` reach a Custom hook but are attacker-controlled.
-            val ownerContext =
-              TaskOwnerContext(session.clientKey, context.clientInfo, context.meta)
-            // runWithoutSink for the same reason as the legacy branch: an offer to this POST's
-            // sink queue after it shut down would interrupt the task. Over HTTP the request's
-            // own session has no reader for its outbound channel, so what the task sends from
-            // then on is discarded, not buffered; on stdio it reaches the client.
-            (taskManager.ownerKeyFor(ownerContext) <*> session.currentRequestId
-              <*> RequestHeaders.current)
-              .mapError(McpError.fromThrowable)
-              .flatMap { (key, requestId, headers) =>
-                session
-                  .runWithoutSink(
-                    taskManager.createInteractive(
-                      scope = TaskScope.bearer(key),
-                      requestedTtlMs = None,
-                      requestBytes = retainedBytes(params, Some(context), requestId, headers),
-                      run = input => runWithInput(session, params, next, context, input),
-                      onStatusChange = _ => ZIO.unit
-                    )
-                  )
-                  .uninterruptible // see the legacy branch
-                  .mapBoth(
-                    McpError.fromThrowable,
-                    created =>
-                      ExtensionTaskHandle
-                        .fromLegacy(created.task)
-                        .toJsonAST
-                        .getOrElse(Json.Obj())
-                  )
-              }
+            createModern(session, params, next, context)
+
+  /** Create the 2026-07-28 task for this `tools/call` and answer with its handle. */
+  private def createModern(
+      session: Session,
+      params: Json,
+      next: RequestHandler[R],
+      context: RequestContext
+  ): ZIO[R, McpError, Json] =
+    // Bucket per client: only the transport-supplied key is trusted by default;
+    // `clientInfo` / `_meta` reach a Custom hook but are attacker-controlled.
+    val ownerContext =
+      TaskOwnerContext(session.clientKey, context.clientInfo, context.meta)
+    // runWithoutSink for the same reason as the legacy branch: an offer to this POST's
+    // sink queue after it shut down would interrupt the task. Over HTTP the request's
+    // own session has no reader for its outbound channel, so what the task sends from
+    // then on is discarded, not buffered; on stdio it reaches the client.
+    (taskManager.ownerKeyFor(ownerContext) <*> session.currentRequestId
+      <*> RequestHeaders.current)
+      .mapError(McpError.fromThrowable)
+      .flatMap { (key, requestId, headers) =>
+        session
+          .runWithoutSink(
+            taskManager.createInteractive(
+              scope = TaskScope.bearer(key),
+              requestedTtlMs = None,
+              requestBytes = retainedBytes(params, Some(context), requestId, headers),
+              run = input => runWithInput(session, params, next, context, input),
+              onStatusChange = _ => ZIO.unit
+            )
+          )
+          .uninterruptible // see the legacy branch
+          .mapBoth(
+            McpError.fromThrowable,
+            created =>
+              ExtensionTaskHandle
+                .fromLegacy(created.task)
+                .toJsonAST
+                .getOrElse(Json.Obj())
+          )
+      }
 
   /** The body of a 2026-07-28 task: the tool call, re-run each time the client has answered what it
     * asked for.
@@ -211,6 +231,11 @@ final class TaskMiddleware[R](
     * handler again with every response gathered so far in its request context — what a client retry
     * would have sent. `requestState` returned by an attempt is kept here and handed to the next
     * one; it is never put on the task's wire shape.
+    *
+    * A task created by a hand-off (`McpContext.continueAsTask`) starts here like any other: its
+    * first attempt replays the handler with the `inputResponses` of the request that reached the
+    * hand-off, so the questions of the MRTR phase are answered and the handler runs on from the
+    * hand-off. Those responses are part of every later attempt too.
     *
     * A key is asked once in a task's lifetime (SEP-2663: a server "MUST NOT reuse a key ... after a
     * response for that key has been delivered"). An attempt that asks only for keys it already has
@@ -228,7 +253,9 @@ final class TaskMiddleware[R](
         inputResponses = context.inputResponses ++ gathered,
         requestState = state
       )
-      session.rebindRequest(attempt)(next(session, params)).flatMap { result =>
+      // `inTask`: the handler is running as a task, whether the task was created before it
+      // first ran or by its own `McpContext.continueAsTask` on the request.
+      session.rebindRequest(attempt)(TaskHandoff.inTask(next(session, params))).flatMap { result =>
         TaskMiddleware.inputRequired(result) match
           case None => ZIO.succeed(result)
           case Some((requests, nextState)) =>

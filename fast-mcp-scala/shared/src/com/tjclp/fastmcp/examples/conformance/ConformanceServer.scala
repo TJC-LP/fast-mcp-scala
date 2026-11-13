@@ -679,6 +679,8 @@ object ConformanceServer:
       .withTaskSupport(TaskSupport.Optional),
     // MRTR first, then a task (SEP-2663 "Composition with Multi Round-Trip Requests"): the name is
     // gathered with an InputRequiredResult on the request itself, and the final round is a task.
+    // `withDeferredTask` keeps the call a request until the handler reaches `continueAsTask`; the
+    // task then runs the handler again, with the name the request gathered.
     McpTool
       .withSchema[NoArgs, String](
         name = "test_tool_with_task",
@@ -689,7 +691,7 @@ object ConformanceServer:
         withCtx(ctxOpt) { ctx =>
           rawInputResponses(ctx).flatMap { responses =>
             acceptedString(responses, "user_name", "name") match
-              case Some(name) => ZIO.succeed(s"Hello, $name! (from a task)")
+              case Some(name) => ctx.continueAsTask.as(s"Hello, $name! (from a task)")
               case None =>
                 ZIO.fail(
                   McpError.inputRequired(
@@ -701,6 +703,7 @@ object ConformanceServer:
         }
       }
       .withTaskSupport(TaskSupport.Required)
+      .withDeferredTask
   )
 
   // ---- JSON Schema 2020-12 (SEP-1613, SEP-2106) and x-mcp-header (SEP-2243) fixtures ----

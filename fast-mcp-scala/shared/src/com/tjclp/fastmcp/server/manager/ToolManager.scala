@@ -79,6 +79,11 @@ class ToolManager[R](validateInput: Boolean = true) extends Manager[ToolDefiniti
   // public shape. Keyed by name and tied to the exact definition it was compiled from.
   private val inputChecks = new ConcurrentHashMap[String, ToolManager.InputCheck]()
 
+  // The tools registered with deferred task creation (`McpTool.withDeferredTask`), by name, each
+  // with the definition it was registered with. Next to `tools` for the same reason as
+  // `inputChecks`; an entry counts only while `tools` still holds that very definition.
+  private val deferredTasks = new ConcurrentHashMap[String, ToolDefinition]()
+
   private def checkToolConflict(
       name: String,
       options: ToolRegistrationOptions
@@ -106,6 +111,18 @@ class ToolManager[R](validateInput: Boolean = true) extends Manager[ToolDefiniti
       definition: ToolDefinition,
       options: ToolRegistrationOptions = ToolRegistrationOptions()
   ): ZIO[Any, Throwable, Unit] =
+    addTool(name, handler, definition, options, deferTask = false)
+
+  /** [[addTool]] for a typed contract: `deferTask` is `McpTool.withDeferredTask`, see
+    * [[isTaskDeferred]].
+    */
+  private[fastmcp] def addTool(
+      name: String,
+      handler: ContextualToolHandler[R],
+      definition: ToolDefinition,
+      options: ToolRegistrationOptions,
+      deferTask: Boolean
+  ): ZIO[Any, Throwable, Unit] =
     ZIO
       .attempt {
         checkToolConflict(name, options)
@@ -114,8 +131,18 @@ class ToolManager[R](validateInput: Boolean = true) extends Manager[ToolDefiniti
         val check = ToolManager.InputCheck(definition, options.validateInputSchema)
         tools.put(name, (definition, handler))
         inputChecks.put(name, check)
+        if deferTask then deferredTasks.put(name, definition) else deferredTasks.remove(name)
         ()
       }
+
+  /** Whether calls to `name` start as ordinary requests and become tasks only where the handler
+    * calls `McpContext.continueAsTask` (`McpTool.withDeferredTask`). `false` for a tool that
+    * creates its task before the handler runs, and for an unknown tool.
+    */
+  def isTaskDeferred(name: String): Boolean =
+    Option(deferredTasks.get(name)).exists(deferred =>
+      getToolDefinition(name).exists(_ eq deferred)
+    )
 
   /** The compiled input check for the definition currently stored under `name`. A definition that
     * did not come through [[addTool]] (written straight into [[tools]]) is compiled on first use

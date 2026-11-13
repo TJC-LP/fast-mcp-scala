@@ -73,6 +73,17 @@ trait McpServerCore[R]:
       options = options
     )
 
+  /** Registration of a typed contract: [[tool]] plus `McpTool.withDeferredTask`. The default drops
+    * the flag, for an implementation that has no tasks; [[McpServer]] records it.
+    */
+  private[fastmcp] def registerTool[R1 >: R](
+      definition: ToolDefinition,
+      handler: ContextualToolHandler[R1],
+      options: ToolRegistrationOptions,
+      @unused deferTask: Boolean
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    tool(definition, handler, options)
+
   def tool[In, Out, R1 >: R](
       contract: McpTool.WithEnv[In, Out, R1]
   ): ZIO[Any, Throwable, McpServerCore[R]] =
@@ -82,7 +93,8 @@ trait McpServerCore[R]:
       contract: McpTool.WithEnv[In, Out, R1],
       options: ToolRegistrationOptions
   ): ZIO[Any, Throwable, McpServerCore[R]] =
-    tool[R1](
+    registerTool[R1](
+      deferTask = contract.deferTask,
       definition = contract.definition,
       handler = (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
         ZIO
@@ -108,7 +120,8 @@ trait McpServerCore[R]:
       contract: McpTool[In, Out],
       options: ToolRegistrationOptions
   ): ZIO[Any, Throwable, McpServerCore[R]] =
-    tool[Any](
+    registerTool[Any](
+      deferTask = contract.deferTask,
       definition = contract.definition,
       handler = (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
         ZIO
