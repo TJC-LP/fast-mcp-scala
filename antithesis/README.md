@@ -117,7 +117,8 @@ What this check does not cover:
 **The official conformance harness, once faults have stopped.** The last thing the eventually
 does is run `@modelcontextprotocol/conformance` against one node, so the server that is checked
 for conformance is the one that went through the faults, with whatever sessions, tasks and
-streams they left behind. The node is drawn, and so is the mode. The three modes are the ones
+streams they left behind. The node is drawn; all three modes run against it, starting with a
+drawn one. The three modes are the ones
 `scripts/conformance.sh` has and CI gates on:
 
 | Mode | Harness arguments | Scenarios |
@@ -272,8 +273,9 @@ workload time, 300 s for the eventually's own checks, and 300 s for each planned
 
 - The harness runs after faults, never during them. It shows that a server still conforms after
   what the faults did to it, not that it conforms while a fault is active.
-- One suite against one node per timeline. Coverage of all nine combinations comes from many
-  timelines; the nine sometimes-properties show whether a test run got there.
+- All three suites against one node per timeline. Coverage of the three nodes comes from many
+  timelines; the nine sometimes-properties show whether a test run got there. (With one drawn
+  suite per timeline, run `27e04e91` never reached one of the nine combinations.)
 - The scenarios the 2026-07-28 requirement set does not score (the tasks extension, three pending
   ones) are run and logged, and assert nothing. All thirteen pass against this server outside
   Antithesis; the requirement set says of them that the harness's own reference fixture cannot
