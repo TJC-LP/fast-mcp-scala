@@ -349,6 +349,16 @@ private[fastmcp] object TaskMiddleware:
       Json.Obj("extensions" -> Json.Obj(Tasks.ExtensionId -> Json.Obj()))
     )
 
+  /** Whether `subscriptions/listen` params ask for task status notifications
+    * (`notifications.taskIds`, SEP-2663). Read from the raw params: the filter's wire type has no
+    * such field because this server never agrees to any task id.
+    */
+  def requestsTaskNotifications(params: Json): Boolean =
+    JsonFields
+      .get(params, "notifications")
+      .flatMap(JsonFields.get(_, "taskIds"))
+      .exists(_ != Json.Null)
+
   /** The requests (in order) and `requestState` of a `tools/call` result that is an MRTR
     * `input_required` result; `None` for any other result.
     */
