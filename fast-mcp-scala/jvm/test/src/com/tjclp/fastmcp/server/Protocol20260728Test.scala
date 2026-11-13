@@ -377,6 +377,51 @@ class Protocol20260728Test extends AnyFunSuite with Matchers:
     first.toJson should include("subscription-1")
   }
 
+  private def listenForTasks(capabilities: String): JsonRpcMessage.Request =
+    JsonRpcMessage.Request(
+      RequestId.StrId("subscription-tasks"),
+      "subscriptions/listen",
+      Some(
+        s"""{"notifications":{"taskIds":["task-1"]},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":$capabilities}}"""
+          .fromJson[Json]
+          .fold(error => fail(error), identity)
+      )
+    )
+
+  test("subscriptions/listen with taskIds from a client without the Tasks extension is -32021") {
+    val router = runUnsafe(McpServer("ModernTaskSubscriptions", "0.9.0").buildRouter)
+    val session = runUnsafe(Session.make("modern-task-subscriptions"))
+    val reply = runUnsafe(
+      router
+        .dispatch(session, listenForTasks("{}"))
+        .timeoutFail(new RuntimeException("no reply"))(5.seconds)
+    ).map(_.toJson).getOrElse("")
+
+    reply should include("-32021")
+    reply should include("io.modelcontextprotocol/tasks")
+    runUnsafe(session.outbound.poll) shouldBe None
+  }
+
+  test("subscriptions/listen with taskIds from a declaring client is acknowledged without them") {
+    val router = runUnsafe(McpServer("ModernTaskSubscriptions", "0.9.0").buildRouter)
+    val session = runUnsafe(Session.make("modern-task-subscriptions"))
+    val first = runUnsafe(
+      for
+        fiber <- router
+          .dispatch(
+            session,
+            listenForTasks("""{"extensions":{"io.modelcontextprotocol/tasks":{}}}""")
+          )
+          .fork
+        acknowledgement <- session.outbound.take
+        _ <- fiber.interrupt
+      yield acknowledgement
+    )
+
+    first.toJson should include("notifications/subscriptions/acknowledged")
+    first.toJson should not include "taskIds"
+  }
+
   test("HTTP header validation decodes Base64 names and enforces x-mcp-header arguments") {
     val schema = ToolInputSchema.unsafeFromJsonString(
       """{"type":"object","properties":{"region":{"type":"string","x-mcp-header":"Region"}},"required":["region"]}"""

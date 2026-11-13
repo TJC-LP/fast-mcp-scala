@@ -636,6 +636,18 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Fixed
 
+- **`subscriptions/listen` refuses task notifications from a client without the Tasks extension**
+  (GH #115, TJC-2361). A 2026-07-28 `subscriptions/listen` request that names `taskIds` but does
+  not declare `io.modelcontextprotocol/tasks` in its capabilities is answered `-32021`, as
+  SEP-2663 requires; it used to be acknowledged. A declaring client is acknowledged without any
+  task id, as before: pushing `notifications/tasks` is optional and the server does not, so tasks
+  are polled with `tasks/get`.
+- **The 2026-07-28 conformance gate no longer counts a skipped check as a pass.** The harness
+  prints a scenario whose checks were all skipped as "0 passed, 0 failed" with a tick.
+  `scripts/conformance.sh` now reads the harness's `checks.json` and fails on a `SKIPPED` check
+  that its `EXPECTED_SKIPS` list does not name. Three are expected today:
+  `tasks-status-notifications` (a stub in harness 0.2.0-alpha.12 that never contacts the server)
+  and the two `list_changed` subscription checks (the server declares no `listChanged`).
 - **A request that ends without a reply is logged** (GH #114, TJC-2360). When a legacy session is
   terminated while one of its requests is still running — HTTP DELETE, `sessionIdleTimeout`, or
   eviction at the `maxSessions` cap — that request gets no response, and until now nothing in the

@@ -327,6 +327,10 @@ still fill a pool, so pair the peer-address key with edge rate limiting.
   transition, as that revision's Tasks surface specifies; modern bearer tasks do not emit it —
   the 2026-07-28 extension moved status to polling (`tasks/get`). These boundaries are listed in
   the [upgrade guide](./2026-07-28-upgrade.md#deliberate-boundaries).
+- The extension also lets a server push `notifications/tasks` on a `subscriptions/listen` stream
+  for the `taskIds` a client names. That is optional and this server does not: a client that
+  declares the extension is acknowledged without any task id and keeps polling, and one that
+  does not declare it gets `-32021`, as the extension requires.
 - A task outlives the request that created it, so what it emits afterwards — that status
   notification, and any log, progress or server-to-client request message of its body — travels
   on the session's out-of-request channel, which is bounded by `limits.maxOutboundMessages`
