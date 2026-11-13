@@ -1,0 +1,36 @@
+# Binary compatibility findings accepted for the JVM artifact, read by `./mill fast-mcp-scala.mimaCheck`
+# (MiMa against every release in `Versions.binaryCompatBaselines`, build.mill). CONTRIBUTING.md,
+# "Binary compatibility", says when a line belongs here and when the old signature must stay.
+#
+# One finding per line, with the two names exactly as the check prints them and a reason:
+#
+#   <ProblemType> <member>  # <reason>
+#
+# A line without a reason fails the check. So does a line that matches no finding.
+
+# --- Hidden forwarders: these link. They are not breaks. ---
+#
+# Each member below was public in 1.0.x and is now a `private[fastmcp]` forwarder with the same JVM
+# signature. That is public in bytecode, so a program compiled against 1.0.x links and runs; new
+# source cannot call it. MiMa reports `MethodNoLongerCheckedProblem` because it skips a member that
+# is package-private in the baseline: a comparison against 1.1.0 alone would not notice the
+# forwarder being removed. Two things do notice: 1.0.0 and 1.0.1 stay in `binaryCompatBaselines`,
+# where the signatures are public, and `BinaryCompatibilityTest` calls every one of them by its old
+# signature.
+MethodNoLongerCheckedProblem com.tjclp.fastmcp.server.McpServerSettings.this   # the 16-field (1.0.0) and 17-field (1.0.1) constructors; later fields take their defaults
+MethodNoLongerCheckedProblem com.tjclp.fastmcp.server.McpServerSettings.apply  # the 16-field (1.0.0) and 17-field (1.0.1) apply; later fields take their defaults
+MethodNoLongerCheckedProblem com.tjclp.fastmcp.server.McpServerSettings.copy   # the 16-field (1.0.0) and 17-field (1.0.1) copy; later fields keep their values
+MethodNoLongerCheckedProblem com.tjclp.fastmcp.server.TaskSettings.this        # the 11-field constructor of 1.0.x; the 1.1.0 fields take their defaults
+MethodNoLongerCheckedProblem com.tjclp.fastmcp.server.TaskSettings.apply       # the 11-field apply of 1.0.x; the 1.1.0 fields take their defaults
+MethodNoLongerCheckedProblem com.tjclp.fastmcp.server.TaskSettings.copy        # the 11-field copy of 1.0.x; the 1.1.0 fields keep their values
+MethodNoLongerCheckedProblem com.tjclp.fastmcp.server.LimitSettings.this       # the 5-field constructor of 1.0.x; the 1.1.0 fields take their defaults
+MethodNoLongerCheckedProblem com.tjclp.fastmcp.server.LimitSettings.apply      # the 5-field apply of 1.0.x; the 1.1.0 fields take their defaults
+MethodNoLongerCheckedProblem com.tjclp.fastmcp.server.LimitSettings.copy       # the 5-field copy of 1.0.x; the 1.1.0 fields keep their values
+MethodNoLongerCheckedProblem com.tjclp.fastmcp.codec.DefaultDecodeContext.this # the (maxDepth, maxObjectFields) constructor of 1.0.x; the 1.1.0 bounds take their defaults
+MethodNoLongerCheckedProblem com.tjclp.fastmcp.server.manager.ToolManager.this # the no-argument constructor of 1.0.x; validateInput takes its default
+MethodNoLongerCheckedProblem com.tjclp.fastmcp.server.router.Builtins.this     # the 12-parameter constructor of 1.0.x, from before the Skills extension
+MethodNoLongerCheckedProblem com.tjclp.fastmcp.server.router.RouterBuilder.build # the 11-parameter build of 1.0.x, from before the Skills extension
+
+# --- Accepted breaks ---
+#
+# None: 1.1.0 keeps every signature 1.0.0 and 1.0.1 published.

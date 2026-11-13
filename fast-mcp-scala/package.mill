@@ -11,8 +11,8 @@ import mill.scalajslib._
 import mill.scalajslib.api._
 import mill.scalajslib.bun._
 import mill.scalanativelib._
-import build.{BuildConfig, CrossPlatformTests, FastMCPModule, FastMCPPublishingBase,
-  FastMCPTestModule, ScalaJSTestDepsFix, Versions, scala3Version}
+import build.{BinaryCompatTests, BuildConfig, CrossPlatformTests, FastMCPModule,
+  FastMCPPublishingBase, FastMCPTestModule, ScalaJSTestDepsFix, Versions, scala3Version}
 
 // Namespace module. Aggregate tasks at this level fan out to all three platform children so
 // `./mill fast-mcp-scala.compile` and `./mill fast-mcp-scala.test` cover the whole project
@@ -40,6 +40,8 @@ object `package` extends Module {
     jvm.checkFormat()()
     js.checkFormat()()
     scalaNative.checkFormat()()
+    compat.mima.checkFormat()()
+    compat.client.checkFormat()()
     ()
   }
 
@@ -48,7 +50,39 @@ object `package` extends Module {
     jvm.reformat()()
     js.reformat()()
     scalaNative.reformat()()
+    compat.mima.reformat()()
+    compat.client.reformat()()
     ()
+  }
+
+  /** Binary compatibility check: MiMa compares the current JVM jar with each released version in
+    * `Versions.binaryCompatBaselines` and fails on any problem that `.github/mima-exclusions` does
+    * not list with a reason. An exclusion that matches nothing fails too. See CONTRIBUTING.md.
+    *
+    * MiMa gets the current module's dependency classpath for both sides, as sbt-mima does, so each
+    * baseline costs one download: its jar.
+    *
+    * A command, not a cached task: every run prints the report.
+    */
+  def mimaCheck() = Task.Command {
+    val classpath = Task.dest / "classpath.txt"
+    os.write.over(classpath, jvm.compileClasspath().map(_.path.toString).mkString("\n"))
+    val baselines = compat.baselineJars().map((version, jar) => s"$version=${jar.path}")
+    val result = mill.util.Jvm.callProcess(
+      mainClass = "fastmcp.compat.Mima",
+      mainArgs = Seq(
+        compat.mimaExclusions().path.toString,
+        classpath.toString,
+        jvm.jar().path.toString
+      ) ++ baselines,
+      classPath = compat.mima.runClasspath().map(_.path),
+      stdin = os.Inherit,
+      stdout = os.Inherit,
+      stderr = os.Inherit,
+      check = false
+    )
+    if (result.exitCode != 0)
+      Task.fail(s"binary compatibility check failed (exit ${result.exitCode}); see the report above")
   }
 
   object jvm extends FastMCPModule {
@@ -95,7 +129,11 @@ object `package` extends Module {
 
     // jvm/test/src plus the socket-HTTP tests in jvm-native/test/src (CrossPlatformTests), which the
     // Scala Native test module compiles too — the same suite runs on both platforms.
-    object test extends ScalaTests with FastMCPTestModule with CrossPlatformTests {
+    //
+    // BinaryCompatTests adds the classes of `compat.client`, which is compiled against a released
+    // version: BinaryCompatibilityTest runs them on the current classes.
+    object test extends ScalaTests with FastMCPTestModule with CrossPlatformTests
+        with BinaryCompatTests {
       override def mvnDeps = Seq(
         mvn"org.scalatest::scalatest:${Versions.scalaTest}",
         mvn"org.scalacheck::scalacheck:${Versions.scalaCheck}",
@@ -104,6 +142,56 @@ object `package` extends Module {
         mvn"dev.zio::zio-test-sbt:${Versions.zio}",
         mvn"dev.zio::zio-test-magnolia:${Versions.zio}"
       )
+
+      override def binaryCompatClient = Task { compat.client.compile().classes }
+    }
+  }
+
+  /** Binary compatibility tooling for the JVM artifact (TJC-5134). Nothing here is published.
+    *
+    *   - `mima`: the MiMa runner behind `fast-mcp-scala.mimaCheck`.
+    *   - `client`: a small program compiled against the released `Versions.binaryCompatClient`.
+    *     The JVM test suite runs it on the current classes (`BinaryCompatibilityTest`), which
+    *     proves at link time what MiMa reports from the class files.
+    */
+  object compat extends Module {
+
+    /** The released JVM jar of every baseline, each alone: no transitive dependencies. */
+    def baselineJars: T[Seq[(String, PathRef)]] = Task {
+      Versions.binaryCompatBaselines.map { version =>
+        val released = mvn"${build.organization}:fast-mcp-scala_3:$version"
+        val alone = released.copy(dep = released.dep.withTransitive(false))
+        version -> jvm.defaultResolver().classpath(Seq(alone)).head
+      }
+    }
+
+    /** The released jar `client` is compiled against. */
+    def clientBaselineJar: T[PathRef] = Task {
+      baselineJars()
+        .collectFirst { case (Versions.binaryCompatClient, jar) => jar }
+        .getOrElse(
+          Task.fail(
+            s"Versions.binaryCompatClient (${Versions.binaryCompatClient}) is not in " +
+              s"binaryCompatBaselines (${Versions.binaryCompatBaselines.mkString(", ")})"
+          )
+        )
+    }
+
+    /** Accepted MiMa problems, one per line with a reason. Format: the file's own header. */
+    def mimaExclusions: T[PathRef] = Task.Source(BuildCtx.workspaceRoot / ".github" / "mima-exclusions")
+
+    object mima extends ScalaModule with ScalafmtModule {
+      override def scalaVersion: T[String] = scala3Version
+      override def mvnDeps = Seq(mvn"com.typesafe::mima-core:${Versions.mimaCore}")
+    }
+
+    object client extends ScalaModule with ScalafmtModule {
+      override def scalaVersion: T[String] = scala3Version
+
+      // The third-party dependencies of the current JVM module, and the released library jar in
+      // place of the current sources. Only that one jar is an extra download.
+      override def mvnDeps = Task { jvm.mvnDeps() }
+      override def unmanagedClasspath = Task { Seq(clientBaselineJar()) }
     }
   }
 
