@@ -33,6 +33,11 @@ object McpError:
   // until the request dispatcher can turn it back into a successful `input_required` result.
   private val InputRequiredSentinel: Int = Int.MinValue
 
+  // Never crosses the wire either. It ends the attempt of a tool whose handler called
+  // `McpContext.continueAsTask` on the creating request, so that the task middleware can create the
+  // task and run the handler again inside it (server/router/TaskRouting.scala).
+  private val TaskHandoffSentinel: Int = Int.MinValue + 1
+
   def parseError(message: String): McpError = McpError(ErrorCodes.ParseError, message)
   def invalidRequest(message: String): McpError = McpError(ErrorCodes.InvalidRequest, message)
 
@@ -108,6 +113,14 @@ object McpError:
     error match
       case e: McpError if e.code == InputRequiredSentinel => e.data
       case _ => None
+
+  private[fastmcp] def taskHandoff: McpError =
+    McpError(TaskHandoffSentinel, "The tool continues as a task")
+
+  private[fastmcp] def isTaskHandoff(error: Throwable): Boolean =
+    error match
+      case e: McpError => e.code == TaskHandoffSentinel
+      case _ => false
 
   /** Map an arbitrary throwable to an `McpError`. Ports the classification the old
     * `ErrorMapper.errorMessage` did, but produces a structured protocol error rather than a string.

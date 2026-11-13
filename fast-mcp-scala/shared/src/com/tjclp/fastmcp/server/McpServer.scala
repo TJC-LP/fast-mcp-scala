@@ -77,8 +77,22 @@ final class McpServer[R](
       handler: ContextualToolHandler[R1],
       options: ToolRegistrationOptions
   ): ZIO[Any, Throwable, McpServerCore[R]] =
+    registerTool(definition, handler, options, deferTask = false)
+
+  override private[fastmcp] def registerTool[R1 >: R](
+      definition: ToolDefinition,
+      handler: ContextualToolHandler[R1],
+      options: ToolRegistrationOptions,
+      deferTask: Boolean
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
     toolManager
-      .addTool(definition.name, handler.asInstanceOf[ContextualToolHandler[R]], definition, options)
+      .addTool(
+        definition.name,
+        handler.asInstanceOf[ContextualToolHandler[R]],
+        definition,
+        options,
+        deferTask
+      )
       .as(this)
 
   override def resource[R1 >: R](

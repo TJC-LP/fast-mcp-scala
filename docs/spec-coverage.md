@@ -32,14 +32,13 @@ of them, newest first.
 | Per-request log level | ✅ (opt-in) |
 | Deprecated Roots, Sampling, Logging legacy surfaces | ✅ (compatibility only) |
 | Cancellation (`notifications/cancelled`) | ✅ |
-| Tasks extension | ✅ (opt-in). Tasks wait for input in `input_required` and resume on `tasks/update`; `tasks/get`/`update`/`cancel` require the `io.modelcontextprotocol/tasks` client capability (`-32021`) and a matching `Mcp-Name: <taskId>` over HTTP; a legacy `params.task` on a 2026-07-28 request is ignored; `tasks/cancel` and `tasks/update` are acknowledgements. Open: MRTR on the creating request followed by a task (SEP-2663 "Composition with Multi Round-Trip Requests") is not supported — such a tool asks from inside the task; `notifications/tasks` on `subscriptions/listen` is not emitted; the 2025-11-25 `tasks` capability advertises only `requests.tools.call`. Reference: [tasks.md](./tasks.md). |
+| Tasks extension | ✅ (opt-in). Tasks wait for input in `input_required` and resume on `tasks/update`; `tasks/get`/`update`/`cancel` require the `io.modelcontextprotocol/tasks` client capability (`-32021`) and a matching `Mcp-Name: <taskId>` over HTTP; a legacy `params.task` on a 2026-07-28 request is ignored; `tasks/cancel` and `tasks/update` are acknowledgements. A typed contract can gather input over MRTR on the creating request and then return a task (SEP-2663 "Composition with Multi Round-Trip Requests": `McpTool.withDeferredTask` + `McpContext.continueAsTask`). Open: `notifications/tasks` on `subscriptions/listen` is not emitted; the 2025-11-25 `tasks` capability advertises only `requests.tools.call`. Reference: [tasks.md](./tasks.md). |
 | Skills extension (`io.modelcontextprotocol/skills`, SEP-2640: `skills/list`, `skills/get`, `resources/directory/read`, skill files as resources) | ✅ (declared when a skill/provider is registered or `SkillSettings.enabled`); stable page `ext-skills@d866efdb`; both protocol eras; pinned sources and requirement-to-test matrix in [skills-conformance.md](./skills-conformance.md) |
 | DNS-rebinding / browser-origin protection (`allowedHosts`, `allowedOrigins`) | ✅ (on by default for a loopback bind; a non-loopback bind needs `allowedHosts` and warns at startup without it; opt-out `dnsRebindingProtection = false`) |
 | Input limits (`limits: LimitSettings`) + HTTP body / session caps (`maxRequestBodyBytes`, `maxSessions`) | ✅ (on by default) |
 | Legacy session idle eviction + SSE keepalives | ✅ |
 
-The deliberately unimplemented pieces (no dynamic subscription publishers, no MRTR-then-task
-composition, no task-status notifications for modern bearer tasks — legacy 2025-11-25 sessions
+The deliberately unimplemented pieces (no dynamic subscription publishers, no task-status notifications for modern bearer tasks — legacy 2025-11-25 sessions
 do receive `notifications/tasks/status` — no authorization server) are enumerated in the upgrade
 guide's [Deliberate boundaries](./2026-07-28-upgrade.md#deliberate-boundaries).
 
@@ -51,8 +50,9 @@ guide's [Deliberate boundaries](./2026-07-28-upgrade.md#deliberate-boundaries).
   scenarios, 73 checks, every one at the 2025-11-25 wire — against the per-platform
   expected-failure baseline; the `2026` mode runs `--requirements 2026-07-28`, exactly the
   scenarios that revision requires (37 scored, 118 checks; the harness reports but never scores
-  extension and pending scenarios, so the `tasks-*` extension scenarios move no gate in either
-  mode), and is the only run of the two that sends 2026-07-28 requests; the `skills` mode runs the
+  the 13 extension and pending scenarios, the ten `tasks-*` ones among them — the script does:
+  all 13 pass, and it fails the mode when one of them fails), and is the only run of the two that
+  sends 2026-07-28 requests; the `skills` mode runs the
   three Skills extension scenarios (`sep-2640-skills-enumeration`, `-manifest`, `-directory`: 32, 6
   and 7 checks at the 2026-07-28 wire), one harness run each, and fails on any failed, warning or
   skipped check. Baselines live in

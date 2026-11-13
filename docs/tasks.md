@@ -119,6 +119,10 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
 Modern `tools/list` does not expose the removed `execution.taskSupport` field; legacy clients still
 see and use it.
 
+A tool with `optional` or `required` support becomes a task before its handler runs. A typed
+contract can instead start as a request and hand off later: see
+[Input first, then a task](#input-first-then-a-task-withdeferredtask).
+
 ## Waiting for input (`input_required`)
 
 A tool asks its client for input the same way inside a task as outside one: `McpContext.elicit`,
@@ -172,9 +176,87 @@ Rules the server applies:
 - Legacy (2025-11-25) sessions are not affected: there a tool's request is a real server-to-client
   request, and no task enters `input_required`.
 
-Not supported: gathering input over MRTR on the creating request and only then returning a task
-(SEP-2663, "Composition with Multi Round-Trip Requests"). A tool that may run as a task and asks
-for input always asks from inside the task.
+A tool that may run as a task asks from inside the task, because the task exists before its
+handler starts. To ask on the request first and create the task afterwards, defer the task — next
+section.
+
+## Input first, then a task (`withDeferredTask`)
+
+SEP-2663 ("Composition with Multi Round-Trip Requests") lets one `tools/call` use both mechanisms
+in sequence: one or more `input_required` results that gather input on the request itself (MRTR),
+then a task handle that hands the work off. The specification asks for this order — a server
+"SHOULD resolve all MRTR exchanges synchronously before responding with a `CreateTaskResult`" —
+and it suits a tool that cannot start its work before a question is answered: no task is created,
+stored or counted for a call the user abandons at the question.
+
+Two additions make it expressible, on typed contracts:
+
+- `McpTool.withDeferredTask` — every call of the tool starts as an ordinary request. No task
+  exists until the handler asks for one.
+- `McpContext.continueAsTask` — the hand-off. The client gets the task handle as the reply to its
+  request, and everything after this call runs in the task. It returns `true` when the handler is
+  running as a task from here on.
+
+```scala 3 raw
+val provision = McpTool[ProvisionArgs, String](name = "provision")
+  .contextual { (args, context) =>
+    for
+      ctx <- ZIO.fromOption(context).orElseFail(new IllegalStateException("no request context"))
+      // Asked on the request: an `input_required` result, no task yet.
+      answer <- ctx.elicit(ElicitRequestParams(s"Provision ${args.cluster}?", confirmSchema))
+      // The hand-off: the client now gets `resultType: "task"`.
+      _ <- ctx.continueAsTask
+      // Runs in the task; the client polls `tasks/get`.
+      result <- provisionCluster(args.cluster, answer)
+    yield result
+  }
+  .withTaskSupport(TaskSupport.Required)
+  .withDeferredTask
+```
+
+On the wire, for a client that declared the tasks extension:
+
+1. `tools/call` → `resultType: "input_required"` with `inputRequests` (and `requestState` if the
+   tool set one). No `taskId`; the task store is untouched.
+2. `tools/call` again, with `inputResponses` → `resultType: "task"` with `taskId` and `status`.
+   No `requestState` and no `inputRequests`: the MRTR phase is over.
+3. `tasks/get` until the task is terminal; the result is inlined there.
+
+How it works, and what follows from it:
+
+- **The hand-off is a replay.** On the request, `continueAsTask` ends the attempt; the server
+  creates the task, and the task runs the handler again from the start with the same arguments,
+  `inputResponses` and `requestState`. The questions are answered from those responses,
+  `continueAsTask` returns `true`, and the handler continues. So what precedes the hand-off runs
+  once per MRTR round and once more in the task — keep it to gathering input, and do the work
+  that must happen once after the hand-off. `ServerHooks.beforeToolCall` runs for each of those
+  attempts, as it does for every MRTR retry.
+- **Do not recover from `continueAsTask`.** Like a question, it signals through the handler's
+  failure channel on the request. A handler that catches it (`catchAll`, `orElse`, `either`) does
+  not hand off.
+- **`withDeferredTask` decides when, `withTaskSupport` decides whether.** `Required`: a client
+  that did not declare the extension gets `-32021` before the handler runs, as for any required
+  tool. `Optional`: for such a client `continueAsTask` returns `false` and the handler finishes
+  on the request. `Forbidden` (the default): the same, for every client.
+- **A handler that returns without calling `continueAsTask` answers the request** with an
+  ordinary result, also when its task support is `Required`. The specification allows that: a
+  server may always answer with the standard result.
+- **Questions after the hand-off are the task's.** They put the task in `input_required` and are
+  answered through `tasks/update`, as in the previous section. Their keys are the task's own: the
+  responses of the MRTR phase stay available to the handler, but a key that was answered there
+  is not outstanding in the task.
+- **The task store can refuse the hand-off.** The caps and byte budgets apply when the task is
+  created, so a refusal (`-32602` for the per-owner running cap or `maxRequestBytes`, `-32003`
+  for a full pool or budget) is the reply to the round that reached the hand-off.
+- **In a tool that is not deferred** the call only reports: `true` inside a task, `false`
+  otherwise.
+- **Legacy (2025-11-25) sessions** have no MRTR and ask for a task per call (`params.task`), so
+  the deferral does not apply: the task is created before the handler runs when the call asks
+  for one, and `continueAsTask` reports which case it is.
+
+The annotation path has no equivalent yet: `@Tool` cannot mark a tool as deferred, so an annotated
+tool that may be a task is one before its method runs (there `continueAsTask` returns `true`).
+Register the tool as a typed contract to defer it.
 
 ## Extension requests
 
@@ -235,8 +317,9 @@ still fill a pool, so pair the peer-address key with edge rate limiting.
   Write long task bodies as ZIO effects (`ZIO.sleep`, streams, `attemptBlockingInterrupt` on the
   JVM) so they stop promptly; a grace-bounded cancel is tracked for 1.0.1.
 - The server creates working / input_required / completed / failed / cancelled tool tasks. See
-  [Waiting for input](#waiting-for-input-input_required) for what `input_required` does and does
-  not cover.
+  [Waiting for input](#waiting-for-input-input_required) for `input_required`, and
+  [Input first, then a task](#input-first-then-a-task-withdeferredtask) for a tool that asks on
+  the request before it becomes a task.
 - `notifications/tasks/status` is emitted on legacy (2025-11-25) sessions on every terminal
   transition, as that revision's Tasks surface specifies; modern bearer tasks do not emit it —
   the 2026-07-28 extension moved status to polling (`tasks/get`). These boundaries are listed in

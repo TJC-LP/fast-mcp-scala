@@ -9,8 +9,9 @@ name: Conformance
 #     wire, checked against conformance/baseline-<platform>.yml (every baseline is empty;
 #     scala-native reuses baseline-jvm.yml);
 #   * 2026   — `--requirements 2026-07-28`: the scenarios that revision requires (37 scored, 118
-#     checks; extension/pending scenarios are reported but never scored), the only lane that sends
-#     2026-07-28 requests. No baseline file: the harness's own verdict is the gate;
+#     checks), the only lane that sends 2026-07-28 requests. No baseline file: the harness's own
+#     verdict is the gate for the scored ones. The 13 extension/pending scenarios the harness
+#     runs but never scores are gated by the script, which fails when one of them fails;
 #   * skills — the three Skills extension scenarios (SEP-2640: sep-2640-skills-enumeration,
 #     -manifest, -directory; 32 + 6 + 7 checks, at the 2026-07-28 wire). The harness tags them
 #     [extension], so neither mode above runs them. One harness run per scenario; the script

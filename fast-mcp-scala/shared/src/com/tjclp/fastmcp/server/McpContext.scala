@@ -19,7 +19,7 @@ import com.tjclp.fastmcp.core.wire.{
   ProgressNotificationParams
 }
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError}
-import com.tjclp.fastmcp.server.router.{RequestHeaders, Session}
+import com.tjclp.fastmcp.server.router.{RequestHeaders, Session, TaskHandoff}
 
 /** Platform-independent MCP request context handed to handlers as `Option[McpContext]`.
   *
@@ -259,6 +259,36 @@ open class McpContext private[fastmcp] (
         requestState = params.elicitationId
       )
         .flatMap(decodeResult[ElicitResult]("elicitation/create"))
+
+  /** Hand the rest of this tool call over to a task (SEP-2663, "Composition with Multi Round-Trip
+    * Requests"): the client gets a task handle as the reply to its request, and everything after
+    * this call runs in the task.
+    *
+    * It is for a tool registered with `McpTool.withDeferredTask`. Such a tool starts each call as
+    * an ordinary request, so what it asks its client before this call ([[elicit]],
+    * [[createMessage]], [[listRoots]], [[sendRequest]]) is asked with an `input_required` result on
+    * the request itself and no task exists yet. Calling this is what creates the task.
+    *
+    * Returns `true` when the handler is running as a task from here on, and `false` when the call
+    * stays a request: the server has tasks off, the tool's task support is `forbidden`, the client
+    * did not declare the tasks extension for a tool whose task support is `optional`, or the
+    * session speaks 2025-11-25 and did not ask for a task. In a tool that was not registered with
+    * `withDeferredTask` the task, if there is one, exists before the handler starts, and this only
+    * reports it.
+    *
+    * The hand-off is a replay, like an MRTR retry: on the request this call ends the attempt, the
+    * server creates the task, and the handler runs again from the start inside it with the same
+    * arguments and `inputResponses` — the questions it asked are answered, this call returns
+    * `true`, and the handler continues. So everything before this call runs once more in the task;
+    * keep it to gathering input, and do the work that must happen once after it. Do not recover
+    * from this call's failure (`catchAll`, `orElse`, `either`): on the request it is how the
+    * hand-off is signalled.
+    *
+    * The failure can also be a real one: the task store refuses a task it has no room for
+    * (`-32003`, or `-32602` for a request above `TaskSettings.maxRequestBytes`), and the client
+    * gets that error.
+    */
+  def continueAsTask: IO[McpError, Boolean] = TaskHandoff.continue
 
   /** Fail unless the client declared the capability `check` looks for. The predicate is picked by
     * era first: 2026-07-28 sub-capability requirements must not retroactively break legacy clients
