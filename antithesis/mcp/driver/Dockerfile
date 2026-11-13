@@ -18,6 +18,8 @@ ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+# The specification's JSON Schemas, compiled into the binary (`src/wire.rs`).
+COPY schema ./schema
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     set -eu; \

@@ -5,6 +5,9 @@
 //! legacy sessions (initialize, then calls with `Mcp-Session-Id`). Every call carries a fresh
 //! token, and every tool returns it, so each reply is judged against exactly one request.
 //!
+//! Every JSON-RPC message a node sends is also checked against the specification's JSON Schema
+//! (`wire.rs`).
+//!
 //! Once faults have stopped, the eventually also runs the official MCP conformance harness
 //! against one node (`conformance.rs`) and turns its results into assertions.
 //!
@@ -12,6 +15,7 @@
 
 mod conformance;
 mod http;
+mod wire;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -101,6 +105,10 @@ struct Driver {
     eventually_off: bool,
     eventually_after: Option<Duration>,
     harness: Harness,
+    /// Messages checked against the specification's schema, and how many of them broke it. For
+    /// the log line at the end of a timeline; the properties do not depend on it.
+    wire_checked: AtomicU64,
+    wire_invalid: AtomicU64,
 }
 
 /// The conformance harness in this image, and what the environment says about running it.
@@ -298,6 +306,7 @@ impl Driver {
         .to_string();
         let a = self.http.send("POST", &self.nodes[node].url(), &Self::base_headers(), Some(&body), timeout);
         self.judge(node, &a, "initialize");
+        self.wire(node, &a, LEGACY, Some("initialize"));
         let Some(sid) = a.session.clone().filter(|_| a.status == 200) else {
             return (a.status, None);
         };
@@ -305,6 +314,7 @@ impl Driver {
         headers.push(("mcp-session-id", sid.clone()));
         let note = json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string();
         let ack = self.http.send("POST", &self.nodes[node].url(), &headers, Some(&note), timeout);
+        self.wire(node, &ack, LEGACY, None);
         if ack.status != 202 {
             return (a.status, None);
         }
@@ -334,6 +344,7 @@ impl Driver {
     fn boot_of(&self, node: usize) -> Option<String> {
         let id = self.next();
         let a = self.modern_tool(node, id, "stats", json!({"token": format!("t{id}")}), json!({}), Duration::from_secs(2));
+        self.wire(node, &a, MODERN, Some("tools/call"));
         let (frames, _) = a.messages();
         let (_, text) = final_reply(&frames, id)?;
         field(&text, "boot")
@@ -344,6 +355,50 @@ impl Driver {
         let details = json!({"node": self.nodes[node].name, "request": what, "status": a.status, "body": a.head()});
         no_500(a.status, &details);
         assert_sometimes!(a.status == -1, "a request gets no answer", &details);
+    }
+
+    /// Every JSON-RPC message in a definite answer must be valid against the specification's JSON
+    /// Schema for the protocol version of the request (`wire.rs`). `method` is the request's
+    /// method, which decides the definition a result is held to. An answer with no HTTP status,
+    /// and a body that is not JSON, carry no message and are not judged here.
+    ///
+    /// One deviation is judged on its own, so that it cannot hide anything else. The server
+    /// answers a request whose id it could not read (a parse error, a transport-level refusal)
+    /// with `"id": null`, as JSON-RPC 2.0 requires. The specification's schema types the id of an
+    /// error response as a string or an integer and lets it be absent; null is neither. Such a
+    /// message is checked against the schema without its `id`, and the null is the subject of the
+    /// second property.
+    fn wire(&self, node: usize, a: &Answer, version: &str, method: Option<&str>) {
+        if a.status == -1 {
+            return;
+        }
+        let (frames, _) = a.messages();
+        for frame in &frames {
+            let is_error = frame.get("error").is_some_and(|e| !e.is_null());
+            let null_id = is_error && frame.get("id").is_some_and(Value::is_null);
+            let mut judged = frame.clone();
+            if null_id {
+                if let Some(object) = judged.as_object_mut() {
+                    object.remove("id");
+                }
+            }
+            let violations = wire::violations(version, &judged, method);
+            self.wire_checked.fetch_add(1, Ordering::Relaxed);
+            if !violations.is_empty() {
+                self.wire_invalid.fetch_add(1, Ordering::Relaxed);
+            }
+            let text: String = frame.to_string().chars().take(600).collect();
+            let details = json!({"node": self.nodes[node].name, "version": version, "request_method": method,
+                "status": a.status, "violations": violations, "message": text});
+            assert_always!(
+                violations.is_empty(),
+                "a JSON-RPC message a node sends is valid against the specification's JSON Schema for its protocol version",
+                &details
+            );
+            if is_error {
+                assert_always!(!null_id, "an error response a node sends has a request id or none, never null", &details);
+            }
+        }
     }
 
     /// A session answered 404: that is only right if its node restarted since it was opened, the
@@ -398,6 +453,7 @@ impl Driver {
             (self.legacy_tool(&s, id, tool, full, meta, timeout), Some(s))
         };
         self.judge(node, &a, tool);
+        self.wire(node, &a, if modern { MODERN } else { LEGACY }, Some("tools/call"));
         if a.status == -1 {
             return None;
         }
@@ -441,6 +497,7 @@ impl Driver {
     fn session_gone(&self, s: &Sess) -> Option<bool> {
         let id = self.next();
         let probe = self.legacy_tool(s, id, "echo", json!({"token": format!("t{id}")}), Value::Null, Duration::from_secs(3));
+        self.wire(s.node, &probe, LEGACY, Some("tools/call"));
         match probe.status {
             -1 => None,
             404 => {
@@ -609,6 +666,7 @@ impl Driver {
             for n in 0..self.nodes.len() {
                 let id = self.next();
                 let a = self.modern_tool(n, id, "stats", json!({"token": format!("t{id}")}), json!({}), Duration::from_secs(3));
+                self.wire(n, &a, MODERN, Some("tools/call"));
                 let (frames, _) = a.messages();
                 if let Some((false, text)) = final_reply(&frames, id) {
                     serving[n] = true;
@@ -662,6 +720,11 @@ impl Driver {
                 println!("driver: conformance: {} does not serve; the harness is not run against it", self.nodes[n].name);
             }
         }
+        println!(
+            "driver: wire: {} messages checked against the specification's schema, {} invalid",
+            self.wire_checked.load(Ordering::Relaxed),
+            self.wire_invalid.load(Ordering::Relaxed)
+        );
         println!("driver: eventually: ending the timeline");
         std::process::exit(0);
     }
@@ -839,6 +902,7 @@ impl Driver {
         let id = self.next();
         let a = self.modern(node, id, method, &tid, json!({"taskId": tid}), meta, Duration::from_secs(5));
         self.judge(node, &a, method);
+        self.wire(node, &a, MODERN, Some(method));
         if a.status == -1 || method == "tasks/cancel" {
             return;
         }
@@ -905,12 +969,14 @@ impl Driver {
         let headers = vec![("mcp-session-id", s.sid.clone())];
         let a = self.http.send("DELETE", &self.nodes[s.node].url(), &headers, None, Duration::from_secs(5));
         self.judge(s.node, &a, "DELETE");
+        self.wire(s.node, &a, LEGACY, None);
         if a.status != 200 {
             return;
         }
         let id = self.next();
         let after = self.legacy_tool(&s, id, "echo", json!({"token": format!("t{id}")}), Value::Null, Duration::from_secs(5));
         self.judge(s.node, &after, "echo after DELETE");
+        self.wire(s.node, &after, LEGACY, Some("tools/call"));
         let details = json!({"node": self.nodes[s.node].name, "status": after.status, "body": after.head()});
         assert_always!(after.status == 404 || after.status == -1, "a deleted session answers 404", &details);
     }
@@ -1008,6 +1074,7 @@ impl Driver {
             let id = self.next();
             let a = self.legacy_tool(s, id, "echo", json!({"token": format!("t{id}")}), Value::Null, timeout);
             self.judge(node, &a, "echo");
+            self.wire(node, &a, LEGACY, Some("tools/call"));
             a.status
         };
         let (_, Some(older)) = self.open_session(node, timeout) else { return };
@@ -1096,6 +1163,10 @@ impl Driver {
         };
         let a = self.http.send("POST", &self.nodes[node].url(), &headers, Some(&body), Duration::from_secs(5));
         self.judge(node, &a, what);
+        // The refusal is held to the schema of the version the request named, or to the legacy
+        // one when it named none.
+        let version = if headers.iter().any(|(k, v)| *k == "mcp-protocol-version" && v == MODERN) { MODERN } else { LEGACY };
+        self.wire(node, &a, version, None);
         let details = json!({"node": self.nodes[node].name, "request": what, "status": a.status, "body": a.head()});
         assert_always!(
             a.status == -1 || (400..500).contains(&a.status),
@@ -1246,6 +1317,8 @@ fn startup() -> Driver {
         eventually_off: std::env::var("DRIVER_EVENTUALLY").is_ok_and(|v| v == "off"),
         eventually_after: std::env::var("DRIVER_EVENTUALLY_AFTER_S").ok().and_then(|v| v.parse().ok()).map(Duration::from_secs),
         harness,
+        wire_checked: AtomicU64::new(0),
+        wire_invalid: AtomicU64::new(0),
     };
     // A node is up when it answers a tool call, not when its port is open.
     for n in 0..driver.nodes.len() {

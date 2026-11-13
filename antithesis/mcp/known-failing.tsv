@@ -1,3 +1,4 @@
-# Properties expected to fail, each with the finding it regression-tests. Empty since the fixes of
-# TJC-5087: every property is expected to pass. Add a line when a probe is written before its fix.
+# Properties expected to fail, each with the finding it regression-tests or the decision it waits
+# for. Add a line when a probe is written before its fix, and remove it with the fix.
 # property message	finding	note
+an error response a node sends has a request id or none, never null	TJC-5133 (schema validation)	The server answers a request whose id it cannot read with "id": null, as JSON-RPC 2.0 requires and the TypeScript SDK also does. The specification's JSON Schema types JSONRPCErrorResponse.id as a string or an integer and lets it be absent. Decide: leave the id out, or delete this property.

@@ -56,6 +56,7 @@ done
 echo "local.sh: driver exit code ${code}; evidence in ${out}"
 echo "local.sh: the conformance harness:"
 grep -a 'driver: conformance:' "${out}/driver.log" | sed 's/^.*driver: conformance: /  /' || echo "  (it did not run)"
+grep -a 'driver: wire:' "${out}/driver.log" | sed 's/^.*driver: wire: /local.sh: /' || true
 echo "local.sh: assertions that would fail in a run (see known-failing.tsv for the expected ones):"
 jq -rs '[.[].antithesis_assert // empty] | group_by(.message)[]
   | select(if .[0].assert_type == "sometimes" then any(.hit and .condition) | not
