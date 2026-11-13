@@ -6,7 +6,7 @@ import scala.scalajs.js
 import zio.*
 import zio.json.*
 
-import com.tjclp.fastmcp.core.{ErrorCodes, Protocol}
+import com.tjclp.fastmcp.core.ErrorCodes
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError, RequestId}
 import com.tjclp.fastmcp.facades.node.{NodeProcess, NodeReadableStream}
 import com.tjclp.fastmcp.facades.runtime.{
@@ -39,7 +39,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   /** UUID v4 via Web Crypto (`crypto.randomUUID`) — the JS runtime's CSPRNG. */
   override def randomId(): UIO[String] = ZIO.succeed(WebCrypto.randomUUID())
 
-  private val SessionIdHeader = "mcp-session-id"
+  private val SessionIdHeader = HttpRequestGuards.SessionIdHeader
 
   // -------------------------------------------------------------------------
   // stdio
@@ -317,18 +317,31 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       clientKey: Option[String],
       server: js.Dynamic
   ): ZIO[R, Throwable, js.Dynamic] =
-    // `new URL(req.url)` throws on an unparseable authority (e.g. `Host: 127.0.0.1:99999`): answer
-    // the host gate's 403 when the guard is on (JVM parity), else a plain 400 — never a defect.
+    // `new URL(req.url)` throws on an unparseable authority (e.g. `Host: 127.0.0.1:99999`). With
+    // the Host/Origin guard on, the guard refuses such a `Host` itself (403, as on the JVM); with
+    // it off Bun still cannot tell which path was asked for, so the answer is a plain 400 — never
+    // a defect. (The JVM backends, which do not build a URL, serve that request when the guard is
+    // off.)
     val path = scala.util.Try(pathOf(req)).toOption
+    val method = methodOf(req)
     if path.isEmpty then
       ZIO.succeed(
         hostError(req, settings).getOrElse(jsonRpcErrorResponse(400, "Malformed request URL"))
       )
-    else if !path.contains(settings.httpEndpoint) then ZIO.succeed(webResponse(404, "Not Found"))
+    // The endpoint is an exact path match, as on the JVM backends (`HttpRequestGuards.pathMatches`;
+    // `URL.pathname` carries no query string). Anything else is an empty 404, before any gate.
+    else if !path.exists(HttpRequestGuards.pathMatches(_, settings)) then
+      ZIO.succeed(emptyResponse(404))
     else
+      // POST: the header gates. Anything else: Host/Origin, then 405 for a method this endpoint
+      // does not serve — every method but DELETE here, since Bun has no standalone GET stream
+      // (`pushChannel = false`). The JVM twin is `StreamableHttpHandler.admit`.
       val headerErr =
-        if methodOf(req) == "POST" then postHeaderError(req, settings)
-        else hostError(req, settings)
+        if method == "POST" then postHeaderError(req, settings)
+        else
+          HttpRequestGuards
+            .nonPostGate(method, headerOf(req), settings, pushChannel = false)
+            .map(reject)
       headerErr match
         case Some(err) => ZIO.succeed(err)
         case None =>
@@ -343,8 +356,14 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
               handled
             )
 
+  /** A shared-gate refusal as its JSON-RPC error response, with the code and headers it carries
+    * (`Allow` on a 405; JVM twin: `StreamableHttpHandler.reject`). Bun drops the body of a reply to
+    * a `HEAD` by itself.
+    */
   private def reject(r: HttpRequestGuards.Rejection): js.Dynamic =
-    jsonRpcErrorResponse(r.status, r.message)
+    val failure: JsonRpcMessage =
+      JsonRpcMessage.Failure(None, McpError(r.errorCode, r.message).toErrorObject)
+    jsonResponse(failure.toJson, r.headers.toMap, status = r.status)
 
   private def handleStateless[R](
       router: McpRouter[R],
@@ -376,8 +395,9 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                     case (_, Some(r)) => jsonResponse(r.toJson, Map.empty)
                     case (_, None) => webResponse(202, "")
         }
-      case _ =>
-        ZIO.succeed(jsonRpcErrorResponse(405, "Stateless mode only accepts POST"))
+      case other =>
+        // Unreachable: `handleFetch` admits only POST on the stateless adapter.
+        ZIO.succeed(methodNotAllowed(other, settings))
 
   private def handleStreamable[R](
       router: McpRouter[R],
@@ -433,28 +453,22 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         }
 
       case "DELETE" =>
-        val version = Option(req.headers.get("mcp-protocol-version").asInstanceOf[String])
-        if version.exists(Protocol.isStatelessVersion) then
-          ZIO.succeed(webResponse(405, "Method Not Allowed"))
-        else if settings.disallowDelete then
-          ZIO.succeed(jsonRpcErrorResponse(405, "DELETE disabled"))
-        else
-          sessionIdHeader(req) match
-            case None =>
-              ZIO.succeed(webResponse(405, "Method Not Allowed"))
-            case Some(sid) =>
-              store.get(sid) match
-                case Some(session) =>
-                  ZIO.succeed { store -= sid } *> session.terminate.as(webResponse(200, ""))
-                case None =>
-                  ZIO.succeed(jsonRpcErrorResponse(404, s"Session not found: $sid"))
+        // `handleFetch` has already refused a DELETE that is disabled (`disallowDelete`) or that
+        // declares 2026-07-28 (405). One without a session id is 400, an unknown id 404.
+        sessionIdHeader(req) match
+          case None => ZIO.succeed(reject(HttpRequestGuards.SessionRequired))
+          case Some(sid) =>
+            store.get(sid) match
+              case Some(session) =>
+                ZIO.succeed { store -= sid } *> session.terminate.as(webResponse(200, ""))
+              case None =>
+                ZIO.succeed(jsonRpcErrorResponse(404, s"Session not found: $sid"))
 
-      case _ =>
-        // GET is a no-op 405: every server→client message streams on its request's own POST SSE
-        // response (see respondStreamable), so a standalone GET push channel isn't needed.
-        ZIO.succeed(
-          jsonRpcErrorResponse(405, "No standalone GET stream; server→client rides the POST SSE")
-        )
+      case other =>
+        // Unreachable: `handleFetch` admits only POST and DELETE. GET in particular is 405 there —
+        // every server→client message streams on its request's own POST SSE response (see
+        // respondStreamable), so there is no standalone GET push channel on Bun.
+        ZIO.succeed(methodNotAllowed(other, settings))
 
   /** Answer a header-less legacy `initialize`, and store a durable session for it only once it has
     * succeeded (JVM twin: `StreamableHttpHandler.mintSession` / `admit`, which document the rules).
@@ -895,8 +909,23 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     // `new URL(req.url).pathname` is the Web-Standard way to pull the path from a Request.
     js.Dynamic.newInstance(js.Dynamic.global.URL)(req.url).pathname.asInstanceOf[String]
 
+  /** The request's `mcp-session-id`; an empty header counts as absent (the shared rule,
+    * `HttpRequestGuards.sessionId`).
+    */
   private def sessionIdHeader(req: js.Dynamic): Option[String] =
-    Option(req.headers.get(SessionIdHeader).asInstanceOf[String]).filter(_.nonEmpty)
+    HttpRequestGuards.sessionId(headerOf(req))
+
+  /** The shared 405 for `method` (fallback of the per-mode handlers; `handleFetch` normally
+    * answers it first).
+    */
+  private def methodNotAllowed(method: String, settings: McpServerSettings): js.Dynamic =
+    HttpRequestGuards
+      .nonPostGate(method, _ => None, settings, pushChannel = false)
+      .fold(emptyResponse(405))(reject)
+
+  /** A response with a status and no body (the 404 of a path that is not the endpoint). */
+  private def emptyResponse(status: Int): js.Dynamic =
+    webResponse(status, "", Map.empty)
 
   private def readBody(req: js.Dynamic): ZIO[Any, Throwable, String] =
     ZioJsPromise

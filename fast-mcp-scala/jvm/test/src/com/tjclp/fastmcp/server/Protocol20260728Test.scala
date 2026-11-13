@@ -279,7 +279,18 @@ class Protocol20260728Test extends AnyFunSuite with Matchers:
     )
     unsupported should include(""""code":-32022""")
     unsupported should include(""""requested":"2099-01-01"""")
-    unsupported should include(""""supported":["2026-07-28"]""")
+    // An unknown version is told every version the server speaks (D3.15)...
+    unsupported should include(
+      """"supported":["2026-07-28","2025-11-25","2025-06-18","2025-03-26","2024-11-05","2024-10-07"]"""
+    )
+    // ...and a legacy version in the per-request shape the one version that shape is valid for.
+    val legacyShape = frame(
+      router,
+      session,
+      """{"jsonrpc":"2.0","id":3,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+    )
+    legacyShape should include(""""code":-32022""")
+    legacyShape should include(""""supported":["2026-07-28"]""")
   }
 
   test("request metadata preserves W3C trace context for tool handlers") {

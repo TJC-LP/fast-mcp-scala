@@ -47,10 +47,10 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
 ):
   import StreamableHttpHandler.*
 
-  /** The MCP endpoint path, always with a leading slash (`/mcp` by default). */
-  val endpoint: String = "/" + settings.httpEndpoint.stripPrefix("/")
-
-  private val endpointNoSlash: String = endpoint.stripSuffix("/")
+  /** The MCP endpoint path, always with a leading slash (`/mcp` by default). A request is on the
+    * endpoint when its path equals this string exactly (`HttpRequestGuards.pathMatches`).
+    */
+  val endpoint: String = HttpRequestGuards.endpointPath(settings)
 
   /** SSE heartbeat interval handed to the backend with every stream (see [[HttpReply.Sse]]). */
   private val keepAlive: Option[Duration] = settings.keepAliveInterval.map(Duration.fromJava)
@@ -59,34 +59,46 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
   private val contextHeaders: Set[String] = RequestHeaders.normalise(settings.contextHeaders)
 
   /** Headers-only verdict for backends that read the request body themselves: `Some` is the final
-    * reply — `404` off the endpoint, `405` for an unsupported method, or a POST refused by the
-    * header gates — and the body must not be read. `None` admits the request to [[handle]], which
-    * re-runs the same (pure) gates, so the two can never disagree.
+    * reply — `404` off the endpoint, a refused `Host`/`Origin` (`403`), `405` for a method the
+    * endpoint does not serve, or a POST refused by the header gates — and the body must not be
+    * read. `None` admits the request to [[handle]], which re-runs the same (pure) gates, so the two
+    * can never disagree.
     */
   def admit(req: HttpRequest): Option[HttpReply] =
-    if req.path.stripSuffix("/") != endpointNoSlash then Some(HttpReply.Empty(404))
+    if !HttpRequestGuards.pathMatches(req.path, settings) then Some(HttpReply.Empty(404))
     else
       req.method match
         case "POST" =>
           HttpRequestGuards
             .postGate(req.gateHeader, settings, requireSse = store.isDefined)
             .map(reject)
-        case "GET" | "DELETE" => None
-        case _ => Some(MethodNotAllowed)
+        case _ => nonPostError(req)
 
-  /** Full routing for backends without their own router, behind the first-party error boundary:
-    * anything off the endpoint is `404`, methods other than POST/GET/DELETE are `405`.
+  /** Full routing, behind the first-party error boundary: anything off the endpoint is `404` (an
+    * exact path match, see [[endpoint]]); on it, every method meets the Host/Origin guard first
+    * and a method the endpoint does not serve is then `405` with an `Allow` header.
     */
   def handle(req: HttpRequest): URIO[R, HttpReply] =
     guarded {
-      if req.path.stripSuffix("/") != endpointNoSlash then ZIO.succeed(HttpReply.Empty(404))
+      if !HttpRequestGuards.pathMatches(req.path, settings) then ZIO.succeed(HttpReply.Empty(404))
       else
         req.method match
           case "POST" => post(req)
           case "GET" => get(req)
           case "DELETE" => delete(req)
-          case _ => ZIO.succeed(MethodNotAllowed)
+          // Never admitted: `nonPostGate` refuses every method but GET and DELETE.
+          case _ => ZIO.succeed(nonPostError(req).getOrElse(HttpReply.Empty(405)))
     }
+
+  /** The verdict of `HttpRequestGuards.nonPostGate` on a request that is not a POST, rendered: 403
+    * Host/Origin, then 405 for a method this endpoint does not serve in this mode (GET and DELETE
+    * exist only on the durable legacy adapter; DELETE not with `disallowDelete`) or that MCP
+    * 2026-07-28 does not use. `None` admits a GET or DELETE.
+    */
+  private def nonPostError(req: HttpRequest): Option[HttpReply] =
+    HttpRequestGuards
+      .nonPostGate(req.method, req.gateHeader, settings, pushChannel = true)
+      .map(rejection => rejectFor(req.method, rejection))
 
   /** POST: one JSON-RPC frame.
     *
@@ -146,39 +158,39 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
 
   /** GET opens the server→client SSE channel for a session: each message offered to the session's
     * outbound queue is emitted as an SSE `message` event. The stream ends when the session is
-    * terminated (queue shutdown) or the client disconnects. `405` on the stateless adapter and for
-    * 2026-07-28 clients (which have no session to stream).
+    * terminated (queue shutdown) or the client disconnects.
+    *
+    * In order: `403` Host/Origin → `405` on the stateless adapter and for 2026-07-28 clients
+    * (neither has a session to stream) → `400` unsupported `mcp-protocol-version` → `406` unless
+    * `Accept` allows `text/event-stream` → `400` without an `mcp-session-id` → `404` unknown
+    * session → `409` when the session's stream is already open.
     */
   def get(req: HttpRequest): UIO[HttpReply] =
-    store match
-      case None => ZIO.succeed(HttpReply.Empty(405))
-      case Some(sessions) =>
-        hostError(req) match
+    (nonPostError(req.copy(method = "GET")), store) match
+      case (Some(err), _) => ZIO.succeed(err)
+      // Unreachable: without a store `nonPostGate` has already refused the method.
+      case (None, None) => ZIO.succeed(HttpReply.Empty(405))
+      case (None, Some(sessions)) =>
+        getHeaderError(req) match
           case Some(err) => ZIO.succeed(err)
-          case None if req.header("mcp-protocol-version").exists(Protocol.isStatelessVersion) =>
-            ZIO.succeed(HttpReply.Empty(405))
-          case None =>
-            getHeaderError(req) match
-              case Some(err) => ZIO.succeed(err)
-              case None => streamableGetDispatch(sessions, req)
+          case None => streamableGetDispatch(sessions, req)
 
   /** DELETE terminates a session: drop it from the store and `Session.terminate` it (in-flight
     * requests interrupted, its tasks released, outbound queue shut down — which ends any open GET
-    * SSE stream). `405` when delete is disallowed by settings, on the stateless adapter, or for
-    * 2026-07-28 clients.
+    * SSE stream).
+    *
+    * In order: `403` Host/Origin → `405` when delete is disallowed by settings, on the stateless
+    * adapter, or for 2026-07-28 clients → `400` without an `mcp-session-id` → `404` unknown
+    * session.
     */
   def delete(req: HttpRequest): UIO[HttpReply] =
-    store match
-      case None => ZIO.succeed(HttpReply.Empty(405))
-      case Some(sessions) =>
-        hostError(req) match
-          case Some(err) => ZIO.succeed(err)
-          case None if req.header("mcp-protocol-version").exists(Protocol.isStatelessVersion) =>
-            ZIO.succeed(HttpReply.Empty(405))
-          case None if settings.disallowDelete => ZIO.succeed(HttpReply.Empty(405))
-          case None =>
-            req.header(SessionIdHeader) match
-              case None => ZIO.succeed(HttpReply.Empty(405))
+    (nonPostError(req.copy(method = "DELETE")), store) match
+      case (Some(err), _) => ZIO.succeed(err)
+      // Unreachable: without a store `nonPostGate` has already refused the method.
+      case (None, None) => ZIO.succeed(HttpReply.Empty(405))
+      case (None, Some(sessions)) =>
+            HttpRequestGuards.sessionId(req.gateHeader) match
+              case None => ZIO.succeed(reject(HttpRequestGuards.SessionRequired))
               case Some(id) =>
                 // One uninterruptible step: a session that left the store can no longer be reached
                 // by id, so a DELETE whose client goes away mid-way must still terminate it.
@@ -228,7 +240,8 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       req: HttpRequest,
       message: JsonRpcMessage
   ): URIO[R, HttpReply] =
-    req.header(SessionIdHeader) match
+    // An empty header names no session: it is treated as absent, not looked up.
+    HttpRequestGuards.sessionId(req.gateHeader) match
       case Some(id) =>
         sessions.get.map(_.get(id)).flatMap {
           case None => ZIO.succeed(transportError(404, s"Session not found: $id"))
@@ -626,8 +639,8 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       sessions: Ref[Map[String, Session]],
       req: HttpRequest
   ): UIO[HttpReply] =
-    req.header(SessionIdHeader) match
-      case None => ZIO.succeed(HttpReply.Empty(405))
+    HttpRequestGuards.sessionId(req.gateHeader) match
+      case None => ZIO.succeed(reject(HttpRequestGuards.SessionRequired))
       case Some(id) =>
         sessions.get.map(_.get(id)).flatMap {
           case None => ZIO.succeed(transportError(404, s"Session not found: $id"))
@@ -720,32 +733,20 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       req.header("mcp-protocol-version").getOrElse(Protocol.DefaultNegotiatedProtocolVersion)
     Protocol.SupportedProtocolVersions.contains(declared)
 
-  /** Reject (403) when DNS-rebinding protection is on and the request's Host/Origin isn't allowed
-    * (full-origin match, see `HostGuard`).
+  /** GET guard (SSE channel), after the Host/Origin and method gates: a supported
+    * `mcp-protocol-version`, and an `Accept` that (if present) allows `text/event-stream`.
     */
-  private def hostError(req: HttpRequest): Option[HttpReply] =
-    HttpRequestGuards.hostGate(req.gateHeader, settings).map(reject)
-
-  /** GET guard (SSE channel): `Accept` (if present) must allow `text/event-stream`. */
   private def getHeaderError(req: HttpRequest): Option[HttpReply] =
-    hostError(req).orElse {
-      if !protocolVersionOk(req) then
-        Some(transportError(400, "Unsupported mcp-protocol-version header"))
-      else if !HttpRequestGuards.acceptsAny(
-          req.header("accept"),
-          List("text/event-stream", "text/*")
-        )
-      then Some(transportError(406, "Accept must allow text/event-stream"))
-      else None
-    }
+    if !protocolVersionOk(req) then
+      Some(transportError(400, "Unsupported mcp-protocol-version header"))
+    else if !HttpRequestGuards.acceptAllows(req.gateHeader("accept"), "text/event-stream") then
+      Some(transportError(406, "Accept must allow text/event-stream"))
+    else None
 
 private[fastmcp] object StreamableHttpHandler:
 
   /** Compatibility header for initialization-based Streamable HTTP revisions. */
-  val SessionIdHeader = "mcp-session-id"
-
-  private val MethodNotAllowed: HttpReply =
-    HttpReply.Empty(405, List("allow" -> "POST, GET, DELETE"))
+  val SessionIdHeader: String = HttpRequestGuards.SessionIdHeader
 
   /** The longest a legacy (pre-2026-07-28) POST reply waits for its first frame before the SSE
     * response is opened anyway. Long enough that a call which answers promptly gets the
@@ -861,16 +862,26 @@ private[fastmcp] object StreamableHttpHandler:
   def guarded[R](effect: => URIO[R, HttpReply]): URIO[R, HttpReply] =
     guardedWith[R, HttpReply](transportError(500, HttpRequestGuards.InternalErrorMessage))(effect)
 
-  /** A [[HttpRequestGuards.Rejection]] as its JSON-RPC error reply. */
+  /** A [[HttpRequestGuards.Rejection]] as its JSON-RPC error reply, with the headers it carries
+    * (`Allow` on a 405).
+    */
   def reject(rejection: HttpRequestGuards.Rejection): HttpReply.Json =
-    transportError(rejection.status, rejection.message)
+    val failure: JsonRpcMessage = JsonRpcMessage.Failure(
+      None,
+      McpError(rejection.errorCode, rejection.message).toErrorObject
+    )
+    HttpReply.Json(rejection.status, failure.toJson, rejection.headers)
+
+  /** [[reject]] for a request made with `method`: the reply to a `HEAD` has no body (RFC 9110
+    * §9.3.2), so it keeps the status and headers only.
+    */
+  def rejectFor(method: String, rejection: HttpRequestGuards.Rejection): HttpReply =
+    if method == "HEAD" then HttpReply.Empty(rejection.status, rejection.headers)
+    else reject(rejection)
 
   /** Transport-level rejection as a JSON-RPC error body (TS SDK parity — clients surface
     * `error.message` uniformly instead of sniffing text/plain bodies). `404` carries
     * [[ErrorCodes.SessionNotFound]]; every other status [[ErrorCodes.TransportError]].
     */
   def transportError(status: Int, message: String): HttpReply.Json =
-    val code = if status == 404 then ErrorCodes.SessionNotFound else ErrorCodes.TransportError
-    val failure: JsonRpcMessage =
-      JsonRpcMessage.Failure(None, McpError(code, message).toErrorObject)
-    HttpReply.Json(status, failure.toJson)
+    reject(HttpRequestGuards.Rejection(status, message))

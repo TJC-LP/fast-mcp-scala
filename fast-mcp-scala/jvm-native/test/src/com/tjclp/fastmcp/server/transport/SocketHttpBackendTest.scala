@@ -421,9 +421,11 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     }
   }
 
-  test("GET channel: 405 without a session, 200 stream, 409 on a second stream, DELETE ends it") {
+  test("GET channel: 400 without a session, 200 stream, 409 on a second stream, DELETE ends it") {
     withServer() { port =>
-      request(port, get(None)).status shouldBe 405
+      val sessionless = request(port, get(None))
+      sessionless.status shouldBe 400
+      sessionless.body should include("mcp-session-id header is required")
       val sid = initSession(port)
 
       val stream = new RawClient(port)
@@ -561,7 +563,7 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
 
   test("a request head must end every line in CRLF: a bare LF is refused with 400 and a close") {
     withServer() { port =>
-      request(port, get(None)).status shouldBe 405 // the well-formed twin is served
+      request(port, get(None)).status shouldBe 400 // the well-formed twin reaches the handler
       refused(port, "GET /mcp HTTP/1.1\nHost: 127.0.0.1\n\n")
       refused(port, "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\n\r\n")
       refused(port, "GET /mcp HTTP/1.1\nHost: 127.0.0.1\r\n\r\n")
@@ -596,7 +598,7 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       def withValue(value: String): String =
         s"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nX-A: $value\r\n\r\n"
       // HTAB inside a value is the one control byte a head may carry.
-      request(port, withValue("a\tb")).status shouldBe 405
+      request(port, withValue("a\tb")).status shouldBe 400
       List("a\rb", "a\u0000b", "\u0000", "a\u000bb", "a\u000c", "\u001fa", "a\u007fb").foreach { v =>
         refused(port, withValue(v))
       }
@@ -637,7 +639,7 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
           client.readReply()
         finally client.close()
       // Every CR arrives without its LF, so each line end is judged across two reads.
-      dribble("\r\n" + get(None)).status shouldBe 405
+      dribble("\r\n" + get(None)).status shouldBe 400
       val chunked = dribble(
         chunkedHead + s"$initHex;ext=1\r\n$initFrame\r\n0\r\nX-Trailer: v\r\n\r\n"
       )
@@ -835,7 +837,7 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       val client = new RawClient(port)
       client.send("GET /mcp HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
       val reply = client.readReply()
-      reply.status shouldBe 405
+      reply.status shouldBe 400
       reply.header("connection") shouldBe Some("close")
       client.atEof() shouldBe true
       client.close()
@@ -845,7 +847,7 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
   test("empty lines before the request line are ignored (RFC 9112 §2.2)") {
     withServer() { port =>
       // A stray extra CRLF ahead of the request, as some proxies emit: not an empty head.
-      request(port, "\r\n\r\n" + get(None)).status shouldBe 405
+      request(port, "\r\n\r\n" + get(None)).status shouldBe 400
     }
   }
 
@@ -888,6 +890,104 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       val put = request(port, "PUT /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n")
       put.status shouldBe 405
       put.header("allow") shouldBe Some("POST, GET, DELETE")
+      put.header("content-type") shouldBe Some("application/json")
+      put.body should include("Method PUT is not allowed on the MCP endpoint")
+    }
+  }
+
+  test("the endpoint path is exact: a query string is allowed, a trailing slash or another case is 404") {
+    withServer() { port =>
+      def postTo(target: String): Reply =
+        request(port, post(initFrame).replace("POST /mcp HTTP/1.1", s"POST $target HTTP/1.1"))
+      postTo("/mcp").status shouldBe 200
+      postTo("/mcp?x=1").status shouldBe 200
+      postTo("/mcp?").status shouldBe 200
+      for target <- List("/mcp/", "/mcp/?x=1", "/MCP", "/mcp/extra", "/api/mcp", "/xmcpx", "//mcp", "/%6dcp", "/mcp/.", "/./mcp")
+      do
+        withClue(s"$target: ") {
+          val reply = postTo(target)
+          reply.status shouldBe 404
+          reply.body shouldBe ""
+        }
+    }
+  }
+
+  test("PUT, PATCH, OPTIONS and HEAD meet the Host guard first, then 405; HEAD has no body and keeps the connection") {
+    withServer() { port =>
+      for method <- List("PUT", "PATCH", "OPTIONS") do
+        withClue(s"$method: ") {
+          val refused = request(port, s"$method /mcp HTTP/1.1\r\nHost: evil.example\r\n\r\n")
+          refused.status shouldBe 403
+          val reply = request(port, s"$method /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+          reply.status shouldBe 405
+          reply.header("allow") shouldBe Some("POST, GET, DELETE")
+          reply.body should include(s"Method $method is not allowed on the MCP endpoint")
+          reply.body should include(""""code":-32000""")
+        }
+      // HEAD: status and headers only, and the next request on the connection is still parsed.
+      val client = new RawClient(port)
+      try
+        client.send("HEAD /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        val (status, headers) = client.readHead()
+        status shouldBe 405
+        headers.get("allow") shouldBe Some("POST, GET, DELETE")
+        headers.get("content-length").forall(_ == "0") shouldBe true
+        headers.get("transfer-encoding") shouldBe None
+        client.send(post(initFrame))
+        client.readReply().status shouldBe 200
+        client.send("HEAD /mcp HTTP/1.1\r\nHost: evil.example\r\n\r\n")
+        client.readHead()._1 shouldBe 403
+      finally client.close()
+    }
+  }
+
+  test("mcp-session-id: absent or empty is 400 on GET and DELETE, unknown is 404, sent twice is 404") {
+    withServer() { port =>
+      val sid = initSession(port)
+      def bare(method: String, extra: String): Reply =
+        request(
+          port,
+          s"$method /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n$extra\r\n"
+        )
+      for method <- List("GET", "DELETE") do
+        for extra <- List("", "Mcp-Session-Id:\r\n", "Mcp-Session-Id:   \r\n") do
+          withClue(s"$method ${visible(extra)}: ") {
+            val reply = bare(method, extra)
+            reply.status shouldBe 400
+            reply.body should include("mcp-session-id header is required")
+            reply.body should include(""""code":-32000""")
+          }
+        val unknown = bare(method, "Mcp-Session-Id: nope\r\n")
+        unknown.status shouldBe 404
+        unknown.body should include(""""code":-32001""")
+        // Two field lines, each naming the live session: the gates see one joined value.
+        bare(method, s"Mcp-Session-Id: $sid\r\nMcp-Session-Id: $sid\r\n").status shouldBe 404
+      // An empty header on a non-initialize POST is the missing-header 400 as well.
+      val emptyPost = request(port, post(listFrame, extra = List("Mcp-Session-Id" -> "")))
+      emptyPost.status shouldBe 400
+      emptyPost.body should include("mcp-session-id header is required")
+      // The session was not touched by any of it.
+      request(port, post(listFrame, sid = Some(sid))).status shouldBe 200
+    }
+  }
+
+  test("Accept q=0 is honoured on the wire; a 2026-07-28 POST has one 406 shape") {
+    withServer() { port =>
+      request(port, post(initFrame, accept = "*/*;q=0")).status shouldBe 406
+      request(port, post(initFrame, accept = "application/json, text/event-stream;q=0")).status shouldBe
+        406
+      request(port, post(initFrame, accept = "*/*")).status shouldBe 200
+      val modern = List(modernVersion, callMethod, "Mcp-Name" -> "add")
+      val bodies =
+        for accept <- List("application/json", "text/event-stream", "*/*;q=0", "text/html") yield
+          val reply = request(port, post(modernAddFrame, extra = modern, accept = accept))
+          withClue(s"Accept: $accept: ") {
+            reply.status shouldBe 406
+            reply.body should include(""""code":-32020""")
+          }
+          reply.body
+      bodies.distinct.size shouldBe 1
+      request(port, post(modernAddFrame, extra = modern)).status shouldBe 200
     }
   }
 
@@ -930,7 +1030,12 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       reply.header("content-length").isDefined shouldBe true
       reply.header("mcp-session-id") shouldBe None
       reply.body should include(""""protocolVersion"""")
-      request(port, get(None)).status shouldBe 405
+      val refusedGet = request(port, get(None))
+      refusedGet.status shouldBe 405
+      refusedGet.header("allow") shouldBe Some("POST")
+      // The Host guard still runs first on the stateless adapter (it used to be skipped there).
+      request(port, "GET /mcp HTTP/1.1\r\nHost: evil.example\r\n\r\n").status shouldBe 403
+      request(port, "DELETE /mcp HTTP/1.1\r\nHost: evil.example\r\n\r\n").status shouldBe 403
     }
   }
 

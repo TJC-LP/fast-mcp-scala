@@ -230,7 +230,7 @@ final class McpRouter[R](
           McpError
             .unsupportedProtocolVersion(
               context.protocolVersion,
-              List(Protocol.LatestProtocolVersion)
+              Protocol.supportedVersionsFor(context.protocolVersion)
             )
             .toErrorObject
         )

@@ -111,25 +111,21 @@ object JvmHttpBackend extends HttpTransportBackend:
       .unit
 
   // ---------------------------------------------------------------------------
-  // zio-http adapter: per-method routes on the endpoint, so zio-http keeps answering its own
-  // 404/405 for anything else; each route funnels into the shared handler behind `guarded`.
+  // zio-http adapter: ONE catch-all route that funnels every request into the shared handler
+  // behind `guarded`. Path and method are judged there (`StreamableHttpHandler.handle`), not by
+  // zio-http's router: its path codec also matches `/mcp/`, and with per-method routes a PUT or an
+  // OPTIONS on the endpoint was answered 404 without ever meeting the Host/Origin guard. Routed
+  // this way the zio-http backend gives the same 404 / 403 / 405 as the socket backend and Bun.
   // ---------------------------------------------------------------------------
 
   private def routes[R](
       mcp: StreamableHttpHandler[R],
       env: ZEnvironment[R]
   ): Routes[Any, Response] =
-    val ep = mcp.endpoint.stripPrefix("/")
     Routes(
-      Method.POST / ep -> Handler.scoped[Any](handler { (request: Request) =>
-        guarded(mcp.post(toRequest(request)).provideEnvironment(env).flatMap(respond))
-      }),
-      Method.GET / ep -> Handler.scoped[Any](handler { (request: Request) =>
-        guarded(mcp.get(toRequest(request)).flatMap(respond))
-      }),
-      Method.DELETE / ep -> handler { (request: Request) =>
-        guarded(mcp.delete(toRequest(request)).map(toResponse))
-      }
+      Method.ANY / trailing -> Handler.scoped[Any](handler { (_: Path, request: Request) =>
+        guarded(mcp.handle(toRequest(request)).provideEnvironment(env).flatMap(respond))
+      })
     )
 
   /** Render a reply, tying a streamed one to the request it answers. zio-http gives every request a
