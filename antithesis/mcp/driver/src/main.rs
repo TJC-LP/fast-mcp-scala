@@ -736,6 +736,80 @@ impl Driver {
         assert_sometimes!(admitted == FLOOD, "a flood of sessions is admitted by evicting idle ones", &json!({"admitted": admitted}));
     }
 
+    /// Eviction order at the session cap. Opens an older session and then a younger one, uses the
+    /// younger, pushes a drawn number of new sessions into the node's store, and looks at both.
+    ///
+    /// The cap evicts the longest idle session first. The older session was answered before the
+    /// younger was opened and is never used again, so it has been idle longer whatever else
+    /// happens: whatever the store held, whoever else opens sessions, however many evictions take
+    /// place. The younger one may therefore be gone only if the older one is gone too. This is
+    /// the check for the order itself, which `judge_lost_session` cannot make once a store is full.
+    /// It caught the wall-clock ordering that the clock faults exposed: a session stamped after a
+    /// backward clock step looked older than everything stamped before the step.
+    ///
+    /// Neither session is shared with other rules, and neither holds a GET stream. A probe uses the
+    /// session, so the younger is probed first: the older must not be used before the younger is
+    /// known to be gone. Only definite answers are judged.
+    #[rule]
+    fn eviction_order(&self, tc: TestCase) {
+        let drawn = tc.draw(gs::weighted_booleans(0.04));
+        let node = tc.draw(gs::integers::<usize>().max_value(self.nodes.len() - 1));
+        // At least 20 ms, so the two sessions never carry the same last-activity millisecond.
+        let gap_ms = tc.draw(gs::integers::<u64>().min_value(20).max_value(1500));
+        let pushes = tc.draw(gs::integers::<usize>().min_value(1).max_value(FLOOD));
+        if !drawn {
+            return;
+        }
+        let Some(_g) = self.enter() else { return };
+        // The pushes fill the store as a flood does, so other rules' sessions here become evictable.
+        self.flooded[node].store(u64::MAX, Ordering::SeqCst);
+        let boot = self.boot_of(node).unwrap_or_else(|| "?".to_owned());
+        *lock(&self.full_under[node]) = Some(boot);
+        self.eviction_order_on(node, Duration::from_millis(gap_ms), pushes);
+        self.flooded[node].store(self.next(), Ordering::SeqCst);
+    }
+
+    fn eviction_order_on(&self, node: usize, gap: Duration, pushes: usize) {
+        let timeout = Duration::from_secs(3);
+        let use_session = |s: &Sess| {
+            let id = self.next();
+            let a = self.legacy_tool(s, id, "echo", json!({"token": format!("t{id}")}), Value::Null, timeout);
+            self.judge(node, &a, "echo");
+            a.status
+        };
+        let (_, Some(older)) = self.open_session(node, timeout) else { return };
+        // Time for a clock fault to land between the two sessions.
+        std::thread::sleep(gap);
+        let (_, Some(younger)) = self.open_session(node, timeout) else { return };
+        if use_session(&younger) != 200 {
+            return;
+        }
+        for _ in 0..pushes {
+            let _ = self.open_session(node, timeout);
+        }
+        let younger_now = use_session(&younger);
+        if !matches!(younger_now, 200 | 404) {
+            return;
+        }
+        let older_now = use_session(&older);
+        if !matches!(older_now, 200 | 404) {
+            return;
+        }
+        let details = json!({"node": self.nodes[node].name, "older": older.sid, "younger": younger.sid,
+            "older_status": older_now, "younger_status": younger_now, "pushes": pushes, "gap_ms": gap.as_millis() as u64});
+        assert_always!(
+            !(younger_now == 404 && older_now == 200),
+            "at the session cap a session is evicted only after every session that has been idle longer",
+            &details
+        );
+        assert_sometimes!(
+            younger_now == 200 && older_now == 404,
+            "the cap evicts an older session and keeps a younger one",
+            &details
+        );
+        assert_sometimes!(younger_now == 404 && older_now == 404, "the cap evicts both sessions of an eviction-order pair", &details);
+    }
+
     /// Requests that are wrong in one way each. All must be refused with a 4xx.
     #[rule(weight = 2.0)]
     fn malformed(&self, tc: TestCase) {
