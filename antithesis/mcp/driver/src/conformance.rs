@@ -202,7 +202,9 @@ pub fn judge(suite: Suite, manifest: &Manifest, baseline: &[String], scenarios: 
         Suite::Skills => {
             out.exit_counts_failures_only = true;
             let fails = |c: &Check| matches!(c.status.as_str(), "FAILURE" | "WARNING" | "SKIPPED");
-            for s in scenarios {
+            // A scenario stopped at the deadline leaves a directory with no `checks.json`, which
+            // `read_results` reads as a failed check: it is not in `expected` and gets no verdict.
+            for s in scenarios.iter().filter(|s| expected.contains(&s.name)) {
                 let mut failed: Vec<Check> = s.checks.iter().filter(|c| fails(c)).cloned().collect();
                 if !s.checks.iter().any(|c| c.status == "SUCCESS") {
                     failed.push(Check {
@@ -675,6 +677,13 @@ mod tests {
         assert_eq!(j.verdicts.len(), 2);
         let j = judge(Suite::Skills, &manifest(), &[], &[], &[]);
         assert!(j.verdicts.is_empty());
+
+        // One stopped mid-run left a result the harness would count as a failure: no verdict.
+        let mut run = all("SUCCESS");
+        run[2] = scenario(SKILLS_SCENARIOS[2], vec![check(SKILLS_SCENARIOS[2], "FAILURE")]);
+        let j = judge(Suite::Skills, &manifest(), &[], &run, &skills()[..2]);
+        assert!(j.passes());
+        assert_eq!(j.verdicts.len(), 2);
     }
 
     #[test]
