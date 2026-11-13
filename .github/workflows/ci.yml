@@ -47,6 +47,33 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
 
+  # MiMa compares the JVM jar built from this commit with every released version listed in
+  # `Versions.binaryCompatBaselines` (build.mill) and fails on any problem that
+  # .github/mima-exclusions does not list with a reason. One JDK is enough: the class files do not
+  # depend on the JVM that runs scalac. No tool is installed for this: Mill resolves mima-core
+  # (pinned as `Versions.mimaCore`) and each released jar through coursier, checksums included, like
+  # every other build dependency. How to run it and when an exclusion is acceptable: CONTRIBUTING.md,
+  # "Binary compatibility". The link-time half (BinaryCompatibilityTest) runs in the build job above.
+  binary-compat:
+    name: Binary compatibility (MiMa)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Restore-only: this job compiles one platform and fetches MiMa, so a cache saved here would
+      # pin an incomplete entry under the key the build job shares.
+      - name: Set up build
+        uses: ./.github/actions/setup-build
+        with:
+          cache-write: "false"
+
+      - name: MiMa against the released versions
+        run: ./mill fast-mcp-scala.mimaCheck
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
+
   scala-native:
     name: Scala Native (linux-x64)
     runs-on: ubuntu-latest # clang + jq preinstalled; SN 0.5 recommends LLVM >= 17
