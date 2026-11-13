@@ -336,9 +336,27 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     `TaskSettings.maxRequestBytes` and the owner and pool byte budgets. A waiting task is a running
     task for the caps and the TTL.
   - A key is asked once per task; a tool that asks again for a key it was given fails the task.
-  - Legacy (2025-11-25) sessions are unchanged. Gathering input over MRTR on the creating request
-    and then returning a task (SEP-2663 "Composition with Multi Round-Trip Requests") is not
-    supported. Reference: `docs/tasks.md` § "Waiting for input".
+  - Legacy (2025-11-25) sessions are unchanged. Reference: `docs/tasks.md` § "Waiting for input".
+- **Input over MRTR first, then a task: `McpTool.withDeferredTask` and
+  `McpContext.continueAsTask`** (TJC-2367). SEP-2663 ("Composition with Multi Round-Trip
+  Requests") lets one `tools/call` answer with `input_required` results on the request itself and
+  only then with a task handle, and says a server SHOULD resolve the MRTR exchanges before it
+  creates the task. A tool that may be a task became one before its handler ran, so it could only
+  ask from inside the task.
+  - `withDeferredTask` on a typed contract (`McpTool`, `McpTool.WithEnv`) starts every call as an
+    ordinary request. What the handler asks is asked with an `input_required` result, and no task
+    is created, stored or counted.
+  - `continueAsTask: IO[McpError, Boolean]` on `McpContext` is the hand-off: the client gets
+    `resultType: "task"` as the reply, and what follows the call runs in the task. It returns
+    `true` when the handler runs as a task, `false` when the call stays a request (task support
+    `forbidden`, tasks off, an `optional` tool and a client without the extension).
+  - The hand-off is a replay, as an MRTR retry is: the task runs the handler again with the
+    request's `inputResponses`, so what precedes `continueAsTask` must be safe to repeat.
+  - Nothing changes for a tool that does not call `withDeferredTask`, for the annotation path
+    (`@Tool` cannot defer), or for 2025-11-25 sessions.
+  - The conformance scenario `tasks-mrtr-composition` passes with it (fixture
+    `test_tool_with_task`), on the JVM, Bun and Scala Native. Reference: `docs/tasks.md` §
+    "Input first, then a task".
 
 - **Allow-listed HTTP request headers on `McpContext`** (#130): `McpServerSettings.contextHeaders:
   Set[String]` (default empty) names the request headers a handler may read through
@@ -451,8 +469,9 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 - **The conformance fixture covers the unscored 2026-07-28 scenarios** (TJC-2367).
   `ConformanceServer` enables the Tasks extension and registers the tools the harness's ten
   `tasks-*` scenarios, `json-schema-2020-12` and `http-custom-header-server-validation` call.
-  Twelve of the thirteen unscored scenarios pass on the JVM and on Bun; `tasks-mrtr-composition`
-  does not (see above). The scored results are unchanged: 73/73 active, 37/37 for 2026-07-28.
+  All thirteen unscored scenarios pass on the JVM and on Bun (`tasks-mrtr-composition` since
+  `withDeferredTask`, see Added). The scored results are unchanged: 73/73 active, 37/37 for
+  2026-07-28.
 - **The Skills extension's conformance scenarios are part of the gate** (TJC-2367). The pinned
   harness (`0.2.0-alpha.12`) ships `sep-2640-skills-enumeration`, `sep-2640-skills-manifest` and
   `sep-2640-skills-directory`. Its active suite and its 2026-07-28 requirement set do not include
