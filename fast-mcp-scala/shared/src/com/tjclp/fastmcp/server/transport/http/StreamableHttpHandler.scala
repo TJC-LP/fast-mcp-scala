@@ -653,9 +653,10 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     *   - the stream ending or being interrupted, once it was started — the ordinary case;
     *   - [[HttpReply.Sse.abandon]], called by a backend that will not run the stream;
     *   - a watchdog, when the stream has not been started `unstartedReplyGrace` after the reply was
-    *     built. A backend pulls a reply's stream as soon as it has written the response head, so a
-    *     reply only gets that old when nothing is going to run it: the client left as the head went
-    *     out, or the request was interrupted between this handler and the backend.
+    *     built (counted in ticks, so time the process spent frozen does not count). A backend pulls
+    *     a reply's stream as soon as it has written the response head, so a reply only gets that
+    *     old when nothing is going to run it: the client left as the head went out, or the request
+    *     was interrupted between this handler and the backend.
     * A stream started only after its reply was released that way ends at once, empty: it must not
     * read a queue (or hold a GET slot) that is no longer its own.
     *
@@ -675,27 +676,33 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         ZIO.suspendSucceed {
           if state.compareAndSet(ReplyPending, ReplyReleased) then release else ZIO.unit
         }
+      // The grace is counted in short ticks, not waited out as one deadline. A process that is
+      // frozen for longer than the grace (a stop-the-world pause, a suspended VM, a paused
+      // container) finds a single deadline already passed when it runs again, and would release a
+      // reply its backend is about to stream: the client then gets a 200 with an empty body. A
+      // freeze of any length uses up one tick, and the rest take their real time, which is far
+      // more than a backend needs to start the stream.
       // Interruptible only while it sleeps: once it has claimed the reply it finishes the release.
-      (ZIO.sleep(unstartedReplyGrace).interruptible *> giveUp).uninterruptible.forkDaemon.map {
-        watchdog =>
-          val stopWatchdog = signalInterrupt(watchdog)
-          // Decided at the first pull: this run owns the reply, or the reply is gone.
-          val started = ZChannel.unwrap {
-            ZIO.suspendSucceed {
-              if state.compareAndSet(ReplyPending, ReplyStarted) then
-                stopWatchdog.as(frames.channel)
-              else ZIO.succeed(NoFrames)
-            }
+      val tick = unstartedReplyGrace.dividedBy(UnstartedReplyTicks.toLong).max(1.millis)
+      val grace = ZIO.sleep(tick).repeatN(UnstartedReplyTicks - 1)
+      (grace.interruptible *> giveUp).uninterruptible.forkDaemon.map { watchdog =>
+        val stopWatchdog = signalInterrupt(watchdog)
+        // Decided at the first pull: this run owns the reply, or the reply is gone.
+        val started = ZChannel.unwrap {
+          ZIO.suspendSucceed {
+            if state.compareAndSet(ReplyPending, ReplyStarted) then stopWatchdog.as(frames.channel)
+            else ZIO.succeed(NoFrames)
           }
-          // Registered when the stream is run, before the claim above; it also covers a stream
-          // that is halted before its first pull.
-          val finish = ZIO.suspendSucceed {
-            if state.getAndSet(ReplyReleased) != ReplyReleased then release *> stopWatchdog
-            else ZIO.unit
-          }
-          HttpReply.Sse(headers, ZStream.fromChannel(started).ensuring(finish), keepAlive)(
-            giveUp *> stopWatchdog
-          )
+        }
+        // Registered when the stream is run, before the claim above; it also covers a stream
+        // that is halted before its first pull.
+        val finish = ZIO.suspendSucceed {
+          if state.getAndSet(ReplyReleased) != ReplyReleased then release *> stopWatchdog
+          else ZIO.unit
+        }
+        HttpReply.Sse(headers, ZStream.fromChannel(started).ensuring(finish), keepAlive)(
+          giveUp *> stopWatchdog
+        )
       }
     }
 
@@ -753,6 +760,11 @@ private[fastmcp] object StreamableHttpHandler:
     * streamed gets this old.
     */
   private[fastmcp] val UnstartedReplyGrace: Duration = 5.seconds
+
+  /** The number of equal ticks [[UnstartedReplyGrace]] is counted in, so that a freeze of the whole
+    * process costs a reply one tick of its grace, not all of it (see `ownedSse`).
+    */
+  private[fastmcp] val UnstartedReplyTicks: Int = 10
 
   // Who answers for a streamed reply's resources, see `ownedSse`: nobody has run its stream yet;
   // a run of its stream does; or they have been released.

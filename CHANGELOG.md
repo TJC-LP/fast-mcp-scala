@@ -454,6 +454,16 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Fixed
 
+- **A process frozen for longer than five seconds no longer turns a streamed reply into an empty
+  `200`** (TJC-5133). The handler releases a streamed reply that no backend has started within
+  five seconds, so that an abandoned one cannot hold a request or a session's GET slot. It waited
+  for that as one deadline. If the whole process was frozen past it between building the reply
+  and streaming it (a long stop-the-world pause, a suspended VM, a paused container), the deadline
+  had passed when the process ran again: the reply was released, and the backend then streamed an
+  empty body with status 200. The grace is now counted in ten ticks, so a freeze of any length
+  costs one of them. Found by Antithesis pausing a node (run
+  `138b4b66187ffc9deaf28072fff5b5d9-66-21`). Unreleased code: the grace was added in this cycle.
+
 - **A task interrupted before its fiber had started stayed `working` for ever** (TJC-5087). A
   `tasks/cancel`, a session release or the TTL sweep that reached a task right after its creation
   could end the task's fiber before the step that records the terminal status was in place. The

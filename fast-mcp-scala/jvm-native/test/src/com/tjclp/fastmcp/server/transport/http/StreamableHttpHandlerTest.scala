@@ -252,6 +252,50 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
     runUnsafe(storedSession(handler, sid).hasActiveGet) shouldBe false
   }
 
+  /** A clock whose first `sleep` returns at once and whose later ones are real. That is what a
+    * timer sees after the process was frozen for longer than its delay (a stop-the-world pause, a
+    * suspended VM, a paused container): the deadline it was waiting for has already passed when it
+    * runs again, while everything it schedules afterwards takes its normal time.
+    */
+  private final class FrozenOnceClock extends Clock:
+    private val first = new java.util.concurrent.atomic.AtomicBoolean(true)
+    private val live = Clock.ClockLive
+    def currentTime(unit: => java.util.concurrent.TimeUnit)(implicit trace: Trace): UIO[Long] =
+      live.currentTime(unit)
+    def currentTime(unit: => java.time.temporal.ChronoUnit)(implicit
+        trace: Trace,
+        d: DummyImplicit
+    ): UIO[Long] = live.currentTime(unit)
+    def currentDateTime(implicit trace: Trace): UIO[java.time.OffsetDateTime] =
+      live.currentDateTime
+    def instant(implicit trace: Trace): UIO[java.time.Instant] = live.instant
+    def javaClock(implicit trace: Trace): UIO[java.time.Clock] = live.javaClock
+    def localDateTime(implicit trace: Trace): UIO[java.time.LocalDateTime] = live.localDateTime
+    def nanoTime(implicit trace: Trace): UIO[Long] = live.nanoTime
+    def scheduler(implicit trace: Trace): UIO[Scheduler] = live.scheduler
+    def sleep(duration: => Duration)(implicit trace: Trace): UIO[Unit] =
+      if first.compareAndSet(true, false) then ZIO.unit else live.sleep(duration)
+
+  test("a process frozen past the grace does not make a reply that is then streamed come back empty") {
+    // Antithesis found this by pausing a node for nine seconds just after a reply was built (run
+    // 138b4b66187ffc9deaf28072fff5b5d9-66-21): the reply's watchdog saw its whole grace gone when
+    // the process ran again, released the reply, and the backend then streamed an empty 200.
+    val handler = makeHandler(grace = 2.seconds)
+    val sid = openSession(handler)
+    val getHeaders = Map("accept" -> "text/event-stream", "mcp-session-id" -> sid)
+
+    val reply = runUnsafe(ZIO.withClock(new FrozenOnceClock)(handler.get(request("GET", getHeaders))))
+    reply.status shouldBe 200
+    // The backend starts the stream a moment after the freeze ends, as it would after a real one.
+    val outcome = runUnsafe(
+      ZIO.sleep(100.millis) *> framesOf(reply).runCollect.timeout(400.millis)
+    )
+    // A live GET stream stays open; a reply that was given up on ends at once, empty.
+    outcome shouldBe None
+    runUnsafe(storedSession(handler, sid).hasActiveGet) shouldBe false // the timeout ended the run
+    runUnsafe(handler.get(request("GET", getHeaders))).status shouldBe 200
+  }
+
   test("a GET stream that was started keeps the slot for as long as it runs") {
     val handler = makeHandler(grace = 500.millis)
     val sid = openSession(handler)
