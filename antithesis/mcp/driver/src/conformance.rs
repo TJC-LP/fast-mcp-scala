@@ -24,16 +24,24 @@ use serde_json::Value;
 pub const REVISION: &str = "2026-07-28";
 
 /// The whole harness run may take this long. Each scenario has the harness's own 30 s timeout;
-/// this bounds a run in which many of them hang.
+/// this bounds a run in which many of them hang. `scripts/local.sh` waits this long for every
+/// run the driver plans.
 const DEADLINE: Duration = Duration::from_secs(300);
 
-/// What the harness runs. Both are the modes of `scripts/conformance.sh`.
+/// The Skills extension scenarios (SEP-2640) of the pinned harness. They are tagged `[extension]`,
+/// so neither the active suite nor the 2026-07-28 requirement set includes them, and the harness
+/// takes one `--scenario` per run: [`Suite::Skills`] starts it once for each.
+pub const SKILLS_SCENARIOS: [&str; 3] = ["sep-2640-skills-enumeration", "sep-2640-skills-manifest", "sep-2640-skills-directory"];
+
+/// What the harness runs. These are the modes of `scripts/conformance.sh`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Suite {
     /// `--suite active --expected-failures <baseline>`: every scenario at the 2025-11-25 wire.
     Active,
     /// `--requirements 2026-07-28`: the scenarios that revision requires, at its own wire.
     Requirements,
+    /// `--scenario <name>` for each of [`SKILLS_SCENARIOS`], at the 2026-07-28 wire.
+    Skills,
 }
 
 impl Suite {
@@ -42,6 +50,7 @@ impl Suite {
         match self {
             Suite::Active => "active suite",
             Suite::Requirements => "2026-07-28 requirements",
+            Suite::Skills => "skills extension scenarios",
         }
     }
 
@@ -49,6 +58,7 @@ impl Suite {
         match self {
             Suite::Active => "active",
             Suite::Requirements => "2026",
+            Suite::Skills => "skills",
         }
     }
 }
@@ -134,6 +144,9 @@ pub struct Judgement {
     pub verdicts: Vec<Verdict>,
     /// Baseline entries that now pass. The harness exits 1 for these: the entry must be removed.
     pub stale: Vec<String>,
+    /// True for a run of single scenarios ([`Suite::Skills`]): there the harness's exit code
+    /// only counts `FAILURE`, while a verdict also fails on `WARNING` and `SKIPPED`.
+    pub exit_counts_failures_only: bool,
 }
 
 impl Judgement {
@@ -141,9 +154,20 @@ impl Judgement {
         self.verdicts.iter().filter(|v| v.scored && !v.failed.is_empty()).collect()
     }
 
-    /// The exit code the harness gives this run.
+    /// The exit code the harness gives this run. For a run of several harness processes
+    /// ([`Suite::Skills`]) it is the largest of theirs.
     pub fn exit_code(&self) -> i32 {
+        if self.exit_counts_failures_only {
+            return i32::from(self.verdicts.iter().any(|v| v.failed.iter().any(|c| c.status == "FAILURE")));
+        }
         i32::from(!self.unexpected().is_empty() || !self.stale.is_empty())
+    }
+
+    /// Whether the run passes the gate `scripts/conformance.sh` applies to this suite. For the
+    /// active suite and the requirement set that is the harness's exit code. For the skills
+    /// scenarios it is stricter than the exit code, which ignores warnings and skipped checks.
+    pub fn passes(&self) -> bool {
+        self.unexpected().is_empty() && self.stale.is_empty()
     }
 }
 
@@ -161,9 +185,34 @@ impl Judgement {
 /// Requirement set, no baseline. A scenario fails when it is one the set scores and one of its
 /// checks has status `FAILURE`. The set also runs scenarios it does not score (extensions,
 /// pending ones); those are reported and never fail the run.
+///
+/// Skills scenarios, one harness process each, no baseline. The harness exits 1 for a scenario
+/// with a `FAILURE` check and 0 otherwise. The gate is stricter, as in `scripts/conformance.sh`:
+/// a check fails when its status is `FAILURE`, `WARNING` or `SKIPPED`. The scenarios skip their
+/// checks when the server does not declare the extension or `directoryRead`; the fixture declares
+/// both, so a skipped check means the scenario stopped testing something. A scenario of
+/// [`SKILLS_SCENARIOS`] with no result at all fails too.
 pub fn judge(suite: Suite, manifest: &Manifest, baseline: &[String], scenarios: &[Scenario]) -> Judgement {
     let mut out = Judgement::default();
     match suite {
+        Suite::Skills => {
+            out.exit_counts_failures_only = true;
+            let fails = |c: &Check| matches!(c.status.as_str(), "FAILURE" | "WARNING" | "SKIPPED");
+            for s in scenarios {
+                let failed: Vec<Check> = s.checks.iter().filter(|c| fails(c)).cloned().collect();
+                out.verdicts.push(Verdict { scenario: s.name.clone(), checks: s.checks.len(), scored: true, reason: None, failed, excused: Vec::new() });
+            }
+            for name in SKILLS_SCENARIOS {
+                if !scenarios.iter().any(|s| s.name == name) {
+                    let missing = Check {
+                        id: name.to_owned(),
+                        status: "FAILURE".to_owned(),
+                        error: Some("the harness wrote no result for the scenario; see harness.log".to_owned()),
+                    };
+                    out.verdicts.push(Verdict { scenario: name.to_owned(), checks: 0, scored: true, reason: None, failed: vec![missing], excused: Vec::new() });
+                }
+            }
+        }
         Suite::Requirements => {
             for s in scenarios {
                 let scored = manifest.scored.contains(&s.name);
@@ -242,6 +291,7 @@ fn collapse(checks: &[Check]) -> Vec<Check> {
 #[derive(Debug)]
 pub struct Run {
     /// The harness's exit code. None when it could not be started or did not finish in time.
+    /// For the skills scenarios, the largest exit code of the harness's three runs.
     pub exit: Option<i32>,
     /// Why there is no exit code.
     pub problem: Option<String>,
@@ -291,51 +341,69 @@ pub fn run(suite: Suite, home: &Path, node: &str, upstream: &str, baseline: Opti
         Err(e) => return fail(format!("cannot start the loopback relay: {e}"), dir),
     };
     let log_path = dir.join("harness.log");
-    let (out, err) = match std::fs::File::create(&log_path).and_then(|f| Ok((f.try_clone()?, f))) {
-        Ok(pair) => pair,
+    let log = match std::fs::File::create(&log_path) {
+        Ok(file) => file,
         Err(e) => return fail(format!("cannot create {}: {e}", log_path.display()), dir),
     };
-    let mut cmd = Command::new(&bin);
-    cmd.current_dir(home).arg("server").arg("--url").arg(format!("http://127.0.0.1:{port}/mcp"));
-    match suite {
+    // One harness process for a suite; one per scenario for the skills scenarios, which the
+    // harness only runs when they are named. They share the result directory, the log and the
+    // deadline.
+    let invocations: Vec<Vec<String>> = match suite {
         Suite::Active => {
-            cmd.arg("--suite").arg("active");
+            let mut args = vec!["--suite".to_owned(), "active".to_owned()];
             if let Some(baseline) = baseline {
-                cmd.arg("--expected-failures").arg(baseline);
+                args.push("--expected-failures".to_owned());
+                args.push(baseline.display().to_string());
             }
+            vec![args]
         }
-        Suite::Requirements => {
-            cmd.arg("--requirements").arg(REVISION);
-        }
-    }
-    cmd.arg("-o").arg(&dir).stdin(Stdio::null()).stdout(Stdio::from(out)).stderr(Stdio::from(err));
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => return fail(format!("cannot start {}: {e}", bin.display()), dir),
+        Suite::Requirements => vec![vec!["--requirements".to_owned(), REVISION.to_owned()]],
+        Suite::Skills => SKILLS_SCENARIOS.iter().map(|s| vec!["--scenario".to_owned(), (*s).to_owned()]).collect(),
     };
     let mut problem = None;
-    let exit = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.code(),
-            Ok(None) if started.elapsed() > DEADLINE => {
-                let _ = child.kill();
-                let _ = child.wait();
-                problem = Some(format!("the harness did not finish within {} s and was stopped", DEADLINE.as_secs()));
-                break None;
+    let mut exit: Option<i32> = Some(0);
+    for args in &invocations {
+        let (out, err) = match log.try_clone().and_then(|a| Ok((a, log.try_clone()?))) {
+            Ok(pair) => pair,
+            Err(e) => return fail(format!("cannot write {}: {e}", log_path.display()), dir),
+        };
+        let mut cmd = Command::new(&bin);
+        cmd.current_dir(home).arg("server").arg("--url").arg(format!("http://127.0.0.1:{port}/mcp")).args(args);
+        cmd.arg("-o").arg(&dir).stdin(Stdio::null()).stdout(Stdio::from(out)).stderr(Stdio::from(err));
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => return fail(format!("cannot start {}: {e}", bin.display()), dir),
+        };
+        let code = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status.code(),
+                Ok(None) if started.elapsed() > DEADLINE => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    problem = Some(format!("the harness did not finish within {} s and was stopped", DEADLINE.as_secs()));
+                    break None;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Err(e) => {
+                    problem = Some(format!("waiting for the harness failed: {e}"));
+                    break None;
+                }
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(e) => {
-                problem = Some(format!("waiting for the harness failed: {e}"));
-                break None;
-            }
+        };
+        exit = match (exit, code) {
+            (Some(worst), Some(code)) => Some(worst.max(code)),
+            _ => None,
+        };
+        if exit.is_none() {
+            break;
         }
-    };
+    }
     if exit.is_none() && problem.is_none() {
         problem = Some("the harness was ended by a signal".to_owned());
     }
-    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let text = std::fs::read_to_string(&log_path).unwrap_or_default();
     let tail: String = {
-        let chars: Vec<char> = log.chars().collect();
+        let chars: Vec<char> = text.chars().collect();
         chars[chars.len().saturating_sub(1500)..].iter().collect()
     };
     Run { exit, problem, seconds: started.elapsed().as_secs_f64(), scenarios: read_results(&dir), log_tail: tail, dir }
@@ -547,10 +615,53 @@ mod tests {
     }
 
     #[test]
+    fn the_skills_scenarios_fail_on_failure_warning_skip_and_absence() {
+        let all = |status: &str| -> Vec<Scenario> {
+            SKILLS_SCENARIOS.iter().map(|s| scenario(s, vec![check("x", "SUCCESS"), check("y", status), check("z", "INFO")])).collect()
+        };
+        let j = judge(Suite::Skills, &manifest(), &[], &all("SUCCESS"));
+        assert!(j.passes());
+        assert_eq!(j.exit_code(), 0);
+        assert_eq!(j.verdicts.len(), 3);
+        assert!(j.verdicts.iter().all(|v| v.scored));
+
+        // The harness exits 0 for a warning and for a skipped check; the gate does not pass.
+        for status in ["WARNING", "SKIPPED"] {
+            let j = judge(Suite::Skills, &manifest(), &[], &all(status));
+            assert!(!j.passes(), "{status}");
+            assert_eq!(j.exit_code(), 0, "{status}");
+            assert_eq!(failed(&j), SKILLS_SCENARIOS);
+        }
+        let j = judge(Suite::Skills, &manifest(), &[], &all("FAILURE"));
+        assert!(!j.passes());
+        assert_eq!(j.exit_code(), 1);
+
+        // A scenario the harness left no result for fails, and so does the exit code.
+        let two = &all("SUCCESS")[..2];
+        let j = judge(Suite::Skills, &manifest(), &[], two);
+        assert_eq!(failed(&j), [SKILLS_SCENARIOS[2]]);
+        assert_eq!(j.exit_code(), 1);
+    }
+
+    #[test]
+    fn the_other_suites_pass_exactly_when_the_harness_exits_zero() {
+        let good = [scenario("tools-list", vec![check("x", "SUCCESS")])];
+        let bad = [scenario("tools-list", vec![check("x", "FAILURE")])];
+        for suite in [Suite::Active, Suite::Requirements] {
+            assert!(judge(suite, &manifest(), &[], &good).passes());
+            assert!(!judge(suite, &manifest(), &[], &bad).passes());
+        }
+        let stale = judge(Suite::Active, &manifest(), &["tools-list".to_owned()], &good);
+        assert!(!stale.passes());
+        assert_eq!(stale.exit_code(), 1);
+    }
+
+    #[test]
     fn result_directories_name_their_scenario() {
         let split = |s: &str| scenario_of(s).map(|(name, _)| name);
         assert_eq!(split("server-tools-list-2026-11-13T00-24-20-188Z").as_deref(), Some("tools-list"));
         assert_eq!(split("server-json-schema-2020-12-2026-11-13T00-24-20-188Z").as_deref(), Some("json-schema-2020-12"));
+        assert_eq!(split("server-sep-2640-skills-manifest-2026-11-13T00-24-20-188Z").as_deref(), Some("sep-2640-skills-manifest"));
         assert_eq!(split("harness.log"), None);
         assert_eq!(split("server-tools-list"), None);
     }

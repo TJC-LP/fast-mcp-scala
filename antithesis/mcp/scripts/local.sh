@@ -8,9 +8,10 @@
 # antithesis/mcp/out/ (git-ignored).
 #
 # Once the eventually's own checks are done the driver runs the official conformance harness.
-# Here it runs both suites against every node; DRIVER_CONFORMANCE_NODE (a node's name, or `all`)
-# and DRIVER_CONFORMANCE_SUITE (`active`, `2026`, `all`, `off`) narrow that, and setting either to
-# the empty string lets the driver draw it, as on Antithesis.
+# Here it runs all three suites (active, 2026-07-28 requirements, skills extension scenarios)
+# against every node; DRIVER_CONFORMANCE_NODE (a node's name, or `all`) and
+# DRIVER_CONFORMANCE_SUITE (`active`, `2026`, `skills`, `all`, `off`) narrow that, and setting
+# either to the empty string lets the driver draw it, as on Antithesis.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,8 +31,18 @@ mkdir -p "${out}"
 "${compose[@]}" up -d
 "${compose[@]}" exec -T driver /opt/antithesis/test/v1/main/first_start_workload
 
-# The driver exits 0 when its eventually ends the timeline.
-deadline=$(( $(date +%s) + DRIVER_EVENTUALLY_AFTER_S + 600 ))
+# The driver exits 0 when its eventually ends the timeline. The wait covers what the eventually
+# may take: 300 s for its own checks (up to 120 s for the nodes to serve again, then the session
+# and stream checks on each), and 300 s for every harness run the driver plans, which is the
+# deadline the driver gives one run (DEADLINE in driver/src/conformance.rs). The plan is one run
+# for each node and suite named; a variable set to the empty string is one drawn value.
+nodes=3 # mcp-netty, mcp-socket, mcp-bun
+case "${DRIVER_CONFORMANCE_NODE-all}" in all) node_runs=${nodes} ;; *) node_runs=1 ;; esac
+case "${DRIVER_CONFORMANCE_SUITE-all}" in all) suite_runs=3 ;; off) suite_runs=0 ;; *) suite_runs=1 ;; esac
+harness_runs=$(( node_runs * suite_runs ))
+wait_s=$(( DRIVER_EVENTUALLY_AFTER_S + 300 + harness_runs * 300 ))
+echo "local.sh: waiting up to ${wait_s} s for the driver (${harness_runs} harness runs planned)"
+deadline=$(( $(date +%s) + wait_s ))
 while [[ "$("${engine}" inspect -f '{{.State.Running}}' driver 2>/dev/null)" == "true" ]]; do
   if (( $(date +%s) > deadline )); then
     echo "local.sh: the driver is still running past its deadline" >&2

@@ -117,13 +117,19 @@ What this check does not cover:
 **The official conformance harness, once faults have stopped.** The last thing the eventually
 does is run `@modelcontextprotocol/conformance` against one node, so the server that is checked
 for conformance is the one that went through the faults, with whatever sessions, tasks and
-streams they left behind. The node is drawn, and so is the mode. The two modes are the ones
+streams they left behind. The node is drawn, and so is the mode. The three modes are the ones
 `scripts/conformance.sh` has and CI gates on:
 
 | Mode | Harness arguments | Scenarios |
 |---|---|---|
 | active suite | `--suite active --expected-failures <baseline>` | 31 (73 checks), all at the 2025-11-25 wire through legacy sessions |
 | 2026-07-28 requirements | `--requirements 2026-07-28` | the 37 that revision requires, at its own wire; 13 more run without being scored |
+| skills extension scenarios | `--scenario <name>`, one harness process for each | the three of the Skills extension (SEP-2640): `sep-2640-skills-enumeration` (32 checks), `sep-2640-skills-manifest` (6) and `sep-2640-skills-directory` (7), at the 2026-07-28 wire |
+
+The skills scenarios are tagged `[extension]` in the harness. Neither of the other two modes
+includes them, and the harness has no option that selects all three at once, so the driver starts
+it three times in a row. The three processes share one result directory, one `harness.log` and
+one 300 s deadline.
 
 The harness is not re-implemented. The driver starts the pinned binary, waits for it, and reads
 the `checks.json` it writes for each scenario (`mcp/driver/src/conformance.rs`). The harness never
@@ -131,7 +137,9 @@ runs while faults are active: it reports a dropped connection as a failed check.
 container is excluded from faults, so the harness's own process is not disturbed either.
 
 The server under test mounts the harness's fixture (`ConformanceServer.register`: 23 tools named
-`test_*`, five prompts, three resources, a resource template and a completion handler) next to the workload's own
+`test_*`, five prompts, three resources, a resource template, a completion handler, and the
+skills of the `SkillsServer` example: three skills, one of them unlisted, and a dynamic provider)
+next to the workload's own
 tools, on the same port, on all three nodes. No name is shared. The workload's settings needed
 one addition, `resourcesSubscribe = true`: the library registers `resources/subscribe` and
 `resources/unsubscribe` only then, and the active suite has a scenario for each. The session cap
@@ -148,15 +156,15 @@ How the harness's results become properties:
 
 | Property | Type | What it says |
 |---|---|---|
-| `the server passes the conformance harness's active suite once faults stop`, `the server passes the conformance harness's 2026-07-28 requirements once faults stop` | always | The harness exited 0. This is exactly what `scripts/conformance.sh` gates on. It also fails when the harness cannot start or does not finish within 300 s. The details carry the node, the failed scenarios and checks, and the end of the harness's output. |
-| `conformance (active suite): <scenario> passes`, `conformance (2026-07-28 requirements): <scenario> passes` | always, or unreachable | One per scenario (31 and 37), so a report names the scenario that failed. The details carry the node, the ids of the failed checks and the harness's own error text for each. |
-| `the conformance harness passes the <suite> on <node>` | sometimes | One per suite and node (six). Shows that the harness really ran, and passed, against each node in a test run. |
+| `the server passes the conformance harness's active suite once faults stop`, `the server passes the conformance harness's 2026-07-28 requirements once faults stop`, `the server passes the conformance harness's skills extension scenarios once faults stop` | always | The harness exited 0. This is exactly what `scripts/conformance.sh` gates on. For the skills scenarios the property also fails on a warning or a skipped check, as the script's `skills` mode does. It also fails when the harness cannot start or does not finish within 300 s. The details carry the node, the failed scenarios and checks, and the end of the harness's output. |
+| `conformance (active suite): <scenario> passes`, `conformance (2026-07-28 requirements): <scenario> passes`, `conformance (skills extension scenarios): <scenario> passes` | always, or unreachable | One per scenario (31, 37 and 3), so a report names the scenario that failed. The details carry the node, the ids of the failed checks and the harness's own error text for each. The three of the skills mode are `conformance (skills extension scenarios): sep-2640-skills-enumeration passes`, `... sep-2640-skills-manifest passes` and `... sep-2640-skills-directory passes`. |
+| `the conformance harness passes the <suite> on <node>` | sometimes | One per suite and node (nine). Shows that the harness really ran, and passed, against each node in a test run. For the skills mode: `the conformance harness passes the skills extension scenarios on netty`, `... on socket`, `... on bun`. |
 | `the driver's reading of the conformance results agrees with the harness's exit code` | always | The per-scenario properties are computed by the driver from the result files. This one fails if they and the exit code ever tell different stories, for example after a harness bump that changes its rules. |
 
 The messages of the per-scenario and per-node properties are only known when the driver runs.
 The SDK's assertion macros take a literal, because they register it in the assertion catalog at
 build time, so these properties go through the SDK's `assert_raw` and the driver writes their
-catalog entries itself. The six per-node properties are declared at startup, so one that is
+catalog entries itself. The nine per-node properties are declared at startup, so one that is
 never met in a whole test run fails. A per-scenario property is declared when it is first
 evaluated and passes when never reached: which scenarios exist is only known once the harness
 has run, and the per-node properties already fail if it never does.
@@ -175,6 +183,13 @@ and `scripts/conformance.sh` agree:
   extension's ten and three the harness marks pending. Those get no property and can fail
   nothing. The ones that fail are listed in the details (`not_scored_failing`) and in the
   driver's log.
+- Skills extension scenarios. No baseline. A check fails when its status is `FAILURE`, `WARNING`
+  or `SKIPPED`, which is the rule of the script's `skills` mode. The harness's exit code for one
+  scenario only counts `FAILURE`, so here the first property is stricter than the exit code. A
+  skipped check counts because the scenarios skip their checks when the server does not declare
+  the extension or `directoryRead: true`; the fixture declares both, so a skip means a scenario
+  stopped testing something. A scenario with no result file fails too. The property that compares
+  the driver's reading with the exit code compares the `FAILURE` checks only for this mode.
 
 Unit tests in the driver cover these rules (`cargo test` in `mcp/driver`).
 
@@ -233,7 +248,7 @@ antithesis/mcp/scripts/launch.sh 12        # 12 compute hours on Antithesis
 - `local.sh` writes its evidence (the SDK output of every container, the logs, and `unmet.tsv`)
   to `mcp/out/<timestamp>/`. Sometimes-assertions that need a fault are expected in `unmet.tsv`,
   and so are any lines in `known-failing.tsv`.
-- In the local loop the harness runs both suites against all three nodes, and `local.sh` prints
+- In the local loop the harness runs all three suites against all three nodes, and `local.sh` prints
   one line per run with its exit code, counts and duration. The harness's output and result files
   land in `mcp/out/<timestamp>/conformance/<suite>-<node>/`. It also prints how many messages
   were checked against the specification's schema.
@@ -244,16 +259,18 @@ antithesis/mcp/scripts/launch.sh 12        # 12 compute hours on Antithesis
 `DRIVER_EVENTUALLY=off` turns the eventually off; `DRIVER_EVENTUALLY_AFTER_S=<n>` fires it after n
 seconds of workload instead of behind its rare draw. `MCP_NODES` (`name=url,...`) names the nodes.
 `DRIVER_CONFORMANCE_NODE` (a node's name, or `all`) and `DRIVER_CONFORMANCE_SUITE` (`active`,
-`2026`, `all`, or `off` for no harness at all) replace the draw of the node and of the suite.
-Neither is set on Antithesis. `local.sh` sets both to `all`; give it either as an empty string to
-get the draw back.
+`2026`, `skills`, `all`, or `off` for no harness at all) replace the draw of the node and of the
+suite. Neither is set on Antithesis. `local.sh` sets both to `all`; give it either as an empty
+string to get the draw back. `local.sh` waits for the driver as long as the plan needs: the
+workload time, 300 s for the eventually's own checks, and 300 s for each planned harness run
+(nine with both set to `all`).
 
 ### What the conformance properties do not cover
 
 - The harness runs after faults, never during them. It shows that a server still conforms after
   what the faults did to it, not that it conforms while a fault is active.
-- One suite against one node per timeline. Coverage of all six combinations comes from many
-  timelines; the six sometimes-properties show whether a test run got there.
+- One suite against one node per timeline. Coverage of all nine combinations comes from many
+  timelines; the nine sometimes-properties show whether a test run got there.
 - The scenarios the 2026-07-28 requirement set does not score (the tasks extension, three pending
   ones) are run and logged, and assert nothing. Eleven of them fail against this server. The
   requirement set says of all thirteen that the harness's own reference fixture cannot pass them

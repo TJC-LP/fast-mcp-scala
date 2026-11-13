@@ -119,7 +119,8 @@ struct Harness {
     manifest: Result<conformance::Manifest, String>,
     /// `DRIVER_CONFORMANCE_NODE`: a node's name, or `all`. Not set: the eventually's draw decides.
     node: Option<String>,
-    /// `DRIVER_CONFORMANCE_SUITE`: `active`, `2026`, `all` or `off`. Not set: the draw decides.
+    /// `DRIVER_CONFORMANCE_SUITE`: `active`, `2026`, `skills`, `all` or `off`. Not set: the draw
+    /// decides.
     suite: Option<String>,
     /// Messages of the per-scenario properties already declared to the assertion catalog.
     declared: Mutex<BTreeSet<String>>,
@@ -131,8 +132,8 @@ impl Harness {
         let home = PathBuf::from(var("CONFORMANCE_HOME").unwrap_or_else(|| "/opt/conformance".to_owned()));
         let suite = var("DRIVER_CONFORMANCE_SUITE");
         assert!(
-            matches!(suite.as_deref(), None | Some("active" | "2026" | "all" | "off")),
-            "DRIVER_CONFORMANCE_SUITE must be active, 2026, all or off"
+            matches!(suite.as_deref(), None | Some("active" | "2026" | "skills" | "all" | "off")),
+            "DRIVER_CONFORMANCE_SUITE must be active, 2026, skills, all or off"
         );
         Harness {
             manifest: conformance::Manifest::load(&home),
@@ -143,13 +144,14 @@ impl Harness {
         }
     }
 
-    /// The suites a set `DRIVER_CONFORMANCE_SUITE` names, or both when the draw decides.
+    /// The suites a set `DRIVER_CONFORMANCE_SUITE` names, or all three when the draw decides.
     fn suites(&self) -> Vec<Suite> {
         match self.suite.as_deref() {
             Some("off") => Vec::new(),
             Some("active") => vec![Suite::Active],
             Some("2026") => vec![Suite::Requirements],
-            _ => vec![Suite::Active, Suite::Requirements],
+            Some("skills") => vec![Suite::Skills],
+            _ => vec![Suite::Active, Suite::Requirements, Suite::Skills],
         }
     }
 }
@@ -510,7 +512,9 @@ impl Driver {
     ///
     /// The properties, per run of the harness:
     /// - `the server passes the conformance harness's <suite> once faults stop`: the harness
-    ///   exited 0. This is exactly what `scripts/conformance.sh` gates on.
+    ///   exited 0. This is exactly what `scripts/conformance.sh` gates on. For the skills
+    ///   scenarios the script also fails on a warning or a skipped check, which the harness's
+    ///   exit code does not count, and so does this property.
     /// - `conformance (<suite>): <scenario> passes`, one per scenario: no check of that scenario
     ///   failed, by the harness's rules (`conformance::judge`). A check the baseline expects to
     ///   fail, and a scenario the requirement set runs without scoring, fail nothing.
@@ -554,7 +558,8 @@ impl Driver {
             .collect();
         let scored = judgement.verdicts.iter().filter(|v| v.scored).count();
         let checks: usize = judgement.verdicts.iter().map(|v| v.checks).sum();
-        let passed = run.exit == Some(0);
+        // The skills scenarios are gated more strictly than the harness's exit code.
+        let passed = run.exit == Some(0) && (suite != Suite::Skills || judgement.passes());
         let details = json!({
             "node": node.name,
             "suite": suite.label(),
@@ -602,6 +607,9 @@ impl Driver {
             }
             Suite::Requirements => {
                 assert_always!(passed, "the server passes the conformance harness's 2026-07-28 requirements once faults stop", &details)
+            }
+            Suite::Skills => {
+                assert_always!(passed, "the server passes the conformance harness's skills extension scenarios once faults stop", &details)
             }
         }
         raw_assertion(AssertType::Sometimes, "Sometimes", true, true, passed, &passes_on(suite, &node.name), &details);
@@ -735,7 +743,7 @@ impl Driver {
         let drawn = tc.draw(gs::weighted_booleans(0.0005));
         // The node the conformance harness runs against once faults have stopped, and the suite.
         let node = tc.draw(gs::integers::<usize>().max_value(self.nodes.len() - 1));
-        let suite = if tc.draw(gs::booleans()) { Suite::Requirements } else { Suite::Active };
+        let suite = tc.draw(gs::sampled_from(vec![Suite::Active, Suite::Requirements, Suite::Skills]));
         if self.eventually_off || self.ending.load(Ordering::SeqCst) {
             return;
         }
