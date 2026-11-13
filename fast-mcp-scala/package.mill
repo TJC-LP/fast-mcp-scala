@@ -242,6 +242,63 @@ object `package` extends Module {
     }
   }
 
+  /** The server the Antithesis workload tests (`antithesis/mcp`): the JVM library plus a small
+    * application with tools the driver can judge, and the Antithesis Java SDK for assertions inside
+    * it. Not published; the SDK is on no other classpath. `stage` lays the jars out the way the
+    * image wants them: `bin/` holds this project's own jars (instrumented by Antithesis), `lib/`
+    * the third-party ones.
+    */
+  object antithesisSut extends ScalaModule {
+    override def scalaVersion: T[String] = scala3Version
+    override def moduleDeps = Seq(jvm)
+    override def sources = Task.Sources(
+      BuildCtx.workspaceRoot / "antithesis" / "mcp" / "sut" / "shared" / "src",
+      BuildCtx.workspaceRoot / "antithesis" / "mcp" / "sut" / "jvm" / "src"
+    )
+    override def mvnDeps = Seq(mvn"com.antithesis:sdk:${Versions.antithesisSdk}")
+    override def mainClass = Some("com.tjclp.fastmcp.antithesis.AntithesisSut")
+
+    def stage: T[PathRef] = Task {
+      val bin = Task.dest / "bin"
+      val lib = Task.dest / "lib"
+      os.makeDir.all(bin)
+      os.makeDir.all(lib)
+      os.copy(jvm.jar().path, bin / "fast-mcp-scala.jar")
+      os.copy(jar().path, bin / "antithesis-sut.jar")
+      resolvedRunMvnDeps().map(_.path).filter(_.ext == "jar").foreach { dep =>
+        os.copy.over(dep, lib / dep.last)
+      }
+      PathRef(Task.dest)
+    }
+  }
+
+  /** The same server under test for Bun: the shared tools plus a Scala.js launcher that writes its
+    * assertions in the Antithesis fallback format. Not published. `stage` produces the optimized
+    * bundle and its source map for the Bun image.
+    *
+    * Linked as a CommonJS module because Antithesis instruments the bundle: its JavaScript
+    * instrumentation handles `require` by default and needs an account setting for `import`. The
+    * source map lets it attribute coverage to the Scala sources.
+    */
+  object antithesisSutJs extends BunScalaJSModule {
+    def scalaVersion = scala3Version
+    def scalaJSVersion = Versions.scalaJs
+    override def moduleKind = Task { ModuleKind.CommonJSModule }
+    override def moduleDeps = Seq(js)
+    override def sources = Task.Sources(
+      BuildCtx.workspaceRoot / "antithesis" / "mcp" / "sut" / "shared" / "src",
+      BuildCtx.workspaceRoot / "antithesis" / "mcp" / "sut" / "js" / "src"
+    )
+    override def scalacOptions = BuildConfig.crossScalacOptions
+
+    def stage: T[PathRef] = Task {
+      val linked = fullLinkJS().dest.path
+      os.copy(linked / "main.js", Task.dest / "main.js")
+      os.copy(linked / "main.js.map", Task.dest / "main.js.map")
+      PathRef(Task.dest)
+    }
+  }
+
   /** GraalVM native-image smoke binaries (NOT published — verify with `resolve __.publishArtifacts`).
     *
     * These exist so CI proves that a downstream `NativeImageModule` build against fast-mcp-scala

@@ -21,6 +21,8 @@ val organization = "com.tjclp"
 
 /** Version constants - centralized for maintenance */
 object Versions {
+  // Antithesis Java SDK: only the unpublished `antithesisSut` module depends on it.
+  val antithesisSdk = "1.8.0"
   val zio = "2.1.26"
   val zioJson = "0.10.0"
   val zioHttp = "3.11.4"

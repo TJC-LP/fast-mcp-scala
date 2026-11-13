@@ -1,0 +1,48 @@
+# The server under test on Bun (Scala.js): the same tools as the JVM image, on the library's
+# Bun.serve transport, which is separate HTTP code from the JVM backends.
+#
+# The bundle is linked on the host by `scripts/build.sh`
+# (`./mill fast-mcp-scala.antithesisSutJs.stage`) and copied in from `sut/stage/js/`. The
+# context is this directory (`antithesis/mcp/sut`).
+#
+# Instrumented by Antithesis. Its JavaScript instrumentation is documented for Node only, but Bun
+# is compatible enough that it works unchanged (run b940de89b2a74b88a3c5a081503bf872-66-21: the
+# module `fast-mcp-scala-sut-bun` was instrumented with 37,810 locations and thread pausing was
+# enabled for `bun (mcp-bun)`). What that needs from this image:
+#   - the bundle linked as CommonJS: the instrumentor handles `require` by default, `import` only
+#     after an account setting;
+#   - its source map beside it, so coverage can be attributed to the Scala sources;
+#   - a package.json, whose `name` labels the module;
+#   - a `node_modules` directory, even an empty one: without it the instrumentor logs "Couldn't
+#     find a node_modules in any ancestor directory - skipping instrumentation";
+#   - /opt/antithesis/catalog pointing at the directory.
+#
+# Bun is installed from its release archive, checksum-pinned. On x86-64 this is the BASELINE
+# build (no AVX2 requirement; Antithesis's simulated CPU has AVX2, so the regular build would
+# also run). SUT_PLATFORM lets the local loop build for the host's own architecture: the x86-64
+# binary aborts under emulation on an ARM workstation.
+ARG SUT_PLATFORM=linux/amd64
+FROM --platform=${SUT_PLATFORM} debian:trixie-slim
+ARG BUN_VERSION=1.4.1
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl jq unzip \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) asset=bun-linux-x64-baseline; sum=a8c9c6738202e2fced555dd860a953c56c0cd059f75041e7010ae81a32802646 ;; \
+      arm64) asset=bun-linux-aarch64; sum=580ce77533108dc6b10bec1721397e4f5aa44e909726da2451d483dfc5e581d6 ;; \
+      *) echo "unsupported architecture" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/bun.zip "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/${asset}.zip"; \
+    echo "${sum}  /tmp/bun.zip" | sha256sum -c -; \
+    unzip -q /tmp/bun.zip -d /tmp; \
+    install -m 755 "/tmp/${asset}/bun" /usr/local/bin/bun; \
+    rm -rf /tmp/bun.zip "/tmp/${asset}"
+COPY stage/js/main.js stage/js/main.js.map /opt/app/
+COPY bun-entry.cjs /opt/app/entry.cjs
+RUN printf '{"name":"fast-mcp-scala-sut-bun","version":"0.0.0","private":true,"main":"entry.cjs"}\n' > /opt/app/package.json \
+    && mkdir -p /opt/app/node_modules \
+    && mkdir -p /opt/antithesis && ln -s /opt/app /opt/antithesis/catalog
+ENV SUT_PORT=8000
+# `exec` so Bun is the container's main process and receives its signals.
+CMD ["sh", "-c", "exec bun run /opt/app/entry.cjs \"$SUT_PORT\""]

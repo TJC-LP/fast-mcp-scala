@@ -1,0 +1,26 @@
+# Local-loop overrides: the SDKs write their assertions to files, and the servers are reachable
+# from the host for poking at them.
+services:
+  mcp-netty:
+    environment:
+      ANTITHESIS_SDK_LOCAL_OUTPUT: /tmp/sdk.jsonl
+    ports: ["18101:8000"]
+  mcp-socket:
+    environment:
+      ANTITHESIS_SDK_LOCAL_OUTPUT: /tmp/sdk.jsonl
+    ports: ["18102:8000"]
+  # Built for the host's own architecture: the x86-64 Bun binary aborts under emulation on an ARM
+  # workstation. A separate tag keeps this image apart from the one a launch pushes.
+  mcp-bun:
+    platform: ${LOCAL_PLATFORM:-linux/arm64}
+    build:
+      args:
+        SUT_PLATFORM: ${LOCAL_PLATFORM:-linux/arm64}
+    image: fast-mcp-scala-sut-bun:local
+    environment:
+      ANTITHESIS_SDK_LOCAL_OUTPUT: /tmp/sdk.jsonl
+    ports: ["18103:8000"]
+  driver:
+    environment:
+      ANTITHESIS_SDK_LOCAL_OUTPUT: /tmp/sdk.jsonl
+      DRIVER_EVENTUALLY_AFTER_S: ${DRIVER_EVENTUALLY_AFTER_S:-90}
