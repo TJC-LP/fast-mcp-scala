@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
+### Compatibility
+
+- **1.1.0 is binary compatible with 1.0.0 and 1.0.1 for the published API of the JVM artifact**
+  (TJC-5134). A jar compiled against 1.0.x links against 1.1.0 without being recompiled.
+  - Every class that gained parameters keeps its old JVM signatures as forwarders:
+    `McpServerSettings` (the 17-field constructor, `apply` and `copy` of 1.0.1, and the 16-field
+    ones of 1.0.0, which 1.0.1 had dropped), `TaskSettings` (11 fields), `LimitSettings` (5),
+    `new ToolManager()`, `DefaultDecodeContext(maxDepth, maxObjectFields)`, the 12-parameter
+    `Builtins` constructor and the 11-parameter `RouterBuilder.build`. An old constructor or
+    `apply` gives the fields added since their defaults. An old `copy` keeps them as they are in
+    the value being copied. The default getters and the extractor positions of the old fields are
+    unchanged, because new fields were only added at the end.
+  - The forwarders are `private[fastmcp]`: present in the class files, not visible to source
+    code. Code that is recompiled calls the current signatures, and no call becomes ambiguous.
+  - `McpServerCore.skills`, `removeSkills` and `skillProvider` have default implementations, so
+    an implementation of the trait compiled against 1.0.x still loads. The default fails with an
+    `UnsupportedOperationException` that names the implementation; `McpServer` implements all
+    three.
+  - How it is checked: `./mill fast-mcp-scala.mimaCheck` runs MiMa against both releases on every
+    pull request and before a release, and fails on any finding that `.github/mima-exclusions`
+    does not list with a reason. `BinaryCompatibilityTest` runs a program compiled against the
+    released 1.0.1 jar, including a server whose annotation and contract macros 1.0.1 expanded,
+    on the current classes. See "Binary compatibility" in `CONTRIBUTING.md`.
+  - The Scala.js and Scala Native artifacts are built from the same sources and carry the same
+    forwarders. No tool checks their linked form; the check covers the JVM artifact.
+- **A 1.0.x jar links, and it gets the 1.1.0 defaults.** Everything listed below as on by default
+  applies to it without a recompile: tool input validation, the new input limits, the Host /
+  Origin guard on a loopback bind, and the task store's byte budgets.
+- **Two things do need a recompile.** The first is rare: a type class a 1.0.x jar derived from
+  the `Mirror` of `McpServerSettings`, `TaskSettings` or `LimitSettings` (a JSON codec for the
+  settings, say) knows only the 1.0.x fields, and building a value through it fails. The second
+  is the schema of a defaulted parameter. A tool's `inputSchema` is derived when the server is
+  compiled. A server compiled against 1.0.x advertises a parameter or input field that has a
+  Scala default as `required`, as 1.0.x did, and 1.1.0 enforces the advertised schema. A call
+  that omits such an argument was served by 1.0.x (the default was applied) and is refused on
+  1.1.0 with `missing required property`, until the server is recompiled against 1.1.0, which
+  derives the argument as optional (TJC-5117 under *Changed*). A call that sends every argument
+  is unaffected.
+
 ### Security
 
 - **The socket HTTP backend parses requests strictly** (TJC-5087). It is the default on Scala
@@ -279,7 +318,8 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   `McpServerSettings(limits = LimitSettings(maxArrayElements = 16384, maxValues = 262144))`.
   `LimitSettings` and `DefaultDecodeContext` gain fields at the end with defaults: source
   compatible for named and positional construction (a pattern match that destructures
-  `LimitSettings` positionally needs the new fields), not binary compatible.
+  `LimitSettings` positionally needs the new fields when it is recompiled), and binary compatible:
+  the 1.0.x constructors, `apply` and `copy` are kept (see *Compatibility*).
 
 ### Added
 
@@ -490,8 +530,9 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 - `ResourceManager` gains mounted `ResourceSource`s (resolved after static resources and before
   templates) and `readResourceWithMime`; registering a static resource or a template that collides
   with a URI a mounted source serves now fails instead of overwriting.
-- `McpServerCore` declares the four skills registration methods (abstract; implemented by
-  `McpServer`). Third-party implementations of the trait must add them.
+- `McpServerCore` declares the four skills registration methods. They are not abstract: an
+  implementation of the trait that does not override them keeps compiling and linking, and a call
+  fails with an `UnsupportedOperationException` that names it. `McpServer` implements them.
 - `McpRouter.deriveCapabilities` declares the skills extension when its methods are registered;
   `RouterBuilder.build` and `Builtins` take an optional `SkillRegistry`.
 

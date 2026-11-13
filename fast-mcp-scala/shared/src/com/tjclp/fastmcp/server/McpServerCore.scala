@@ -1,6 +1,8 @@
 package com.tjclp.fastmcp
 package server
 
+import scala.annotation.unused
+
 import zio.*
 
 import com.tjclp.fastmcp.core.*
@@ -281,8 +283,13 @@ trait McpServerCore[R]:
     * (`skills/list`, `skills/get`, `resources/read`, `resources/directory/read`). A skill whose
     * root is already published is replaced. Registering a skill declares the extension. Fails with
     * [[com.tjclp.fastmcp.core.skills.SkillError.Exception]] and publishes nothing on any problem.
+    *
+    * `skills`, `removeSkills` and `skillProvider` were added in 1.1.0. They are not abstract, so an
+    * implementation compiled against 1.0.x still links; their default fails with an
+    * `UnsupportedOperationException` naming the implementation. [[McpServer]] implements all three.
     */
-  def skills(skills: List[McpSkill]): ZIO[Any, Throwable, McpServerCore[R]]
+  def skills(@unused skills: List[McpSkill]): ZIO[Any, Throwable, McpServerCore[R]] =
+    ZIO.fail(McpServerCore.skillsUnsupported(this, "skills"))
 
   /** Publish one skill (see [[skills]]). */
   def skill(skill: McpSkill): ZIO[Any, Throwable, McpServerCore[R]] = skills(List(skill))
@@ -290,12 +297,16 @@ trait McpServerCore[R]:
   /** Atomically withdraw the skills rooted at the given URIs (`skill://acme/refunds`). Clients
     * holding an older entry see verification failures on read and refresh via `skills/get`.
     */
-  def removeSkills(rootUris: List[String]): ZIO[Any, Throwable, McpServerCore[R]]
+  def removeSkills(@unused rootUris: List[String]): ZIO[Any, Throwable, McpServerCore[R]] =
+    ZIO.fail(McpServerCore.skillsUnsupported(this, "removeSkills"))
 
   /** Mount a [[SkillProvider]] — a generated, remote or authorization-scoped catalog. Its
     * namespaces must not overlap published skills or other providers.
     */
-  def skillProvider[R1 >: R](provider: SkillProvider[R1]): ZIO[Any, Throwable, McpServerCore[R]]
+  def skillProvider[R1 >: R](
+      @unused provider: SkillProvider[R1]
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    ZIO.fail(McpServerCore.skillsUnsupported(this, "skillProvider"))
 
   // --- Server lifecycle ---
 
@@ -307,3 +318,18 @@ trait McpServerCore[R]:
     * entirely, and Scala.js DCE drops `Bun.serve`.
     */
   def runHttp()(using transport.HttpTransportBackend): ZIO[R, Throwable, Unit]
+
+object McpServerCore:
+
+  /** The failure the default `skills` / `removeSkills` / `skillProvider` return on an
+    * implementation that does not override them.
+    */
+  private[server] def skillsUnsupported(
+      server: McpServerCore[?],
+      method: String
+  ): UnsupportedOperationException =
+    new UnsupportedOperationException(
+      s"${server.getClass.getName} does not implement McpServerCore.$method: it does not support " +
+        "the Skills extension (io.modelcontextprotocol/skills). The method was added in " +
+        "fast-mcp-scala 1.1.0; McpServer implements it."
+    )

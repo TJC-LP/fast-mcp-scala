@@ -58,6 +58,17 @@ object Versions {
   // rejected before any node is built. Added under DEPENDENCY_POLICY "a new dependency feature is
   // needed"; bump only for a security advisory or a parser bug that reaches frontmatter.
   val scalaYaml = "0.3.3"
+  // Binary compatibility (`./mill fast-mcp-scala.mimaCheck`, CONTRIBUTING.md). The released 1.x
+  // versions the current sources must stay binary compatible with; this is the one place they are
+  // stated. Append each new 1.x release and drop none before 2.0: the forwarders kept for an older
+  // release are `private[fastmcp]`, and MiMa ignores a member that is package-private in the
+  // baseline, so only the comparison against the release where the signature was public guards it.
+  val binaryCompatBaselines = Seq("1.0.0", "1.0.1")
+  // The baseline `fast-mcp-scala.compat.client` is compiled against (it must be one of the above).
+  // It stays where it is when a release is appended: the client is what links the 1.0.1 signatures.
+  val binaryCompatClient = "1.0.1"
+  // MiMa runs as a build tool only (`fast-mcp-scala.compat.mima`); it is on no published classpath.
+  val mimaCore = "1.2.1"
 }
 
 /** Shared build configuration constants */
@@ -172,6 +183,21 @@ trait CrossPlatformTests extends JavaModule {
     moduleDir / "src",
     moduleDir / os.up / os.up / "jvm-native" / "test" / "src"
   )
+}
+
+/** Puts the classes of `fast-mcp-scala.compat.client` on a test module's classpath. That client is
+  * compiled against a released version (`Versions.binaryCompatClient`), so a test that calls it
+  * runs code linked against the old signatures on the current classes.
+  *
+  * A top-level trait for the reason given on [[CrossPlatformTests]]: the `super.<task>()` override
+  * cannot live in the nested test object.
+  */
+trait BinaryCompatTests extends JavaModule {
+  def binaryCompatClient: T[PathRef]
+
+  override def unmanagedClasspath = Task {
+    super.unmanagedClasspath() ++ Seq(binaryCompatClient())
+  }
 }
 
 /** Scala.js test-link fix for Scala 3.8+. Mill's `TestScalaJSModule.scalaJSTestDeps` resolves the

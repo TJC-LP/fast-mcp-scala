@@ -54,6 +54,11 @@ jobs:
       - name: Run Tests
         run: ./mill -i fast-mcp-scala.test
 
+      # The same gate as ci.yml's binary-compat job: no release ships a binary break that
+      # .github/mima-exclusions does not list.
+      - name: Binary compatibility (MiMa)
+        run: ./mill fast-mcp-scala.mimaCheck
+
   publish:
     name: ${{ github.event_name == 'push' && 'Publish to Maven Central' || 'Publish dry run (publishLocal, nothing uploaded)' }}
     needs: verify

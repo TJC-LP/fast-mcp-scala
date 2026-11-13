@@ -65,6 +65,11 @@ final class DefaultDecodeContext(
     maxNumberExponent
   )
 
+  // Binary compatibility with 1.0.x: the `(maxDepth, maxObjectFields)` constructor. The bounds
+  // added since take their defaults.
+  private[fastmcp] def this(maxDepth: Int, maxObjectFields: Int) =
+    this(maxDepth, maxObjectFields, maxArrayElements = JsonLimits.DefaultMaxArrayElements)
+
   /** Best-effort cast — callers are almost always other decoders, not user code. */
   override def convertValue[T: ClassTag](name: String, rawValue: Any): T =
     rawValue match

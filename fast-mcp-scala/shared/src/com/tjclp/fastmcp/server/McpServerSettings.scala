@@ -130,6 +130,98 @@ case class TaskSettings(
     "TaskSettings.maxBytesTotal must be >= maxBytesPerOwner"
   )
 
+  // Binary compatibility with 1.0.x: the 11-field constructor. Later fields take their defaults; the
+  // one repeated below is checked against the primary constructor's by BinaryCompatibilityTest.
+  private[fastmcp] def this(
+      enabled: Boolean,
+      defaultTtlMs: Long,
+      maxTtlMs: Long,
+      pollIntervalMs: Long,
+      maxConcurrentPerSession: Int,
+      maxConcurrentTotal: Int,
+      maxStoredPerOwner: Int,
+      maxStoredTotal: Int,
+      minResultRetentionMs: Long,
+      sweepIntervalMs: Long,
+      ownerKey: com.tjclp.fastmcp.core.TaskOwnerKey
+  ) =
+    this(
+      enabled,
+      defaultTtlMs,
+      maxTtlMs,
+      pollIntervalMs,
+      maxConcurrentPerSession,
+      maxConcurrentTotal,
+      maxStoredPerOwner,
+      maxStoredTotal,
+      minResultRetentionMs,
+      sweepIntervalMs,
+      ownerKey,
+      maxRequestBytes = 2L * 1024 * 1024
+    )
+
+  // Binary compatibility with 1.0.x: the 11-field `copy`. Later fields keep their values.
+  private[fastmcp] def copy(
+      enabled: Boolean,
+      defaultTtlMs: Long,
+      maxTtlMs: Long,
+      pollIntervalMs: Long,
+      maxConcurrentPerSession: Int,
+      maxConcurrentTotal: Int,
+      maxStoredPerOwner: Int,
+      maxStoredTotal: Int,
+      minResultRetentionMs: Long,
+      sweepIntervalMs: Long,
+      ownerKey: com.tjclp.fastmcp.core.TaskOwnerKey
+  ): TaskSettings =
+    copy(
+      enabled,
+      defaultTtlMs,
+      maxTtlMs,
+      pollIntervalMs,
+      maxConcurrentPerSession,
+      maxConcurrentTotal,
+      maxStoredPerOwner,
+      maxStoredTotal,
+      minResultRetentionMs,
+      sweepIntervalMs,
+      ownerKey,
+      maxRequestBytes = maxRequestBytes
+    )
+
+object TaskSettings:
+
+  // 1.0.x had no explicit companion, and the synthetic one printed as the class name.
+  override def toString: String = "TaskSettings"
+
+  // Binary compatibility with 1.0.x: the 11-field `apply`.
+  private[fastmcp] def apply(
+      enabled: Boolean,
+      defaultTtlMs: Long,
+      maxTtlMs: Long,
+      pollIntervalMs: Long,
+      maxConcurrentPerSession: Int,
+      maxConcurrentTotal: Int,
+      maxStoredPerOwner: Int,
+      maxStoredTotal: Int,
+      minResultRetentionMs: Long,
+      sweepIntervalMs: Long,
+      ownerKey: com.tjclp.fastmcp.core.TaskOwnerKey
+  ): TaskSettings =
+    new TaskSettings(
+      enabled,
+      defaultTtlMs,
+      maxTtlMs,
+      pollIntervalMs,
+      maxConcurrentPerSession,
+      maxConcurrentTotal,
+      maxStoredPerOwner,
+      maxStoredTotal,
+      minResultRetentionMs,
+      sweepIntervalMs,
+      ownerKey
+    )
+
 /** Settings for the **Skills extension** (`io.modelcontextprotocol/skills`, SEP-2640). Full
   * reference: `docs/skills.md`.
   *
@@ -319,6 +411,250 @@ case class McpServerSettings(
   private[fastmcp] lazy val hostGuardPolicy: transport.HostGuard.Policy =
     transport.HostGuard.policy(this)
 
+  // Binary compatibility with 1.0.1: the 17-field constructor. Later fields take their defaults; the
+  // one repeated below is checked against the primary constructor's by BinaryCompatibilityTest.
+  private[fastmcp] def this(
+      host: String,
+      port: Int,
+      httpEndpoint: String,
+      exposeTemplatesEndpoint: Boolean,
+      stateless: Boolean,
+      keepAliveInterval: Option[java.time.Duration],
+      sessionIdleTimeout: Option[java.time.Duration],
+      disallowDelete: Boolean,
+      loggingEnabled: Boolean,
+      resourcesSubscribe: Boolean,
+      allowedHosts: Option[Set[String]],
+      allowedOrigins: Option[Set[String]],
+      maxRequestBodyBytes: Int,
+      maxSessions: Option[Int],
+      tasks: TaskSettings,
+      limits: LimitSettings,
+      instructions: Option[String]
+  ) =
+    this(
+      host,
+      port,
+      httpEndpoint,
+      exposeTemplatesEndpoint,
+      stateless,
+      keepAliveInterval,
+      sessionIdleTimeout,
+      disallowDelete,
+      loggingEnabled,
+      resourcesSubscribe,
+      allowedHosts,
+      allowedOrigins,
+      maxRequestBodyBytes,
+      maxSessions,
+      tasks,
+      limits,
+      instructions,
+      skills = SkillSettings()
+    )
+
+  // Binary compatibility with 1.0.1: the 17-field `copy`. Later fields keep their values.
+  private[fastmcp] def copy(
+      host: String,
+      port: Int,
+      httpEndpoint: String,
+      exposeTemplatesEndpoint: Boolean,
+      stateless: Boolean,
+      keepAliveInterval: Option[java.time.Duration],
+      sessionIdleTimeout: Option[java.time.Duration],
+      disallowDelete: Boolean,
+      loggingEnabled: Boolean,
+      resourcesSubscribe: Boolean,
+      allowedHosts: Option[Set[String]],
+      allowedOrigins: Option[Set[String]],
+      maxRequestBodyBytes: Int,
+      maxSessions: Option[Int],
+      tasks: TaskSettings,
+      limits: LimitSettings,
+      instructions: Option[String]
+  ): McpServerSettings =
+    copy(
+      host,
+      port,
+      httpEndpoint,
+      exposeTemplatesEndpoint,
+      stateless,
+      keepAliveInterval,
+      sessionIdleTimeout,
+      disallowDelete,
+      loggingEnabled,
+      resourcesSubscribe,
+      allowedHosts,
+      allowedOrigins,
+      maxRequestBodyBytes,
+      maxSessions,
+      tasks,
+      limits,
+      instructions,
+      skills = skills
+    )
+
+  // Binary compatibility with 1.0.0: the 16-field constructor, from before `instructions`.
+  private[fastmcp] def this(
+      host: String,
+      port: Int,
+      httpEndpoint: String,
+      exposeTemplatesEndpoint: Boolean,
+      stateless: Boolean,
+      keepAliveInterval: Option[java.time.Duration],
+      sessionIdleTimeout: Option[java.time.Duration],
+      disallowDelete: Boolean,
+      loggingEnabled: Boolean,
+      resourcesSubscribe: Boolean,
+      allowedHosts: Option[Set[String]],
+      allowedOrigins: Option[Set[String]],
+      maxRequestBodyBytes: Int,
+      maxSessions: Option[Int],
+      tasks: TaskSettings,
+      limits: LimitSettings
+  ) =
+    this(
+      host,
+      port,
+      httpEndpoint,
+      exposeTemplatesEndpoint,
+      stateless,
+      keepAliveInterval,
+      sessionIdleTimeout,
+      disallowDelete,
+      loggingEnabled,
+      resourcesSubscribe,
+      allowedHosts,
+      allowedOrigins,
+      maxRequestBodyBytes,
+      maxSessions,
+      tasks,
+      limits,
+      instructions = None
+    )
+
+  // Binary compatibility with 1.0.0: the 16-field `copy`. Later fields keep their values.
+  private[fastmcp] def copy(
+      host: String,
+      port: Int,
+      httpEndpoint: String,
+      exposeTemplatesEndpoint: Boolean,
+      stateless: Boolean,
+      keepAliveInterval: Option[java.time.Duration],
+      sessionIdleTimeout: Option[java.time.Duration],
+      disallowDelete: Boolean,
+      loggingEnabled: Boolean,
+      resourcesSubscribe: Boolean,
+      allowedHosts: Option[Set[String]],
+      allowedOrigins: Option[Set[String]],
+      maxRequestBodyBytes: Int,
+      maxSessions: Option[Int],
+      tasks: TaskSettings,
+      limits: LimitSettings
+  ): McpServerSettings =
+    copy(
+      host,
+      port,
+      httpEndpoint,
+      exposeTemplatesEndpoint,
+      stateless,
+      keepAliveInterval,
+      sessionIdleTimeout,
+      disallowDelete,
+      loggingEnabled,
+      resourcesSubscribe,
+      allowedHosts,
+      allowedOrigins,
+      maxRequestBodyBytes,
+      maxSessions,
+      tasks,
+      limits,
+      instructions = instructions
+    )
+
+object McpServerSettings:
+
+  // 1.0.x had no explicit companion, and the synthetic one printed as the class name.
+  override def toString: String = "McpServerSettings"
+
+  // Binary compatibility with 1.0.1: the 17-field `apply`.
+  private[fastmcp] def apply(
+      host: String,
+      port: Int,
+      httpEndpoint: String,
+      exposeTemplatesEndpoint: Boolean,
+      stateless: Boolean,
+      keepAliveInterval: Option[java.time.Duration],
+      sessionIdleTimeout: Option[java.time.Duration],
+      disallowDelete: Boolean,
+      loggingEnabled: Boolean,
+      resourcesSubscribe: Boolean,
+      allowedHosts: Option[Set[String]],
+      allowedOrigins: Option[Set[String]],
+      maxRequestBodyBytes: Int,
+      maxSessions: Option[Int],
+      tasks: TaskSettings,
+      limits: LimitSettings,
+      instructions: Option[String]
+  ): McpServerSettings =
+    new McpServerSettings(
+      host,
+      port,
+      httpEndpoint,
+      exposeTemplatesEndpoint,
+      stateless,
+      keepAliveInterval,
+      sessionIdleTimeout,
+      disallowDelete,
+      loggingEnabled,
+      resourcesSubscribe,
+      allowedHosts,
+      allowedOrigins,
+      maxRequestBodyBytes,
+      maxSessions,
+      tasks,
+      limits,
+      instructions
+    )
+
+  // Binary compatibility with 1.0.0: the 16-field `apply`.
+  private[fastmcp] def apply(
+      host: String,
+      port: Int,
+      httpEndpoint: String,
+      exposeTemplatesEndpoint: Boolean,
+      stateless: Boolean,
+      keepAliveInterval: Option[java.time.Duration],
+      sessionIdleTimeout: Option[java.time.Duration],
+      disallowDelete: Boolean,
+      loggingEnabled: Boolean,
+      resourcesSubscribe: Boolean,
+      allowedHosts: Option[Set[String]],
+      allowedOrigins: Option[Set[String]],
+      maxRequestBodyBytes: Int,
+      maxSessions: Option[Int],
+      tasks: TaskSettings,
+      limits: LimitSettings
+  ): McpServerSettings =
+    new McpServerSettings(
+      host,
+      port,
+      httpEndpoint,
+      exposeTemplatesEndpoint,
+      stateless,
+      keepAliveInterval,
+      sessionIdleTimeout,
+      disallowDelete,
+      loggingEnabled,
+      resourcesSubscribe,
+      allowedHosts,
+      allowedOrigins,
+      maxRequestBodyBytes,
+      maxSessions,
+      tasks,
+      limits
+    )
+
 /** Input limits applied to every inbound JSON-RPC frame on every transport (stdio and HTTP; JVM,
   * Scala.js, Scala Native), plus the resource-URI and per-session subscription bounds.
   *
@@ -457,7 +793,59 @@ case class LimitSettings(
       maxNumberExponent
     )
 
+  // Binary compatibility with 1.0.x: the 5-field constructor. Later fields take their defaults; the
+  // one repeated below is checked against the primary constructor's by BinaryCompatibilityTest.
+  private[fastmcp] def this(
+      maxFrameChars: Int,
+      maxDepth: Int,
+      maxObjectFields: Int,
+      maxUriChars: Int,
+      maxSubscriptionsPerSession: Int
+  ) =
+    this(
+      maxFrameChars,
+      maxDepth,
+      maxObjectFields,
+      maxUriChars,
+      maxSubscriptionsPerSession,
+      maxOutboundMessages = 256
+    )
+
+  // Binary compatibility with 1.0.x: the 5-field `copy`. Later fields keep their values.
+  private[fastmcp] def copy(
+      maxFrameChars: Int,
+      maxDepth: Int,
+      maxObjectFields: Int,
+      maxUriChars: Int,
+      maxSubscriptionsPerSession: Int
+  ): LimitSettings =
+    copy(
+      maxFrameChars,
+      maxDepth,
+      maxObjectFields,
+      maxUriChars,
+      maxSubscriptionsPerSession,
+      maxOutboundMessages = maxOutboundMessages
+    )
+
 object LimitSettings:
+
+  // Binary compatibility with 1.0.x: the 5-field `apply`.
+  private[fastmcp] def apply(
+      maxFrameChars: Int,
+      maxDepth: Int,
+      maxObjectFields: Int,
+      maxUriChars: Int,
+      maxSubscriptionsPerSession: Int
+  ): LimitSettings =
+    new LimitSettings(
+      maxFrameChars,
+      maxDepth,
+      maxObjectFields,
+      maxUriChars,
+      maxSubscriptionsPerSession
+    )
+
   /** Hard ceiling for `maxDepth`: the stack safety of every later recursive walk over client JSON
     * (zio-json encode, `equals`, `toString`, AST unwrapping) depends on it. Defined in
     * `codec.JsonLimits` (shared with `DefaultDecodeContext`'s embedded-JSON bounds) and re-exported
