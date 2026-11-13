@@ -93,19 +93,14 @@ for its code where the schema has one. Formats such as `uri` are checked.
 | Property | What it says |
 |---|---|
 | `a JSON-RPC message a node sends is valid against the specification's JSON Schema for its protocol version` | The message has no schema violation. The details carry the node, the version, the request's method, the violations and the message. |
-| `an error response a node sends has a request id or none, never null` | Fails today, on every node, and is listed in `known-failing.tsv`. See below. |
 
-The second property exists because of one deviation the first check found at once. A request
-whose id the server cannot read (a body that is not JSON, a refusal before the body is looked
-at: wrong `Content-Type`, unknown session, missing session header) is answered with
-`"id": null`. JSON-RPC 2.0 requires exactly that. The specification's schema does not allow it:
-`JSONRPCErrorResponse.id` is a `RequestId`, a string or an integer, and may be left out, and null
-is neither. The library does this on purpose (`JsonRpc.scala`: "a parse error before the id is
-known carries `null`"), and the official TypeScript SDK sends the same. So that this one
-disagreement cannot keep the main property red and hide anything else, such a message is checked
-against the schema without its `id`, and the null itself is the subject of the second property.
-Whether the library should leave the id out instead is an open decision; if the answer is no,
-delete the second property.
+One deviation is accepted. A request whose id the server cannot read (a body that is not JSON, a
+refusal before the body is looked at: wrong `Content-Type`, unknown session, missing session
+header) is answered with `"id": null`. JSON-RPC 2.0 requires exactly that, and the official
+TypeScript SDK sends the same. The specification's schema does not allow it:
+`JSONRPCErrorResponse.id` is a string or an integer and may be left out, and null is neither. The
+library keeps the null (decided 2026-11-13), so such a message is checked against the schema
+without its `id`.
 
 What this check does not cover:
 
@@ -202,8 +197,7 @@ before the fixes (TJC-5087) and pass since; a failure now is a regression.
 | `a dropped GET stream frees its slot` | A GET slot was released only by the response stream's finalizer |
 
 `mcp/known-failing.tsv` lists properties that are expected to fail because their fix has not
-landed. It has one line: the null id on error responses (above), which is a decision to make
-rather than a security finding. When a probe is written before its fix, add a line there and
+landed. It is empty. When a probe is written before its fix, add a line there and
 remove it with the fix; any other failing property is a new result to triage.
 
 **Faults.** The `resilient` profile, with the driver excluded. Each node is a single server with

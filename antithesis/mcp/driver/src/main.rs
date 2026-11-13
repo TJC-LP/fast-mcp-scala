@@ -395,9 +395,6 @@ impl Driver {
                 "a JSON-RPC message a node sends is valid against the specification's JSON Schema for its protocol version",
                 &details
             );
-            if is_error {
-                assert_always!(!null_id, "an error response a node sends has a request id or none, never null", &details);
-            }
         }
     }
 
