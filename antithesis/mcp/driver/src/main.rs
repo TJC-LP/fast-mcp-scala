@@ -5,20 +5,28 @@
 //! legacy sessions (initialize, then calls with `Mcp-Session-Id`). Every call carries a fresh
 //! token, and every tool returns it, so each reply is judged against exactly one request.
 //!
+//! Once faults have stopped, the eventually also runs the official MCP conformance harness
+//! against one node (`conformance.rs`) and turns its results into assertions.
+//!
 //! All randomness is drawn from hegel, after `/workload-active` appears.
 
+mod conformance;
 mod http;
 
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
+use antithesis_sdk::assert::{AssertType, assert_raw};
 use antithesis_sdk::{antithesis_init, assert_always, assert_reachable, assert_sometimes, lifecycle};
 use hegel::TestCase;
 use hegel::generators as gs;
 use hegel::stateful::machine;
 use serde_json::{Value, json};
 
+use conformance::Suite;
 use http::{Answer, Client};
 
 const MODERN: &str = "2026-07-28";
@@ -92,6 +100,82 @@ struct Driver {
     started: Instant,
     eventually_off: bool,
     eventually_after: Option<Duration>,
+    harness: Harness,
+}
+
+/// The conformance harness in this image, and what the environment says about running it.
+struct Harness {
+    /// Where the pinned harness is installed (`CONFORMANCE_HOME`, `/opt/conformance`).
+    home: PathBuf,
+    /// The harness's requirement set and the repository's baselines, or why they cannot be read.
+    manifest: Result<conformance::Manifest, String>,
+    /// `DRIVER_CONFORMANCE_NODE`: a node's name, or `all`. Not set: the eventually's draw decides.
+    node: Option<String>,
+    /// `DRIVER_CONFORMANCE_SUITE`: `active`, `2026`, `all` or `off`. Not set: the draw decides.
+    suite: Option<String>,
+    /// Messages of the per-scenario properties already declared to the assertion catalog.
+    declared: Mutex<BTreeSet<String>>,
+}
+
+impl Harness {
+    fn from_env() -> Harness {
+        let var = |name: &str| std::env::var(name).ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+        let home = PathBuf::from(var("CONFORMANCE_HOME").unwrap_or_else(|| "/opt/conformance".to_owned()));
+        let suite = var("DRIVER_CONFORMANCE_SUITE");
+        assert!(
+            matches!(suite.as_deref(), None | Some("active" | "2026" | "all" | "off")),
+            "DRIVER_CONFORMANCE_SUITE must be active, 2026, all or off"
+        );
+        Harness {
+            manifest: conformance::Manifest::load(&home),
+            home,
+            node: var("DRIVER_CONFORMANCE_NODE"),
+            suite,
+            declared: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    /// The suites a set `DRIVER_CONFORMANCE_SUITE` names, or both when the draw decides.
+    fn suites(&self) -> Vec<Suite> {
+        match self.suite.as_deref() {
+            Some("off") => Vec::new(),
+            Some("active") => vec![Suite::Active],
+            Some("2026") => vec![Suite::Requirements],
+            _ => vec![Suite::Active, Suite::Requirements],
+        }
+    }
+}
+
+/// The baseline of `conformance/` that applies to a node: the Bun node has its own
+/// (`baseline-js.yml`); both JVM backends share `baseline-jvm.yml`, as in `scripts/conformance.sh`.
+fn baseline_of(node: &str) -> &'static str {
+    if node == "bun" { "js" } else { "jvm" }
+}
+
+/// An assertion whose message is only known at run time, which the SDK's macros cannot express:
+/// they take a literal, because they register it in the assertion catalog when the program is
+/// built. `assert_raw` is the SDK's entry for this case. It registers nothing, so the caller
+/// declares the assertion itself, with a call where `hit` is false, before it is first evaluated.
+fn raw_assertion(kind: AssertType, display: &str, must_hit: bool, hit: bool, condition: bool, message: &str, details: &Value) {
+    assert_raw(
+        condition,
+        message.to_owned(),
+        details,
+        module_path!().to_owned(),
+        "Driver::conformance".to_owned(),
+        file!().to_owned(),
+        line!(),
+        0,
+        hit,
+        must_hit,
+        kind,
+        display.to_owned(),
+        message.to_owned(),
+    );
+}
+
+fn passes_on(suite: Suite, node: &str) -> String {
+    format!("the conformance harness passes the {} on {node}", suite.label())
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -367,9 +451,147 @@ impl Driver {
         }
     }
 
-    /// Stops faults for good, waits for the nodes, checks what must hold once faults stop, and
-    /// ends the timeline.
-    fn eventually(&self) {
+    /// Runs the conformance harness against one node and asserts what it found. Only called once
+    /// faults have stopped: the harness reports a dropped connection as a failed check.
+    ///
+    /// The properties, per run of the harness:
+    /// - `the server passes the conformance harness's <suite> once faults stop`: the harness
+    ///   exited 0. This is exactly what `scripts/conformance.sh` gates on.
+    /// - `conformance (<suite>): <scenario> passes`, one per scenario: no check of that scenario
+    ///   failed, by the harness's rules (`conformance::judge`). A check the baseline expects to
+    ///   fail, and a scenario the requirement set runs without scoring, fail nothing.
+    /// - `the conformance harness passes the <suite> on <node>` (sometimes): shows in a report
+    ///   that the harness really ran, and passed, against each node.
+    /// - `the driver's reading of the conformance results agrees with the harness's exit code`:
+    ///   the per-scenario properties and the exit code tell the same story.
+    fn conformance(&self, n: usize, suite: Suite) {
+        let node = &self.nodes[n];
+        println!("driver: conformance: {} on {}: starting", suite.label(), node.name);
+        let empty = conformance::Manifest::default();
+        let (manifest, run) = match &self.harness.manifest {
+            Ok(manifest) => {
+                let baseline = self.harness.home.join(format!("baseline-{}.yml", baseline_of(&node.name)));
+                (manifest, conformance::run(suite, &self.harness.home, &node.name, &node.host_port(), Some(&baseline)))
+            }
+            Err(why) => (&empty, conformance::Run::not_started(format!("cannot read the harness manifest: {why}"))),
+        };
+        let no_entries = Vec::new();
+        let baseline = manifest.baselines.get(baseline_of(&node.name)).unwrap_or(&no_entries);
+        let judgement = conformance::judge(suite, manifest, baseline, &run.scenarios);
+
+        let failures = |checks: &[conformance::Check]| -> Vec<Value> {
+            checks
+                .iter()
+                .take(8)
+                .map(|c| {
+                    let error: String = c.error.as_deref().unwrap_or("").chars().take(600).collect();
+                    json!({"check": c.id, "status": c.status, "error": error})
+                })
+                .collect()
+        };
+        let unexpected: Vec<Value> =
+            judgement.unexpected().iter().map(|v| json!({"scenario": v.scenario, "failed": failures(&v.failed)})).collect();
+        let excused: Vec<&String> = judgement.verdicts.iter().flat_map(|v| v.excused.iter()).collect();
+        let not_scored_failing: Vec<String> = judgement
+            .verdicts
+            .iter()
+            .filter(|v| !v.scored && !v.failed.is_empty())
+            .map(|v| format!("{} ({})", v.scenario, v.reason.as_deref().unwrap_or("not scored")))
+            .collect();
+        let scored = judgement.verdicts.iter().filter(|v| v.scored).count();
+        let checks: usize = judgement.verdicts.iter().map(|v| v.checks).sum();
+        let passed = run.exit == Some(0);
+        let details = json!({
+            "node": node.name,
+            "suite": suite.label(),
+            "harness": manifest.harness,
+            "exit": run.exit,
+            "problem": run.problem,
+            "seconds": (run.seconds * 10.0).round() / 10.0,
+            "scenarios": run.scenarios.len(),
+            "scored_scenarios": scored,
+            "checks": checks,
+            "failed": unexpected,
+            "stale_baseline_entries": judgement.stale,
+            "excused_by_baseline": excused,
+            "not_scored_failing": not_scored_failing,
+            "output_tail": if passed { Value::Null } else { json!(run.log_tail) },
+        });
+        println!(
+            "driver: conformance: {} on {}: exit {}, {} scenarios ({} scored), {} checks, {} failed, {:.1} s (harness {}, results in {})",
+            suite.label(),
+            node.name,
+            run.exit.map(|c| c.to_string()).unwrap_or_else(|| "none".to_owned()),
+            run.scenarios.len(),
+            scored,
+            checks,
+            unexpected.len(),
+            run.seconds,
+            manifest.harness,
+            run.dir.display()
+        );
+        if let Some(problem) = &run.problem {
+            println!("driver: conformance: {problem}");
+        }
+        for v in judgement.unexpected() {
+            for c in &v.failed {
+                println!("driver: conformance: FAILED {}: {} [{}] {}", v.scenario, c.id, c.status, c.error.as_deref().unwrap_or(""));
+            }
+        }
+        if !not_scored_failing.is_empty() {
+            println!("driver: conformance: not scored, failing: {}", not_scored_failing.join(", "));
+        }
+
+        match suite {
+            Suite::Active => {
+                assert_always!(passed, "the server passes the conformance harness's active suite once faults stop", &details)
+            }
+            Suite::Requirements => {
+                assert_always!(passed, "the server passes the conformance harness's 2026-07-28 requirements once faults stop", &details)
+            }
+        }
+        raw_assertion(AssertType::Sometimes, "Sometimes", true, true, passed, &passes_on(suite, &node.name), &details);
+        if let Some(code) = run.exit {
+            assert_always!(
+                code == judgement.exit_code(),
+                "the driver's reading of the conformance results agrees with the harness's exit code",
+                &details
+            );
+        }
+        for v in judgement.verdicts.iter().filter(|v| v.scored) {
+            let message = format!("conformance ({}): {} passes", suite.label(), v.scenario);
+            // Declared when first evaluated, and passing when never reached: which scenarios exist
+            // is only known once the harness has run. The sometimes above fails if it never does.
+            if lock(&self.harness.declared).insert(message.clone()) {
+                raw_assertion(AssertType::Always, "AlwaysOrUnreachable", false, false, false, &message, &Value::Null);
+            }
+            let details = json!({
+                "node": node.name,
+                "suite": suite.label(),
+                "scenario": v.scenario,
+                "checks": v.checks,
+                "failed": failures(&v.failed),
+                "excused_by_baseline": v.excused,
+            });
+            raw_assertion(AssertType::Always, "AlwaysOrUnreachable", false, true, v.failed.is_empty(), &message, &details);
+        }
+    }
+
+    /// The harness runs the eventually makes: the drawn node and suite, unless
+    /// `DRIVER_CONFORMANCE_NODE` / `DRIVER_CONFORMANCE_SUITE` say otherwise (the local loop).
+    fn conformance_plan(&self, drawn_node: usize, drawn_suite: Suite) -> Vec<(usize, Suite)> {
+        let suites = if self.harness.suite.is_some() { self.harness.suites() } else { vec![drawn_suite] };
+        let nodes: Vec<usize> = match self.harness.node.as_deref() {
+            None => vec![drawn_node],
+            Some("all") => (0..self.nodes.len()).collect(),
+            Some(name) => self.nodes.iter().position(|n| n.name == name).into_iter().collect(),
+        };
+        nodes.iter().flat_map(|n| suites.iter().map(|s| (*n, *s))).collect()
+    }
+
+    /// Stops faults for good, waits for the nodes, checks what must hold once faults stop, runs
+    /// the conformance harness against `node`, and ends the timeline.
+    fn eventually(&self, node: usize, suite: Suite) {
         let _all = self.quiet.write().unwrap_or_else(|e| e.into_inner());
         if self.ending.swap(true, Ordering::SeqCst) {
             return;
@@ -432,6 +654,14 @@ impl Driver {
                 assert_always!(second == 200 || first == 405, "a dropped GET stream frees its slot", &details);
             }
         }
+        // Last, so everything above is judged on the server as the faults left it.
+        for (n, suite) in self.conformance_plan(node, suite) {
+            if serving[n] {
+                self.conformance(n, suite);
+            } else {
+                println!("driver: conformance: {} does not serve; the harness is not run against it", self.nodes[n].name);
+            }
+        }
         println!("driver: eventually: ending the timeline");
         std::process::exit(0);
     }
@@ -443,6 +673,9 @@ impl Driver {
     #[rule]
     fn maybe_eventually(&self, tc: TestCase) {
         let drawn = tc.draw(gs::weighted_booleans(0.0005));
+        // The node the conformance harness runs against once faults have stopped, and the suite.
+        let node = tc.draw(gs::integers::<usize>().max_value(self.nodes.len() - 1));
+        let suite = if tc.draw(gs::booleans()) { Suite::Requirements } else { Suite::Active };
         if self.eventually_off || self.ending.load(Ordering::SeqCst) {
             return;
         }
@@ -451,7 +684,7 @@ impl Driver {
             None => drawn,
         };
         if fire {
-            self.eventually();
+            self.eventually(node, suite);
         }
     }
 
@@ -981,6 +1214,21 @@ fn startup() -> Driver {
         .map(|(name, base)| Node { name: name.trim().to_owned(), base: base.trim().trim_end_matches('/').to_owned() })
         .collect();
     assert!(!nodes.is_empty(), "MCP_NODES names no node");
+    let harness = Harness::from_env();
+    if let Some(name) = harness.node.as_deref() {
+        assert!(name == "all" || nodes.iter().any(|n| n.name == name), "DRIVER_CONFORMANCE_NODE names no node in MCP_NODES");
+    }
+    match &harness.manifest {
+        Ok(m) => println!("driver: conformance harness {} at {}", m.harness, harness.home.display()),
+        Err(why) => println!("driver: the conformance harness cannot run: {why}"),
+    }
+    // One property per node and suite, declared up front so that a combination that never ran in a
+    // whole test run fails instead of going unnoticed.
+    for suite in harness.suites() {
+        for node in &nodes {
+            raw_assertion(AssertType::Sometimes, "Sometimes", true, false, false, &passes_on(suite, &node.name), &Value::Null);
+        }
+    }
     let flooded = nodes.iter().map(|_| AtomicU64::new(0)).collect();
     let full_under = nodes.iter().map(|_| Mutex::new(None)).collect();
     let driver = Driver {
@@ -997,6 +1245,7 @@ fn startup() -> Driver {
         started: Instant::now(),
         eventually_off: std::env::var("DRIVER_EVENTUALLY").is_ok_and(|v| v == "off"),
         eventually_after: std::env::var("DRIVER_EVENTUALLY_AFTER_S").ok().and_then(|v| v.parse().ok()).map(Duration::from_secs),
+        harness,
     };
     // A node is up when it answers a tool call, not when its port is open.
     for n in 0..driver.nodes.len() {
