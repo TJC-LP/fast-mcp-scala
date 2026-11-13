@@ -1046,6 +1046,25 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     bodyOf(post(routes, listFrame, Some(sid))) should include("tools")
   }
 
+  test("zio-http serves an endpoint clients percent-encode: it decodes the request path") {
+    val settings = McpServerSettings(httpEndpoint = "/mcp-ü")
+    val server = McpServer.typed[Any]("T", "0.1.0", settings)
+    val _ = server.scanAnnotations[TestServer.type]
+    val routes = runUnsafe(
+      server.buildRouter.flatMap(r => JvmHttpBackend.httpRoutes(r, settings, ZEnvironment.empty))
+    )
+    // The request target as a client writes it, through zio-http's own URL parser.
+    val url = URL.decode("/mcp-%C3%BC").toOption.getOrElse(fail("the URL does not parse"))
+    val init =
+      """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"""
+    val req = JsonHeaders.foldLeft(Request.post(url, Body.fromString(init))) { case (r, (k, v)) =>
+      r.addHeader(Header.Custom(k, v))
+    }
+    run(routes, req).status shouldBe Status.Ok
+    runUnsafe(com.tjclp.fastmcp.server.transport.http.StreamableHttpHandler.validateSettings(settings, decodedPaths = true)) shouldBe ()
+    runUnsafe(com.tjclp.fastmcp.server.transport.http.StreamableHttpHandler.validateSettings(settings).either).isLeft shouldBe true
+  }
+
   test("modern capability failures use HTTP 400 with -32021") {
     val routes = buildRoutes(stateless = false)
     val frame =

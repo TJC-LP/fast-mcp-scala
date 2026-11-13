@@ -33,7 +33,8 @@ object JvmHttpBackend extends HttpTransportBackend:
     // Capture the environment ZIO-natively and thread it into each handler via provideEnvironment,
     // so Routes stay `Routes[Any]` — Server.serve then needs only `Server`, avoiding the generic-R
     // HasNoScope constraint. No Unsafe, no runtime capture.
-    StreamableHttpHandler.validateSettings(settings) *>
+    // zio-http percent-decodes the request path before the handler compares it.
+    StreamableHttpHandler.validateSettings(settings, decodedPaths = true) *>
       ZIO.environment[R].flatMap { env =>
         StreamableHttpHandler.make(router, settings, JvmTransportBackend.randomId()).flatMap {
           mcp =>

@@ -80,6 +80,17 @@ private[fastmcp] object HttpRequestGuards:
     * must be a path a request can actually name ([[invalidEndpoint]]).
     */
   def validateSettings(settings: McpServerSettings): Either[String, Unit] =
+    validateSettings(settings, decodedPaths = false)
+
+  /** [[validateSettings]] for a backend whose HTTP layer hands over the request path
+    * percent-decoded (`decodedPaths`, zio-http): an endpoint with a character clients
+    * percent-encode does match there, so it is not refused ([[encodedEndpointWarning]] says what to
+    * log instead).
+    */
+  private[fastmcp] def validateSettings(
+      settings: McpServerSettings,
+      decodedPaths: Boolean
+  ): Either[String, Unit] =
     val bad = HostGuard.invalidOrigins(settings.allowedOrigins.getOrElse(Set.empty))
     val badHeaders = RequestHeaders.invalidNames(settings.contextHeaders)
     val listed =
@@ -102,7 +113,10 @@ private[fastmcp] object HttpRequestGuards:
     // ever sees it; `limits.maxFrameChars` is the transport-independent backstop.
     else if settings.maxRequestBodyBytes > settings.limits.maxFrameChars then
       Left("maxRequestBodyBytes must not exceed limits.maxFrameChars")
-    else invalidEndpoint(settings.httpEndpoint).toLeft(())
+    else
+      invalidEndpoint(settings.httpEndpoint)
+        .filterNot(_ => decodedPaths && structuralProblem(settings.httpEndpoint).isEmpty)
+        .toLeft(())
 
   /** The path requests are matched against: `httpEndpoint` with a leading slash (`/mcp` for both
     * `"/mcp"` and `"mcp"`).
@@ -125,8 +139,23 @@ private[fastmcp] object HttpRequestGuards:
     * every request: refused at startup instead.
     */
   def invalidEndpoint(httpEndpoint: String): Option[String] =
-    def refuse(what: String) =
-      Some(s"httpEndpoint '$httpEndpoint' can never match a request path: it contains $what")
+    structuralProblem(httpEndpoint).orElse(encodedChar(httpEndpoint)).map { what =>
+      s"httpEndpoint '$httpEndpoint' can never match a request path: it contains $what"
+    }
+
+  /** The WARN for a backend that receives decoded paths and so serves an endpoint with a character
+    * clients percent-encode: the same settings fail at startup on the other backends.
+    */
+  private[fastmcp] def encodedEndpointWarning(httpEndpoint: String): Option[String] =
+    if structuralProblem(httpEndpoint).nonEmpty then None
+    else
+      encodedChar(httpEndpoint).map { what =>
+        s"httpEndpoint '$httpEndpoint' contains $what. This backend decodes the request path and " +
+          "serves it; the socket and Bun backends refuse the same setting at startup."
+      }
+
+  private def structuralProblem(httpEndpoint: String): Option[String] =
+    def refuse(what: String) = Some(what)
     if httpEndpoint.exists(ch => ch.isWhitespace || Character.isISOControl(ch)) then
       refuse("whitespace or a control character")
     else if httpEndpoint.indexOf('?') >= 0 then
@@ -137,6 +166,15 @@ private[fastmcp] object HttpRequestGuards:
     else if httpEndpoint.split('/').exists(seg => seg == "." || seg == "..") then
       refuse("a '.' or '..' segment")
     else None
+
+  private def encodedChar(httpEndpoint: String): Option[String] =
+    // What every client percent-encodes in a path, and Bun's URL parser too: the WHATWG path
+    // percent-encode set (non-ASCII, `"`, `<`, `>`, `^`, `` ` ``, `{`, `}`), and `\`, which that
+    // parser turns into `/`. `[`, `]` and `|` are left alone: an RFC 3986 client encodes them, a
+    // WHATWG one (`fetch`) sends them as written, so such an endpoint is reachable.
+    httpEndpoint.find(ch => ch > 0x7e || "\"<>^`{}\\".indexOf(ch.toInt) >= 0).map { ch =>
+      s"'$ch' (clients percent-encode it, and the path is compared as written)"
+    }
 
   /** What every backend logs at WARN once, before binding. Today: a non-loopback bind address with
     * no allow-list, where the Host/Origin guard has nothing to go on and is therefore off. Startup

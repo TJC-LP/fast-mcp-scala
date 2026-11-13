@@ -117,7 +117,8 @@ What this check does not cover:
 **The official conformance harness, once faults have stopped.** The last thing the eventually
 does is run `@modelcontextprotocol/conformance` against one node, so the server that is checked
 for conformance is the one that went through the faults, with whatever sessions, tasks and
-streams they left behind. The node is drawn, and so is the mode. The three modes are the ones
+streams they left behind. The node is drawn; all three modes run against it, starting with a
+drawn one. The three modes are the ones
 `scripts/conformance.sh` has and CI gates on:
 
 | Mode | Harness arguments | Scenarios |
@@ -199,7 +200,7 @@ Unit tests in the driver cover these rules (`cargo test` in `mcp/driver`).
 Time. In the local loop on an ARM workstation, where the driver's x86-64 Node runs under
 emulation, the active suite took 6 to 11 s against a node and the requirement set 7 to 12 s.
 Without emulation (the host's own Node against the same server started on the host) the active
-suite took 1 to 2 s and the requirement set 3 s. A timeline runs one suite against one node.
+suite took 1 to 2 s and the requirement set 3 s. A timeline runs all three suites against one node, the drawn suite first.
 
 **Regression probes for security findings.** The `probe` rule and two in-server assertions state
 hardened behaviour that Claude Security findings showed was missing. They failed on the code
@@ -272,8 +273,9 @@ workload time, 300 s for the eventually's own checks, and 300 s for each planned
 
 - The harness runs after faults, never during them. It shows that a server still conforms after
   what the faults did to it, not that it conforms while a fault is active.
-- One suite against one node per timeline. Coverage of all nine combinations comes from many
-  timelines; the nine sometimes-properties show whether a test run got there.
+- All three suites against one node per timeline. Coverage of the three nodes comes from many
+  timelines; the nine sometimes-properties show whether a test run got there. (With one drawn
+  suite per timeline, run `27e04e91` never reached one of the nine combinations.)
 - The scenarios the 2026-07-28 requirement set does not score (the tasks extension, three pending
   ones) are run and logged, and assert nothing. All thirteen pass against this server outside
   Antithesis; the requirement set says of them that the harness's own reference fixture cannot
@@ -298,3 +300,5 @@ workload time, 300 s for the eventually's own checks, and 300 s for each planned
 | `138b4b66187ffc9deaf28072fff5b5d9-66-21` (2026-11-13, first run with the conformance and schema properties, `resilient`) | 12 h | 155 properties passed, 2 failed. All 68 per-scenario conformance properties passed, and the harness passed on all three nodes in both suites once faults had stopped. Failed: the null-id property (since removed, see the schema section), and `a streamed reply delivers its notifications in order and then its result`, 18 counterexamples on 1.7k checks. **A library defect, found by a node pause.** A streamed reply that no backend has started within five seconds is released. The node was paused for nine seconds just after a reply was built, so the deadline had passed when it ran again and the backend streamed an empty 200. Fixed by counting the grace in ticks (reproduced in `StreamableHttpHandlerTest` with a clock whose first sleep returns at once). |
 | `91d0456d0e5d9d5bba3d0e2ee02bd676-66-21` (2026-11-13, `main` with the reply-watchdog fix, `resilient`) | 12 h | 156 properties passed, none failed. `a streamed reply delivers its notifications in order and then its result` held, which is the evidence for the tick-counted grace. |
 | `d4d207e85a4bf164e0e04929c7f541e5-66-21` (2026-11-13, `main` at `cca19a0` plus the first commit of #142: binary-compatibility forwarders, the tasks-extension changes, the Skills scenarios, `resilient`) | 12 h | 163 properties passed, none failed, none pending. First run with the Skills scenarios: the suite property and the three per-scenario properties held on 81 checks each, and the harness passed them on all three nodes (Bun 45 times, netty 22, socket 14). The task properties held on about 1.7k checks each. The schema property lists one example in the report although it is asserted on every message; the driver's own count in the logs is up to 4,840 messages checked per timeline, none invalid. Both modules were instrumented. |
+| `27e04e91b96dccaf3febbc1769766589-66-21` (2026-11-13, `main` at `60515b5` with HTTP parity and the deferred-task hand-off, plus the first commit of #146, `resilient`) | 12 h | 162 properties passed, 1 failed: the reachability assertion `the conformance harness passes the active suite on bun`, with no example and no counterexample. **A workload gap, not a server failure**: the active suite was never started against the Bun node in this run (0 starts; 26 on netty, 38 on socket; the other two suites ran against Bun 79 and 40 times and passed). Each timeline drew one node and one suite, and the timelines of a run share most of their draws. The driver now runs all three suites against the drawn node. |
+| `cc300b548f06c64a04b22e0f14d5c555-66-21` (2026-11-13, as above with all three suites per timeline, `resilient`) | 12 h | 163 properties passed, none failed, none pending. Every node/suite pair was visited and passed: the active suite 95 times on bun, 63 on netty, 73 on socket; the requirement set 107, 51 and 67; the Skills scenarios 112, 49 and 81. This confirms the failure of the run above was the workload gap. |

@@ -646,9 +646,18 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     val interrupted = runUnsafe(Ref.make(false))
     try
       val mine = TaskScope.session("mine")
+      val started = runUnsafe(Promise.make[Nothing, Unit])
       val running = runUnsafe(
-        tm.create(mine, None, ZIO.never.onInterrupt(interrupted.set(true)), _ => ZIO.unit)
+        tm.create(
+          mine,
+          None,
+          (started.succeed(()) *> ZIO.never).onInterrupt(interrupted.set(true)),
+          _ => ZIO.unit
+        )
       )
+      // create returns before the task body starts: a release that lands first interrupts a task
+      // that never ran, and the body's own onInterrupt is then never installed (seen once in CI).
+      runUnsafe(started.await.timeoutFail(new RuntimeException("task did not start"))(10.seconds))
       val doneId = completed(tm, mine)
       val otherId = completed(tm, TaskScope.session("other"))
       val anonId = completed(tm, TaskScope.bearer(None))

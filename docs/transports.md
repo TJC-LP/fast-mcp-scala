@@ -178,8 +178,11 @@ match on every backend. A trailing slash (`/mcp/`), another case (`/MCP`), a lon
 (`/mcp/extra`) and a prefixed one (`/api/mcp`) are all **404** with an empty body, before any other
 check. The query string is not part of the path: `/mcp?x=1` is the endpoint, and the query is
 ignored. Because the match is exact, `runHttp()` refuses at startup an `httpEndpoint` that no
-request path could equal: one containing `?`, `#`, `%`, whitespace or a control character, or a
-`.` / `..` segment.
+request path could equal: one containing `?`, `#`, `%`, whitespace or a control character, a
+`.` / `..` segment, or a character every client percent-encodes (non-ASCII, `"`, `<`, `>`, `^`,
+`` ` ``, `{`, `}`) or rewrites (`\`).
+The last rule is a WARN, not a failure, on the zio-http backend: it decodes the request path, so
+such an endpoint is served there (and it worked in 1.0.x).
 
 What each backend compares is the path as its HTTP layer hands it over. The socket backend
 compares the request target exactly as written. zio-http normalises the target first — it decodes
@@ -468,7 +471,7 @@ no reply (it fails with its timeout). A JVM client whose GET stream falls more t
 |---|---|---|
 | `host` | `127.0.0.1` | Bind address. Changed in 0.5.0 from `0.0.0.0` per the spec's bind-localhost guidance; set `"0.0.0.0"` explicitly for containers or external exposure — and then set `allowedHosts` / `allowedOrigins` too: a non-loopback bind is not guarded automatically, and startup logs a WARN until an allow-list is set. See [Host / Origin validation](#host--origin-validation). |
 | `port` | `8000` | Listen port. |
-| `httpEndpoint` | `/mcp` | JSON-RPC endpoint path, matched exactly (no trailing slash, case-sensitive; the query string is ignored). Must not contain `?`, `#`, `%`, whitespace or a `.` / `..` segment — `runHttp()` fails at startup otherwise. See [The endpoint: path and methods](#the-endpoint-path-and-methods). |
+| `httpEndpoint` | `/mcp` | JSON-RPC endpoint path, matched exactly (no trailing slash, case-sensitive; the query string is ignored). Must not contain `?`, `#`, `%`, whitespace, a `.` / `..` segment, or (socket and Bun backends) non-ASCII or any of ``"<>^`{}\`` — `runHttp()` fails at startup otherwise. See [The endpoint: path and methods](#the-endpoint-path-and-methods). |
 | `stateless` | `false` | Disable the legacy HTTP session store; modern requests are always stateless. |
 | `disallowDelete` | `false` | Legacy adapter: answer 405 to HTTP DELETE instead of terminating the session. |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity. Live legacy GET streams are exempt from the periodic sweep but become evictable at the `maxSessions` cap once idle this long; `None` disables both. |
