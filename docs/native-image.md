@@ -188,9 +188,10 @@ Runtime behavior baked into `JvmHttpBackend`:
   [transports.md](./transports.md#host--origin-validation).
 
 The in-repo proof: `fast-mcp-scala.nativeSmoke.http` builds the conformance server, and
-`scripts/conformance.sh native [port] [active|2026]` runs the **official MCP conformance suite**
+`scripts/conformance.sh native [port] [active|2026|skills]` runs the **official MCP conformance suite**
 against the native binary, held to the unchanged (empty) JVM baseline. CI runs the active suite,
-enforces scenario-level JVM/native parity on the 2026 requirements run, requires a clean server
+enforces scenario-level JVM/native parity on the 2026 requirements run, runs the three Skills
+extension scenarios (`skills`), requires a clean server
 log (no `UnsupportedFeatureError`), and requires the binary to exit within 15s of SIGTERM — on
 every PR.
 

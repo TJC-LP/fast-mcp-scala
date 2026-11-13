@@ -27,7 +27,7 @@ compiles and runs on all three platforms (JVM, Scala.js/Bun, Scala Native):
 |---|---|
 | `HttpServer.scala` | HTTP transport: modern stateless POST + request-scoped SSE, with the legacy session adapter enabled by default |
 | `TaskManagerServer.scala` | Realistic domain server: custom decoders, hints across a CRUD-style surface |
-| `SkillsHttpServer.scala` | The `SkillsServer` catalog over streamable HTTP on `127.0.0.1:8091` — the fixture for the upstream `sep-2640-skills-*` conformance scenarios ([docs/skills-conformance.md](./skills-conformance.md)) |
+| `SkillsHttpServer.scala` | The `SkillsServer` catalog over streamable HTTP on `127.0.0.1:8091`, for running an upstream `sep-2640-skills-*` conformance scenario by hand. The gate runs them against `ConformanceServer`, which mounts the same catalog ([docs/skills-conformance.md](./skills-conformance.md)) |
 | `SkillDirectoryServer.scala` | `SkillDirectoryLoader`: publish an on-disk skill directory (`FAST_MCP_SKILL_DIR` or first argument) over stdio |
 | `conformance/ConformanceServerJvm.scala` | JVM entry point for the conformance server (`scripts/conformance.sh jvm`) |
 
@@ -79,6 +79,7 @@ scripts/native-smoke.sh "$(./mill --no-server show fast-mcp-scala.scalaNative.na
 scripts/conformance.sh jvm            # active suite (31 scenarios / 73 checks, 2025-11-25 wire), empty baseline
 scripts/conformance.sh jvm 8077 2026  # the 37 scored 2026-07-28 scenarios (the only mode that sends 2026-07-28 requests)
 scripts/conformance.sh js 8078 2026   # Bun, the same 2026-07-28 requirements run
+scripts/conformance.sh jvm 8077 skills  # the three Skills extension scenarios (SEP-2640); also js, scala-native, native
 scripts/conformance.sh native         # the GraalVM HTTP image against the JVM baseline
 ```
 

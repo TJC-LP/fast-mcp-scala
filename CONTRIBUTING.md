@@ -82,9 +82,12 @@ Every pull request must pass:
   `TripleQuestionMark`, `ArrayEquals`; warnings on `Var`, `Return`, `AsInstanceOf`, `IsInstanceOf`.
 - **Whitespace** — `git diff --check`.
 - **Tests** on all three platforms (`ci.yml`).
-- **Official MCP conformance** (`conformance.yml`) against the JVM and Bun servers, and the same
-  server as a GraalVM native image (`native.yml`). Run locally with
-  `scripts/conformance.sh {jvm|js|native} [port] [active|2026]`. The expected-failure baselines in
+- **Official MCP conformance** (`conformance.yml`) against the JVM, Bun and Scala Native servers,
+  and the same server as a GraalVM native image (`native.yml`). Run locally with
+  `scripts/conformance.sh {jvm|js|native|scala-native} [port] [active|2026|skills]`. `active` is the
+  harness's active suite, `2026` is `--requirements 2026-07-28`, and `skills` is the three Skills
+  extension scenarios (`sep-2640-skills-*`), which fail the gate on any failed, warning or skipped
+  check. The expected-failure baselines in
   `conformance/` are **empty and stay empty**: fix the regression, never grow a baseline. The
   harness itself is pinned in `conformance/package.json` and frozen by `conformance/bun.lock`; to
   bump it, edit the version in `package.json`, run
