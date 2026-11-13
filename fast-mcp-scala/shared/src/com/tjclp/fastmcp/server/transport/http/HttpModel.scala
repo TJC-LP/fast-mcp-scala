@@ -101,3 +101,11 @@ private[fastmcp] object HttpReply:
       keepAlive: Option[Duration] = None
   ) extends HttpReply:
     def status: Int = 200
+
+  /** A `200 text/event-stream` response whose whole body is known before it starts: the reply to a
+    * request whose first frame was already its final one, which is the common case. The event bytes
+    * are those an [[Sse]] reply carrying that one frame would send; backends write them with a
+    * `Content-Length` instead of running a stream, so nothing is pulled, chunked or finalized.
+    */
+  final case class SseComplete(headers: List[(String, String)], frame: SseFrame) extends HttpReply:
+    def status: Int = 200

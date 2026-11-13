@@ -286,48 +286,33 @@ object Session:
       clientKey: Option[String],
       isProtocolSession: Boolean
   ): UIO[Session] =
-    for
-      pv <- Ref.make("")
-      ll <- Ref.make(Option.empty[LoggingLevel])
-      init <- Ref.make(false)
-      subs <- Ref.make(Set.empty[String])
-      cnt <- Ref.make(0L)
-      inflight <- Ref.make(Map.empty[RequestId, (String, Fiber.Runtime[?, ?])])
-      pending <- Ref.make(Map.empty[RequestId, Promise[McpError, Json]])
-      cInfo <- Ref.make(Option.empty[Implementation])
-      cCaps <- Ref.make(Option.empty[ClientCapabilities])
-      outbound <- Queue.unbounded[JsonRpcMessage]
-      sink = Unsafe.unsafe(implicit u => FiberRef.unsafe.make(Option.empty[Queue[JsonRpcMessage]]))
-      requestContext = Unsafe.unsafe(implicit u =>
-        FiberRef.unsafe.make(Option.empty[RequestContext])
-      )
-      requestId = Unsafe.unsafe(implicit u => FiberRef.unsafe.make(Option.empty[RequestId]))
-      inputOccurrences = Unsafe.unsafe(implicit u =>
-        FiberRef.unsafe.make(Option.empty[Ref[Map[String, Int]]])
-      )
-      seen = new java.util.concurrent.atomic.AtomicLong(java.lang.System.currentTimeMillis())
-      activeGet = new java.util.concurrent.atomic.AtomicBoolean(false)
-      finalizers <- Ref.make(Option(Map.empty[String, UIO[Unit]]))
-    yield new Session(
-      sessionId,
-      supportsTasks,
-      clientKey,
-      isProtocolSession,
-      pv,
-      ll,
-      init,
-      subs,
-      cnt,
-      inflight,
-      pending,
-      cInfo,
-      cCaps,
-      outbound,
-      sink,
-      requestContext,
-      requestId,
-      inputOccurrences,
-      seen,
-      activeGet,
-      finalizers
-    )
+    // One effect for the queue, then a single synchronous step for everything else: a 2026-07-28
+    // request builds a Session of its own, so a dozen chained `Ref.make`s here are a dozen
+    // interpreter steps on every request.
+    Queue.unbounded[JsonRpcMessage].map { outbound =>
+      Unsafe.unsafe { implicit u =>
+        new Session(
+          sessionId,
+          supportsTasks,
+          clientKey,
+          isProtocolSession,
+          Ref.unsafe.make(""),
+          Ref.unsafe.make(Option.empty[LoggingLevel]),
+          Ref.unsafe.make(false),
+          Ref.unsafe.make(Set.empty[String]),
+          Ref.unsafe.make(0L),
+          Ref.unsafe.make(Map.empty[RequestId, (String, Fiber.Runtime[?, ?])]),
+          Ref.unsafe.make(Map.empty[RequestId, Promise[McpError, Json]]),
+          Ref.unsafe.make(Option.empty[Implementation]),
+          Ref.unsafe.make(Option.empty[ClientCapabilities]),
+          outbound,
+          FiberRef.unsafe.make(Option.empty[Queue[JsonRpcMessage]]),
+          FiberRef.unsafe.make(Option.empty[RequestContext]),
+          FiberRef.unsafe.make(Option.empty[RequestId]),
+          FiberRef.unsafe.make(Option.empty[Ref[Map[String, Int]]]),
+          new java.util.concurrent.atomic.AtomicLong(java.lang.System.currentTimeMillis()),
+          new java.util.concurrent.atomic.AtomicBoolean(false),
+          Ref.unsafe.make(Option(Map.empty[String, UIO[Unit]]))
+        )
+      }
+    }

@@ -35,6 +35,7 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
   private def framesOf(reply: HttpReply) =
     reply match
       case HttpReply.Sse(_, frames, _) => frames
+      case HttpReply.SseComplete(_, frame) => zio.stream.ZStream.succeed(frame)
       case other => fail(s"expected an SSE reply, got $other")
 
   test("a reply stream halted before its first pull still runs the handler's finalizers") {

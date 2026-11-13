@@ -222,6 +222,13 @@ object `package` extends Module {
       nativeLinkOtherMain("com.tjclp.fastmcp.examples.conformance.ConformanceServerNative")()
     }
 
+    /** The benchmark binary (`bench/run.sh scala-native`): `BenchServerNative` as the entry point,
+      * linked the same way as [[conformanceLink]].
+      */
+    def benchLink: T[PathRef] = Task {
+      nativeLinkOtherMain("com.tjclp.fastmcp.examples.bench.BenchServerNative")()
+    }
+
     // WartRemover is a JVM-only compiler plugin (same rationale as the js module).
     override def scalacOptions = BuildConfig.crossScalacOptions
 

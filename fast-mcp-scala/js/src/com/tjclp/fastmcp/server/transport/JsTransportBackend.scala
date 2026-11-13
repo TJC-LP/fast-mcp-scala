@@ -19,7 +19,8 @@ import com.tjclp.fastmcp.facades.runtime.{
 }
 import com.tjclp.fastmcp.interop.ZioJsPromise
 import com.tjclp.fastmcp.server.McpServerSettings
-import com.tjclp.fastmcp.server.router.{McpRouter, RequestHeaders, Session}
+import com.tjclp.fastmcp.server.router.{McpRouter, RequestContext, RequestHeaders, Session}
+import com.tjclp.fastmcp.server.transport.http.StreamableHttpHandler
 
 /** Scala.js (Bun-first) [[TransportBackend]].
   *
@@ -200,7 +201,16 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       hostname = settings.host,
       fetch = js.Any.fromFunction2((req: js.Dynamic, server: js.Dynamic) =>
         ZioJsPromise.zioToPromise(runtime)(
-          guarded(settings)(handleFetch(router, settings, store, req, clientKeyOf(server, req)))
+          guarded(settings)(
+            handleFetch(
+              router,
+              settings,
+              store,
+              req,
+              // The peer address only buckets bearer tasks: skip the lookup when tasks are off.
+              if settings.tasks.enabled then clientKeyOf(server, req) else None
+            )
+          )
         )
       ),
       maxRequestBodySize = settings.maxRequestBodyBytes,
@@ -214,8 +224,9 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   /** First-party error boundary, independent of `NODE_ENV`. The by-name `effect` is evaluated
     * inside `suspendSucceed`, so `handleFetch`'s synchronous prefix (`new URL`, header gates) runs
     * in the fiber and a throw becomes a defect; every Cause is then rendered as a JSON-RPC error
-    * with a fixed message — the full cause goes to the server log only. Nothing interrupts the
-    * fetch fiber, so no interrupt path exists here.
+    * with a fixed message — the full cause goes to the server log only. The one interruption that
+    * reaches here is a client that went away while its request waited for a first frame; it is not
+    * logged as a failure.
     */
   private def guarded[R](settings: McpServerSettings)(
       effect: => ZIO[R, Throwable, js.Dynamic]
@@ -231,7 +242,10 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         case Some(_: BodyReadFailure) => jsonRpcErrorResponse(400, "Body read error")
         // Any other typed failure is a server-side problem, not the client's body.
         case _ => jsonRpcErrorResponse(500, HttpRequestGuards.InternalErrorMessage)
-      ZIO.logWarningCause("HTTP handler failed", cause).as(response)
+      // The client went away while the request waited for its first frame (`onClientAbort` shut
+      // the request's queue down): nobody is left to answer, and it is not a handler failure.
+      if cause.isInterruptedOnly then ZIO.succeed(response)
+      else ZIO.logWarningCause("HTTP handler failed", cause).as(response)
     }
 
   /** Marks a failure raised while reading the request body (`req.text()`), so `guarded` can
@@ -381,9 +395,16 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                           ZIO.succeed(jsonRpcErrorResponse(404, s"Session not found: $sid"))
                         case Some(session) =>
                           session.touch *>
-                            respondStreamable(router, session, message, isNew = false, settings)
+                            respondStreamable(
+                              router,
+                              session,
+                              message,
+                              isNew = false,
+                              settings,
+                              req
+                            )
                     case None if MessageLoop.isInitialize(message) =>
-                      mintSession(router, store, message, settings)
+                      mintSession(router, store, message, settings, req)
                     case None =>
                       ZIO.succeed(
                         jsonRpcErrorResponse(
@@ -431,7 +452,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       router: McpRouter[R],
       store: js.Dictionary[Session],
       message: JsonRpcMessage,
-      settings: McpServerSettings
+      settings: McpServerSettings,
+      http: js.Dynamic
   ): ZIO[R, Throwable, js.Dynamic] =
     for
       sid <- randomId()
@@ -455,12 +477,13 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             case None => Left(())
       }
       resp <- outcome match
-        case Right(None) => respondStreamable(router, session, message, isNew = true, settings)
+        case Right(None) =>
+          respondStreamable(router, session, message, isNew = true, settings, http)
         case Right(Some(victim)) =>
           ZIO.logWarning(
             s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted idle session ${victim.sessionId}"
           ) *> victim.terminate *>
-            respondStreamable(router, session, message, isNew = true, settings)
+            respondStreamable(router, session, message, isNew = true, settings, http)
         case Left(()) =>
           session.terminate
             .as(jsonRpcErrorResponse(503, HttpRequestGuards.SessionLimitMessage))
@@ -478,22 +501,12 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       session: Session,
       message: JsonRpcMessage,
       isNew: Boolean,
-      settings: McpServerSettings
+      settings: McpServerSettings,
+      http: js.Dynamic
   ): ZIO[R, Throwable, js.Dynamic] =
     message match
       case req: JsonRpcMessage.Request =>
-        for
-          reqQueue <- Queue.unbounded[JsonRpcMessage]
-          // `ensuring` offers the close sentinel when dispatch ends replyless (cancellation) so
-          // the SSE stream terminates; the bound fiber lets the stream's `cancel` hook interrupt
-          // the dispatch when the client disconnects mid-request.
-          fiber <- session
-            .runWithSink(reqQueue)(router.dispatch(session, req))
-            .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
-            .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
-            .forkDaemon
-          response <- sseResponse(reqQueue, req.id, session, isNew, fiber, settings, modern = false)
-        yield response
+        requestResponse(router, session, req, isNew, settings, context = None, http)
       case other =>
         val extra =
           if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String]
@@ -502,6 +515,93 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
           case Some(reply) => jsonResponse(reply.toJson, extra, status = 400)
           case None => webResponse(202, "")
         }
+
+  /** Run a request's dispatch with its server→client messages routed to a per-request queue, and
+    * choose the HTTP shape of the reply from its FIRST frame (JVM twin:
+    * `StreamableHttpHandler.streamRequest` / `firstFrameReply`, which documents the rules):
+    *   - 2026-07-28 only: an error that maps to an HTTP status is plain JSON with that status;
+    *   - the final reply itself: one fixed-length `text/event-stream` body — a string `Response`,
+    *     no `ReadableStream`, no pull and no heartbeat fiber;
+    *   - anything else opens the SSE stream, which carries that frame and the rest.
+    *
+    * The wait for the first frame is bounded the same way as on the JVM: a legacy reply waits at
+    * most `StreamableHttpHandler.LegacyHeadGrace` (or one `keepAliveInterval`, if shorter), a
+    * 2026-07-28 reply one `keepAliveInterval` when set. A timer OFFERS the heartbeat sentinel, and
+    * a reply that is still silent then opens its stream. The wait itself stays one plain `take`, so
+    * the timer cannot discard a frame.
+    *
+    * Until a `Response` exists there is no `ReadableStream` whose `cancel` hook could tell us the
+    * client went away, so the request's own abort signal does: it interrupts the dispatch and shuts
+    * the queue down, which also ends the wait.
+    */
+  private def requestResponse[R](
+      router: McpRouter[R],
+      session: Session,
+      req: JsonRpcMessage.Request,
+      isNew: Boolean,
+      settings: McpServerSettings,
+      // `Some` for a 2026-07-28 request: its context, decoded once by the header validation and
+      // handed to the router so the dispatch does not decode `_meta` a second time.
+      context: Option[RequestContext],
+      // The Bun `Request`, for its abort signal.
+      http: js.Dynamic
+  ): ZIO[R, Throwable, js.Dynamic] =
+    val modern = context.isDefined
+    val dispatch = context match
+      case Some(ctx) => router.dispatchModern(session, req, ctx)
+      case None => router.dispatch(session, req)
+    for
+      reqQueue <- Queue.unbounded[JsonRpcMessage]
+      // `ensuring` offers the close sentinel when dispatch ends replyless (cancellation) so a
+      // streamed reply terminates; the bound fiber lets the stream's `cancel` hook interrupt the
+      // dispatch when the client disconnects mid-request.
+      fiber <- session
+        .runWithSink(reqQueue)(dispatch)
+        .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
+        .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
+        .forkDaemon
+      _ <- ZIO.succeed(onClientAbort(http)(fiber.interrupt *> reqQueue.shutdown))
+      keepAlive = settings.keepAliveInterval.map(Duration.fromJava)
+      grace = StreamableHttpHandler.LegacyHeadGrace
+      bound = if modern then keepAlive else Some(keepAlive.fold(grace)(_.min(grace)))
+      timer <- bound match
+        case None => ZIO.none
+        case Some(interval) =>
+          (ZIO.sleep(interval) *> reqQueue.offer(KeepAliveSentinel)).forkDaemon.map(Some(_))
+      stopTimer = timer.fold(ZIO.unit)(StreamableHttpHandler.signalInterrupt)
+      first <- reqQueue.take.onInterrupt(stopTimer *> fiber.interrupt *> reqQueue.shutdown)
+      _ <- stopTimer
+      response <- (if modern then modernErrorStatus(first) else None) match
+        case Some(status) =>
+          (fiber.interrupt *> reqQueue.shutdown).as(jsonResponse(first.toJson, Map.empty, status))
+        // The dispatch fiber is past its last step: signal it, do not wait for its exit.
+        case None if isFinalReply(first, req.id) =>
+          (StreamableHttpHandler.signalInterrupt(fiber) *> reqQueue.shutdown).as(
+            webResponse(
+              200,
+              s"event: message\ndata: ${MessageLoop.encodeOutbound(first)}\n\n",
+              sseHeaders(session, isNew, modern)
+            )
+          )
+        case None =>
+          sseResponse(reqQueue, req.id, session, isNew, fiber, settings, modern, Some(first))
+    yield response
+
+  /** Run `cleanup` if the client goes away (Bun aborts `request.signal` when the connection
+    * closes). Registered once per request; firing after the reply was sent is harmless, since by
+    * then the fiber is finished and the queue is shut.
+    */
+  private def onClientAbort(http: js.Dynamic)(cleanup: UIO[Any]): Unit =
+    val signal = http.signal
+    if !js.isUndefined(signal) && signal != null then
+      val listener: js.Function0[Unit] = () =>
+        val _ = Unsafe.unsafe(implicit u => Runtime.default.unsafe.fork(cleanup))
+      val _ = signal.addEventListener("abort", listener, js.Dynamic.literal(once = true))
+
+  private def sseHeaders(session: Session, isNew: Boolean, modern: Boolean): Map[String, String] =
+    Map("content-type" -> "text/event-stream", "cache-control" -> "no-cache") ++
+      (if modern then Map("x-accel-buffering" -> "no") else Map.empty[String, String]) ++
+      (if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String])
 
   /** Heartbeat marker the keepalive fiber offers into a request's `reqQueue`; the pull turns it
     * into an SSE comment frame (`: ping`). Shared with the JVM handler, which uses it to open a
@@ -530,7 +630,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       dispatchFiber: Fiber.Runtime[?, ?],
       settings: McpServerSettings,
       modern: Boolean,
-      initial: Option[JsonRpcMessage] = None
+      initial: Option[JsonRpcMessage]
   ): UIO[js.Dynamic] =
     val heartbeat: UIO[Option[Fiber.Runtime[Nothing, Nothing]]] =
       settings.keepAliveInterval match
@@ -591,10 +691,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         )
       )
       val stream = js.Dynamic.newInstance(js.Dynamic.global.ReadableStream)(source)
-      val headers =
-        Map("content-type" -> "text/event-stream", "cache-control" -> "no-cache") ++
-          (if modern then Map("x-accel-buffering" -> "no") else Map.empty[String, String]) ++
-          (if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String])
+      val headers = sseHeaders(session, isNew, modern)
       val init = js.Dynamic.literal(status = 200, headers = js.Dictionary[String](headers.toSeq*))
       js.Dynamic.newInstance(js.Dynamic.global.Response)(stream, init)
     }
@@ -624,46 +721,12 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             val failure: JsonRpcMessage =
               JsonRpcMessage.Failure(Some(rpc.id), error.toErrorObject)
             ZIO.succeed(jsonResponse(failure.toJson, Map.empty, status))
-          case Right(_) =>
-            for
-              session <- Session.make(s"request-${rpc.id.toString}", clientKey = clientKey)
-              reqQueue <- Queue.unbounded[JsonRpcMessage]
-              fiber <- session
-                .runWithSink(reqQueue)(router.dispatch(session, rpc))
-                .flatMap(reply => ZIO.foreachDiscard(reply)(reqQueue.offer))
-                .ensuring(reqQueue.offer(MessageLoop.CloseSentinel))
-                .forkDaemon
-              // With `keepAliveInterval`, the wait for the first frame is bounded by one interval:
-              // a timer OFFERS the heartbeat sentinel, and a reply that is still silent then opens
-              // its SSE stream with a heartbeat (JVM twin: `StreamableHttpHandler.modernReply`). A
-              // status-mapped error arriving after that is delivered in-band.
-              timer <- settings.keepAliveInterval match
-                case None => ZIO.none
-                case Some(interval) =>
-                  (ZIO.sleep(Duration.fromJava(interval)) *> reqQueue.offer(
-                    KeepAliveSentinel
-                  )).forkDaemon
-                    .map(Some(_))
-              stopTimer = timer.fold(ZIO.unit)(_.interruptFork)
-              first <- reqQueue.take.onInterrupt(stopTimer *> fiber.interrupt *> reqQueue.shutdown)
-              _ <- stopTimer
-              response <- modernErrorStatus(first) match
-                case Some(status) =>
-                  (fiber.interrupt *> reqQueue.shutdown).as(
-                    jsonResponse(first.toJson, Map.empty, status)
-                  )
-                case None =>
-                  sseResponse(
-                    reqQueue,
-                    rpc.id,
-                    session,
-                    isNew = false,
-                    fiber,
-                    settings,
-                    modern = true,
-                    initial = Some(first)
-                  )
-            yield response
+          case Right(context) =>
+            Session
+              .make(s"request-${rpc.id.toString}", clientKey = clientKey)
+              .flatMap(session =>
+                requestResponse(router, session, rpc, isNew = false, settings, Some(context), req)
+              )
       case _: JsonRpcMessage.Invalid =>
         val failure: JsonRpcMessage =
           JsonRpcMessage.Failure(None, McpError.invalidRequest("Invalid Request").toErrorObject)
@@ -704,8 +767,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       router: McpRouter[R],
       req: js.Dynamic,
       rpc: JsonRpcMessage.Request
-  ): Either[(Int, McpError), Unit] =
-    ModernHttpValidation.validateRequest(router, rpc, headerOf(req))
+  ): Either[(Int, McpError), RequestContext] =
+    ModernHttpValidation.validateRequestContext(router, rpc, headerOf(req))
 
   private def isModernRequest(req: js.Dynamic, message: JsonRpcMessage): Boolean =
     ModernHttpValidation.isModern(headerOf(req), message)
