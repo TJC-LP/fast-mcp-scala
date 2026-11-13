@@ -19,6 +19,7 @@ import com.tjclp.fastmcp.core.wire.EmptyResult
 import com.tjclp.fastmcp.jsonrpc.{JsonFields, JsonRpcMessage, McpError, RequestId}
 import com.tjclp.fastmcp.server.manager.{
   RetainedBytes,
+  TaskInput,
   TaskManager,
   TaskScope,
   TaskSnapshot,
@@ -153,55 +154,99 @@ final class TaskMiddleware[R](
           .getToolDefinition(name)
           .map(_.effectiveTaskSupport)
           .getOrElse(TaskSupport.Forbidden)
-        val hasLegacyAugmentation = JsonFields.get(params, "task").isDefined
-        val clientSupportsTasks =
-          context.clientCapabilities.extensions.exists(_.contains(Tasks.ExtensionId))
+        val clientSupportsTasks = TaskMiddleware.declaresTasks(context)
 
-        if hasLegacyAugmentation then
-          ZIO.fail(McpError.invalidParams("tools/call: `params.task` was removed in 2026-07-28"))
-        else
-          support match
-            case TaskSupport.Forbidden => next(session, params)
-            case TaskSupport.Required if !clientSupportsTasks =>
+        // A 2025-11-25 `params.task` is not read here. The extension removed the parameter and
+        // says a server "MUST ignore it (treat the field as unknown) rather than using it as an
+        // opt-in" (SEP-2663, Backward Compatibility): whether a task is created depends only on
+        // the tool's policy and on the capabilities this request declares.
+        support match
+          case TaskSupport.Forbidden => next(session, params)
+          case TaskSupport.Required if !clientSupportsTasks =>
+            ZIO.fail(TaskMiddleware.missingTasksCapability)
+          case TaskSupport.Optional if !clientSupportsTasks => next(session, params)
+          case TaskSupport.Optional | TaskSupport.Required =>
+            // Bucket per client: only the transport-supplied key is trusted by default;
+            // `clientInfo` / `_meta` reach a Custom hook but are attacker-controlled.
+            val ownerContext =
+              TaskOwnerContext(session.clientKey, context.clientInfo, context.meta)
+            // runWithoutSink for the same reason as the legacy branch: an offer to this POST's
+            // sink queue after it shut down would interrupt the task. Over HTTP the request's
+            // own session has no reader for its outbound channel, so what the task sends from
+            // then on is discarded, not buffered; on stdio it reaches the client.
+            (taskManager.ownerKeyFor(ownerContext) <*> session.currentRequestId
+              <*> RequestHeaders.current)
+              .mapError(McpError.fromThrowable)
+              .flatMap { (key, requestId, headers) =>
+                session
+                  .runWithoutSink(
+                    taskManager.createInteractive(
+                      scope = TaskScope.bearer(key),
+                      requestedTtlMs = None,
+                      requestBytes = retainedBytes(params, Some(context), requestId, headers),
+                      run = input => runWithInput(session, params, next, context, input),
+                      onStatusChange = _ => ZIO.unit
+                    )
+                  )
+                  .uninterruptible // see the legacy branch
+                  .mapBoth(
+                    McpError.fromThrowable,
+                    created =>
+                      ExtensionTaskHandle
+                        .fromLegacy(created.task)
+                        .toJsonAST
+                        .getOrElse(Json.Obj())
+                  )
+              }
+
+  /** The body of a 2026-07-28 task: the tool call, re-run each time the client has answered what it
+    * asked for.
+    *
+    * A handler asks its client for input the same way inside a task as outside one
+    * (`McpContext.elicit` / `createMessage` / `listRoots` / `sendRequest`): the call ends the
+    * attempt with an `input_required` result naming the requests. Outside a task that result is the
+    * reply, and the client retries the request with `inputResponses` (MRTR, SEP-2322). Inside a
+    * task there is no reply to give, so the task itself waits: it shows the requests on `tasks/get`
+    * in status `input_required`, collects the responses from `tasks/update`, and then runs the
+    * handler again with every response gathered so far in its request context — what a client retry
+    * would have sent. `requestState` returned by an attempt is kept here and handed to the next
+    * one; it is never put on the task's wire shape.
+    *
+    * A key is asked once in a task's lifetime (SEP-2663: a server "MUST NOT reuse a key ... after a
+    * response for that key has been delivered"). An attempt that asks only for keys it already has
+    * responses for cannot make progress, and the task fails.
+    */
+  private def runWithInput(
+      session: Session,
+      params: Json,
+      next: RequestHandler[R],
+      context: RequestContext,
+      input: TaskInput
+  ): ZIO[R, Throwable, Any] =
+    def loop(gathered: Map[String, Json], state: Option[String]): ZIO[R, Throwable, Any] =
+      val attempt = context.copy(
+        inputResponses = context.inputResponses ++ gathered,
+        requestState = state
+      )
+      session.rebindRequest(attempt)(next(session, params)).flatMap { result =>
+        TaskMiddleware.inputRequired(result) match
+          case None => ZIO.succeed(result)
+          case Some((requests, nextState)) =>
+            val unanswered =
+              requests.filterNot(request => attempt.inputResponses.contains(request._1))
+            if unanswered.isEmpty then
               ZIO.fail(
-                McpError.missingRequiredClientCapability(
-                  Json.Obj("extensions" -> Json.Obj(Tasks.ExtensionId -> Json.Obj()))
+                McpError.internalError(
+                  "The tool asked again for input it was already given; a task asks each " +
+                    "input request once"
                 )
               )
-            case TaskSupport.Optional if !clientSupportsTasks => next(session, params)
-            case TaskSupport.Optional | TaskSupport.Required =>
-              // Bucket per client: only the transport-supplied key is trusted by default;
-              // `clientInfo` / `_meta` reach a Custom hook but are attacker-controlled.
-              val ownerContext =
-                TaskOwnerContext(session.clientKey, context.clientInfo, context.meta)
-              // runWithoutSink for the same reason as the legacy branch: an offer to this POST's
-              // sink queue after it shut down would interrupt the task. Over HTTP the request's
-              // own session has no reader for its outbound channel, so what the task sends from
-              // then on is discarded, not buffered; on stdio it reaches the client.
-              (taskManager.ownerKeyFor(ownerContext) <*> session.currentRequestId
-                <*> RequestHeaders.current)
-                .mapError(McpError.fromThrowable)
-                .flatMap { (key, requestId, headers) =>
-                  session
-                    .runWithoutSink(
-                      taskManager.createSized(
-                        scope = TaskScope.bearer(key),
-                        requestedTtlMs = None,
-                        requestBytes = retainedBytes(params, Some(context), requestId, headers),
-                        run = next(session, params),
-                        onStatusChange = _ => ZIO.unit
-                      )
-                    )
-                    .uninterruptible // see the legacy branch
-                    .mapBoth(
-                      McpError.fromThrowable,
-                      created =>
-                        ExtensionTaskHandle
-                          .fromLegacy(created.task)
-                          .toJsonAST
-                          .getOrElse(Json.Obj())
-                    )
-                }
+            else
+              input
+                .await(unanswered)
+                .flatMap(answers => loop(gathered ++ answers, nextState.orElse(state)))
+      }
+    loop(Map.empty, context.requestState)
 
   /** Estimate of what a task created from this request keeps reachable while it runs:
     *
@@ -265,6 +310,32 @@ final class TaskMiddleware[R](
       params.toJsonAST.toOption
     )
 
+private[fastmcp] object TaskMiddleware:
+
+  /** Whether a 2026-07-28 request declares the Tasks extension in its per-request capabilities. */
+  def declaresTasks(context: RequestContext): Boolean =
+    context.clientCapabilities.extensions.exists(_.contains(Tasks.ExtensionId))
+
+  /** `-32021` naming the Tasks extension, as SEP-2663 ("Capability Negotiation") shows it. */
+  def missingTasksCapability: McpError =
+    McpError.missingRequiredClientCapability(
+      Json.Obj("extensions" -> Json.Obj(Tasks.ExtensionId -> Json.Obj()))
+    )
+
+  /** The requests (in order) and `requestState` of a `tools/call` result that is an MRTR
+    * `input_required` result; `None` for any other result.
+    */
+  def inputRequired(result: Json): Option[(List[(String, Json)], Option[String])] =
+    result match
+      case Json.Obj(fields)
+          if JsonFields.get(fields, "resultType").contains(Json.Str("input_required")) =>
+        val requests = JsonFields.get(fields, "inputRequests") match
+          case Some(Json.Obj(entries)) => entries.toList
+          case _ => Nil
+        val state = JsonFields.get(fields, "requestState").collect { case Json.Str(value) => value }
+        Some((requests, state))
+      case _ => None
+
 private case class CallToolRequestParamsLite(task: Option[TaskParams] = None)
 
 private object CallToolRequestParamsLite:
@@ -290,11 +361,24 @@ final class TaskHandlers[R](taskManager: TaskManager[R]):
       ZIO.fail(McpError.methodNotFound(method)).when(ctx.isEmpty && !session.supportsTasks).unit
     }
 
+  /** SEP-2663 ("Protocol Errors"): a server MUST answer `-32021` to a client that issues
+    * `tasks/get`, `tasks/update` or `tasks/cancel` without declaring the extension on that request.
+    * It is checked before anything else, so the answer does not depend on whether the id names a
+    * task. Legacy sessions (no request context) are not affected. Returns whether the request is a
+    * 2026-07-28 one.
+    */
+  private def requireTasksExtension(session: Session): IO[McpError, Boolean] =
+    session.currentRequestContext.flatMap {
+      case Some(context) if !TaskMiddleware.declaresTasks(context) =>
+        ZIO.fail(TaskMiddleware.missingTasksCapability)
+      case context => ZIO.succeed(context.isDefined)
+    }
+
   val get: RequestHandler[R] = (session, params) =>
     for
       _ <- rejectSharedLegacySession(session, Tasks.MethodTasksGet)
+      modern <- requireTasksExtension(session)
       req <- decodeParams[TaskIdParams](params, "tasks/get")
-      modern <- session.currentRequestContext.map(_.isDefined)
       json <-
         if modern then
           taskManager.snapshot(req.taskId, None).flatMap {
@@ -322,30 +406,40 @@ final class TaskHandlers[R](taskManager: TaskManager[R]):
   val cancel: RequestHandler[R] = (session, params) =>
     for
       _ <- rejectSharedLegacySession(session, Tasks.MethodTasksCancel)
+      modern <- requireTasksExtension(session)
       req <- decodeParams[TaskIdParams](params, "tasks/cancel")
-      modern <- session.currentRequestContext.map(_.isDefined)
-      outcome <- taskManager.cancel(req.taskId, if modern then None else Some(session.sessionId))
-      json <- outcome match
-        case Right(task) => if modern then ok(EmptyResult()) else ok(task)
-        case Left(err) => ZIO.fail(McpError.invalidParams(err))
+      json <-
+        if modern then
+          // The extension's cancel is an acknowledgement, not a read of the task: "The server
+          // MUST acknowledge the request with an empty result", with an error only for an id that
+          // names no task (SEP-2663, Task Cancellation). A task that is already terminal is a
+          // known task, so cancelling it again is acknowledged and changes nothing.
+          taskManager.get(req.taskId, None).flatMap {
+            case None => ZIO.fail(McpError.invalidParams(s"Unknown task: ${req.taskId}"))
+            case Some(task) if task.status.isTerminal => ok(EmptyResult())
+            case Some(_) => taskManager.cancel(req.taskId, None) *> ok(EmptyResult())
+          }
+        else
+          taskManager.cancel(req.taskId, Some(session.sessionId)).flatMap {
+            case Right(task) => ok(task)
+            case Left(err) => ZIO.fail(McpError.invalidParams(err))
+          }
     yield json
 
   // Modern-only: legacy sessions are answered -32601 by McpRouter's modernOnlyMethods gate
   // before this handler is ever reached.
-  val update: RequestHandler[R] = (_, params) =>
+  //
+  // Like cancel, the reply is an acknowledgement: an error only for an id that names no task.
+  // Responses under a key that is not outstanding are ignored, which covers every key sent to a
+  // task that is not waiting for input (SEP-2663, Task Update Requests).
+  val update: RequestHandler[R] = (session, params) =>
     for
+      _ <- requireTasksExtension(session)
       req <- decodeParams[TaskUpdateParams](params, "tasks/update")
-      task <- taskManager.get(req.taskId, None)
-      _ <- task match
-        case None => ZIO.fail(McpError.invalidParams(s"Unknown task: ${req.taskId}"))
-        case Some(value) if value.status != TaskStatus.InputRequired =>
-          ZIO.fail(McpError.invalidParams(s"Task ${req.taskId} is not waiting for input"))
-        case Some(_) =>
-          ZIO.fail(
-            McpError.invalidParams(
-              "This task has no resumable input request; retry the original MCP request instead"
-            )
-          )
+      _ <- taskManager
+        .offerInput(req.taskId, req.inputResponses)
+        .flatMap(ZIO.fromEither(_))
+        .mapError(McpError.fromThrowable)
       json <- ok(EmptyResult())
     yield json
 
@@ -387,5 +481,8 @@ final class TaskHandlers[R](taskManager: TaskManager[R]):
           .map(McpError.fromThrowable)
           .getOrElse(McpError.internalError("Task failed"))
         List("error" -> error.toErrorObject.toJsonAST.getOrElse(Json.Obj()))
+      // `input_required`: every request the task is still waiting on (SEP-2663, Task Polling).
+      case None if task.status == TaskStatus.InputRequired =>
+        List("inputRequests" -> Json.Obj(snapshot.inputRequests*))
       case _ => Nil
     Json.Obj((base ++ details)*)
