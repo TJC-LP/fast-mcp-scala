@@ -256,11 +256,12 @@ PY
 # regression and fails the mode. So does a run without that summary: the gate must not turn into
 # nothing when a harness bump rewords it.
 run_2026() {
-  local out rc=0
+  local out dir rc=0
   out="$(mktemp -t fmcp-conf-2026.XXXXXX)"
-  run_harness server --url "$URL" --requirements 2026-07-28 | tee "$out" || rc=$?
-  python3 - "$out" <<'PY' || rc=1
-import re, sys
+  dir="$(mktemp -d -t fmcp-conf-2026-checks.XXXXXX)"
+  run_harness server --url "$URL" --requirements 2026-07-28 -o "$dir" | tee "$out" || rc=$?
+  python3 - "$out" "$dir" <<'PY' || rc=1
+import glob, json, re, sys
 text = re.sub(r"\x1b\[[0-9;]*m", "", open(sys.argv[1], errors="replace").read())
 summary = re.search(r"^Not scored for \S+: (\d+) scenario\(s\) run, (\d+) failing", text, re.M)
 if not summary:
@@ -271,9 +272,31 @@ failed = re.findall(r"^\s+✗ (\S+)", text[summary.end():], re.M)
 print(f"2026: unscored scenarios: {ran} run, {failing} failing")
 for name in failed:
     print(f"2026:   FAILURE {name}")
-sys.exit(1 if failing or failed or ran == 0 else 0)
+# The harness prints "<n> passed, 0 failed" and a tick for a scenario whose checks were all
+# SKIPPED, so a skipped check looks like a pass. Every skip must be one this list explains.
+EXPECTED_SKIPS = {
+    # A stub in the harness itself: it never contacts the server (pending its rewrite against
+    # subscriptions/listen). Pushing notifications/tasks is optional in SEP-2663.
+    "tasks-status-notifications",
+    # The server declares no tools/prompts listChanged capability, so there is nothing to observe.
+    "sep-2575-server-sends-tools-list-changed-on-subscription",
+    "sep-2575-server-sends-prompts-list-changed-on-subscription",
+}
+files = glob.glob(f"{sys.argv[2]}/**/checks.json", recursive=True)
+if not files:
+    print("2026: the harness wrote no checks.json; skipped checks cannot be gated")
+    sys.exit(1)
+skipped = sorted({c.get("id") for f in files for c in json.load(open(f)) if c.get("status") == "SKIPPED"})
+unexpected = [s for s in skipped if s not in EXPECTED_SKIPS]
+stale = sorted(EXPECTED_SKIPS - set(skipped))
+print(f"2026: skipped checks: {len(skipped)} ({len(unexpected)} unexpected)")
+for name in unexpected:
+    print(f"2026:   SKIPPED {name}: not in EXPECTED_SKIPS (scripts/conformance.sh)")
+for name in stale:
+    print(f"2026:   EXPECTED_SKIPS lists {name}, which was not skipped; remove it")
+sys.exit(1 if failing or failed or ran == 0 or unexpected or stale else 0)
 PY
-  rm -f "$out"
+  rm -rf "$out" "$dir"
   return "$rc"
 }
 

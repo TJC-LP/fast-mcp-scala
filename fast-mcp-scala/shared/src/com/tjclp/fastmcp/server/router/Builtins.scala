@@ -345,6 +345,17 @@ final class Builtins[R](
   val subscriptionsListen: RequestHandler[R] = (session, params) =>
     for
       req <- decodeParams[SubscriptionsListenRequestParams](params, "subscriptions/listen")
+      // SEP-2663 ("Task Status Notifications"): a client that asks for task status notifications
+      // without declaring the Tasks extension on the request MUST get -32021. A declaring client
+      // is acknowledged with no task ids: pushing `notifications/tasks` is optional and this
+      // server does not, so tasks are polled with `tasks/get`.
+      context <- session.currentRequestContext
+      _ <- ZIO
+        .fail(TaskMiddleware.missingTasksCapability)
+        .when(
+          TaskMiddleware.requestsTaskNotifications(params) &&
+            context.exists(!TaskMiddleware.declaresTasks(_))
+        )
       requestId <- session.currentRequestId.someOrFail(
         McpError.internalError("subscriptions/listen is missing its request id")
       )
