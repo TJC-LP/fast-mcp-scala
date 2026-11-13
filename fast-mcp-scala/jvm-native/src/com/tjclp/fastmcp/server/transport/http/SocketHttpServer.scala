@@ -433,16 +433,6 @@ private[fastmcp] object SocketHttpServer:
   ): UIO[(Scope.Closeable, ZIO[Any, Option[Nothing], Chunk[SseFrame]])] =
     Scope.make.flatMap(scope => scope.extend[Any](frames.toPull).map(pull => (scope, pull)))
 
-  /** Run an SSE reply's finalizers without emitting it: the stream is started already halted. Its
-    * `ensuring` hooks are the only thing that interrupts the request's dispatch fiber, shuts its
-    * queue and releases the session's GET slot, so a reply that cannot be delivered must still be
-    * run this way — dropping it would leave every later GET on the session answering 409.
-    */
-  private def abandon(frames: ZStream[Any, Nothing, SseFrame]): UIO[Unit] =
-    Promise.make[Nothing, Unit].flatMap { halted =>
-      halted.succeed(()) *> frames.interruptWhen(halted).runDrain
-    }
-
   /** One accepted socket: the request loop, framing, and response writing, all on one thread. */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private final class Connection[R](socket: Socket, owner: Listener[R]) extends Runnable:
@@ -557,7 +547,15 @@ private[fastmcp] object SocketHttpServer:
         case Left(rejection) => reject(rejection)
         case Right(framing) =>
           val request =
-            HttpRequest(head.method, head.path, head.header, head.headerJoined, NoBody, peer)
+            HttpRequest(
+              head.method,
+              head.path,
+              head.header,
+              head.headerJoined,
+              NoBody,
+              peer,
+              () => head.headerNames
+            )
           admit(request) match
             case Some(reply) =>
               // Answered on the head alone. A declared body that was never read leaves unknown
@@ -589,11 +587,14 @@ private[fastmcp] object SocketHttpServer:
       exit match
         case Exit.Success(reply) if !peerGone => writeReply(reply, head.version, close)
         case Exit.Success(reply) =>
-          // The peer vanished while the handler ran, but it still produced a reply: run an SSE
-          // reply's finalizers before dropping it.
+          // The peer vanished while the handler ran, but it still produced a reply: release what
+          // an SSE reply holds (the request's dispatch and queue, a session's GET slot) before
+          // dropping it. `abandon` does that at once. Running the stream already halted does not:
+          // a stream halted before its first pull may never register its finalizers, and the
+          // release then waits for the handler's unstarted-reply grace.
           reply match
             case sse: HttpReply.Sse =>
-              val _ = owner.runSync(abandon(sse.frames))
+              val _ = owner.runSync(sse.abandon)
             case _ => ()
           false
         case Exit.Failure(cause) =>
@@ -752,6 +753,7 @@ private[fastmcp] object SocketHttpServer:
       owner.runSync(openPull(sse.frames)) match
         case Exit.Failure(cause) =>
           debugLog(s"could not open the reply stream: ${cause.prettyPrint}")
+          val _ = owner.runSync(sse.abandon)
           val _ = writeReply(internalError, version, close = true)
           false
         case Exit.Success((scope, pull)) =>
@@ -792,8 +794,10 @@ private[fastmcp] object SocketHttpServer:
               broken = true
           finally
             // Runs the stream's finalizers (dispatch interrupt, queue shutdown, GET-slot release)
-            // on every path: normal end, client disconnect, write failure, shutdown.
-            val _ = owner.runSync(scope.close(Exit.unit))
+            // on every path: normal end, client disconnect, write failure, shutdown. `abandon`
+            // covers a stream that was never pulled far enough to register them; it does nothing
+            // for one that was.
+            val _ = owner.runSync(scope.close(Exit.unit) *> sse.abandon)
           finished && !broken && !closeAfter
 
     private def appendHead(status: Int, headers: List[(String, String)], close: Boolean): Unit =
@@ -920,60 +924,56 @@ private[fastmcp] object SocketHttpServer:
           deadline = math.min(deadline + n * RequestNanosPerByte, deadlineCeiling)
       n
 
-    /** Read a request head up to (excluding) its blank-line terminator (`CRLF CRLF`, or bare `LF
-      * LF` / `LF CRLF` for lenient clients). `Right(None)` on EOF before any byte.
+    /** Read a request head up to (excluding) its `CRLF CRLF` terminator. `Right(None)` on EOF
+      * before any byte. Strict: a bare LF, a bare CR or a control byte anywhere in the head —
+      * including before the request line — is a `400` as soon as it is seen, so `LF LF` never ends
+      * a head and the bytes after it are never read as another request.
       */
     def readHead(max: Int): Either[Rejection, Option[Array[Byte]]] =
       var scanned = 0 // bytes from `start` already scanned without finding the terminator
       var result: Option[Either[Rejection, Option[Array[Byte]]]] = None
       while result.isEmpty do
         // RFC 9112 §2.2: ignore empty lines received before the request-line, so a stray extra
-        // CRLF from a proxy is not taken as an (empty) head terminator.
+        // CRLF from a proxy is not taken as an (empty) head terminator. An empty line is CRLF.
         var skippedBlank = false
-        while start < end && (buf(start) == '\r' || buf(start) == '\n') do
-          start += 1
-          scanned = math.max(0, scanned - 1)
+        while scanned == 0 && end - start >= 2 && buf(start) == '\r' && buf(start + 1) == '\n' do
+          start += 2
           skippedBlank = true
+        // A lone CR is undecided until the next byte arrives: so far it is (half of) a blank line.
+        val pendingBlank = scanned == 0 && available == 1 && buf(start) == '\r'
         // The first byte of a request starts its clock (bytes a liveness probe buffered count
         // from the moment the request loop gets to them); blank lines alone start one as well.
-        if available > 0 then armDeadline()
-        else if skippedBlank then armDeadlineForBlankLines()
-        headEnd(start + scanned) match
-          case Some((headEnd, _)) if headEnd - start > max =>
+        if available > 0 && !pendingBlank then armDeadline()
+        else if skippedBlank || pendingBlank then armDeadlineForBlankLines()
+        val found =
+          if pendingBlank then Http1.HeadIncomplete
+          else Http1.findHeadEnd(buf, start, start + scanned, end)
+        if found == Http1.HeadMalformed then
+          result = Some(
+            Left(
+              Rejection(400, "Request head contains a bare CR, a bare LF or a control character")
+            )
+          )
+        else if found >= 0 then
+          if found - start > max then
             result = Some(Left(Rejection(431, s"Request head exceeds $max bytes")))
-          case Some((headEnd, terminatorLength)) =>
-            val bytes = java.util.Arrays.copyOfRange(buf, start, headEnd)
-            start = headEnd + terminatorLength
+          else
+            val bytes = java.util.Arrays.copyOfRange(buf, start, found)
+            start = found + 4
             result = Some(Right(Some(bytes)))
-          case None =>
-            if available > max then
-              result = Some(Left(Rejection(431, s"Request head exceeds $max bytes")))
-            else if timedOut then
-              result = Some(Left(Rejection(408, "Request was not received in time")))
-            else
-              // Re-scan the last 3 bytes next time: a terminator may straddle two reads.
-              scanned = math.max(0, available - 3)
-              if fill() < 0 then
-                result = Some(
-                  if available == 0 then Right(None)
-                  else Left(Rejection(400, "Truncated request head"))
-                )
+        else if available > max then
+          result = Some(Left(Rejection(431, s"Request head exceeds $max bytes")))
+        else if timedOut then
+          result = Some(Left(Rejection(408, "Request was not received in time")))
+        else
+          // Everything buffered is scanned, except a trailing CR whose LF may come next.
+          if !pendingBlank then scanned = Http1.resumeFrom(buf, start, end) - start
+          if fill() < 0 then
+            result = Some(
+              if available == 0 then Right(None)
+              else Left(Rejection(400, "Truncated request head"))
+            )
       result.getOrElse(Right(None))
-
-    /** Index just past the head and the terminator length, if a terminator ends at or after `from`.
-      */
-    private def headEnd(from: Int): Option[(Int, Int)] =
-      var i = math.max(from, start)
-      var found: Option[(Int, Int)] = None
-      while found.isEmpty && i < end do
-        if buf(i) == '\n' then
-          if i - 3 >= start && buf(i - 1) == '\r' && buf(i - 2) == '\n' && buf(i - 3) == '\r' then
-            found = Some((i - 3, 4))
-          else if i - 2 >= start && buf(i - 1) == '\r' && buf(i - 2) == '\n' then
-            found = Some((i - 2, 3))
-          else if i - 1 >= start && buf(i - 1) == '\n' then found = Some((i - 1, 2))
-        i += 1
-      found
 
     /** Wait until `n` bytes are buffered; `false` if the peer closed first. */
     private def require(n: Int): Boolean =
@@ -999,31 +999,51 @@ private[fastmcp] object SocketHttpServer:
         start += n
         Some(text)
 
-    /** One line up to LF (CR stripped), or `None` at EOF; `Left(400)` past `max` bytes. */
+    /** One CRLF-terminated line of chunked framing without its CRLF, or `None` at EOF. Strict: a
+      * bare LF, a CR that no LF follows, or a control byte other than HTAB is a `400`, as is a line
+      * longer than `max` bytes.
+      */
     private def readLine(max: Int): Either[Rejection, Option[String]] =
-      var scanned = 0
+      var scanned = 0 // bytes from `start` already scanned without finding the CRLF
       var result: Option[Either[Rejection, Option[String]]] = None
       while result.isEmpty do
         var i = start + scanned
-        var lf = -1
-        while lf < 0 && i < end do
-          if buf(i) == '\n' then lf = i
+        var lineEnd = -1 // index of the CR of the terminating CRLF
+        var malformed = false
+        while lineEnd < 0 && !malformed && i < end do
+          val b = buf(i)
+          if b == '\n' then
+            if i > start && buf(i - 1) == '\r' then lineEnd = i - 1 else malformed = true
+          else if b == '\r' then
+            if i + 1 < end && buf(i + 1) != '\n' then malformed = true
+          else if (b >= 0 && b < ' ' && b != '\t') || b == 0x7f then malformed = true
           i += 1
-        if lf >= 0 then
-          val lineEnd = if lf > start && buf(lf - 1) == '\r' then lf - 1 else lf
-          val line = new String(buf, start, lineEnd - start, StandardCharsets.ISO_8859_1)
-          start = lf + 1
-          result = Some(Right(Some(line)))
+        if malformed then result = Some(Left(malformedChunkedFraming))
+        else if lineEnd >= 0 then
+          if lineEnd - start > max then
+            result = Some(Left(Rejection(400, "Chunk header line too long")))
+          else
+            val line = new String(buf, start, lineEnd - start, StandardCharsets.ISO_8859_1)
+            start = lineEnd + 2
+            result = Some(Right(Some(line)))
         else if available > max then
           result = Some(Left(Rejection(400, "Chunk header line too long")))
         else if timedOut then
           result = Some(Left(Rejection(408, "Request was not received in time")))
         else
-          scanned = available
+          // Everything buffered is scanned, except a trailing CR whose LF may come next.
+          scanned = Http1.resumeFrom(buf, start, end) - start
           if fill() < 0 then result = Some(Right(None))
       result.getOrElse(Right(None))
 
-    /** Decode a `Transfer-Encoding: chunked` body (extensions ignored, trailers skipped). */
+    private def malformedChunkedFraming: Rejection =
+      Rejection(400, "Chunked body lines must end in CRLF and carry no control characters")
+
+    /** Decode a `Transfer-Encoding: chunked` body (extensions ignored, trailers checked and
+      * dropped). The framing is read exactly as RFC 9112 §7.1 writes it: a chunk-size line is hex
+      * digits from its first byte, optionally followed by chunk extensions, and ends in CRLF; chunk
+      * data is followed by exactly CRLF; trailer lines are field lines ending in CRLF.
+      */
     def readChunked(max: Int): Either[Rejection, Array[Byte]] =
       val body = new java.io.ByteArrayOutputStream()
       var result: Option[Either[Rejection, Array[Byte]]] = None
@@ -1032,10 +1052,7 @@ private[fastmcp] object SocketHttpServer:
           case Left(rejection) => result = Some(Left(rejection))
           case Right(None) => result = Some(Left(Rejection(400, "Truncated chunked body")))
           case Right(Some(line)) =>
-            val sizeToken = line.indexOf(';') match
-              case -1 => line.trim
-              case i => line.substring(0, i).trim
-            parseChunkSize(sizeToken) match
+            parseChunkSize(line) match
               case None => result = Some(Left(Rejection(400, "Malformed chunk size")))
               case Some(0) => result = Some(skipTrailers().map(_ => body.toByteArray))
               case Some(size) =>
@@ -1043,32 +1060,62 @@ private[fastmcp] object SocketHttpServer:
                   result = Some(Left(Rejection(413, s"Request body exceeds $max bytes")))
                 else
                   readExactly(size) match
-                    case None =>
-                      result = Some(
-                        Left(
-                          if timedOut then Rejection(408, "Request was not received in time")
-                          else Rejection(400, "Truncated chunk")
-                        )
-                      )
+                    case None => result = Some(Left(chunkCutShort))
                     case Some(bytes) =>
                       body.write(bytes)
-                      readLine(8) match
-                        case Right(Some("")) => ()
-                        case _ => result = Some(Left(Rejection(400, "Missing CRLF after chunk")))
+                      // Exactly CRLF: a lone LF (or anything else) here is where two parsers
+                      // would start to disagree about the next chunk.
+                      if !require(2) then result = Some(Left(chunkCutShort))
+                      else if buf(start) == '\r' && buf(start + 1) == '\n' then start += 2
+                      else result = Some(Left(Rejection(400, "Missing CRLF after chunk")))
       result.getOrElse(Left(Rejection(400, "Truncated chunked body")))
 
+    private def chunkCutShort: Rejection =
+      if timedOut then Rejection(408, "Request was not received in time")
+      else Rejection(400, "Truncated chunk")
+
+    /** The trailer section: field lines up to the empty line. Their content is not used, but a line
+      * that is not a field line is refused rather than skipped.
+      */
     private def skipTrailers(): Either[Rejection, Unit] =
       var result: Option[Either[Rejection, Unit]] = None
       while result.isEmpty do
         readLine(1024) match
           case Right(Some("")) => result = Some(Right(()))
-          case Right(Some(_)) => ()
+          case Right(Some(line)) =>
+            Http1.parseHeaderLine(line) match
+              case Left(_) => result = Some(Left(Rejection(400, "Malformed chunked trailer")))
+              case Right(_) => ()
           case Right(None) => result = Some(Left(Rejection(400, "Truncated chunked trailers")))
           case Left(rejection) => result = Some(Left(rejection))
       result.getOrElse(Right(()))
 
-    /** Hex chunk size, capped at 7 digits (≤ 256 MiB) so it always fits an `Int`. */
-    private def parseChunkSize(token: String): Option[Int] =
-      if token.isEmpty || token.length > 7 || !token.forall(c => Character.digit(c, 16) >= 0) then
-        None
-      else Some(Integer.parseInt(token, 16))
+    /** The size of a chunk-size line: `1*HEXDIG` from the line's first byte, capped at 7 digits (≤
+      * 256 MiB) so it always fits an `Int`. What follows the digits must be nothing, or chunk
+      * extensions — optional SP / HTAB, then `;` (the line reader has already refused control
+      * bytes). Leading whitespace, a sign, a `0x` prefix or trailing bytes that are not an
+      * extension make the line malformed: a size is never recovered from a padded token.
+      */
+    private def parseChunkSize(line: String): Option[Int] =
+      var digits = 0
+      var size = 0
+      var more = true
+      while more && digits < line.length && digits <= 7 do
+        val value = hexValue(line.charAt(digits))
+        if value < 0 then more = false
+        else
+          size = size * 16 + value
+          digits += 1
+      if digits == 0 || digits > 7 then None
+      else if digits == line.length then Some(size)
+      else
+        var i = digits
+        while i < line.length && (line.charAt(i) == ' ' || line.charAt(i) == '\t') do i += 1
+        if i < line.length && line.charAt(i) == ';' then Some(size) else None
+
+    /** The value of an ASCII hex digit, or -1. */
+    private def hexValue(c: Char): Int =
+      if c >= '0' && c <= '9' then c - '0'
+      else if c >= 'a' && c <= 'f' then c - 'a' + 10
+      else if c >= 'A' && c <= 'F' then c - 'A' + 10
+      else -1

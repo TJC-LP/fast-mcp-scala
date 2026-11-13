@@ -31,6 +31,8 @@ object BenchServer:
       port = port,
       httpEndpoint = "/mcp",
       stateless = stateless,
+      // Host/Origin validation, as a deployed server runs it (and as a loopback bind gets by
+      // default), so the benchmark measures the guarded request path.
       allowedHosts = Some(Set("127.0.0.1", "localhost"))
     )
 

@@ -64,6 +64,18 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       "x" * (args.megabytes * 1024 * 1024)
     }
 
+  case class RegionArgs(region: String)
+  given JsonDecoder[RegionArgs] = DeriveJsonDecoder.gen[RegionArgs]
+
+  /** A tool whose `region` argument is mirrored in the `Mcp-Param-Region` header. */
+  private val regionTool = McpTool.withSchema[RegionArgs, String](
+    name = "region",
+    inputSchema = ToolInputSchema.unsafeFromJsonString(
+      """{"type":"object","properties":{"region":{"type":"string","x-mcp-header":"Region"}},"required":["region"]}"""
+    ),
+    description = Some("Echoes its header-backed argument")
+  )(args => args.region)
+
   private def baseSettings: McpServerSettings =
     McpServerSettings(
       host = "127.0.0.1",
@@ -82,7 +94,10 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       blockingExecutor: Option[Executor] = None
   )(body: Int => A): A =
     val server = McpServer.typed[Any]("SocketT", "0.1.0", settings)
-    runUnsafe(server.tool(addTool) *> server.tool(chattyTool) *> server.tool(bigTool))
+    runUnsafe(
+      server.tool(addTool) *> server.tool(chattyTool) *> server.tool(bigTool) *>
+        server.tool(regionTool)
+    )
     runUnsafe(
       ZIO
         .scoped {
@@ -253,6 +268,61 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     val reply = request(port, post(initFrame))
     reply.status shouldBe 200
     reply.header("mcp-session-id").getOrElse(fail("initialize did not mint a session"))
+
+  /** Control bytes made visible, for failure messages. */
+  private def visible(raw: String): String =
+    raw.flatMap {
+      case '\r' => "\\r"
+      case '\n' => "\\n"
+      case '\t' => "\\t"
+      case c if c < ' ' || c == '\u007f' => f"\\x${c.toInt}%02x"
+      case c => c.toString
+    }
+
+  /** `raw` must be refused by the socket layer itself: a `400` transport error with
+    * `Connection: close`, after which the server closes without answering anything else on the
+    * connection — so no byte of `raw` is ever served as a further request.
+    */
+  private def refused(port: Int, raw: String): Unit =
+    val client = new RawClient(port)
+    try
+      client.send(raw)
+      withClue(s"request ${visible(raw)}: ") {
+        val reply = client.readReply()
+        reply.status shouldBe 400
+        reply.header("connection") shouldBe Some("close")
+        reply.body should include(""""code":-32000""")
+        client.atEof() shouldBe true
+      }
+    finally client.close()
+
+  private val chunkedHead =
+    "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" +
+      "Accept: application/json, text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+
+  /** `initFrame` is ASCII, so its length in chars is its length in bytes. */
+  private val initHex = Integer.toHexString(initFrame.length)
+
+  private val modernMeta =
+    """"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}"""
+
+  private val modernAddFrame =
+    s"""{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":40},$modernMeta}}"""
+
+  private val modernRegionFrame =
+    s"""{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"region","arguments":{"region":"eu"},$modernMeta}}"""
+
+  private val modernVersion = "MCP-Protocol-Version" -> "2026-07-28"
+  private val callMethod = "Mcp-Method" -> "tools/call"
+
+  /** The reply must be the header-mismatch error: HTTP 400 carrying JSON-RPC `-32020`. */
+  private def headerMismatch(port: Int, body: String, headers: List[(String, String)]): Unit =
+    withClue(s"headers $headers: ") {
+      val reply = request(port, post(body, extra = headers))
+      reply.status shouldBe 400
+      reply.header("content-type") shouldBe Some("application/json")
+      reply.body should include(""""code":-32020""")
+    }
 
   // --- tests --------------------------------------------------------------------------------------
 
@@ -487,6 +557,262 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     }
   }
 
+  // --- strict request-head parsing ---------------------------------------------------------------
+
+  test("a request head must end every line in CRLF: a bare LF is refused with 400 and a close") {
+    withServer() { port =>
+      request(port, get(None)).status shouldBe 405 // the well-formed twin is served
+      refused(port, "GET /mcp HTTP/1.1\nHost: 127.0.0.1\n\n")
+      refused(port, "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\n\r\n")
+      refused(port, "GET /mcp HTTP/1.1\nHost: 127.0.0.1\r\n\r\n")
+      refused(port, "\nGET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+      refused(port, "\r\n\nGET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    }
+  }
+
+  test("LF LF or LF CRLF inside a head does not end it: the bytes after are never a second request") {
+    withServer() { port =>
+      val second = "GET /other HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+      // `refused` also proves the connection closes with ONE reply: nothing answers `second`.
+      refused(port, "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nX-A: b\n\n" + second)
+      refused(port, "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nX-A: b\n\r\n" + second)
+    }
+  }
+
+  test("a lone LF or CR inside a field value cannot introduce a header") {
+    withServer() { port =>
+      val length = s"Content-Length: ${initFrame.length}"
+      def smuggled(separator: String): String =
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" +
+          "Accept: application/json, text/event-stream\r\n" +
+          s"X-A: b$separator$length\r\n\r\n$initFrame"
+      refused(port, smuggled("\n"))
+      refused(port, smuggled("\r"))
+    }
+  }
+
+  test("a bare CR, NUL or another control byte in a request head is refused with 400 and a close") {
+    withServer() { port =>
+      def withValue(value: String): String =
+        s"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nX-A: $value\r\n\r\n"
+      // HTAB inside a value is the one control byte a head may carry.
+      request(port, withValue("a\tb")).status shouldBe 405
+      List("a\rb", "a\u0000b", "\u0000", "a\u000bb", "a\u000c", "\u001fa", "a\u007fb").foreach { v =>
+        refused(port, withValue(v))
+      }
+      refused(port, "\rGET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+      refused(port, "GET /mcp\u0000 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+      refused(port, "GET\t/mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+      refused(port, "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nX\u0000A: b\r\n\r\n")
+    }
+  }
+
+  test("Transfer-Encoding / Content-Length padded with control bytes are refused, not recognised") {
+    withServer() { port =>
+      val head =
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" +
+          "Accept: application/json, text/event-stream\r\n"
+      val chunkedBody = s"$initHex\r\n$initFrame\r\n0\r\n\r\n"
+      List("\u000b", "\u000c", "\u0000", "\r").foreach { pad =>
+        refused(port, s"${head}Transfer-Encoding: ${pad}chunked\r\n\r\n$chunkedBody")
+        refused(port, s"${head}Transfer-Encoding: chunked$pad\r\n\r\n$chunkedBody")
+        refused(port, s"${head}Content-Length: $pad${initFrame.length}\r\n\r\n$initFrame")
+        refused(port, s"${head}Content-Length: ${initFrame.length}$pad\r\n\r\n$initFrame")
+      }
+      // Optional whitespace (SP / HTAB) around the value is still just whitespace.
+      val ok = request(port, s"${head}Content-Length: \t${initFrame.length} \r\n\r\n$initFrame")
+      ok.status shouldBe 200
+    }
+  }
+
+  test("a well-formed request delivered one byte at a time is still parsed") {
+    withServer() { port =>
+      def dribble(raw: String): Reply =
+        val client = new RawClient(port)
+        try
+          raw.foreach { c =>
+            client.send(c.toString)
+            Thread.sleep(1)
+          }
+          client.readReply()
+        finally client.close()
+      // Every CR arrives without its LF, so each line end is judged across two reads.
+      dribble("\r\n" + get(None)).status shouldBe 405
+      val chunked = dribble(
+        chunkedHead + s"$initHex;ext=1\r\n$initFrame\r\n0\r\nX-Trailer: v\r\n\r\n"
+      )
+      chunked.status shouldBe 200
+      chunked.header("mcp-session-id").isDefined shouldBe true
+    }
+  }
+
+  // --- strict chunked framing ---------------------------------------------------------------------
+
+  test("well-formed chunked bodies decode: extensions, trailers, and the connection stays usable") {
+    withServer() { port =>
+      val (a, b) = initFrame.splitAt(40)
+      def chunk(s: String, ext: String = "") = s"${Integer.toHexString(s.length)}$ext\r\n$s\r\n"
+      val client = new RawClient(port)
+      try
+        client.send(
+          chunkedHead + chunk(a, ";name=value") + chunk(b, " ; q=\"quoted text\"") +
+            "0;last\r\nX-Trailer: one\r\nX-Other:\ttwo\r\n\r\n"
+        )
+        val first = client.readReply()
+        first.status shouldBe 200
+        first.header("connection") shouldBe Some("keep-alive")
+        // Upper-case hex digits and leading zeros (within the digit bound) are sizes too.
+        val upper = "%07X".format(initFrame.length)
+        client.send(chunkedHead + s"$upper\r\n$initFrame\r\n0\r\n\r\n")
+        client.readReply().status shouldBe 200
+      finally client.close()
+    }
+  }
+
+  test("chunk-size lines, the terminator after chunk data, and trailers must end in CRLF") {
+    withServer() { port =>
+      val data = s"$initFrame\r\n"
+      val end = "0\r\n\r\n"
+      // A chunk header ending in a bare LF, with or without a chunk extension.
+      refused(port, chunkedHead + s"$initHex\n$data$end")
+      refused(port, chunkedHead + s"$initHex;a=b\n$data$end")
+      // Chunk data followed by a single LF, or by nothing.
+      refused(port, chunkedHead + s"$initHex\r\n$initFrame\n$end")
+      refused(port, chunkedHead + s"$initHex\r\n$initFrame$end")
+      // The last chunk and the trailer section.
+      refused(port, chunkedHead + s"$initHex\r\n${data}0\n\r\n")
+      refused(port, chunkedHead + s"$initHex\r\n${data}0\r\n\n")
+      refused(port, chunkedHead + s"$initHex\r\n${data}0\r\nX-Trailer: v\n\r\n")
+      refused(port, chunkedHead + s"$initHex\r\n${data}0\r\nX-Trailer: v\r\n\n")
+      // A CR that is not followed by LF.
+      refused(port, chunkedHead + s"$initHex\r$data$end")
+      refused(port, chunkedHead + s"$initHex\r\n$initFrame\r$end")
+      refused(port, chunkedHead + s"$initHex\r\n${data}0\r\nX-Trailer: a\rb\r\n\r\n")
+    }
+  }
+
+  test("a chunk size is hex digits from the first byte; padding and control bytes are refused") {
+    withServer() { port =>
+      val rest = s"\r\n$initFrame\r\n0\r\n\r\n"
+      List(" ", "\t", "\u000b", "\u000c", "\u0000", "\u00a0").foreach { pad =>
+        refused(port, chunkedHead + s"$pad$initHex$rest")
+        refused(port, chunkedHead + s"$initHex$pad$rest")
+      }
+      refused(port, chunkedHead + s"0x$initHex$rest")
+      refused(port, chunkedHead + s"+$initHex$rest")
+      refused(port, chunkedHead + s"$rest") // no size at all
+      refused(port, chunkedHead + s"0000000$initHex$rest") // past the digit bound
+      // Something after the size that is not a chunk extension.
+      refused(port, chunkedHead + s"$initHex junk$rest")
+      refused(port, chunkedHead + s"$initHex=1$rest")
+      // A chunk extension carrying control bytes.
+      refused(port, chunkedHead + s"$initHex;a=\u0000b$rest")
+      refused(port, chunkedHead + s"$initHex;a\rb$rest")
+      refused(port, chunkedHead + s"$initHex;a=\u007f$rest")
+      refused(port, chunkedHead + s"$initHex\r\n$initFrame\r\n0;\u000b\r\n\r\n")
+    }
+  }
+
+  test("a chunked trailer section holds field lines only") {
+    withServer() { port =>
+      val body = s"$initHex\r\n$initFrame\r\n0\r\n"
+      refused(port, chunkedHead + body + "not a field line\r\n\r\n")
+      refused(port, chunkedHead + body + "X-Trailer: v\r\n folded\r\n\r\n")
+      refused(port, chunkedHead + body + "X-Trailer: a\u0000b\r\n\r\n")
+    }
+  }
+
+  // --- repeated routing headers on a 2026-07-28 POST ----------------------------------------------
+
+  test("2026-07-28 POST: single routing headers are served as before") {
+    withServer() { port =>
+      val add = request(
+        port,
+        post(modernAddFrame, extra = List(modernVersion, callMethod, "Mcp-Name" -> "add"))
+      )
+      add.status shouldBe 200
+      add.body should include("""{\"sum\":42}""")
+      val region = request(
+        port,
+        post(
+          modernRegionFrame,
+          extra = List(modernVersion, callMethod, "Mcp-Name" -> "region", "Mcp-Param-Region" -> "eu")
+        )
+      )
+      region.status shouldBe 200
+      region.body should include("eu")
+    }
+  }
+
+  test("2026-07-28 POST: a repeated Mcp-Name or Mcp-Method is a header mismatch, whatever the order") {
+    withServer() { port =>
+      val name = "Mcp-Name" -> "add"
+      // Two different names are refused whichever of them matches the body.
+      headerMismatch(port, modernAddFrame, List(modernVersion, callMethod, name, "Mcp-Name" -> "big"))
+      headerMismatch(port, modernAddFrame, List(modernVersion, callMethod, "Mcp-Name" -> "big", name))
+      headerMismatch(port, modernAddFrame, List(modernVersion, name, callMethod, "mcp-name" -> "big"))
+      // More than one occurrence is refused even when they agree.
+      headerMismatch(port, modernAddFrame, List(modernVersion, callMethod, name, name))
+      headerMismatch(port, modernAddFrame, List(modernVersion, callMethod, name, "MCP-NAME" -> "add"))
+
+      val list = "Mcp-Method" -> "tools/list"
+      headerMismatch(port, modernAddFrame, List(modernVersion, callMethod, list, name))
+      headerMismatch(port, modernAddFrame, List(modernVersion, list, callMethod, name))
+      headerMismatch(port, modernAddFrame, List(modernVersion, callMethod, name, callMethod))
+    }
+  }
+
+  test("2026-07-28 POST: a repeated Mcp-Param-* header is a header mismatch, whatever the order") {
+    withServer() { port =>
+      val base = List(modernVersion, callMethod, "Mcp-Name" -> "region")
+      val eu = "Mcp-Param-Region" -> "eu"
+      headerMismatch(port, modernRegionFrame, base ++ List(eu, "Mcp-Param-Region" -> "us"))
+      headerMismatch(port, modernRegionFrame, base ++ List("Mcp-Param-Region" -> "us", eu))
+      headerMismatch(port, modernRegionFrame, base ++ List(eu, "mcp-param-region" -> "eu"))
+      headerMismatch(port, modernRegionFrame, ("MCP-PARAM-REGION" -> "us") :: base ++ List(eu))
+      // Also for a parameter header the called tool does not declare.
+      headerMismatch(
+        port,
+        modernAddFrame,
+        List(modernVersion, callMethod, "Mcp-Name" -> "add", "Mcp-Param-X" -> "1", "Mcp-Param-X" -> "2")
+      )
+      // Different parameter headers are not a repeat.
+      val distinct = request(
+        port,
+        post(modernRegionFrame, extra = base ++ List(eu, "Mcp-Param-Other" -> "x"))
+      )
+      distinct.status shouldBe 200
+    }
+  }
+
+  test("a repeated MCP-Protocol-Version is a header mismatch, whatever the order and the body") {
+    withServer() { port =>
+      val routing = List(callMethod, "Mcp-Name" -> "add")
+      val legacy = "Mcp-Protocol-Version" -> "2025-11-25"
+      headerMismatch(port, modernAddFrame, modernVersion :: modernVersion :: routing)
+      headerMismatch(port, modernAddFrame, modernVersion :: legacy :: routing)
+      headerMismatch(port, modernAddFrame, legacy :: modernVersion :: routing)
+      // A body without the 2026-07-28 metadata: the first value must not pick the legacy path
+      // while a later one says 2026-07-28 (nor the other way round).
+      headerMismatch(port, initFrame, List(legacy, modernVersion))
+      headerMismatch(port, initFrame, List(modernVersion, legacy))
+      headerMismatch(port, initFrame, List(legacy, legacy))
+      // One legacy version header is an ordinary legacy request.
+      request(port, post(initFrame, extra = List(legacy))).status shouldBe 200
+    }
+  }
+
+  test("2026-07-28 notification: a repeated Mcp-Method is a header mismatch") {
+    withServer() { port =>
+      val cancelled =
+        """{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":99}}"""
+      val method = "Mcp-Method" -> "notifications/cancelled"
+      request(port, post(cancelled, extra = List(modernVersion, method))).status shouldBe 202
+      headerMismatch(port, cancelled, List(modernVersion, method, "Mcp-Method" -> "tools/call"))
+      headerMismatch(port, cancelled, List(modernVersion, "Mcp-Method" -> "tools/call", method))
+    }
+  }
+
   test("Expect: 100-continue receives the interim response before the body is sent") {
     withServer() { port =>
       val client = new RawClient(port)
@@ -571,6 +897,28 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       val ok = request(port, post(initFrame, host = "localhost:1234"))
       ok.status shouldBe 200
       request(port, post(initFrame, host = "localhost", accept = "text/plain")).status shouldBe 406
+    }
+  }
+
+  test("default settings on a loopback bind refuse a non-loopback Host and a foreign Origin (403)") {
+    // No allow-list configured: the guard is automatic for a loopback listener.
+    withServer() { port =>
+      request(port, post(initFrame, host = "evil.example")).status shouldBe 403
+      request(port, post(initFrame, host = s"evil.example:$port")).status shouldBe 403
+      val foreignOrigin = List("Origin" -> "http://evil.example")
+      request(
+        port,
+        post(initFrame, host = s"127.0.0.1:$port", extra = foreignOrigin)
+      ).status shouldBe 403
+      request(port, get(None, extra = foreignOrigin)).status shouldBe 403
+      // Loopback names, on the bound port or a forwarded one, and a same-origin page pass.
+      request(port, post(initFrame, host = s"127.0.0.1:$port")).status shouldBe 200
+      request(port, post(initFrame, host = "localhost:1234")).status shouldBe 200
+      val sameOrigin = List("Origin" -> s"http://localhost:$port")
+      request(
+        port,
+        post(initFrame, host = s"localhost:$port", extra = sameOrigin)
+      ).status shouldBe 200
     }
   }
 

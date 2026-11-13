@@ -34,11 +34,22 @@ object HttpServerJs extends McpServerApp[Http, HttpServerJs.type]:
     description = Some("Say hello")
   )(args => GreetResult(s"Hello, ${args.name}!"))
 
+  /** Binds loopback with Host/Origin validation on.
+    *
+    * The two are separate protections and you want both: binding `127.0.0.1` keeps other machines
+    * out, and the `allowedHosts` guard keeps a web page in a local browser out (a request whose
+    * `Host` is not one of these names, or whose `Origin` is not this server's own, is refused with
+    * 403). These three names are what a loopback bind gets when `allowedHosts` is left unset — they
+    * are spelled out here so that the guard stays on if you copy this and change `host`. To expose
+    * the server (`host = "0.0.0.0"`), list the name clients reach it by here (and browser
+    * front-ends in `allowedOrigins`), and put an authenticating proxy in front of it.
+    */
   override def settings: McpServerSettings = McpServerSettings(
-    host = "127.0.0.1", // bind loopback unless you set allowedHosts
+    host = "127.0.0.1",
     port = 8090,
     httpEndpoint = "/mcp",
-    stateless = false
+    stateless = false,
+    allowedHosts = Some(Set("localhost", "127.0.0.1", "[::1]"))
   )
 
   override val tools: List[McpTool[?, ?]] = List(greetTool)

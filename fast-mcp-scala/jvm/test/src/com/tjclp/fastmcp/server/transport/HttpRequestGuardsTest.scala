@@ -95,7 +95,14 @@ class HttpRequestGuardsTest extends AnyFunSuite with Matchers:
       "origin" -> "http://localhost:3000",
       "content-type" -> "application/json"
     )
-    HttpRequestGuards.postGate(crossPort, McpServerSettings(), requireSse = true) shouldBe None
+    HttpRequestGuards.postGate(
+      crossPort,
+      McpServerSettings(dnsRebindingProtection = false),
+      requireSse = true
+    ) shouldBe None
+    // Default settings bind loopback, so the guard is on without any allow-list.
+    HttpRequestGuards.postGate(crossPort, McpServerSettings(), requireSse = true).map(_.status) shouldBe
+      Some(403)
     HttpRequestGuards.postGate(crossPort, guarded, requireSse = true).map(_.status) shouldBe Some(
       403
     )
@@ -105,8 +112,58 @@ class HttpRequestGuardsTest extends AnyFunSuite with Matchers:
     HttpRequestGuards.hostGate(headers("host" -> "evil.example.com"), guarded) shouldBe
       Some(Rejection(403, "Host/Origin not allowed (DNS-rebinding protection)"))
     HttpRequestGuards.hostGate(headers("host" -> "127.0.0.1:8000"), guarded) shouldBe None
+    // Default settings: the automatic loopback guard refuses it too...
     HttpRequestGuards.hostGate(headers("host" -> "evil.example.com"), McpServerSettings()) shouldBe
-      None
+      Some(Rejection(403, "Host/Origin not allowed (DNS-rebinding protection)"))
+    HttpRequestGuards.hostGate(headers("host" -> "localhost:8000"), McpServerSettings()) shouldBe None
+    // ...and only the explicit opt-out lets it through.
+    HttpRequestGuards.hostGate(
+      headers("host" -> "evil.example.com"),
+      McpServerSettings(dnsRebindingProtection = false)
+    ) shouldBe None
+  }
+
+  test("startupWarnings: only a non-loopback bind with nothing listed and no opt-out warns") {
+    val warned = HttpRequestGuards.startupWarnings(McpServerSettings(host = "0.0.0.0"))
+    warned should have size 1
+    warned.head should include("'0.0.0.0'")
+    warned.head should include("allowedHosts")
+    warned.head should include("allowedOrigins")
+    warned.head should include("dnsRebindingProtection = false")
+    HttpRequestGuards.startupWarnings(McpServerSettings()) shouldBe Nil
+    HttpRequestGuards.startupWarnings(McpServerSettings(host = "localhost")) shouldBe Nil
+    HttpRequestGuards.startupWarnings(
+      McpServerSettings(host = "0.0.0.0", allowedHosts = Some(Set("mcp.example.com")))
+    ) shouldBe Nil
+    HttpRequestGuards.startupWarnings(
+      McpServerSettings(host = "0.0.0.0", allowedOrigins = Some(Set("https://app.example.com")))
+    ) shouldBe Nil
+    HttpRequestGuards.startupWarnings(
+      McpServerSettings(host = "0.0.0.0", dnsRebindingProtection = false)
+    ) shouldBe Nil
+  }
+
+  test("validateSettings: the opt-out is accepted alone and refused next to an allow-list") {
+    HttpRequestGuards.validateSettings(McpServerSettings(dnsRebindingProtection = false)) shouldBe
+      Right(())
+    HttpRequestGuards.validateSettings(
+      McpServerSettings(host = "0.0.0.0", dnsRebindingProtection = false)
+    ) shouldBe Right(())
+    // An empty list is "nothing listed": no contradiction.
+    HttpRequestGuards.validateSettings(
+      McpServerSettings(allowedHosts = Some(Set.empty), dnsRebindingProtection = false)
+    ) shouldBe Right(())
+    val withHosts = HttpRequestGuards.validateSettings(
+      McpServerSettings(allowedHosts = Some(Set("localhost")), dnsRebindingProtection = false)
+    )
+    withHosts shouldBe Left(HttpRequestGuards.OptOutWithAllowListMessage)
+    withHosts.left.getOrElse("") should include("dnsRebindingProtection")
+    HttpRequestGuards.validateSettings(
+      McpServerSettings(
+        allowedOrigins = Some(Set("https://app.example.com")),
+        dnsRebindingProtection = false
+      )
+    ) shouldBe Left(HttpRequestGuards.OptOutWithAllowListMessage)
   }
 
   test("isJsonContentType: application/json with parameters, case-insensitive, utf-8 charsets") {
@@ -202,6 +259,97 @@ class HttpRequestGuardsTest extends AnyFunSuite with Matchers:
     val mixed = List(("held", 100L, true), ("plain", 9_000L, false))
     HttpRequestGuards.pickEvictable(mixed, now, Some(5_000L)) shouldBe Some("plain")
     HttpRequestGuards.pickEvictable(Nil, now, Some(1L)) shouldBe None
+  }
+
+  // ---- pickVictim: who makes room at the cap, counted per client ----
+
+  private def stored(id: String, seen: Long, live: Boolean, client: String = "") =
+    HttpRequestGuards.StoredSession(id, seen, live, Option(client).filter(_.nonEmpty))
+
+  private val A = "203.0.113.7"
+  private val B = "198.51.100.20"
+  private val C = "192.0.2.33"
+
+  test("pickVictim: a client holding every slot with live, fresh GETs gives one up to another client") {
+    val now = 10_000L
+    val hogged = List(stored("a1", 9_990L, live = true, A), stored("a2", 9_980L, live = true, A))
+    // The idle rules alone find nobody, with or without a timeout…
+    HttpRequestGuards.pickEvictable(hogged.map(s => (s.id, s.lastSeen, s.liveGet)), now, Some(5_000L)) shouldBe None
+    // …but the client holding two gives up its longest-idle session to a client holding none.
+    HttpRequestGuards.pickVictim(hogged, Some(B), now, Some(5_000L)) shouldBe Some("a2")
+    HttpRequestGuards.pickVictim(hogged, Some(B), now, None) shouldBe Some("a2")
+    // A newcomer the backend cannot identify is a client holding none, too.
+    HttpRequestGuards.pickVictim(hogged, None, now, None) shouldBe Some("a2")
+  }
+
+  test("pickVictim: the client holding the most gives up a GET-less session before a live one") {
+    val snapshot = List(
+      stored("a-live", 100L, live = true, A),
+      stored("a-plain", 900L, live = false, A),
+      stored("a-live2", 200L, live = true, A),
+      stored("b", 50L, live = false, B) // the longest-idle session overall, and GET-less
+    )
+    // B holds one, A holds three: A gives one up, and B's idle session is left alone.
+    HttpRequestGuards.pickVictim(snapshot, Some(C), 1_000L, None) shouldBe Some("a-plain")
+  }
+
+  test("pickVictim: a client that holds as many sessions as anyone replaces one of its own") {
+    val snapshot = List(
+      stored("b", 50L, live = false, B), // would be the idle rules' choice
+      stored("a1", 300L, live = true, A),
+      stored("a2", 200L, live = true, A)
+    )
+    HttpRequestGuards.pickVictim(snapshot, Some(A), 1_000L, None) shouldBe Some("a2")
+    // Also when every client holds exactly one: the returning client's own session goes.
+    val level = List(stored("b", 50L, live = false, B), stored("a", 900L, live = true, A))
+    HttpRequestGuards.pickVictim(level, Some(A), 1_000L, None) shouldBe Some("a")
+  }
+
+  test("pickVictim: when holdings are level the idle rules decide, 503 included") {
+    val now = 10_000L
+    // One session each, the newcomer holds none: nobody holds two more than the newcomer.
+    val level = List(stored("a", 9_000L, live = true, A), stored("b", 500L, live = true, B))
+    HttpRequestGuards.pickVictim(level, Some(C), now, None) shouldBe None
+    HttpRequestGuards.pickVictim(level, Some(C), now, Some(20_000L)) shouldBe None
+    HttpRequestGuards.pickVictim(level, Some(C), now, Some(5_000L)) shouldBe Some("b") // idle past the timeout
+    val withPlain = stored("c", 9_500L, live = false, "198.51.100.99") :: level
+    HttpRequestGuards.pickVictim(withPlain, Some(C), now, None) shouldBe Some("c") // GET-less first
+    // The newcomer's client holds one, another holds two: one apart is still level.
+    val oneApart = List(
+      stored("a1", 9_000L, live = true, A),
+      stored("a2", 9_100L, live = true, A),
+      stored("b", 9_200L, live = true, B)
+    )
+    HttpRequestGuards.pickVictim(oneApart, Some(B), now, None) shouldBe None
+  }
+
+  test("pickVictim: sessions without an identity each count as their own client (the rules before per-client counting)") {
+    val now = 10_000L
+    val held = List(stored("x", 1_000L, live = true), stored("y", 500L, live = true), stored("z", 9_900L, live = true))
+    HttpRequestGuards.pickVictim(held, None, now, None) shouldBe None
+    HttpRequestGuards.pickVictim(held, None, now, Some(5_000L)) shouldBe Some("y")
+    HttpRequestGuards.pickVictim(held, Some(A), now, None) shouldBe None
+    val mixed = stored("plain", 9_000L, live = false) :: held
+    HttpRequestGuards.pickVictim(mixed, None, now, Some(5_000L)) shouldBe Some("plain")
+    HttpRequestGuards.pickVictim(Nil, Some(A), now, Some(1L)) shouldBe None
+  }
+
+  test("pickVictim: one shared identity (a reverse proxy) makes the store least-recently-used") {
+    val now = 10_000L
+    val proxied = List(stored("p1", 9_000L, live = true, A), stored("p2", 8_000L, live = true, A))
+    HttpRequestGuards.pickVictim(proxied, Some(A), now, None) shouldBe Some("p2")
+    val withPlain = stored("p3", 9_900L, live = false, A) :: proxied
+    HttpRequestGuards.pickVictim(withPlain, Some(A), now, None) shouldBe Some("p3")
+  }
+
+  test("pickVictim: several clients tied for the most share the pool") {
+    val snapshot = List(
+      stored("a1", 300L, live = true, A),
+      stored("a2", 400L, live = true, A),
+      stored("b1", 100L, live = true, B),
+      stored("b2", 500L, live = true, B)
+    )
+    HttpRequestGuards.pickVictim(snapshot, Some(C), 1_000L, None) shouldBe Some("b1")
   }
 
   test("validateSettings: accepts defaults and parseable origins") {

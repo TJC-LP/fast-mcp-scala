@@ -45,12 +45,13 @@ object MessageLoop:
     * (null id, per JSON-RPC).
     *
     * This is the single choke point for the inbound input limits on every transport: frame length,
-    * nesting depth and per-object member count are checked on the raw text ([[JsonLimits.preScan]])
-    * BEFORE zio-json allocates a node, and re-checked iteratively on the AST
-    * ([[JsonLimits.validate]]) before the envelope is decoded. Limit violations are parser
-    * constraints and answer `-32700` like any other unparseable frame (JSON-RPC 2.0 §5.1 — the same
-    * mapping Jackson's `StreamReadConstraints` get in the MCP Java SDK); we deliberately do not
-    * echo an id taken from a frame we refused to parse.
+    * nesting depth, per-object member count, per-array element count, total value count and the
+    * digits / exponent of every number are checked on the raw text ([[JsonLimits.preScan]]) BEFORE
+    * zio-json allocates a node, and re-checked iteratively on the AST ([[JsonLimits.validate]])
+    * before the envelope is decoded. Limit violations are parser constraints and answer `-32700`
+    * like any other unparseable frame (JSON-RPC 2.0 §5.1 — the same mapping Jackson's
+    * `StreamReadConstraints` get in the MCP Java SDK); we deliberately do not echo an id taken from
+    * a frame we refused to parse.
     *
     * HTTP transports parse — and therefore enforce limits — *before* touching session state, so a
     * malformed or oversized body can never mint a session; stdio just feeds both arms to the
@@ -61,11 +62,11 @@ object MessageLoop:
       frame: String,
       limits: LimitSettings = LimitSettings()
   ): Either[JsonRpcMessage, JsonRpcMessage] =
-    JsonLimits.preScan(frame, limits.maxFrameChars, limits.maxDepth, limits.maxObjectFields) match
+    JsonLimits.preScan(frame, limits.maxFrameChars, limits.jsonBounds) match
       case Some(violation) => Left(parseFailure(violation.message))
       case None =>
         frame.fromJson[Json].left.map(parseFailure).flatMap { json =>
-          JsonLimits.validate(json, limits.maxDepth, limits.maxObjectFields) match
+          JsonLimits.validate(json, limits.jsonBounds) match
             case Some(violation) => Left(parseFailure(violation.message))
             // AST path: the envelope decoder is `mapOrFail`, whose `unsafeFromJsonAST` override
             // applies straight to the node — no re-encode.

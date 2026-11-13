@@ -11,6 +11,7 @@ import com.tjclp.fastmcp.server.manager.ContextualToolHandler
 import com.tjclp.fastmcp.server.manager.PromptHandler
 import com.tjclp.fastmcp.server.manager.ResourceHandler
 import com.tjclp.fastmcp.server.manager.ResourceTemplateHandler
+import com.tjclp.fastmcp.server.manager.ToolInputValidation
 import com.tjclp.fastmcp.server.manager.ToolRegistrationOptions
 
 /** Platform-independent MCP server API.
@@ -121,6 +122,14 @@ trait McpServerCore[R]:
           ),
       options = options
     )
+
+  /** For each registered tool, whether `tools/call` arguments are validated against its advertised
+    * `inputSchema` before the handler runs, and what that schema declares that is not enforced.
+    * Validation is on unless `McpServerSettings(validateToolInput = false)` or the tool's
+    * `ToolRegistrationOptions(validateInputSchema = false)` turns it off. The default here (an
+    * empty map) is for implementations that do not validate; [[McpServer]] reports every tool.
+    */
+  def toolInputValidation: Map[String, ToolInputValidation] = Map.empty
 
   // --- Resource registration ---
 

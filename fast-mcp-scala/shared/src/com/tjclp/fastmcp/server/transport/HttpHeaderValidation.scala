@@ -17,6 +17,69 @@ private[fastmcp] object HttpHeaderValidation:
   private val EncodedSuffix = "?="
   private val MaxSafeInteger = BigDecimal("9007199254740991")
 
+  /** Canonical spelling of the version header, as [[repeatedHeader]] reports it. */
+  val ProtocolVersionHeader = "MCP-Protocol-Version"
+
+  private val ParamPrefix = "mcp-param-"
+
+  /** The routing header that occurs more than once among `names` — every header name of one request
+    * as received (any case, one entry per field line) — or `None`. The routing headers are the ones
+    * the header/body checks read: `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and every
+    * `Mcp-Param-*`.
+    *
+    * Each of them carries exactly one value, so a second occurrence is never legitimate; and the
+    * lookup the checks use returns one occurrence only, so a second one would go unread while an
+    * intermediary may have acted on it. The request is refused whatever the values and their order.
+    * A repeated `MCP-Protocol-Version` is reported first: it decides which protocol revision's
+    * rules apply at all.
+    *
+    * One pass, and no allocation for a request that carries at most one `Mcp-Param-*` header.
+    */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  def repeatedHeader(names: Iterator[String]): Option[String] =
+    var versions = 0
+    var methods = 0
+    var nameHeaders = 0
+    var firstParam = ""
+    var moreParams: Option[scala.collection.mutable.HashSet[String]] = None
+    var repeatedParam = ""
+    while names.hasNext do
+      val name = names.next()
+      val length = name.length
+      if length == 20 && name.equalsIgnoreCase("mcp-protocol-version") then versions += 1
+      else if length == 10 && name.equalsIgnoreCase("mcp-method") then methods += 1
+      else if length == 8 && name.equalsIgnoreCase("mcp-name") then nameHeaders += 1
+      else if length >= ParamPrefix.length &&
+        name.regionMatches(true, 0, ParamPrefix, 0, ParamPrefix.length)
+      then
+        val key = asciiLower(name)
+        if firstParam.isEmpty then firstParam = key
+        else if key == firstParam then repeatedParam = key
+        else
+          val seen = moreParams.getOrElse {
+            val created = scala.collection.mutable.HashSet.empty[String]
+            moreParams = Some(created)
+            created
+          }
+          if !seen.add(key) then repeatedParam = key
+    if versions > 1 then Some(ProtocolVersionHeader)
+    else if methods > 1 then Some("Mcp-Method")
+    else if nameHeaders > 1 then Some("Mcp-Name")
+    else if repeatedParam.nonEmpty then
+      Some("Mcp-Param-" + repeatedParam.substring(ParamPrefix.length))
+    else None
+
+  /** The header-mismatch error (`-32020`) for a routing header that was sent more than once. */
+  def repeatedHeaderError(name: String): McpError =
+    McpError.headerMismatch(s"Header mismatch: $name must not be sent more than once")
+
+  /** ASCII-only lower-casing: header names are ASCII, and a locale-sensitive fold could make two
+    * spellings of one name compare different.
+    */
+  private def asciiLower(s: String): String =
+    if s.forall(c => c < 'A' || c > 'Z') then s
+    else s.map(c => if c >= 'A' && c <= 'Z' then (c + 32).toChar else c)
+
   def validate(
       request: JsonRpcMessage.Request,
       header: String => Option[String],

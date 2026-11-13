@@ -71,7 +71,13 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
         err.message
       case other => fail(s"expected a -32700 parse failure, got $other")
 
-  private val big = LimitSettings(maxFrameChars = 8 * 1024 * 1024)
+  // Raised array / value bounds too: several tests below feed megabyte arrays on purpose to probe
+  // what happens AFTER the frame check (error-body size, envelope decoding).
+  private val big = LimitSettings(
+    maxFrameChars = 8 * 1024 * 1024,
+    maxArrayElements = 1_000_000,
+    maxValues = 2_000_000
+  )
 
   // ---- F1: colliding keys ----
 
@@ -270,16 +276,15 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
     )
     idOf("1e3") shouldBe Right(Request(RequestId.NumId(1000L), "ping", None))
     idOf("100e-2") shouldBe Right(Request(RequestId.NumId(1L), "ping", None))
-    idOf("0e99999999") shouldBe Right(Request(RequestId.NumId(0L), "ping", None))
+    idOf("0e512") shouldBe Right(Request(RequestId.NumId(0L), "ping", None))
     // 1e30 used to become NumId(5076944270305263616); 1e999999999 became NumId(0).
     Seq(
       "9223372036854775808",
       "1e30",
       "1e19",
-      "1e999999999",
-      "1e2147483647",
+      "1e512",
       "1.5",
-      "1e-2147483647"
+      "1e-512"
     )
       .foreach { id =>
         val (result, ms) = timed(idOf(id))
@@ -290,6 +295,14 @@ class JsonLimitsTest extends AnyFunSuite with Matchers:
           ms should be < 1000L
         }
       }
+    // Past limits.maxNumberExponent the frame is refused before the envelope is decoded at all.
+    Seq("0e99999999", "1e999999999", "1e2147483647", "1e-2147483647").foreach { id =>
+      val (result, ms) = timed(idOf(id))
+      withClue(id) {
+        parseErrorMessage(result) should include("maxNumberExponent")
+        ms should be < 1000L
+      }
+    }
   }
 
   test("unknown top-level fields are tolerated and never materialised") {

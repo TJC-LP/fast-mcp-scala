@@ -9,6 +9,277 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
+### Security
+
+- **The socket HTTP backend parses requests strictly** (TJC-5087). It is the default on Scala
+  Native and opt-in on the JVM, and it usually sits behind a reverse proxy, so a request the two
+  could read differently is now refused instead of repaired. Each refusal is a `400` JSON-RPC
+  transport error followed by `Connection: close`; nothing else on that connection is served.
+  - Request head: every line ends in CRLF. A bare LF, a bare CR, NUL, any other control character
+    except HTAB inside a field value, or DEL is refused as soon as it is read — also in the empty
+    lines allowed before the request line. `LF LF` and `LF CRLF` no longer end a head.
+  - Only SP and HTAB are removed around a field value (it used to be every character up to
+    U+0020), so `Content-Length` / `Transfer-Encoding` values padded with control characters are
+    refused rather than recognised. `Content-Length` is ASCII digits only.
+  - Methods and field names are ASCII `tchar` only. The request line is
+    `method SP target SP version` exactly: repeated, leading or trailing spaces and HTAB are refused.
+  - Chunked request bodies: a chunk-size line is hex digits from its first byte (at most 7),
+    optionally followed by chunk extensions, and ends in CRLF; chunk data is followed by exactly
+    CRLF; trailer lines are field lines ending in CRLF. Padded sizes, a bare LF or CR anywhere in
+    the framing, control characters in a chunk extension and trailer lines that are not field lines
+    are refused. Well-formed chunked bodies, extensions and trailers decode as before.
+- **A repeated routing header on a POST is refused** (TJC-5087): `MCP-Protocol-Version`,
+  `Mcp-Method`, `Mcp-Name` and every `Mcp-Param-*` carry one value, and the header/body checks
+  read one occurrence. A 2026-07-28 POST that carries any of them more than once is now answered
+  `400` with the header-mismatch error (`-32020`), whatever the values and their order — also when
+  the occurrences agree. Before, the zio-http and socket backends compared the first occurrence
+  only. A repeated `MCP-Protocol-Version` is refused on every POST, so its first value cannot
+  select the legacy path while a later one says `2026-07-28`. On Bun the runtime joins a repeated
+  header into one value before the server sees it: a joined `MCP-Protocol-Version` was already
+  refused there and now gets `-32020` instead of `-32022`, and the other headers are compared with
+  the body as the joined value, as before. Requests that send each of these headers once are
+  unaffected.
+- **A request's resources are released even when its reply is never streamed** (TJC-5087): on the
+  streamable-HTTP transport a request's dispatch and its message queue — and, for a legacy
+  session, the GET stream slot — were released by the response stream's finalizer alone, which
+  does nothing for a stream that is never started. A client that disconnected as the response
+  head went out, or a request interrupted between the handler and the backend, left the dispatch
+  running with nobody to answer, and left a session's GET slot taken: every later GET on that
+  session was answered `409`, and the idle sweeper skipped it as if it still had a live stream.
+  - A streamed reply now answers for those resources from the moment it exists. They are released
+    when its stream ends or is interrupted, when the backend drops the reply without running it,
+    or — failing both — 5 seconds after the reply was built if its stream has still not been
+    started. A stream first run after that is empty.
+  - On the zio-http backend a streamed reply is tied to the request's scope, so a connection that
+    closes before the stream starts releases them at once. The socket backend releases a reply it
+    cannot deliver through the same explicit hook; it used to run the stream already halted, which
+    frees them only if the stream has registered its finalizers by then. Both are built on the
+    shared handler, where the bound lives.
+  - The handler is uninterruptible from the moment it forks a request's dispatch until it hands
+    the reply back, except while it waits for the first frame; leaving that wait without a reply
+    stops the dispatch.
+  - A legacy session that leaves the store is always terminated: cap eviction at `maxSessions`,
+    `DELETE` and the idle sweeper now remove and terminate in one uninterruptible step, so an
+    `initialize` or `DELETE` whose client goes away mid-way cannot strand a session with its
+    in-flight requests and tasks.
+  - Bun: the same one-step eviction at the cap, and a client that had already gone when its
+    request reached the dispatch (it left while the body was being read) now stops that dispatch.
+    Bun has no GET stream, so it has no GET slot to release.
+  - No new setting and no wire change for a reply that is delivered. Replies that are complete at
+    their first frame are unaffected and gain no fiber or timer; a streamed reply carries one
+    sleeping watchdog fiber until its stream's first pull.
+- **The legacy session store is bounded in what each session holds, not only in how many there
+  are.** Applies to the legacy (pre-2026-07-28) streamable-HTTP adapter on the JVM, Bun and Scala
+  Native; 2026-07-28 requests never store a session.
+  - **A session is stored only for an `initialize` that succeeded.** A header-less `initialize` is
+    answered on a session that is not in the store. One that fails — params that do not decode, or
+    a `clientInfo` / `capabilities` over the budget below — returns the JSON-RPC error with no
+    `Mcp-Session-Id`, takes no slot and evicts nobody. The cap check, the choice of the session
+    that makes room and the insert remain one atomic step.
+  - **What a stored session keeps from `initialize` has a fixed budget**: `clientInfo` and
+    `capabilities` together may hold at most 256 JSON values and 16 KiB of text (member names,
+    strings, number digits). Over either bound the `initialize` is refused with `-32602`. The
+    budget does not grow with `maxRequestBodyBytes` or `limits.maxFrameChars`. Stdio and the
+    sessionless adapter (`stateless = true`) store nothing and are not budgeted.
+  - **One client can no longer fill the store and have every other client refused.** At the
+    `maxSessions` cap, sessions are counted per client (the peer address the backend reports). A
+    client that already holds as many sessions as any other replaces one of its own; otherwise a
+    client holding at least two more than the newcomer's gives one up — its longest-idle session,
+    a live and recently used GET stream included. Only when holdings are level do the previous
+    rules decide (longest-idle session without a live GET, else the longest-idle GET holder idle
+    past `sessionIdleTimeout`, else 503).
+  - **Idle time is measured on the monotonic clock.** A session's last-activity time and every
+    comparison with it (the idle sweep at `sessionIdleTimeout`, the eviction order at
+    `maxSessions`) used the wall clock. A backward step (NTP, a VM resume) made a session used a
+    moment ago look like the longest idle one, so it was the next to be evicted at the cap; a
+    forward step longer than `sessionIdleTimeout` expired every session without a live GET at
+    the next sweep. Found by Antithesis's clock faults. `Session.lastSeen` now returns
+    monotonic milliseconds, comparable only with each other.
+  - `docs/transports.md` ("The legacy session store") states the resulting worst case:
+    `maxSessions` × the per-session budget, about 100 MiB of heap at the defaults, plus the
+    subscription and task terms when those features are enabled.
+
+  What changes for a deployment:
+  - A client whose `initialize` carries more than the budget (in practice: an icon inlined as a
+    large `data:` URI, or a very large `experimental` / `extensions` object) is refused with
+    `-32602` on the legacy streamable adapter, where it used to be accepted.
+  - A failed header-less `initialize` no longer returns an `Mcp-Session-Id`; a successful one
+    returns it as before. Its reply is sent when the handler has finished rather than being opened
+    after the one-second legacy grace.
+  - Behind a reverse proxy all clients share the proxy's address, so a full store now admits a
+    newcomer by closing the longest-idle session — live GET or not — where it answered 503 when
+    every session held a live, recently used GET stream. Limit sessions per principal in the proxy.
+  - A backend that reports no peer address keeps the previous cap rules unchanged.
+- **A tool's advertised `inputSchema` is now enforced on `tools/call`** (TJC-5087). Until now the
+  schema was advertised on `tools/list` but arguments were only decoded by Scala type, so a
+  constraint that lived in the schema alone — an `enum`, numeric bounds, a length limit,
+  `additionalProperties: false`, declared through `@Param(schema = ...)`, `McpSchema` /
+  `McpInputCodec` or `McpTool.withSchema` — was not checked, and `ToolRegistrationOptions
+  .validateInputSchema` (default `true`) was never read. Now, before a handler or annotated method
+  runs, the arguments are validated against the schema; a call that does not conform is answered
+  with an `isError` tool result naming the location and the constraint (the same in-band answer an
+  undecodable argument gets; the offending value is not echoed) and the handler is not invoked.
+  Applies to the annotation path and to typed contracts, on every transport, on the JVM, Scala.js
+  and Scala Native, and to task-augmented calls.
+  - The validator is built in (`com.tjclp.fastmcp.core.JsonSchemaValidator`: no dependency, no
+    regular expressions, no reflection) and covers a documented subset of JSON Schema: `type`,
+    `enum`, `const`, `minimum` / `maximum` / `exclusiveMinimum` / `exclusiveMaximum`, `minLength` /
+    `maxLength`, `items` / `prefixItems`, `minItems` / `maxItems`, `properties`, `required`,
+    `additionalProperties`, `allOf` / `anyOf` / `oneOf` / `not`, and `$ref` to a location inside
+    the same schema. A schema is compiled once at registration; a call costs one walk over its
+    arguments.
+  - **Not enforced, by design:** `pattern` and `patternProperties` (no backtracking regular
+    expression is run on client input), `format`, `multipleOf`, `uniqueItems`, `minProperties` /
+    `maxProperties`, `propertyNames`, `contains`, the `dependent*` keywords, `if` / `then` /
+    `else`, `unevaluated*`, and a `$ref` that is remote, unresolvable or recursive. These remain
+    advertised only: a handler (or an `McpInputCodec` decoder) that relies on one must check it.
+  - New setting `McpServerSettings.validateToolInput: Boolean = true` — the server-wide switch
+    (`false` restores decode-only behaviour for every tool). One tool opts out with
+    `ToolRegistrationOptions(validateInputSchema = false)`, which is now honoured.
+  - New `McpServer.toolInputValidation: Map[String, ToolInputValidation]` (also
+    `ToolManager.inputValidation(name)` / `inputValidationReport`) reports, per tool, whether
+    enforcement is on and which declared keywords the validator skips. `McpServerCore` gains
+    `toolInputValidation` with an empty default, so third-party implementations keep compiling.
+  - `ToolManager` takes an optional constructor argument (`validateInput: Boolean = true`).
+  - **What a client or server author can notice** — each of these was accepted before because the
+    decoder was more lenient than the schema, and is now rejected because the schema says so:
+    a string where the schema says `integer` / `number` (`"5"`), or any other JSON type mismatch;
+    a call that omits a member listed in `required`, including a parameter or field that has a
+    Scala default but is not marked `@Param(..., required = false)` (mark it to keep it optional)
+    and an `Option` parameter annotated `@Param(required = true)`; arguments sent to a tool that
+    takes none (its derived schema says `additionalProperties: false`); an explicit `null` for an
+    `Option` parameter whose `@Param(schema = ...)` override does not admit `null`; any value a
+    custom decoder accepts but the advertised schema does not describe (give the type a matching
+    `McpSchema` / `McpInputCodec`); and every value under a hand-written `oneOf` whose
+    alternatives overlap (`oneOf` means exactly one — add `required` to object alternatives).
+    The message for a missing argument changes from `Missing required argument 'x'` to `Invalid
+    arguments for tool '<tool>': missing required property 'x'`, and an out-of-enum value is
+    reported as `... 'field' must be one of: a, b` instead of the decoder's text.
+  - The router-level `SchemaValidator` / `ValidationMiddleware` seam is unchanged and still
+    permissive by default; its documentation no longer describes it as the validation mechanism.
+  - Docs: `docs/custom-types.md` § "What the server enforces", `SECURITY.md`, the Scaladoc of
+    `@Param(schema)`, `McpSchema`, `McpInputCodec`, `McpTool.withSchema` and
+    `ToolRegistrationOptions`.
+- **BEHAVIOUR CHANGE — Host / Origin validation is on by default for loopback HTTP servers**
+  (TJC-5087). A server whose `host` is a loopback bind address (`127.0.0.0/8`, `::1`, `localhost`
+  — including the default `127.0.0.1`) now answers **403** to a request whose `Host` is not a
+  loopback name, and to a request whose present `Origin` is not the server's own origin or listed
+  in `allowedOrigins`, **without any setting**. Previously the guard existed only when
+  `allowedHosts` / `allowedOrigins` was set, so a server started with default settings accepted
+  any `Host` and `Origin`. Binding loopback keeps other machines out; it does not keep out a web
+  page open in a browser on the same machine, and this guard is what does.
+  - **What may break: a loopback listener behind a reverse proxy that forwards its own `Host`**
+    (`Host: mcp.example.com` arriving at `127.0.0.1:8000`), or a browser front-end on another
+    origin talking to a default-settings server. Those requests are now refused with
+    `403 {"error":{"code":-32000,"message":"Host/Origin not allowed (DNS-rebinding protection)"}}`.
+    Fix it one of two ways:
+    - **preferred:** list what the proxy forwards —
+      `McpServerSettings(allowedHosts = Some(Set("mcp.example.com")))`, plus
+      `allowedOrigins = Some(Set("https://app.example.com"))` for a browser front-end on another
+      origin. An explicit `allowedHosts` replaces the automatic names, so add `"localhost"` /
+      `"127.0.0.1"` to it if local clients must keep working;
+    - **or opt out:** `McpServerSettings(dnsRebindingProtection = false)` (new setting, default
+      `true`) accepts every `Host` and `Origin`, as before. It is valid only with both
+      allow-lists unset; `runHttp()` refuses the contradictory combination at startup.
+  - Clients that reach the server as `localhost`, `127.0.0.1` or `[::1]` — MCP clients, `curl`,
+    the conformance harness, an `ssh -L` or IDE port-forward — are unaffected: the automatic names
+    are `localhost`, `127.0.0.1`, `[::1]` and the bound address itself, **on any port** (the port
+    is not compared). A request with no `Host` and no `Origin` still passes. A host name that only
+    resolves to loopback (an `/etc/hosts` alias) is not recognised as a loopback bind: list it.
+  - `allowedHosts = None` therefore now means "automatic", not "off"; `Some(Set.empty)` reads the
+    same. An explicit `allowedHosts` behaves exactly as before on every bind address.
+    `allowedOrigins` on its own keeps its meaning (only the listed origins pass) and, on a loopback
+    bind, the `Host` is now additionally held to the loopback names.
+  - **A non-loopback bind is not guarded automatically** — the names clients use cannot be
+    inferred from `0.0.0.0` or a LAN address — so `runHttp()` (and Bun's `startStatefulHttp()` /
+    `startStatelessHttp()`) now logs a **WARN at startup** when `host` is not loopback and neither
+    allow-list is set. The server still starts: a container behind an authenticating proxy binds
+    `0.0.0.0` legitimately. Set `allowedHosts` / `allowedOrigins`, or `dnsRebindingProtection =
+    false` to acknowledge it and silence the warning.
+  - Identical on every HTTP backend (zio-http, the socket backend on the JVM and Scala Native,
+    `Bun.serve`): the decision is the shared `HostGuard`, now resolved once per settings value
+    instead of on every request.
+  - The shipped `HttpServer` and `HttpServerJs` examples spell the loopback allow-list out, and the
+    `HttpServerJs` comment that presented loopback binding as an alternative to `allowedHosts` is
+    corrected. README, `docs/transports.md` and SECURITY.md now say that the two are separate
+    protections.
+- **The task store is bounded in bytes, not only in entries.** Affects servers with
+  `tasks.enabled = true` and at least one tool whose task support is optional or required.
+  - A finished task's store entry no longer references its fiber, so nothing of the request that
+    created it (its `_meta`, `inputResponses`, allow-listed headers) stays reachable while the
+    result waits to be collected. The store's TTL sweeper no longer carries the context of the
+    request that happened to start it.
+  - A request that becomes a task is measured and capped: new `TaskSettings.maxRequestBytes`
+    (default 2 MiB). A larger one is refused with `-32602` before anything is started. While the
+    task runs, that size is charged to its owner and pool.
+  - A stored result is measured and capped: new `TaskSettings.maxResultBytes` (default 8 MiB). A
+    task whose result (or failure) is larger ends `failed` and the oversized value is not kept.
+  - New per-owner and per-pool budgets, `TaskSettings.maxBytesPerOwner` (default 16 MiB) and
+    `TaskSettings.maxBytesTotal` (default 128 MiB per pool; there are two pools). A create that
+    does not fit evicts stored results older than `minResultRetentionMs` in the same order as the
+    stored-entry caps and is otherwise refused with `-32003`; a finishing task whose result does
+    not fit evicts the same way and otherwise ends `failed` with its result discarded.
+  - Sizes are estimated heap bytes (two per string character plus a fixed overhead per JSON node),
+    so a document of many small values is charged several times its wire size.
+  - A failed task's `statusMessage` keeps at most the first 1024 characters of the failure
+    message.
+- **A session's out-of-request channel is bounded.** Messages a server emits outside a request's
+  own response stream — legacy `notifications/tasks/status`, and the log, progress and
+  server-to-client request messages of a task body — used to be queued without limit, whether or
+  not anything would ever read them. New `LimitSettings.maxOutboundMessages` (default 256):
+  - a legacy streamable-HTTP session on the JVM buffers at most that many for its standalone GET
+    stream and drops the oldest at the bound, so the emitting task is never blocked or interrupted
+    by a client that does not read;
+  - sessions with no reader for the channel — every Bun HTTP session, every 2026-07-28 HTTP
+    request, the legacy stateless adapter — buffer nothing: such a message is discarded;
+  - the stdio session buffers at most that many and applies back-pressure instead: an emitter
+    waits for the stdout writer, so nothing is lost. After stdin reaches EOF nothing is buffered.
+  - `Session.make` (unchanged signature; used by tests and embedders that drive a router
+    directly) now builds a session whose `outbound` holds 256 messages and drops the oldest.
+  - Consequences to plan for: a legacy JVM client whose GET stream falls more than
+    `maxOutboundMessages` behind loses the oldest messages; a server-to-client request a task
+    body issues after its POST was answered is not delivered on Bun or without a GET stream (it
+    fails with its timeout, as before); task status is always available from `tasks/get`.
+- **Inbound frames are bounded in array length, value count and number magnitude** (TJC-5087). Four
+  new `LimitSettings` fields, enforced like the existing ones on every transport and platform — by
+  the linear pre-scan of the raw text before the parser allocates anything, then again on the
+  parsed tree — and answered with `-32700` (HTTP 400) before dispatch:
+  - `maxArrayElements` (default `4096`): elements of any single JSON array. The array counterpart
+    of `maxObjectFields`: a handler parameter that builds a `Set` from a client array is bounded
+    to `maxArrayElements² / 2` comparisons per array. The default leaves room for 1536- and
+    3072-number embedding vectors, at 16 times the per-object worst case; lower it when no tool
+    takes long arrays.
+  - `maxValues` (default `65536`): JSON values in one frame. The parsed tree is bounded by this
+    figure rather than by a multiple of the body size, and the summed size of all arrays and
+    objects in a frame is capped, so the hash-collision cost of a frame is at most
+    `maxValues × max(maxObjectFields, maxArrayElements) / 2` comparisons whatever its size.
+  - `maxNumberDigits` and `maxNumberExponent` (default `512` each; hard ceilings
+    `LimitSettings.MaxSupportedNumberDigits` / `MaxSupportedNumberExponent`, 4096): a number
+    literal outside them is refused without work proportional to its magnitude. The full `Long`
+    range and every finite `Double` are inside the defaults.
+- **Arbitrary-precision argument decoding is bounded by the request size.** The number bounds are
+  applied again in `DefaultDecodeContext.decodeRaw`, in front of every argument decoder (typed
+  contracts and annotated methods alike), so a `BigInt`, `java.math.BigInteger` or `BigDecimal`
+  parameter never receives a number that expands to more than `maxNumberDigits +
+  maxNumberExponent` decimal digits (1024 by default, at most 3402 bits) — also for values that
+  did not arrive as a JSON number in a frame: in-process calls, prompt and resource-template
+  arguments, and a number written as a JSON string, which is refused only when it decodes into a
+  `BigDecimal` (`isError: true` on `tools/call`, an error reply on `prompts/get` and
+  `resources/read`).
+- JSON embedded in string arguments (`McpDecodeContext.parseJsonObject` / `parseJsonArray`) gets
+  the same array, value-count and number bounds (`-32602`); `DefaultDecodeContext` takes them as
+  four new constructor parameters with the same defaults.
+
+  Upgrading: a frame with an array of more than 4096 elements, more than 65 536 values, or a number
+  with more than 512 digits or an exponent beyond ±512 used to be parsed and is now answered
+  `400` / `-32700` (`Parse error: a JSON array exceeds limits.maxArrayElements (4096)`, and
+  likewise for `maxValues`, `maxNumberDigits`, `maxNumberExponent`). A server whose tools take
+  longer arrays or bulk tables by design raises the bounds, e.g.
+  `McpServerSettings(limits = LimitSettings(maxArrayElements = 16384, maxValues = 262144))`.
+  `LimitSettings` and `DefaultDecodeContext` gain fields at the end with defaults: source
+  compatible for named and positional construction (a pattern match that destructures
+  `LimitSettings` positionally needs the new fields), not binary compatible.
+
 ### Added
 
 - **Allow-listed HTTP request headers on `McpContext`** (#130): `McpServerSettings.contextHeaders:
@@ -146,6 +417,17 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   `RouterBuilder.build` and `Builtins` take an optional `SkillRegistry`.
 
 ### Fixed
+
+- **A task interrupted before its fiber had started stayed `working` for ever** (TJC-5087). A
+  `tasks/cancel`, a session release or the TTL sweep that reached a task right after its creation
+  could end the task's fiber before the step that records the terminal status was in place. The
+  client was told the task was cancelled, but the store kept it `working`: it counted against the
+  running caps until its TTL, `tasks/get` kept answering `working`, and `tasks/result` never
+  completed. On the JVM about 2 in 100 creates followed at once by a cancel hit it under load; on
+  Bun, where one thread runs everything, a cancel issued by the same fiber as the create hit it
+  every time. Present since tasks were introduced, 1.0.1 included. The task fiber
+  now becomes interruptible only once that step is in place. The same ordering is applied to the
+  dispatch fiber of a streamed HTTP reply on the JVM backends.
 
 - **2026-07-28 request replies no longer allocate a 32 KiB array each** (TJC-2223): the reply
   stream carried its first message through `ZStream.fromIterable`, which sizes a builder for a full

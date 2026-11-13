@@ -51,18 +51,20 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   ): ZIO[R, Throwable, Unit] =
     for
       rt <- ZIO.runtime[R]
-      session <- Session.make("stdio")
-      // Drain server-initiated messages (log/progress notifications) to stdout.
+      session <- Session.makeDrained("stdio", router.limits.maxOutboundMessages)
+      // Drain server-initiated messages (log/progress notifications) to stdout. The channel is
+      // bounded and back-pressured: an emitter waits for this writer rather than lose a message.
       drainer <- session.outbound.take
         .flatMap(msg => writeLine(MessageLoop.encodeOutbound(msg)))
         .forever
         .forkDaemon
-      // stdin EOF completes the async; take the drainer down with it.
+      // stdin EOF completes the async; take the drainer down with it, and stop buffering for a
+      // writer that is gone.
       _ <- ZIO
         .async[R, Throwable, Unit](cb =>
           wireStdin(router, session, rt, cb, NodeProcess.stdin, writeLine)
         )
-        .ensuring(drainer.interrupt)
+        .ensuring(drainer.interrupt *> session.closeOutbound)
     yield ()
 
   /** Input/output seams let tests drive the real chunk callbacks without replacing process IO. */
@@ -169,7 +171,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         val timeoutMs = timeout.toMillis
         val sweep =
           for
-            now <- ZIO.succeed(java.lang.System.currentTimeMillis())
+            now <- ZIO.succeed(Session.monotonicMs())
             expired <- ZIO.filter(store.toList) { case (_, s) =>
               (s.lastSeen zip s.hasActiveGet).map((seen, live) => !live && now - seen > timeoutMs)
             }
@@ -207,8 +209,11 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
               settings,
               store,
               req,
-              // The peer address only buckets bearer tasks: skip the lookup when tasks are off.
-              if settings.tasks.enabled then clientKeyOf(server, req) else None
+              // The peer address buckets bearer tasks: skip the per-request lookup when tasks are
+              // off. The one other reader — a header-less legacy `initialize`, which records who
+              // opens a session — looks it up itself from `server`.
+              if settings.tasks.enabled then clientKeyOf(server, req) else None,
+              server
             )
           )
         )
@@ -225,8 +230,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     * inside `suspendSucceed`, so `handleFetch`'s synchronous prefix (`new URL`, header gates) runs
     * in the fiber and a throw becomes a defect; every Cause is then rendered as a JSON-RPC error
     * with a fixed message — the full cause goes to the server log only. The one interruption that
-    * reaches here is a client that went away while its request waited for a first frame; it is not
-    * logged as a failure.
+    * reaches here is a client that went away while its request waited for a first frame (or, for a
+    * header-less `initialize`, for its dispatch); it is not logged as a failure.
     */
   private def guarded[R](settings: McpServerSettings)(
       effect: => ZIO[R, Throwable, js.Dynamic]
@@ -243,7 +248,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         // Any other typed failure is a server-side problem, not the client's body.
         case _ => jsonRpcErrorResponse(500, HttpRequestGuards.InternalErrorMessage)
       // The client went away while the request waited for its first frame (`onClientAbort` shut
-      // the request's queue down): nobody is left to answer, and it is not a handler failure.
+      // the request's queue down, or stopped an `initialize`): nobody is left to answer, and it is
+      // not a handler failure.
       if cause.isInterruptedOnly then ZIO.succeed(response)
       else ZIO.logWarningCause("HTTP handler failed", cause).as(response)
     }
@@ -273,7 +279,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     * [[BunHttpHandle]] whose `stop()` tears both down. Every entry — `serveHttp` / `runHttp()`,
     * `startStatefulHttp()`, `startStatelessHttp()` — goes through here, so `sessionIdleTimeout` and
     * `maxSessions` are honoured for the listener's whole lifetime. Fails fast with
-    * `IllegalArgumentException` when `HttpRequestGuards.validateSettings` rejects the settings.
+    * `IllegalArgumentException` when `HttpRequestGuards.validateSettings` rejects the settings, and
+    * logs `HttpRequestGuards.startupWarnings` at WARN.
     */
   private[fastmcp] def startBun[R](
       router: McpRouter[R],
@@ -286,6 +293,11 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       .validateSettings(settings)
       .left
       .foreach(msg => throw new IllegalArgumentException(s"Invalid HTTP settings: $msg"))
+    // Startup diagnostics (a non-loopback bind with no Host/Origin allow-list), through the app's
+    // ZIO logger like every other warning of this backend. Forked: see the sweeper note below.
+    HttpRequestGuards.startupWarnings(settings).foreach { msg =>
+      Unsafe.unsafe(implicit u => { val _ = runtime.unsafe.fork(ZIO.logWarning(msg)) })
+    }
     val server = Bun.serve(serveOptions(router, runtime, settings, store))
     // `unsafe.fork`, never `unsafe.run`: Runtime.unsafe.run throws on Scala.js when the effect
     // suspends ("Cannot block for result to be set in JavaScript").
@@ -302,7 +314,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       settings: McpServerSettings,
       store: js.Dictionary[Session],
       req: js.Dynamic,
-      clientKey: Option[String]
+      clientKey: Option[String],
+      server: js.Dynamic
   ): ZIO[R, Throwable, js.Dynamic] =
     // `new URL(req.url)` throws on an unparseable authority (e.g. `Host: 127.0.0.1:99999`): answer
     // the host gate's 403 when the guard is on (JVM parity), else a plain 400 — never a defect.
@@ -321,7 +334,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         case None =>
           val handled =
             if settings.stateless then handleStateless(router, settings, req, clientKey)
-            else handleStreamable(router, settings, store, req, clientKey)
+            else handleStreamable(router, settings, store, req, clientKey, server)
           // Bind the allow-listed headers of THIS request around its dispatch (JVM twin:
           // `StreamableHttpHandler.post`). `Headers.get` already joins a repeated header.
           if settings.contextHeaders.isEmpty || methodOf(req) != "POST" then handled
@@ -353,7 +366,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                   modernPost(router, req, message, settings, clientKey)
                 else
                   for
-                    session <- Session.make("stateless", supportsTasks = false)
+                    session <- Session.makeRequestScoped("stateless", supportsTasks = false)
                     // Legacy stateless compatibility mode starts ready without a handshake.
                     _ <- session.markInitialized
                     reply <- router.dispatch(session, message)
@@ -371,7 +384,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       settings: McpServerSettings,
       store: js.Dictionary[Session],
       req: js.Dynamic,
-      clientKey: Option[String]
+      clientKey: Option[String],
+      server: js.Dynamic
   ): ZIO[R, Throwable, js.Dynamic] =
     methodOf(req) match
       case "POST" =>
@@ -403,15 +417,19 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                               settings,
                               req
                             )
-                    case None if MessageLoop.isInitialize(message) =>
-                      mintSession(router, store, message, settings, req)
                     case None =>
-                      ZIO.succeed(
-                        jsonRpcErrorResponse(
-                          400,
-                          s"$SessionIdHeader header is required (only initialize may open a session)"
-                        )
-                      )
+                      message match
+                        case rpc: JsonRpcMessage.Request if MessageLoop.isInitialize(rpc) =>
+                          // The peer address, read here when the task buckets did not need it.
+                          val peer = clientKey.orElse(clientKeyOf(server, req))
+                          mintSession(router, store, rpc, settings, peer, req)
+                        case _ =>
+                          ZIO.succeed(
+                            jsonRpcErrorResponse(
+                              400,
+                              s"$SessionIdHeader header is required (only initialize may open a session)"
+                            )
+                          )
         }
 
       case "DELETE" =>
@@ -438,56 +456,117 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
           jsonRpcErrorResponse(405, "No standalone GET stream; server→client rides the POST SSE")
         )
 
-  /** Mint a durable session for a header-less legacy `initialize`, bounded by
-    * `settings.maxSessions` (JVM twin: `StreamableHttpHandler.mintSession`). Bun is
-    * single-threaded, so the idle/live snapshot, the admission decision, the eviction and the
-    * insert all happen in ONE synchronous `ZIO.succeed` block (`Session.idleStateUnsafe`, no fiber
-    * yield in between): the store never exceeds the cap with N initializes in flight, and a
-    * newcomer is never refused while an evictable session exists. At the cap the longest-idle
-    * session WITHOUT a live GET is evicted — terminated (`Session.terminate`: in-flight requests
-    * interrupted, its tasks released, queue shut down; WARN logged) — and the newcomer admitted;
-    * only when every stored session holds a live GET is the request refused with 503.
+  /** Answer a header-less legacy `initialize`, and store a durable session for it only once it has
+    * succeeded (JVM twin: `StreamableHttpHandler.mintSession` / `admit`, which document the rules).
+    *
+    * The `initialize` is dispatched on a session that is not in the store. A failed one — params
+    * that do not decode, or `clientInfo` / `capabilities` over the retention budget
+    * (`ClientRetention`, `-32602`) — is answered without an `mcp-session-id` and leaves the store
+    * exactly as it was. A successful one is admitted against `settings.maxSessions`: Bun is
+    * single-threaded, so the snapshot of every stored session, the choice of the session that makes
+    * room (`HttpRequestGuards.pickVictim`), the eviction and the insert all happen in ONE
+    * synchronous `ZIO.succeed` block (`Session.idleStateUnsafe`, no fiber yield in between). The
+    * store never exceeds the cap with N initializes in flight, and a newcomer is never refused
+    * while a session can make room for it. The evicted session is terminated (`Session.terminate`:
+    * in-flight requests interrupted, its tasks released, queue shut down; WARN logged). There is no
+    * standalone GET stream on Bun, so no stored session is ever exempt and a full store always has
+    * a session to give up; the 503 is kept for parity.
+    *
+    * The store update and the termination it calls for are one uninterruptible step, as on the JVM:
+    * a session that has left the store cannot be reached by id any more, so nothing else would ever
+    * terminate it.
+    *
+    * A client that goes away is seen through the request's abort signal, as for every other request
+    * on Bun (`onClientAbort`; a request fiber is never interrupted from outside here). The dispatch
+    * runs on a fiber of its own that the signal interrupts, and the signal is read once more in the
+    * admission block itself: a client that left before then never learns the session's id, so
+    * nothing is stored and nobody is evicted for it.
+    *
+    * `peer` is the address the `initialize` came from: at the cap a client holding more sessions
+    * than the newcomer's client is the one that gives a session up. `http` is the Bun `Request`,
+    * for its abort signal.
     */
   private def mintSession[R](
       router: McpRouter[R],
       store: js.Dictionary[Session],
-      message: JsonRpcMessage,
+      message: JsonRpcMessage.Request,
       settings: McpServerSettings,
+      peer: Option[String],
       http: js.Dynamic
   ): ZIO[R, Throwable, js.Dynamic] =
     for
       sid <- randomId()
-      session <- Session.makeProtocolSession(sid)
-      outcome <- ZIO.succeed {
-        if !HttpRequestGuards.capReached(store.size, settings) then
-          store(sid) = session
-          Right(None)
-        else
-          val snapshot = Unsafe.unsafe { implicit u =>
-            store.toList.map { case (id, s) =>
-              val (seen, live) = s.idleStateUnsafe
-              (id, seen, live)
+      // Bun has no standalone GET stream (405), so nothing would ever read this session's
+      // out-of-request channel: it buffers nothing (see `Session.outboundCapacity`).
+      session <- Session.makeProtocolSession(sid, peer, outboundCapacity = 0)
+      // Anything the handler chain sends while it runs rides this reply, ahead of the result.
+      sink <- Queue.unbounded[JsonRpcMessage]
+      dispatch <- session.runWithSink(sink)(router.dispatch(session, message)).fork
+      _ <- ZIO.succeed(onClientAbort(http)(dispatch.interrupt))
+      exit <- dispatch.await
+      sent <- sink.takeAll <* sink.shutdown
+      resp <- exit match
+        case Exit.Success(answer @ Some(_: JsonRpcMessage.Success)) =>
+          ZIO
+            // `None`: the client has gone, the store is left alone.
+            .succeed[Option[Either[Unit, Option[Session]]]] {
+              if clientGone(http) then None
+              else if !HttpRequestGuards.capReached(store.size, settings) then
+                store(sid) = session
+                Some(Right(None))
+              else
+                val snapshot = Unsafe.unsafe { implicit u =>
+                  store.toList.map { case (id, s) =>
+                    val (seen, live) = s.idleStateUnsafe
+                    HttpRequestGuards.StoredSession(id, seen, live, s.clientKey)
+                  }
+                }
+                val now = Session.monotonicMs()
+                val idleMs = settings.sessionIdleTimeout.map(_.toMillis)
+                HttpRequestGuards.pickVictim(snapshot, peer, now, idleMs).flatMap(store.get) match
+                  case Some(victim) =>
+                    store -= victim.sessionId
+                    store(sid) = session
+                    Some(Right(Some(victim)))
+                  case None => Some(Left(()))
             }
-          }
-          HttpRequestGuards.pickEvictable(snapshot).flatMap(store.get) match
-            case Some(victim) =>
-              store -= victim.sessionId
-              store(sid) = session
-              Right(Some(victim))
-            case None => Left(())
-      }
-      resp <- outcome match
-        case Right(None) =>
-          respondStreamable(router, session, message, isNew = true, settings, http)
-        case Right(Some(victim)) =>
-          ZIO.logWarning(
-            s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted idle session ${victim.sessionId}"
-          ) *> victim.terminate *>
-            respondStreamable(router, session, message, isNew = true, settings, http)
-        case Left(()) =>
-          session.terminate
-            .as(jsonRpcErrorResponse(503, HttpRequestGuards.SessionLimitMessage))
+            .flatMap {
+              case None =>
+                // Nobody reads this reply; it carries no session id because none was stored.
+                session.terminate.as(initializeResponse(sent, answer, session, minted = false))
+              case Some(Left(())) =>
+                session.terminate
+                  .as(jsonRpcErrorResponse(503, HttpRequestGuards.SessionLimitMessage))
+              case Some(Right(evicted)) =>
+                ZIO
+                  .foreachDiscard(evicted) { victim =>
+                    ZIO.logWarning(
+                      s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted session ${victim.sessionId}"
+                    ) *> victim.terminate
+                  }
+                  .as(initializeResponse(sent, answer, session, minted = true))
+            }
+            .uninterruptible
+        case Exit.Success(answer) =>
+          session.terminate.as(initializeResponse(sent, answer, session, minted = false))
+        // The client went away (or the handler chain died): `guarded` answers, as it does for a
+        // request abandoned while it waited for its first frame.
+        case Exit.Failure(cause) => session.terminate *> ZIO.failCause(cause)
     yield resp
+
+  /** The reply to a header-less `initialize`: what the handler chain sent, then its answer, as one
+    * fixed-length `text/event-stream` body. Only a stored session's id is echoed.
+    */
+  private def initializeResponse(
+      sent: Chunk[JsonRpcMessage],
+      answer: Option[JsonRpcMessage],
+      session: Session,
+      minted: Boolean
+  ): js.Dynamic =
+    val body = (sent ++ Chunk.fromIterable(answer))
+      .map(message => s"event: message\ndata: ${MessageLoop.encodeOutbound(message)}\n\n")
+      .mkString
+    webResponse(200, body, sseHeaders(session, isNew = minted, modern = false))
 
   /** Dispatch one streamable POST frame. A *request* gets a `text/event-stream` response that
     * streams the notifications and sub-requests it emits (progress, sampling, elicitation) followed
@@ -590,13 +669,26 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   /** Run `cleanup` if the client goes away (Bun aborts `request.signal` when the connection
     * closes). Registered once per request; firing after the reply was sent is harmless, since by
     * then the fiber is finished and the queue is shut.
+    *
+    * This — not the reply stream's `cancel` hook — is what answers for a request's dispatch and
+    * queue on Bun: it does not depend on the stream ever being pulled. A signal that aborted before
+    * this point (the client left while its body was being read) never fires the event again, so
+    * that case runs `cleanup` directly.
     */
   private def onClientAbort(http: js.Dynamic)(cleanup: UIO[Any]): Unit =
     val signal = http.signal
     if !js.isUndefined(signal) && signal != null then
-      val listener: js.Function0[Unit] = () =>
+      val run: js.Function0[Unit] = () =>
         val _ = Unsafe.unsafe(implicit u => Runtime.default.unsafe.fork(cleanup))
-      val _ = signal.addEventListener("abort", listener, js.Dynamic.literal(once = true))
+      if clientGone(http) then run()
+      else
+        val _ = signal.addEventListener("abort", run, js.Dynamic.literal(once = true))
+
+  /** True once the request's abort signal has fired: the client closed the connection. */
+  private def clientGone(http: js.Dynamic): Boolean =
+    val signal = http.signal
+    !js.isUndefined(signal) && signal != null &&
+    js.typeOf(signal.aborted) == "boolean" && signal.aborted.asInstanceOf[Boolean]
 
   private def sseHeaders(session: Session, isNew: Boolean, modern: Boolean): Map[String, String] =
     Map("content-type" -> "text/event-stream", "cache-control" -> "no-cache") ++
@@ -723,7 +815,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             ZIO.succeed(jsonResponse(failure.toJson, Map.empty, status))
           case Right(context) =>
             Session
-              .make(s"request-${rpc.id.toString}", clientKey = clientKey)
+              .makeRequestScoped(s"request-${rpc.id.toString}", clientKey = clientKey)
               .flatMap(session =>
                 requestResponse(router, session, rpc, isNew = false, settings, Some(context), req)
               )
@@ -738,7 +830,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             ZIO.succeed(jsonResponse(failure.toJson, Map.empty, status))
           case Right(_) =>
             Session
-              .make("notification")
+              .makeRequestScoped("notification")
               .flatMap(session => router.dispatch(session, notification))
               .as(webResponse(202, ""))
       case _ =>

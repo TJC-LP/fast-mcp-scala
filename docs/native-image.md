@@ -182,6 +182,10 @@ Runtime behavior baked into `JvmHttpBackend`:
   `-Dfastmcp.http.channelType=nio|epoll|kqueue|auto` if you know what you're doing.
 - **Container binding**: the default host is `127.0.0.1`; set
   `McpServerSettings(host = "0.0.0.0")` for containerized deployments (Databricks Apps included).
+  A non-loopback bind is not covered by the automatic Host/Origin guard, and startup logs a
+  warning until you set `allowedHosts` to the name clients reach the server by (or acknowledge it
+  with `dnsRebindingProtection = false` behind an authenticating proxy that does the check) — see
+  [transports.md](./transports.md#host--origin-validation).
 
 The in-repo proof: `fast-mcp-scala.nativeSmoke.http` builds the conformance server, and
 `scripts/conformance.sh native [port] [active|2026]` runs the **official MCP conformance suite**
