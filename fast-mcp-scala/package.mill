@@ -12,7 +12,8 @@ import mill.scalajslib.api._
 import mill.scalajslib.bun._
 import mill.scalanativelib._
 import build.{BinaryCompatTests, BuildConfig, CrossPlatformTests, FastMCPModule,
-  FastMCPPublishingBase, FastMCPTestModule, ScalaJSTestDepsFix, Versions, scala3Version}
+  FastMCPPublishingBase, FastMCPTestModule, ScalaJSTestDepsFix, SharedTests, Versions,
+  scala3Version}
 
 // Namespace module. Aggregate tasks at this level fan out to all three platform children so
 // `./mill fast-mcp-scala.compile` and `./mill fast-mcp-scala.test` cover the whole project
@@ -251,7 +252,9 @@ object `package` extends Module {
     }
 
     // ScalaJSTestDepsFix: see build.mill — keeps the Scala 2.13 stdlib out of the test link.
-    object test extends BunScalaJSTests with TestModule.ScalaTest with ScalaJSTestDepsFix {
+    // js/test/src plus shared/test/src (SharedTests), the tests every platform runs.
+    object test extends BunScalaJSTests with TestModule.ScalaTest with ScalaJSTestDepsFix
+        with SharedTests {
       override def mvnDeps = Seq(
         mvn"org.scalatest::scalatest::${Versions.scalaTest}"
       )
