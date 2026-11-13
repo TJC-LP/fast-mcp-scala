@@ -17,6 +17,36 @@ import com.tjclp.fastmcp.server.skills.SkillRegistry
   */
 object RouterBuilder:
 
+  // Binary compatibility with 1.0.x: the 11-parameter `build`, from before the Skills extension.
+  // No skill registry is wired.
+  private[fastmcp] def build[R](
+      serverInfo: Implementation,
+      instructions: Option[String],
+      toolManager: ToolManager[R],
+      promptManager: PromptManager[R],
+      resourceManager: ResourceManager[R],
+      settings: McpServerSettings,
+      taskManager: Option[TaskManager[R]],
+      completionHandler: Option[CompletionHandler[R]],
+      validator: SchemaValidator,
+      extraMiddlewares: List[Middleware[R]],
+      hooks: ServerHooks[R]
+  ): McpRouter[R] =
+    build(
+      serverInfo,
+      instructions,
+      toolManager,
+      promptManager,
+      resourceManager,
+      settings,
+      taskManager,
+      completionHandler,
+      validator,
+      extraMiddlewares,
+      hooks,
+      skillRegistry = None
+    )
+
   def build[R](
       serverInfo: Implementation,
       instructions: Option[String],

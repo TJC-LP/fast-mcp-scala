@@ -44,6 +44,38 @@ final class Builtins[R](
     skillSettings: SkillSettings = SkillSettings()
 ):
 
+  // Binary compatibility with 1.0.x: the 12-parameter constructor, from before the Skills
+  // extension. `skills` and `skillSettings` take their defaults.
+  private[fastmcp] def this(
+      serverInfo: Implementation,
+      instructions: Option[String],
+      capabilities: ServerCapabilities,
+      modernCapabilities: ServerCapabilities,
+      toolManager: ToolManager[R],
+      promptManager: PromptManager[R],
+      resourceManager: ResourceManager[R],
+      tasksEnabled: Boolean,
+      exposeTemplates: Boolean,
+      completionHandler: Option[CompletionHandler[R]],
+      hooks: ServerHooks[R],
+      limits: LimitSettings
+  ) =
+    this(
+      serverInfo,
+      instructions,
+      capabilities,
+      modernCapabilities,
+      toolManager,
+      promptManager,
+      resourceManager,
+      tasksEnabled,
+      exposeTemplates,
+      completionHandler,
+      hooks,
+      limits,
+      skills = None
+    )
+
   /** Bound a client-supplied resource URI BEFORE it reaches the template matcher, the resource
     * lookup, or the session's subscription set. `-32602` in both eras: this is malformed input, not
     * a miss (the legacy `-32002` re-coding stays for real misses).
