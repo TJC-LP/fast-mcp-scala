@@ -469,9 +469,13 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 - **The conformance fixture covers the unscored 2026-07-28 scenarios** (TJC-2367).
   `ConformanceServer` enables the Tasks extension and registers the tools the harness's ten
   `tasks-*` scenarios, `json-schema-2020-12` and `http-custom-header-server-validation` call.
-  All thirteen unscored scenarios pass on the JVM and on Bun (`tasks-mrtr-composition` since
-  `withDeferredTask`, see Added). The scored results are unchanged: 73/73 active, 37/37 for
-  2026-07-28.
+  All thirteen unscored scenarios pass on the JVM, on Bun and on Scala Native
+  (`tasks-mrtr-composition` since `withDeferredTask`, see Added). The scored results are
+  unchanged: 73/73 active, 37/37 for 2026-07-28.
+  - `scripts/conformance.sh <platform> <port> 2026` now fails when an unscored scenario fails.
+    The harness's exit code covers the 37 scored scenarios only, so the script reads the
+    harness's "Not scored for 2026-07-28: N scenario(s) run, M failing" summary and fails on
+    `M > 0`, and on a run that prints no such summary. CI runs that mode on every platform.
 - **The Skills extension's conformance scenarios are part of the gate** (TJC-2367). The pinned
   harness (`0.2.0-alpha.12`) ships `sep-2640-skills-enumeration`, `sep-2640-skills-manifest` and
   `sep-2640-skills-directory`. Its active suite and its 2026-07-28 requirement set do not include

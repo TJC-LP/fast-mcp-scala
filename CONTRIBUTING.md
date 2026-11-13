@@ -85,7 +85,8 @@ Every pull request must pass:
 - **Official MCP conformance** (`conformance.yml`) against the JVM, Bun and Scala Native servers,
   and the same server as a GraalVM native image (`native.yml`). Run locally with
   `scripts/conformance.sh {jvm|js|native|scala-native} [port] [active|2026|skills]`. `active` is the
-  harness's active suite, `2026` is `--requirements 2026-07-28`, and `skills` is the three Skills
+  harness's active suite, `2026` is `--requirements 2026-07-28` (the script also fails it when one
+  of the scenarios the harness runs without scoring fails), and `skills` is the three Skills
   extension scenarios (`sep-2640-skills-*`), which fail the gate on any failed, warning or skipped
   check. The expected-failure baselines in
   `conformance/` are **empty and stay empty**: fix the regression, never grow a baseline. The

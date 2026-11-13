@@ -8,14 +8,17 @@
 # streamable HTTP, then drives it with the official harness installed from the committed,
 # integrity-hashed lockfile in conformance/ (bun install --frozen-lockfile — never bunx). Exit code
 # follows the harness (0 = all scored scenarios pass or match the platform baseline; 1 = regression /
-# stale baseline).
+# stale baseline), plus the two gates the modes below add on top of it.
 #
 # Modes: "active" (default) runs the harness's active suite — 31 scenarios / 73 checks, every one at
 # the 2025-11-25 wire — with the per-platform baseline; "2026" runs `--requirements 2026-07-28` —
 # exactly the scenarios that revision requires, frozen at its release (37 scored; extension/pending
 # scenarios are reported but not scored by the harness) — and is the only mode that sends
-# 2026-07-28 requests; "skills" runs the three Skills extension scenarios (SEP-2640:
-# sep-2640-skills-enumeration, -manifest, -directory), which neither of the other modes includes.
+# 2026-07-28 requests. The unscored scenarios are gated by this script: the harness's exit code
+# ignores them, so that mode also reads its "Not scored for ..." summary and fails when one of them
+# fails or when the summary is missing (all of them pass against this server); "skills" runs the
+# three Skills extension scenarios (SEP-2640: sep-2640-skills-enumeration, -manifest, -directory),
+# which neither of the other modes includes.
 # The harness takes one --scenario per run, so that mode starts it three times against the same
 # server and fails when any check of any scenario is a FAILURE, a WARNING or SKIPPED, when a
 # scenario writes no checks, or when the harness exits non-zero. CI runs all three modes on every platform
@@ -246,6 +249,34 @@ PY
   return "$rc"
 }
 
+# The 2026-07-28 requirement set. The harness scores 37 scenarios and exits by them; the extension
+# and pending scenarios it also runs are "not scored", and it prints
+#   Not scored for 2026-07-28: <n> scenario(s) run, <m> failing. These do not affect conformance.
+# followed by one line per scenario. All of them pass against this server, so a failing one is a
+# regression and fails the mode. So does a run without that summary: the gate must not turn into
+# nothing when a harness bump rewords it.
+run_2026() {
+  local out rc=0
+  out="$(mktemp -t fmcp-conf-2026.XXXXXX)"
+  run_harness server --url "$URL" --requirements 2026-07-28 | tee "$out" || rc=$?
+  python3 - "$out" <<'PY' || rc=1
+import re, sys
+text = re.sub(r"\x1b\[[0-9;]*m", "", open(sys.argv[1], errors="replace").read())
+summary = re.search(r"^Not scored for \S+: (\d+) scenario\(s\) run, (\d+) failing", text, re.M)
+if not summary:
+    print("2026: the harness printed no 'Not scored for ...' summary; the unscored scenarios cannot be gated")
+    sys.exit(1)
+ran, failing = int(summary.group(1)), int(summary.group(2))
+failed = re.findall(r"^\s+✗ (\S+)", text[summary.end():], re.M)
+print(f"2026: unscored scenarios: {ran} run, {failing} failing")
+for name in failed:
+    print(f"2026:   FAILURE {name}")
+sys.exit(1 if failing or failed or ran == 0 else 0)
+PY
+  rm -f "$out"
+  return "$rc"
+}
+
 case "$PLATFORM" in
   jvm) start_jvm ;;
   js) start_js ;;
@@ -274,7 +305,7 @@ case "$MODE" in
     ;;
   2026)
     echo "→ conformance 2026-07-28 requirements ($PLATFORM)" >&2
-    run_harness server --url "$URL" --requirements 2026-07-28
+    run_2026
     ;;
   skills)
     echo "→ conformance skills extension scenarios ($PLATFORM)" >&2

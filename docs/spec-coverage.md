@@ -50,8 +50,9 @@ guide's [Deliberate boundaries](./2026-07-28-upgrade.md#deliberate-boundaries).
   scenarios, 73 checks, every one at the 2025-11-25 wire — against the per-platform
   expected-failure baseline; the `2026` mode runs `--requirements 2026-07-28`, exactly the
   scenarios that revision requires (37 scored, 118 checks; the harness reports but never scores
-  extension and pending scenarios, so the `tasks-*` extension scenarios move no gate in either
-  mode), and is the only run of the two that sends 2026-07-28 requests; the `skills` mode runs the
+  the 13 extension and pending scenarios, the ten `tasks-*` ones among them — the script does:
+  all 13 pass, and it fails the mode when one of them fails), and is the only run of the two that
+  sends 2026-07-28 requests; the `skills` mode runs the
   three Skills extension scenarios (`sep-2640-skills-enumeration`, `-manifest`, `-directory`: 32, 6
   and 7 checks at the 2026-07-28 wire), one harness run each, and fails on any failed, warning or
   skipped check. Baselines live in
