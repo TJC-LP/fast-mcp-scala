@@ -97,7 +97,7 @@ fast-mcp-scala/
 
 Every module's sources are exactly `shared/src/` + its own platform tree — plus, for the JVM and Scala Native modules, `jvm-native/src/` (the socket HTTP server, which needs `java.net` and so cannot live in `shared/`) — and no module reaches across into another's platform tree. That is an invariant worth preserving: the schema-derivation macros and every platform-pure example live in `shared/`, so `shared/src/` plus any one platform tree compiles on its own (the shared examples need that platform's `given TransportBackend`), and `shared/` never reaches across platform trees. Mill wires this in `fast-mcp-scala/package.mill` (module definitions live next to the code; the root `build.mill` holds only versions, compiler flags, and shared traits).
 
-The stdio serving lifecycle is shared too: `StdioLoop` owns the session, the single-writer stdout lock, the outbound drainer fiber, and EOF teardown, so the JVM and Scala Native backends contribute only their stdin stream and their `randomId` source. The JS backend drives Node's callback IO directly and does not use it.
+The stdio serving lifecycle is shared too: `StdioLoop` owns the session, the single-writer stdout lock, the outbound drainer fiber, and the lifecycle contract (replies owed at end of stdin, `initialize` answered before the next frame is read, interruption), so the JVM and Scala Native backends contribute only their stdin stream and their `randomId` source. On the JVM that stream is fed by a dedicated reader thread, so a signal can end the loop while stdin is open. The JS backend drives Node's callback IO directly and implements the same contract in `JsTransportBackend.wireStdin`.
 
 ## The annotation path at compile time
 
@@ -147,7 +147,7 @@ All transports are thin adapters over the shared `MessageLoop` + router:
 
 | Transport | Entry point | JVM | Scala.js | Scala Native |
 |---|---|---|---|---|
-| Stdio | `server.runStdio()` | `ZStream` over `System.in`, serialized writer on `System.out` | Node `process.stdin`/`stdout` | `ZStream.fromReader` over `System.in`, ids from `/dev/urandom` |
+| Stdio | `server.runStdio()` | `ZStream` over `System.in` (read on a dedicated thread), serialized writer on `System.out` | Node `process.stdin`/`stdout` | `ZStream.fromReader` over `System.in`, ids from `/dev/urandom` |
 | Streamable HTTP, MCP 2026-07-28 (stateless POST + request-scoped SSE) | `server.runHttp()` | ZIO HTTP (opt-in: socket server) | `Bun.serve` | socket server over `java.net.ServerSocket` |
 | Legacy HTTP adapter (initialize, `Mcp-Session-Id`, GET stream, DELETE) | `server.runHttp()`; `stateless = true` disables its session store | ZIO HTTP (opt-in: socket server) | `Bun.serve` (GET answers 405) | socket server |
 

@@ -385,7 +385,9 @@ class SessionOutboundBoundTest extends AnyFunSuite with Matchers:
     // stdio always has a reader (the drainer), on every platform.
     bun should include("""Session.makeDrained("stdio",router.limits.maxOutboundMessages)""")
     stdio should include("""Session.makeDrained("stdio",router.limits.maxOutboundMessages)""")
-    // ... until stdin reaches EOF: from then on the session must stop buffering for it.
-    bun should include(".ensuring(drainer.interrupt*>session.closeOutbound)")
-    stdio should include(".ensuring(drainer.interrupt*>session.closeOutbound)")
+    // ... until stdin reaches EOF: from then on the session must stop buffering for it. (The
+    // drainer is interrupted without waiting for it: one blocked in a write to a stdout nobody
+    // reads must not hold the exit.)
+    bun should include(".ensuring(drainer.interruptFork*>session.closeOutbound)")
+    stdio should include("drainer.interruptFork*>session.closeOutbound")
   }

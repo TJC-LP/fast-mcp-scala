@@ -62,6 +62,7 @@ esac
 LOG="$(mktemp -t fmcp-conf-log.XXXXXX)"
 SRV_PID=""
 SRV_STOPPED=""
+SRV_STOP_SECS=""
 ENTRY=""
 
 # Terminate the launched server and record HOW it died: "clean" (exited within 15s of SIGTERM)
@@ -70,10 +71,13 @@ ENTRY=""
 stop_server() {
   [ -n "$SRV_PID" ] || return 0
   kill -TERM "$SRV_PID" 2>/dev/null || true
+  local polls=0
   for _ in $(seq 1 30); do
     kill -0 "$SRV_PID" 2>/dev/null || { SRV_STOPPED="clean"; break; }
     sleep 0.5
+    polls=$((polls + 1))
   done
+  SRV_STOP_SECS="$((polls / 2)).$((polls % 2 * 5))"
   if [ "$SRV_STOPPED" != "clean" ]; then
     SRV_STOPPED="hang"
     kill -9 "$SRV_PID" 2>/dev/null || true
@@ -341,17 +345,16 @@ set -e
 # Terminate BEFORE inspecting the log, so teardown-time failures are gated too.
 stop_server
 echo "→ server log: $LOG" >&2
-case "$PLATFORM" in
-  native|scala-native)
-    # Shutdown must actually work: a binary that survives 15s of SIGTERM is a bug. GraalVM needs
-    # --install-exit-handlers for this (dead event loops deadlocking shutdown was exactly the
-    # failure SharedArenaSupport fixed); Scala Native relies on the OS default action.
-    if [ "$SRV_STOPPED" = "hang" ]; then
-      echo "$PLATFORM FAIL: server did not exit within 15s of SIGTERM (suite verdict: $RC)" >&2
-      exit 1
-    fi
-    ;;
-esac
+# Shutdown must actually work, on every platform: a server that survives 15s of SIGTERM is a bug
+# whatever the suite said (GH #113 C3.10 — this used to be checked for the two native binaries
+# only, so a JVM or Bun server pinned by a live SSE stream or a dead event loop passed the gate).
+# GraalVM needs --install-exit-handlers for this (dead event loops deadlocking shutdown was exactly
+# the failure SharedArenaSupport fixed); Scala Native relies on the OS default action.
+if [ "$SRV_STOPPED" = "hang" ]; then
+  echo "$PLATFORM FAIL: server did not exit within 15s of SIGTERM (suite verdict: $RC)" >&2
+  exit 1
+fi
+echo "→ $PLATFORM server exited within ${SRV_STOP_SECS}s of SIGTERM" >&2
 # A clean SIGTERM is not an error: the server must not log its own shutdown interrupt at ERROR
 # (GH #114 D3.13 — `level=ERROR ... InterruptedException: Interrupted by thread zio-fiber-…`, one
 # line per shutdown, which trips log alerting on hosted deployments).

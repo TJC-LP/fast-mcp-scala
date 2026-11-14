@@ -390,7 +390,9 @@ final class Builtins[R](
           notificationParams.toJsonAST.toOption
         )
       )
-      result <- ZIO.never
+      // The subscription lasts as long as the request's transport. On stdio that ends at stdin
+      // EOF: the handler owes no reply, so it ends there instead of holding the EOF drain.
+      result <- session.awaitInboundClosed *> ZIO.interrupt
     yield result
 
   val promptsGet: RequestHandler[R] = (session, params) =>

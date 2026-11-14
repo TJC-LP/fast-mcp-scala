@@ -152,9 +152,7 @@ final class McpRouter[R](
               Some(
                 Failure(
                   Some(id),
-                  McpError
-                    .invalidRequest(s"Server not initialized — send initialize before '$method'")
-                    .toErrorObject
+                  McpError.invalidRequest(McpRouter.notInitializedMessage(method)).toErrorObject
                 )
               )
             )
@@ -358,6 +356,15 @@ final class McpRouter[R](
       case Left(_) => ZIO.unit
 
 object McpRouter:
+
+  /** The `-32600` text for a request that reached a session before `initialize` and without a
+    * protocol version of its own. It names both ways to be served: the handshake of MCP <=
+    * 2025-11-25, and the per-request `_meta` key of MCP 2026-07-28, which needs no handshake.
+    */
+  private[fastmcp] def notInitializedMessage(method: String): String =
+    s"Server not initialized — send initialize before '$method', or send the request with " +
+      s"_meta[\"${RequestContext.ProtocolVersionKey}\"] (MCP ${Protocol.LatestProtocolVersion}, " +
+      "no handshake)"
 
   def toModernCapabilities(
       capabilities: ServerCapabilities,

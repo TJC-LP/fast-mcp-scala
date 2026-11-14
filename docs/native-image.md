@@ -95,11 +95,10 @@ must print `0` (it does for 1.0.0: nothing but zio-http brings netty in).
   GraalVM 25 installs the SIGINT/SIGTERM exit handlers for executables by default, so a
   long-running HTTP server binary terminates cleanly without extra flags (`--install-exit-handlers`
   is deprecated there and only needed on older GraalVM releases). A stdio image — like a plain JVM
-  stdio server — acts on those signals only
-  once stdin has reached EOF: the main fiber sits in a blocking `System.in.read` that interruption
-  cannot unblock, so the exit handlers wait for it. Hosts that close the child's stdin before
-  signalling (the TypeScript SDK does) are unaffected; `Ctrl-C`, `timeout` and `docker stop` stall
-  until stdin closes or SIGKILL. An interruptible stdin reader is tracked for 1.0.1.
+  stdio server — acts on those signals while stdin is still open: since 1.1.0 stdin is read on a
+  dedicated daemon thread, so the exit handlers no longer wait for a blocked `System.in.read`
+  (through 1.0.x `Ctrl-C`, `timeout` and `docker stop` stalled until stdin closed).
+  `scripts/native-smoke.sh` gates it: SIGTERM with stdin open must end the binary within 5 s.
 - **stderr noise on start**: on JDK 25 the image prints four
   `sun.misc.Unsafe::objectFieldOffset ... scala.runtime.LazyVals$` warnings to stderr on every
   start (a plain JVM prints them too; Scala Native prints nothing). stdout stays clean, so MCP

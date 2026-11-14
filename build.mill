@@ -173,7 +173,9 @@ trait FastMCPTestModule extends TestModule.ScalaTest {
 
 /** Test modules that also compile the cross-platform socket-HTTP tests in
   * `fast-mcp-scala/jvm-native/test/src` next to their own `test/src` — the same suite then runs on
-  * the JVM and inside the linked Scala Native test binary. This is a named top-level trait rather
+  * the JVM and inside the linked Scala Native test binary — and the tests in
+  * `fast-mcp-scala/shared/test/src`, which the Scala.js test module runs too ([[SharedTests]]).
+  * This is a named top-level trait rather
   * than an inline `override def sources` in each nested `test` object because Mill's
   * code-signature tracking cannot name a task overridden inside a nested object of a dash-named
   * package module ("Could not detect the parent class of task ...") and aborts the build.
@@ -181,7 +183,21 @@ trait FastMCPTestModule extends TestModule.ScalaTest {
 trait CrossPlatformTests extends JavaModule {
   override def sources = Task.Sources(
     moduleDir / "src",
-    moduleDir / os.up / os.up / "jvm-native" / "test" / "src"
+    moduleDir / os.up / os.up / "jvm-native" / "test" / "src",
+    moduleDir / os.up / os.up / "shared" / "test" / "src"
+  )
+}
+
+/** The Scala.js test module's share of `fast-mcp-scala/shared/test/src`: the tests of shared code
+  * that every platform must run (the JVM and Scala Native test modules take the same directory
+  * through [[CrossPlatformTests]]). A test there uses only what all three platforms have — an
+  * asynchronous ScalaTest style, no threads, no files. A top-level trait for the reason given on
+  * [[CrossPlatformTests]].
+  */
+trait SharedTests extends JavaModule {
+  override def sources = Task.Sources(
+    moduleDir / "src",
+    moduleDir / os.up / os.up / "shared" / "test" / "src"
   )
 }
 

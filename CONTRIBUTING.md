@@ -240,7 +240,10 @@ declare the ZIO libraries the build pins (`Versions` in `build.mill`) alongside 
 
 1. Branch from `main`. Open an issue first for anything non-trivial so scope can be agreed.
 2. Platform-independent code goes in `shared/src/`; platform code stays in its own tree.
-3. Add tests in `jvm/test/src/`, `js/test/src/`, or `native/test/src/`.
+3. Add tests in `jvm/test/src/`, `js/test/src/`, or `native/test/src/`. A test of shared code that
+   must run on the JVM and Scala Native goes in `jvm-native/test/src/`; one that must run on all
+   three platforms goes in `shared/test/src/` (asynchronous ScalaTest styles only, so that it runs
+   on Scala.js).
 4. User-visible changes get an entry under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md)
    (Keep a Changelog format).
 5. Run `./mill fast-mcp-scala.reformat` and `./mill fast-mcp-scala.test`.

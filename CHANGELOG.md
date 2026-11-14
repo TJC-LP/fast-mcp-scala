@@ -323,6 +323,10 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Added
 
+- **`McpServerSettings.stdioDrainTimeout`** (GH #113, TJC-2359): how long a stdio server waits at
+  end of stdin for the replies to frames it has already read, before it interrupts what is still
+  running. Default five seconds; zero interrupts without waiting; a negative value is refused when
+  the settings are built. Ignored by the HTTP transports. See *Fixed*, "One stdio lifecycle".
 - **Tasks wait for input: `input_required`** (TJC-2366, TJC-2367). A tool that asks its client
   for input from inside a 2026-07-28 task (`McpContext.elicit`, `createMessage`, `listRoots`,
   `sendRequest`) now puts the task in `input_required`. `tasks/get` returns the outstanding
@@ -636,6 +640,42 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Fixed
 
+- **One stdio lifecycle on the JVM, Bun and Scala Native** (GH #113, TJC-2359). The edges of a
+  stdio session behaved differently per platform; they now behave the same, and
+  `docs/transports.md` ("stdio") states the contract.
+  - **End of stdin drains.** Every frame the server has read is dispatched and its reply written
+    before `runStdio()` returns. Before, the JVM forked each dispatch and returned at EOF without
+    waiting: a client that wrote its requests and closed the pipe at once got none of the replies
+    (0 of 60 in the probe behind this change, 60 of 60 now), and Scala Native and Bun answered
+    only what finished before the process was gone. The wait is bounded by the new
+    `McpServerSettings.stdioDrainTimeout` (5 s): a handler still running then is interrupted.
+    Background task bodies are not waited for. A handler waiting for the client's answer to a
+    server→client request (roots, sampling, elicitation) fails at once at EOF instead of waiting
+    out its own timeout, and what handlers pushed to the client before they finished is written
+    before the process ends. An answer the client wrote just before it closed stdin still reaches
+    its handler: client responses are processed in the order read, before the session stops
+    accepting them. A request to the client issued after stdin closed fails without being
+    written. An open `subscriptions/listen` ends at EOF and does not hold the exit.
+  - **A final line without a newline is a frame.** Bun discarded it; the JVM parsed it and then
+    lost the reply to the race above; Scala Native usually answered it. All three answer it.
+  - **SIGTERM and SIGINT end a JVM or GraalVM stdio server while its stdin is open.** The main
+    fiber sat in a blocking `System.in.read`, which interruption cannot unblock, so the signal took
+    effect only after the host closed stdin: `Ctrl-C`, `timeout`, a supervisor and `docker stop`
+    hung until SIGKILL. Stdin is now read on a dedicated daemon thread behind a bounded queue (at
+    most 128 KiB read ahead of the dispatcher), and the server exits in well under a second. It
+    does not rely on `gracefulShutdownTimeout`, whose expiry warning ZIO prints to stdout.
+  - **A pipelined handshake is never answered `-32600 Server not initialized`.** Frames are
+    dispatched concurrently, so `initialize`, `notifications/initialized` and a first request
+    written in one burst could race (5 of 30 bursts on Scala Native in the probe). `initialize`
+    is now answered before the next frame is read; every other frame is dispatched concurrently
+    as before. A 2026-07-28 request, which carries its protocol version in `_meta`, never needed
+    the handshake and is unaffected.
+  - The `-32600` text for a request that arrives before `initialize` now names both routes:
+    `send initialize before '<method>', or send the request with
+    _meta["io.modelcontextprotocol/protocolVersion"] (MCP 2026-07-28, no handshake)`.
+  - `scripts/conformance.sh` fails a run on any platform whose server is still alive 15 s after
+    SIGTERM (it checked the two native binaries only), and `scripts/native-smoke.sh` sends SIGTERM
+    to the stdio binary while its stdin is open.
 - **`subscriptions/listen` refuses task notifications from a client without the Tasks extension**
   (GH #115, TJC-2361). A 2026-07-28 `subscriptions/listen` request that names `taskIds` but does
   not declare `io.modelcontextprotocol/tasks` in its capabilities is answered `-32021`, as

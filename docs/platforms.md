@@ -170,8 +170,10 @@ Caveats (experimental):
 - request fibers are not listed in `Fiber.roots` / fiber dumps on this platform (registering them
   costs a `WeakReference` each, which Scala Native does not reclaim at request rates);
 - session and task ids come from `/dev/urandom` (Unix only);
-- ZIO's signal handlers and shutdown hooks are no-ops on Scala Native, so shutdown is EOF-driven
-  (the client closing stdin ends the loop) and SIGINT falls back to the OS default.
+- ZIO's signal handlers and shutdown hooks are no-ops on Scala Native, so SIGINT and SIGTERM end
+  the process by the OS default action: at once, without interrupting handlers or running their
+  finalizers. End of stdin is the orderly shutdown — the frames already read are answered first
+  (see [the stdio lifecycle](./transports.md#stdio)).
 
 ## GraalVM native image (JVM)
 

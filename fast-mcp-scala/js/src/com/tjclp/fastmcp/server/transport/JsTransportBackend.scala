@@ -54,28 +54,61 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       session <- Session.makeDrained("stdio", router.limits.maxOutboundMessages)
       // Drain server-initiated messages (log/progress notifications) to stdout. The channel is
       // bounded and back-pressured: an emitter waits for this writer rather than lose a message.
+      // The writer stops at the close sentinel, offered below after the last reply at stdin EOF.
       drainer <- session.outbound.take
-        .flatMap(msg => writeLine(MessageLoop.encodeOutbound(msg)))
-        .forever
-        .forkDaemon
-      // stdin EOF completes the async; take the drainer down with it, and stop buffering for a
-      // writer that is gone.
-      _ <- ZIO
-        .async[R, Throwable, Unit](cb =>
-          wireStdin(router, session, rt, cb, NodeProcess.stdin, writeLine)
+        .tap(msg =>
+          ZIO.unless(MessageLoop.isCloseSentinel(msg))(writeLine(MessageLoop.encodeOutbound(msg)))
         )
-        .ensuring(drainer.interrupt *> session.closeOutbound)
+        .repeatUntil(MessageLoop.isCloseSentinel)
+        .forkDaemon
+      // stdin EOF completes the async once every frame read has been answered (or the drain
+      // timeout has passed); interruption stops the in-flight dispatches instead. Then whatever is
+      // still queued for the writer is flushed, the drainer goes down, and nothing is buffered for
+      // a writer that is gone.
+      _ <- ZIO
+        .asyncInterrupt[R, Throwable, Unit](cb =>
+          Left(
+            wireStdin(
+              router,
+              session,
+              rt,
+              cb,
+              NodeProcess.stdin,
+              writeLine,
+              settings.stdioDrainTimeout
+            )
+          )
+        )
+        .zipLeft(
+          (session.outbound.offer(MessageLoop.CloseSentinel) *> drainer.await)
+            .timeout(StdioLoop.SettleTimeout)
+            .exit
+        )
+        .ensuring(drainer.interruptFork *> session.closeOutbound)
     yield ()
 
-  /** Input/output seams let tests drive the real chunk callbacks without replacing process IO. */
+  /** The Bun/Node stdin callbacks: the same lifecycle contract as the JVM and Scala Native
+    * `StdioLoop`, on callback IO.
+    *
+    *   - Every frame read is answered: `end` completes `done` only when no dispatch is in flight,
+    *     or after `drainTimeout`, when what is still running is interrupted.
+    *   - The final line is a frame with or without its newline.
+    *   - `initialize` is finished before the next frame runs; lines that arrive meanwhile wait in
+    *     order. Every other frame is dispatched concurrently.
+    *
+    * Returns the effect that interrupts the in-flight dispatches (`serveStdio` runs it when the
+    * server is interrupted). Input/output seams let tests drive the real chunk callbacks without
+    * replacing process IO.
+    */
   private[fastmcp] def wireStdin[R](
       router: McpRouter[R],
       session: Session,
       rt: Runtime[R],
       done: ZIO[R, Throwable, Unit] => Unit,
       stdin: NodeReadableStream,
-      emit: String => UIO[Unit]
-  ): Unit =
+      emit: String => UIO[Unit],
+      drainTimeout: Duration = McpServerSettings.DefaultStdioDrainTimeout
+  ): UIO[Unit] =
     stdin.setEncoding("utf8")
     // Same contract as the JVM/Native `BoundedLines`: keep at most `maxFrameChars + 1` chars of
     // an over-long line (so `parseFrame` still answers -32700 FrameTooLong for it), discard the
@@ -84,21 +117,72 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     val cap = if max == Int.MaxValue then Int.MaxValue else max + 1
     var buffer = "" // accumulates partial lines across `data` chunks (bounded at `cap`)
     var discarding = false // inside an over-long line: drop input until the next newline
+
+    // Lifecycle state. Bun runs these callbacks and every fiber on one thread, so plain fields
+    // are safe: nothing here is touched between two statements of a callback.
+    val inFlight = scala.collection.mutable.Map.empty[Long, Option[Fiber.Runtime[Nothing, Unit]]]
+    val held = scala.collection.mutable.Queue.empty[String] // lines behind a running `initialize`
+    var nextId = 0L
+    var initializing = false
+    var ended = false
+    val idle = Unsafe.unsafe(implicit unsafe => Promise.unsafe.make[Nothing, Unit](FiberId.None))
+
+    // Completed once stdin has ended and every ordered frame read (`initialize`, a client's
+    // answer to a server→client request) has run: only then may the session stop accepting answers.
+    val orderedDone =
+      Unsafe.unsafe(implicit unsafe => Promise.unsafe.make[Nothing, Unit](FiberId.None))
+
+    def settleIfIdle(): Unit =
+      if ended && !initializing && held.isEmpty then
+        val _ =
+          Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.fork(orderedDone.succeed(())))
+        if inFlight.isEmpty then
+          val _ = Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.fork(idle.succeed(())))
+
+    def run(line: String): Unit =
+      val parsed = MessageLoop.parseFrame(line, router.limits)
+      val ordered = MessageLoop.isOrderedStdioFrame(parsed)
+      val id = nextId
+      nextId += 1
+      // Entered before the fork and removed by the fiber's exit observer, so the entry cannot
+      // outlive the fiber even when the fiber ends before `fork` returns.
+      inFlight(id) = None
+      if ordered then initializing = true
+      val answer = MessageLoop
+        .dispatchParsed(router, session, parsed)
+        .flatMap {
+          case Some(reply) => emit(reply)
+          case None => ZIO.unit
+        }
+        // A defect never becomes an unhandled promise rejection or a dead fiber nobody saw. The
+        // cause goes to the ZIO logger (stderr under the stdio runner) and the client gets no
+        // frame.
+        .catchAllCause(cause => ZIO.logWarningCause("stdio dispatch failed", cause))
+      Unsafe.unsafe { implicit unsafe =>
+        val fiber = rt.unsafe.fork(answer)
+        fiber.unsafe.addObserver(_ => finished(id, ordered))
+        if inFlight.contains(id) then inFlight(id) = Some(fiber)
+      }
+
+    def finished(id: Long, ordered: Boolean): Unit =
+      val _ = inFlight.remove(id)
+      if ordered then
+        initializing = false
+        while !initializing && held.nonEmpty do run(held.dequeue())
+      settleIfIdle()
+
+    // `initialize` is answered before any later frame runs, so a client that writes its handshake
+    // and its first requests in one burst is never told "not initialized". The lines held back are
+    // those of the chunks delivered while it runs; it is a built-in that awaits nothing.
     def dispatch(line: String): Unit =
       if MessageLoop.shouldDispatchStdioFrame(line, router.limits) then
-        val _ = ZioJsPromise.zioToPromise(rt)(
-          MessageLoop
-            .handleFrame(router, session, line)
-            .flatMap {
-              case Some(reply) => emit(reply)
-              case None => ZIO.unit
-            }
-            // Never surface a defect as an unhandled promise rejection — Bun terminates the whole
-            // process on those. The cause goes to the ZIO logger — with ZIO's default Scala.js
-            // logger a warning is printed via `console.log`, i.e. to stdout, unless the app installs
-            // a stderr logger in `bootstrap` — and the client gets no frame.
-            .catchAllCause(cause => ZIO.logWarningCause("stdio dispatch failed", cause))
-        )
+        if initializing then held.enqueue(line) else run(line)
+
+    val interruptInFlight: UIO[Unit] = ZIO.suspendSucceed {
+      held.clear()
+      ZIO.foreachDiscard(inFlight.values.flatten.toList)(_.interruptFork)
+    }
+
     stdin.on(
       "data",
       (chunk: js.Any) =>
@@ -126,7 +210,31 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             buffer += text.substring(from, from + room)
             discarding = true
     )
-    stdin.on("end", (_: js.Any) => done(ZIO.unit))
+    stdin.on(
+      "end",
+      (_: js.Any) =>
+        // A final line without a newline is a frame, as `BoundedLines` flushes it on the JVM and
+        // Scala Native.
+        if buffer.nonEmpty || discarding then
+          val frame =
+            if !discarding && buffer.endsWith("\r") then buffer.dropRight(1) else buffer
+          buffer = ""
+          discarding = false
+          dispatch(frame)
+        ended = true
+        settleIfIdle()
+        // No frame can arrive any more: a handler waiting for the client's answer to a
+        // server→client request is failed now. Then wait for the replies owed, up to the drain
+        // timeout; what is still running after it is interrupted and given a moment to finish.
+        done(
+          orderedDone.await *> session.closeInbound *>
+            idle.await.timeout(drainTimeout).flatMap {
+              case Some(_) => ZIO.unit
+              case None => interruptInFlight *> idle.await.timeout(StdioLoop.SettleTimeout).unit
+            }
+        )
+    )
+    interruptInFlight
 
   private def writeLine(line: String): UIO[Unit] =
     ZIO.succeed {
