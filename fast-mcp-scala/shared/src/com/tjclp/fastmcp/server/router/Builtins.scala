@@ -165,7 +165,15 @@ final class Builtins[R](
       tools = toolManager
         .listDefinitions()
         .sortBy(_.name)
-        .map(d => WireMapping.toolForVersion(WireMapping.toolToWire(d, tasksEnabled), version))
+        // `execution.taskSupport` is a 2025-11-25 field (`toolForVersion` keeps it for that
+        // revision alone), and only for a session that can use the legacy task surface: the
+        // stateless adapter declares no `tasks` capability.
+        .map(d =>
+          WireMapping.toolForVersion(
+            WireMapping.toolToWire(d, tasksEnabled && session.supportsTasks),
+            version
+          )
+        )
       json <- ok(ListToolsResult(tools = tools))
     yield json
 
