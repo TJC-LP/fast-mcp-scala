@@ -192,7 +192,13 @@ start_native() {
   local bin="${FAST_MCP_NATIVE_BIN:-}"
   if [ -z "$bin" ]; then
     echo "→ building native ConformanceServer (GraalVM)" >&2
-    ./mill --no-server fast-mcp-scala.nativeSmoke.http.nativeImage >/dev/null 2>&1
+    # The output is kept, and shown when the build fails: discarded, a failure here ended the
+    # script (set -e) with no message at all.
+    if ! ./mill --no-server fast-mcp-scala.nativeSmoke.http.nativeImage >"$LOG.build" 2>&1; then
+      echo "native image build failed; last lines:" >&2
+      tail -n 60 "$LOG.build" >&2
+      exit 1
+    fi
     bin="$(./mill --no-server show fast-mcp-scala.nativeSmoke.http.nativeImage 2>/dev/null |
       python3 -c "import sys,json,re; print(re.sub(r'^q?ref:v\\d+:[0-9a-f]+:','',json.load(sys.stdin)))")"
   fi
