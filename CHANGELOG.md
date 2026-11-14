@@ -701,6 +701,12 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - `scripts/conformance.sh` fails a run on any platform whose server is still alive 15 s after
     SIGTERM (it checked the two native binaries only), and `scripts/native-smoke.sh` sends SIGTERM
     to the stdio binary while its stdin is open.
+- **The 2025-11-25 `tasks` capability declares `list` and `cancel`** (GH #115, D6.8). The
+  `initialize` result of a server with tasks enabled is now
+  `"tasks": {"list": {}, "cancel": {}, "requests": {"tools": {"call": {}}}}`. It used to declare
+  `requests.tools.call` only, although `tasks/list` and `tasks/cancel` were always served on the
+  same sessions, so a client that gates those calls on the server's capability never made them.
+  The 2026-07-28 discovery result is unchanged: it declares the extension and no `tasks` field.
 - **`subscriptions/listen` refuses task notifications from a client without the Tasks extension**
   (GH #115, TJC-2361). A 2026-07-28 `subscriptions/listen` request that names `taskIds` but does
   not declare `io.modelcontextprotocol/tasks` in its capabilities is answered `-32021`, as

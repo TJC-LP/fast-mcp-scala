@@ -13,7 +13,7 @@ import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import com.tjclp.fastmcp.core.wire.Implementation
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.manager.TaskManager
-import com.tjclp.fastmcp.server.router.{RouterBuilder, SchemaValidator, ServerHooks}
+import com.tjclp.fastmcp.server.router.{McpRouter, RouterBuilder, SchemaValidator, ServerHooks}
 import com.tjclp.fastmcp.testkit.{Await, ManualClock}
 import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
@@ -225,7 +225,41 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
   test("initialize advertises the tasks capability when enabled") {
     val routes = buildRoutes()
     val body = bodyOf(post(routes, initFrame, None))
-    body should include(""""tasks"""")
+    // The 2025-11-25 capability names everything that revision gives a flag and this server
+    // serves: tasks/list, tasks/cancel and task-augmented tools/call (GH #115, D6.8).
+    body should include(""""tasks":{"list":{},"cancel":{},"requests":{"tools":{"call":{}}}}""")
+  }
+
+  test("the advertised tasks/list and tasks/cancel are served on that session") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    val listed =
+      bodyOf(post(routes, """{"jsonrpc":"2.0","id":2,"method":"tasks/list"}""", Some(sid)))
+    listed should include(""""tasks":[]""")
+    // An unknown id is this method's own error (-32602), not "method not found" (-32601).
+    val cancelled = bodyOf(
+      post(
+        routes,
+        """{"jsonrpc":"2.0","id":3,"method":"tasks/cancel","params":{"taskId":"nope"}}""",
+        Some(sid)
+      )
+    )
+    cancelled should include("-32602")
+  }
+
+  test("2026-07-28 discovery declares the extension and no 2025-11-25 tasks capability") {
+    val legacy = McpRouter.deriveCapabilities(
+      methods = Set.empty,
+      tasksEnabled = true,
+      resourcesSubscribe = false,
+      listChanged = false
+    )
+    legacy.tasks.flatMap(_.list) shouldBe defined
+    legacy.tasks.flatMap(_.cancel) shouldBe defined
+    McpRouter.toModernCapabilities(legacy, tasksEnabled = true).tasks shouldBe None
+    McpRouter
+      .deriveCapabilities(Set.empty, tasksEnabled = false, false, false)
+      .tasks shouldBe None
   }
 
   test("tools/list carries execution.taskSupport for opted-in tools and omits it for plain") {

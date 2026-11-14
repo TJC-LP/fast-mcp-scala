@@ -343,7 +343,10 @@ still fill a pool, so pair the peer-address key with edge rate limiting.
 ## Legacy (2025-11-25) task surface
 
 On the compatibility adapter, clients send `params.task: {ttl}` and poll `tasks/get` /
-`tasks/result` / `tasks/list` / `tasks/cancel`. That surface works on any transport whose session
+`tasks/result` / `tasks/list` / `tasks/cancel`. The `initialize` result declares all of it that
+the 2025-11-25 revision has a flag for: `capabilities.tasks` is
+`{"list": {}, "cancel": {}, "requests": {"tools": {"call": {}}}}` (until 1.1.0 it carried
+`requests.tools.call` only, although `tasks/list` and `tasks/cancel` were served). That surface works on any transport whose session
 outlives a single request: the legacy streamable-HTTP adapter and stdio (one durable session per
 process). On the **stateless** legacy adapter all clients share one session identity, so legacy
 task requests there are rejected with `-32601`. Bearer tasks are invisible to legacy sessions and
