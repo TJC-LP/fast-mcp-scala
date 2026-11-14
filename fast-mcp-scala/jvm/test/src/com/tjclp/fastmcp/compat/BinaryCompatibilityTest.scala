@@ -52,7 +52,8 @@ class BinaryCompatibilityTest extends AnyFunSuite with Matchers:
     maxRequestBytes = 1024L,
     maxResultBytes = 2048L,
     maxBytesPerOwner = 4096L,
-    maxBytesTotal = 8192L
+    maxBytesTotal = 8192L,
+    cancelGraceMs = 77L
   )
 
   private val limitsWithNewFields = LimitSettings(

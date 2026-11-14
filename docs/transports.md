@@ -464,7 +464,7 @@ session as its own client, so only case 3 applies.
 Most server→client messages ride the response stream of the request that caused them. A message
 emitted when no such stream exists goes to the session's out-of-request channel instead. Today
 that is what a **legacy task** emits once its creating POST has been answered — the
-`notifications/tasks/status` of every terminal transition, and any log, progress or
+`notifications/tasks/status` of a task that becomes terminal, and any log, progress or
 server→client request message of the task body — and, on stdio, every server-pushed message. The
 channel holds at most `limits.maxOutboundMessages` messages (default 256) per session, whether or
 not anything reads it:

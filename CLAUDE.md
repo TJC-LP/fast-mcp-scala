@@ -295,6 +295,12 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   transport whose session outlives a single request (legacy streamable HTTP, stdio). On the
   **stateless legacy adapter** all clients share one session identity, so legacy task requests
   there are rejected with `-32601`.
+- `tasks/cancel` interrupts the task and waits at most `TaskSettings.cancelGraceMs` (1 s, on the
+  `ServerClock`) for its body. A synchronous body sees the interrupt only when it returns: after
+  the grace the task is recorded `cancelled` (result promise failed with `TaskCancelledError`,
+  legacy status notification sent) and `recordTerminal` drops whatever the body returns later.
+  Bodies are never lifted with `attemptBlockingInterrupt` (JVM-only semantics). Tests:
+  `TaskCancelGraceSpec` (all platforms), `TaskCancelGraceRouterTest`.
 - Task ids come from the platform CSPRNG (`/dev/urandom` on Scala Native); a task that outlives
   its TTL is interrupted (not orphaned); terminal results stay pollable until the TTL sweeps them
   or, after a 30 s grace, the owner/pool stored-entry cap evicts the oldest completed task.
@@ -332,8 +338,9 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   one `FiberRef`). The flag is on the contract and in `ToolManager.isTaskDeferred`, not in
   `ToolDefinition` or `@Tool` (public shapes, binary compatibility); it is ignored on legacy
   sessions.
-- `notifications/tasks/status` is emitted on legacy (2025-11-25) sessions only — never for modern
-  bearer tasks, which are polled via `tasks/get`.
+- `notifications/tasks/status` is emitted on legacy (2025-11-25) sessions only, when a task's
+  entry becomes terminal (`completed` / `failed` / `cancelled`); a running task removed by its TTL
+  or with its session emits none. Never for modern bearer tasks, which are polled via `tasks/get`.
 
 ### Cross-Platform Architecture
 

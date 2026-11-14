@@ -45,6 +45,7 @@ val server = McpServer(
 | `maxResultBytes` | 8 MiB | One stored result or failure (estimated bytes). A task whose result is larger ends `failed` and the result is not kept. |
 | `maxBytesPerOwner` | 16 MiB | Everything the store holds for one owner: the request of each running task plus each stored result. Must be ≥ `maxRequestBytes` and ≥ `maxResultBytes`. |
 | `maxBytesTotal` | 128 MiB | The same budget per pool (legacy-session tasks and modern bearer tasks are separate pools, so the store as a whole holds at most twice this). Must be ≥ `maxBytesPerOwner`. |
+| `cancelGraceMs` | `1 000` | How long `tasks/cancel` waits for the task's body to stop before it answers. After that the task is recorded `cancelled` although its body is still running — see [Cancelling a task](#cancelling-a-task). `0` does not wait. Since 1.1.0. |
 
 ### Memory bounds
 
@@ -313,20 +314,21 @@ still fill a pool, so pair the peer-address key with edge rate limiting.
   `runStdio()` / `runHttp()` stop the sweeper and running tasks on shutdown. A request in flight is
   not session activity (activity is stamped on arrival), so a legacy `tasks/result` parked longer
   than `sessionIdleTimeout` on an otherwise quiet session can be evicted mid-wait and gets no reply.
-- Cancellation is cooperative. `tasks/cancel`, TTL expiry and session release interrupt the task
-  fiber, but a synchronous body (`ZIO.attempt`, or a plain method on the annotation path) observes
-  the interrupt only when it returns, so the status flips — and the `tasks/cancel` reply arrives —
-  when the body finishes; on Scala.js a running synchronous body cannot be interrupted at all.
-  Write long task bodies as ZIO effects (`ZIO.sleep`, streams, `attemptBlockingInterrupt` on the
-  JVM) so they stop promptly; a grace-bounded cancel is tracked for 1.0.1.
+- Cancellation is cooperative, and `tasks/cancel` waits for it only so long: see
+  [Cancelling a task](#cancelling-a-task).
 - The server creates working / input_required / completed / failed / cancelled tool tasks. See
   [Waiting for input](#waiting-for-input-input_required) for `input_required`, and
   [Input first, then a task](#input-first-then-a-task-withdeferredtask) for a tool that asks on
   the request before it becomes a task.
-- `notifications/tasks/status` is emitted on legacy (2025-11-25) sessions on every terminal
-  transition, as that revision's Tasks surface specifies; modern bearer tasks do not emit it —
-  the 2026-07-28 extension moved status to polling (`tasks/get`). These boundaries are listed in
-  the [upgrade guide](./2026-07-28-upgrade.md#deliberate-boundaries).
+- `notifications/tasks/status` is emitted on legacy (2025-11-25) sessions, on every platform
+  (Scala Native included), when a task's entry becomes terminal: `completed`, `failed`, or
+  `cancelled` by `tasks/cancel`. A running task that is removed instead — its TTL passed, its
+  session was terminated, or the server is shutting down — emits none: its entry is deleted, so
+  there is no status left to report (`tasks/get` answers `Unknown task`, and a parked
+  `tasks/result` is answered `-32602`). That revision makes the notification optional and tells
+  requestors to keep polling, so a client must not wait for one. Modern bearer tasks never emit
+  it — the 2026-07-28 extension moved status to polling (`tasks/get`). These boundaries are listed
+  in the [upgrade guide](./2026-07-28-upgrade.md#deliberate-boundaries).
 - The extension also lets a server push `notifications/tasks` on a `subscriptions/listen` stream
   for the `taskIds` a client names. That is optional and this server does not: a client that
   declares the extension is acknowledged without any task id and keeps polling, and one that
@@ -339,6 +341,44 @@ still fill a pool, so pair the peer-address key with edge rate limiting.
   client that does not read that stream keeps only the newest 256 messages. On a Bun HTTP session
   and on any 2026-07-28 HTTP request there is no such stream and the message is discarded — poll
   `tasks/get`. See [transports](./transports.md#messages-outside-a-request).
+
+## Cancelling a task
+
+`tasks/cancel`, TTL expiry and session release all stop a task the same way: they interrupt its
+fiber. What happens next depends on how the tool's body is written.
+
+- **A body that is a ZIO effect** (`ZIO.sleep`, a stream, an HTTP call through a ZIO client,
+  `ZIO.attemptBlockingInterrupt` on the JVM) stops at its next step. The task is `cancelled`
+  within milliseconds and `tasks/cancel` answers with that state.
+- **A synchronous body** — a plain method on the annotation path, a typed-contract handler that
+  returns a plain value, `ZIO.attempt { ... }`, a `Thread.sleep`, a blocking driver call — sees
+  the interrupt only when it returns. Nothing can stop it earlier, and on Scala.js nothing else
+  runs while it does. The library does not wrap bodies in `attemptBlockingInterrupt` for you:
+  that interrupts a JVM thread, which is not safe for arbitrary code and does not exist on the
+  other two platforms.
+
+`tasks/cancel` therefore waits for the body for at most `TaskSettings.cancelGraceMs` (default
+1 s). If the body has stopped by then, the reply shows how the task really ended: `cancelled`, or
+`completed` / `failed` if it finished before the interrupt took effect. If it has not:
+
+- the task is recorded `cancelled` and the cancel is answered (the legacy reply carries that
+  task; the 2026-07-28 reply is the empty acknowledgement);
+- a legacy `tasks/result` waiter is answered `-32602` (`Task <id> was cancelled`), and the legacy
+  session gets its `notifications/tasks/status`;
+- the entry is a stored result from then on: it no longer counts as running, and it holds neither
+  the fiber nor the request;
+- **the body keeps running until it returns.** Whatever it returns or throws then is dropped: the
+  task stays `cancelled` and no second notification is sent. Its side effects still happen.
+
+Until 1.1.0 the cancel reply waited for the body, however long that took. To get that back, set
+`cancelGraceMs` to a value longer than any body runs; `0` answers without waiting at all.
+
+A body that outlives its cancellation is work the store no longer counts: it holds a thread (on
+the JVM and Scala Native) and the request it was started with until it returns, outside
+`maxConcurrentPerSession`, `maxConcurrentTotal` and the byte budgets. The same has always been
+true of a synchronous body whose task is removed by its TTL or with its session. A tool that can
+run long should therefore be written as an effect that can be interrupted; the grace bounds the
+client's wait, not the work.
 
 ## Legacy (2025-11-25) task surface
 

@@ -92,6 +92,14 @@ import com.tjclp.fastmcp.core.Tasks
   *   separately), with the stored-cap eviction order: the creating owner's own stale results first,
   *   then those of the owner holding the most stale results. Must be >= `maxBytesPerOwner`. Default
   *   128 MiB, so the two pools together retain at most twice that; size it to the heap.
+  * @param cancelGraceMs
+  *   How long `tasks/cancel` waits for the task's body to stop after interrupting it, before it
+  *   answers. A body written as a ZIO effect stops at once and the answer shows the state the task
+  *   really ended in. A synchronous body (`ZIO.attempt`, a plain method on the annotation path)
+  *   sees the interrupt only when it returns: once the grace has passed the task is recorded
+  *   `cancelled`, `tasks/result` waiters are answered, and the cancel is answered, while the body
+  *   runs on to its end with its result discarded. `0` does not wait at all. Default 1 s. (Until
+  *   1.1.0 the cancel reply waited for the body, however long it ran.)
   */
 case class TaskSettings(
     enabled: Boolean = false,
@@ -108,7 +116,8 @@ case class TaskSettings(
     maxRequestBytes: Long = 2L * 1024 * 1024,
     maxResultBytes: Long = 8L * 1024 * 1024,
     maxBytesPerOwner: Long = 16L * 1024 * 1024,
-    maxBytesTotal: Long = 128L * 1024 * 1024
+    maxBytesTotal: Long = 128L * 1024 * 1024,
+    cancelGraceMs: Long = 1_000L
 ):
   require(maxConcurrentPerSession >= 1, "TaskSettings.maxConcurrentPerSession must be >= 1")
   require(
@@ -129,6 +138,7 @@ case class TaskSettings(
     maxBytesTotal >= maxBytesPerOwner,
     "TaskSettings.maxBytesTotal must be >= maxBytesPerOwner"
   )
+  require(cancelGraceMs >= 0L, "TaskSettings.cancelGraceMs must be >= 0")
 
   // Binary compatibility with 1.0.x: the 11-field constructor. Later fields take their defaults; the
   // one repeated below is checked against the primary constructor's by BinaryCompatibilityTest.

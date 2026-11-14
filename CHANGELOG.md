@@ -465,6 +465,30 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Changed
 
+- **BEHAVIOUR CHANGE — `tasks/cancel` no longer waits for a body that does not stop** (GH #115,
+  D6.14 / C3.3). Affects servers with `TaskSettings(enabled = true)` whose task tools have a
+  synchronous body: a plain method on the annotation path, a typed-contract handler that returns
+  a plain value, `ZIO.attempt { ... }`. Such a body sees an interrupt only when it returns, and
+  until now the reply to `tasks/cancel` waited with it: cancelling an 8 s `Thread.sleep` took 8 s.
+  - New setting **`TaskSettings.cancelGraceMs`** (default `1000`): how long the cancel waits for
+    the body after interrupting it. A body that stops inside the grace is reported as it really
+    ended, as before. Otherwise the task is recorded `cancelled` when the grace has passed, the
+    cancel is answered, a parked legacy `tasks/result` gets `-32602` (`Task <id> was cancelled`),
+    and a legacy session gets its `notifications/tasks/status`.
+  - **The body is not stopped.** It runs until it returns, and what it returns or throws then is
+    dropped: the task stays `cancelled` and nothing more is sent. The entry no longer counts as
+    running and holds neither the fiber nor the request, so such a body runs outside the running
+    caps and byte budgets until it returns (as a synchronous body whose task is removed by its
+    TTL or with its session always has). Write long tools as effects that can be interrupted
+    (`ZIO.sleep`, streams, `ZIO.attemptBlockingInterrupt` on the JVM). The library does not lift
+    bodies with `attemptBlockingInterrupt` itself: that is JVM thread interruption, unsafe for
+    arbitrary code and absent on Scala.js and Scala Native.
+  - Tools written as ZIO effects are unaffected: they were and are cancelled within milliseconds.
+  - To keep the old reply timing, set `cancelGraceMs` above the longest body; `0` never waits.
+  - The legacy status notification of a task is now always sent on the session's out-of-request
+    channel, never on the reply stream of the request that happened to trigger it.
+  - `TaskSettings` gains the field at the end; the 11-field 1.0.x forwarders give it its default
+    (`copy` keeps it). Reference: `docs/tasks.md` § "Cancelling a task".
 - **HTTP refusals are the same on every backend** (GH #114, TJC-2360). zio-http, the socket
   backend and Bun disagreed on a handful of requests that are refused either way; they now take
   the same decisions from the shared `HttpRequestGuards`. Requests that were served before are
@@ -754,6 +778,13 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   costs one of them. Found by Antithesis pausing a node (run
   `138b4b66187ffc9deaf28072fff5b5d9-66-21`). Unreleased code: the grace was added in this cycle.
 
+- **Docs: when a legacy session gets `notifications/tasks/status`** (GH #115, D5.6 / D5.7).
+  `docs/tasks.md` said the notification was sent "on every terminal transition". It is sent when
+  a task's entry becomes `completed`, `failed` or `cancelled`, on every platform including Scala
+  Native. A running task that is removed instead (its TTL passed, its session ended, the server
+  shut down) emits none, because no entry is left to report on; that is now stated, with the
+  reminder that the 2025-11-25 revision makes the notification optional. Behaviour is unchanged.
+  The statement that bearer tasks work over stdio on Scala Native was already in the text.
 - **A task interrupted before its fiber had started stayed `working` for ever** (TJC-5087). A
   `tasks/cancel`, a session release or the TTL sweep that reached a task right after its creation
   could end the task's fiber before the step that records the terminal status was in place. The

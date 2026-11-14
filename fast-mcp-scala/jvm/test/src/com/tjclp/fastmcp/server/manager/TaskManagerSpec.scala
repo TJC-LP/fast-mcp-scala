@@ -501,6 +501,10 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     an[IllegalArgumentException] should be thrownBy TaskSettings(maxStoredTotal = -1)
     an[IllegalArgumentException] should be thrownBy TaskSettings(minResultRetentionMs = -1L)
     an[IllegalArgumentException] should be thrownBy TaskSettings(sweepIntervalMs = 0L)
+    an[IllegalArgumentException] should be thrownBy TaskSettings(cancelGraceMs = -1L)
+    // No grace at all is a setting, not an error.
+    TaskSettings(cancelGraceMs = 0L).cancelGraceMs shouldBe 0L
+    TaskSettings().cancelGraceMs shouldBe 1_000L
     // Equal running caps are fine; stored caps below the running caps are normalised, not rejected.
     noException should be thrownBy
       TaskSettings(maxConcurrentPerSession = 2, maxConcurrentTotal = 2, maxStoredTotal = 1)
