@@ -23,10 +23,10 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     unchanged, because new fields were only added at the end.
   - The forwarders are `private[fastmcp]`: present in the class files, not visible to source
     code. Code that is recompiled calls the current signatures, and no call becomes ambiguous.
-  - `McpServerCore.skills`, `removeSkills` and `skillProvider` have default implementations, so
-    an implementation of the trait compiled against 1.0.x still loads. The default fails with an
-    `UnsupportedOperationException` that names the implementation; `McpServer` implements all
-    three.
+  - `McpServerCore.skills`, `removeSkills`, `skillProvider` and `completion` have default
+    implementations, so an implementation of the trait compiled against 1.0.x still loads. The
+    default fails with an `UnsupportedOperationException` that names the implementation;
+    `McpServer` implements all four.
   - How it is checked: `./mill fast-mcp-scala.mimaCheck` runs MiMa against both releases on every
     pull request and before a release, and fails on any finding that `.github/mima-exclusions`
     does not list with a reason. `BinaryCompatibilityTest` runs a program compiled against the
@@ -323,6 +323,18 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Added
 
+- **`McpServerApp.completion`: a declarative server can answer `completion/complete`** (GH #115,
+  D6.9). Override `def completion: Option[CompletionHandler[Any]]` on an `McpServerApp` to
+  register the argument-completion provider; the default, `None`, registers nothing. Until now
+  only `McpServer.completion(...)` could register one, and `McpServerApp.buildCore` is final, so a
+  server written as an `McpServerApp` had to build its own `McpServerCoreFactory` to get one.
+  - `completion` is now a method of the `McpServerCore` trait (it was on `McpServer` only), with a
+    default that fails with an `UnsupportedOperationException` naming the implementation, like the
+    Skills methods. `McpServer` implements it; its signature is unchanged.
+  - `CompletionHandler` is exported from the root import.
+  - An object that extends `McpServerApp` and already has a parameterless member named
+    `completion` no longer compiles: rename the member. (A method that takes parameters, a tool
+    for instance, is an overload and is unaffected.)
 - **`McpServerSettings.stdioDrainTimeout`** (GH #113, TJC-2359): how long a stdio server waits at
   end of stdin for the replies to frames it has already read, before it interrupts what is still
   running. Default five seconds; zero interrupts without waiting; a negative value is refused when

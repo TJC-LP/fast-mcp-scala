@@ -199,6 +199,7 @@ server.tool(addTool) *> server.runStdio()
 - `McpPrompt[In]` / `McpPrompt[In, R](...)` - Typed prompt with manual argument metadata
 - `McpStaticResource` / `McpStaticResource.withEnv[R]` - Typed static resource
 - `McpTemplateResource[In]` / `McpTemplateResource[In, R](...)` - Typed resource template
+- `completion/complete`: `server.completion(handler)` on an `McpServer`, or `override def completion: Option[CompletionHandler[Any]]` on an `McpServerApp` (1.1.0; `CompletionHandler` is root-exported). The `completions` capability is advertised only when a provider is registered
 - `McpDecoder[T]` / `McpEncoder[A]` - Platform-neutral codecs
 - `ToolSchemaProvider[A]` - Auto-derives `inputSchema` from `@Param`-annotated case classes on both JVM and JS
 - The advertised `inputSchema` is **enforced on `tools/call`** (both registration paths, all platforms): `ToolManager.callTool` validates arguments with the dependency-free `core/JsonSchemaValidator` before the handler and fails with `ToolArgumentError` (an `isError` result on the wire). Subset: `type`, `enum`, `const`, numeric/length/item bounds, `properties`, `required`, `additionalProperties`, `items`/`prefixItems`, `allOf`/`anyOf`/`oneOf`/`not`, local non-recursive `$ref`; `pattern`, `format`, `multipleOf`, `uniqueItems` and friends are NOT evaluated. Off switches: `McpServerSettings(validateToolInput = false)`, per tool `ToolRegistrationOptions(validateInputSchema = false)`; `server.toolInputValidation` reports the effective state. Reference: `docs/custom-types.md` § "What the server enforces"

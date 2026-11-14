@@ -35,7 +35,8 @@ object SelfScan:
   * }}}
   *
   * Override `name`, `version`, `settings`, or the `tools` / `prompts` / `staticResources` /
-  * `templateResources` lists to compose annotation scanning with typed contracts.
+  * `templateResources` lists to compose annotation scanning with typed contracts, and `completion`
+  * to answer `completion/complete`.
   *
   * The default `McpServerApp` flow pins `R = Any`, so annotated methods must return effects that
   * don't depend on a ZIO environment. For layer-aware servers, build an `McpServer.typed[R]`
@@ -71,6 +72,17 @@ trait McpServerApp[T <: Transport, Self <: Singleton](using
   def staticResources: List[McpStaticResource] = Nil
   def templateResources: List[McpTemplateResource[?]] = Nil
 
+  /** The `completion/complete` provider (argument autocompletion for prompts and resource
+    * templates). `None`, the default, registers nothing: the `completions` capability is not
+    * advertised and the method answers `-32601`.
+    * {{{
+    *   override def completion: Option[CompletionHandler[Any]] = Some { (request, _) =>
+    *     ZIO.succeed(Completion(languages.filter(_.startsWith(request.argument.value))))
+    *   }
+    * }}}
+    */
+  def completion: Option[CompletionHandler[Any]] = None
+
   /** Skills to publish (Skills extension). Published as one atomic batch after the resources, so a
     * skill file colliding with a static resource fails startup instead of shadowing it.
     */
@@ -92,6 +104,7 @@ trait McpServerApp[T <: Transport, Self <: Singleton](using
       _ <- ZIO.foreachDiscard(prompts)(core.prompt(_))
       _ <- ZIO.foreachDiscard(staticResources)(core.resource(_))
       _ <- ZIO.foreachDiscard(templateResources)(core.resource(_))
+      _ <- ZIO.foreachDiscard(completion)(core.completion(_))
       _ <- ZIO.when(skills.nonEmpty)(core.skills(skills))
       _ <- ZIO.foreachDiscard(skillProviders)(core.skillProvider(_))
     yield core

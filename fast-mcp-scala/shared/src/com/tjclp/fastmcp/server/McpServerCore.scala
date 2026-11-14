@@ -292,6 +292,22 @@ trait McpServerCore[R]:
           .flatMap(in => contract.handler(in, ctx))
     )
 
+  // --- Completion registration ---
+
+  /** Register the `completion/complete` argument-completion provider: the server then advertises
+    * the `completions` capability and routes completion requests to `handler`. One provider per
+    * server; a later registration replaces the earlier one.
+    *
+    * On this trait since 1.1.0 (until then a method of [[McpServer]] only), so that
+    * [[McpServerApp.completion]] can register through it. It is not abstract, so an implementation
+    * compiled against 1.0.x still links; the default fails with an `UnsupportedOperationException`
+    * naming the implementation. [[McpServer]] implements it.
+    */
+  def completion[R1 >: R](
+      @unused handler: CompletionHandler[R1]
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    ZIO.fail(McpServerCore.completionUnsupported(this))
+
   // --- Skills registration (io.modelcontextprotocol/skills) ---
 
   /** Publish skills atomically: every skill is validated, hashed and checked for conflicts with the
@@ -351,6 +367,17 @@ object McpServerCore:
       s"${server.getClass.getName} cannot register tool '$tool': it was built with " +
         "McpTool.withDeferredTask, which only McpServer supports (added in fast-mcp-scala " +
         "1.1.0). Register the tool on the McpServer itself, or drop withDeferredTask."
+    )
+
+  /** The failure the default `completion` returns on an implementation that does not override it.
+    */
+  private[server] def completionUnsupported(
+      server: McpServerCore[?]
+  ): UnsupportedOperationException =
+    new UnsupportedOperationException(
+      s"${server.getClass.getName} does not implement McpServerCore.completion: it cannot " +
+        "register a completion/complete provider. The method was added to the trait in " +
+        "fast-mcp-scala 1.1.0; McpServer implements it."
     )
 
   private[server] def skillsUnsupported(

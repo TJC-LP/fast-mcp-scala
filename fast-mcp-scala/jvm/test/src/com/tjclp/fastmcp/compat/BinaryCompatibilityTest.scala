@@ -220,6 +220,11 @@ class BinaryCompatibilityTest extends AnyFunSuite with Matchers:
     failure(core.skillProvider(EmptyProvider)).getMessage should
       include("McpServerCore.skillProvider")
 
+    // `completion` moved up from McpServer to the trait in 1.1.0, with the same kind of default.
+    val completion = failure(core.completion[Any]((_, _) => ZIO.succeed(com.tjclp.fastmcp.core.wire.Completion(Nil))))
+    completion shouldBe an[UnsupportedOperationException]
+    completion.getMessage should (include(className) and include("McpServerCore.completion"))
+
     // The rest of the trait works on the old implementation, 1.1.0 additions included.
     core.toolInputValidation shouldBe Map.empty
     val _ = runUnsafe(core.tool(OldApp.tools.head))
