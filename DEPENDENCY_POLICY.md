@@ -55,6 +55,10 @@ dependency policies are not forced to move transitively.
 
 - No scheduled bumps of production dependencies (ZIO, zio-json, zio-http, mill-bun-plugin).
 - No unpinned dependency ranges anywhere in the build.
+- No tested range of dependency versions. Each release is built and tested against exactly the
+  versions pinned in `build.mill`. A consumer build that pins another ZIO or zio-json resolves the
+  higher version by eviction; that combination compiles, but this project has not run it, so run
+  your own tests on it (see "Troubleshooting" in [docs/upgrading.md](docs/upgrading.md)).
 
 ## Compatibility promises
 

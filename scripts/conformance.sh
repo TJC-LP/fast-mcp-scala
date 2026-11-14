@@ -348,8 +348,9 @@ echo "→ server log: $LOG" >&2
 # Shutdown must actually work, on every platform: a server that survives 15s of SIGTERM is a bug
 # whatever the suite said (GH #113 C3.10 — this used to be checked for the two native binaries
 # only, so a JVM or Bun server pinned by a live SSE stream or a dead event loop passed the gate).
-# GraalVM needs --install-exit-handlers for this (dead event loops deadlocking shutdown was exactly
-# the failure SharedArenaSupport fixed); Scala Native relies on the OS default action.
+# GraalVM needs its exit handlers for this (the default for executables since GraalVM 25;
+# --install-exit-handlers on older releases). Dead event loops deadlocking shutdown was exactly
+# the failure SharedArenaSupport fixed. Scala Native relies on the OS default action.
 if [ "$SRV_STOPPED" = "hang" ]; then
   echo "$PLATFORM FAIL: server did not exit within 15s of SIGTERM (suite verdict: $RC)" >&2
   exit 1

@@ -58,6 +58,12 @@ example main classes above. Exercise a stdio server interactively with the MCP I
 npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc
 ```
 
+The first run downloads and compiles, which can exceed the Inspector's 15 s connect timeout: run
+`scala-cli compile scripts/quickstart.sc` once beforehand (see the
+[README quickstart](../README.md#quickstart)). A server command that has `-e` flags of its own needs
+a `--` before the Inspector CLI's options (see
+[Claude Desktop integration](../README.md#claude-desktop-integration)).
+
 **Bun.** The in-repo js bundle has no runnable main yet (see [platforms.md](./platforms.md#in-this-repository)).
 Package a single-file server with scala-cli and run it on Bun:
 
