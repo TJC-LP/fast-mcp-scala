@@ -517,10 +517,11 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     cancel is answered, a parked legacy `tasks/result` gets `-32602` (`Task <id> was cancelled`),
     and a legacy session gets its `notifications/tasks/status`.
   - **The body is not stopped.** It runs until it returns, and what it returns or throws then is
-    dropped: the task stays `cancelled` and nothing more is sent. The entry no longer counts as
-    running and holds neither the fiber nor the request, so such a body runs outside the running
-    caps and byte budgets until it returns (as a synchronous body whose task is removed by its
-    TTL or with its session always has). Write long tools as effects that can be interrupted
+    dropped: the task stays `cancelled` and nothing more is sent. The entry holds neither the
+    fiber nor the request, but the body keeps its place under `maxConcurrentPerSession` and
+    `maxConcurrentTotal` until it returns, so cancelling synchronous tasks in turn cannot stack
+    up running bodies beyond the caps. The same now holds for a synchronous body whose task is
+    removed by its TTL or with its session; in 1.0.x those ran uncounted. Write long tools as effects that can be interrupted
     (`ZIO.sleep`, streams, `ZIO.attemptBlockingInterrupt` on the JVM). The library does not lift
     bodies with `attemptBlockingInterrupt` itself: that is JVM thread interruption, unsafe for
     arbitrary code and absent on Scala.js and Scala Native.
