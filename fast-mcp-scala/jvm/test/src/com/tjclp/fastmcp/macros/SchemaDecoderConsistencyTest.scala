@@ -12,6 +12,15 @@ import zio.json.ast.Json
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
 
+/** References two Java enum constants out of declaration order, BEFORE the macros below expand in
+  * this file. The compiler lists a Java enum's constants in the order a run first touches them, so
+  * a derivation that read that list would advertise `["DAYS", "MILLISECONDS", ...]` here (and did,
+  * in one full build of this branch). The schema must be in declaration order regardless.
+  */
+object JavaEnumOrderProbe:
+  val touchedFirst: java.util.concurrent.TimeUnit = java.util.concurrent.TimeUnit.DAYS
+  val touchedSecond: java.util.concurrent.TimeUnit = java.util.concurrent.TimeUnit.MILLISECONDS
+
 /** Parameter shapes whose advertised `inputSchema` and generated decoder must agree. The `ctl_*`
   * tools are controls: if their properties fail, the schema-driven generator is wrong, not the
   * macro.
@@ -45,18 +54,73 @@ object WireShapeTools:
   def eitherOption(@Param("p", required = false) p: Option[Either[Color, String]]): String =
     p.toString
 
-  // Tuples: productSchema advertises {"_1": ..., "_2": ...}. A bare tuple parameter decodes that
-  // object shape (Mirror-derived product decoder), but once wrapped in Option the summoned
-  // zio-json tuple decoder demands a JSON array — the same type, two wire shapes.
+  // Tuples: productSchema advertises {"_1": ..., "_2": ...}, and that object is the one wire shape
+  // of a tuple wherever it appears (C2.13). zio-json's own tuple decoder reads a JSON array; the
+  // macro derives the product decoder instead, bare and inside Option / collections / case classes.
   @Tool(name = Some("tuple_plain"))
   def tuplePlain(@Param("p") p: (Int, String)): String = p.toString
 
   @Tool(name = Some("tuple_option"))
   def tupleOption(@Param("p", required = false) p: Option[(Int, String)]): String = p.toString
 
-  // Java enum: schema is a bare {"type": "string"}; the decoder accepts only the seven names.
+  @Tool(name = Some("tuple_list"))
+  def tupleList(@Param("p") p: List[(Int, String)]): String = p.toString
+
+  // A container SUBTYPE with a tuple inside: no structural arm builds a decoder for it, so the
+  // macro keeps the in-scope zio-json decoder, as 1.0.x did. That this object compiles is the
+  // assertion (it stopped compiling when tuples got one wire shape; review of PR #149).
+  @Tool(name = Some("tuple_indexed_seq"))
+  def tupleIndexedSeq(@Param("p") p: IndexedSeq[(Int, String)]): String = p.toString
+
+  @Tool(name = Some("tuple_map"))
+  def tupleMap(@Param("p") p: Map[String, (Int, Color)]): String = p.toString
+
+  @Tool(name = Some("tuple_nested"))
+  def tupleNested(@Param("p") p: (Int, Option[(String, Boolean)])): String = p.toString
+
+  @Tool(name = Some("tuple_field"))
+  def tupleField(@Param("p") p: TupleHolder): String = p.toString
+
+  // Java enums (C2.14): the schema enumerates the constant names and the decoder reads them.
+  // `DayOfWeek` / `Month` use zio-json's decoders; any other Java enum gets a derived one.
   @Tool(name = Some("dayofweek"))
   def dayOfWeek(@Param("p") p: java.time.DayOfWeek): String = p.toString
+
+  @Tool(name = Some("month"))
+  def month(@Param("p") p: java.time.Month): String = p.toString
+
+  @Tool(name = Some("timeunit"))
+  def timeUnit(@Param("p") p: java.util.concurrent.TimeUnit): String = p.toString
+
+  @Tool(name = Some("timeunit_list"))
+  def timeUnitList(@Param("p") p: List[java.util.concurrent.TimeUnit]): String = p.toString
+
+  @Tool(name = Some("timeunit_map"))
+  def timeUnitMap(@Param("p") p: Map[String, java.util.concurrent.TimeUnit]): String = p.toString
+
+  @Tool(name = Some("timeunit_field"))
+  def timeUnitField(@Param("p") p: TimeUnitHolder): String = p.toString
+
+/** A tuple type with a user-supplied decoder (its own wire shape: the string "tt" / "ff"). */
+given userBooleanPairDecoder: JsonDecoder[(Boolean, Boolean)] = JsonDecoder.string.mapOrFail {
+  case "tt" => Right((true, true))
+  case "ff" => Right((false, false))
+  case other => Left(s"expected tt or ff, got $other")
+}
+
+object UserTupleDecoderTools:
+
+  @Tool(name = Some("user_tuple"))
+  def userTuple(@Param("p") p: Option[(Boolean, Boolean)]): String = p.toString
+
+/** A tuple as a case-class field, bare and optional. */
+case class TupleHolder(pair: (Int, String), maybe: Option[(String, Color)])
+
+/** A Java enum as a case-class field, bare and in a collection. */
+case class TimeUnitHolder(
+    unit: java.util.concurrent.TimeUnit,
+    others: List[java.util.concurrent.TimeUnit]
+)
 
 /** Generates JSON instances that conform to a schema emitted by [[JsonSchemaMacro]] (the subset it
   * produces: scalars, `enum`, `anyOf`/`oneOf`, arrays with `items`/`uniqueItems`, objects with
@@ -136,9 +200,28 @@ class SchemaDecoderConsistencyTest extends AnyFunSuite:
 
   private val controls = List("ctl_int", "ctl_list_color", "ctl_item", "ctl_map_int")
 
-  /** Live rows: `Either` of a derived payload in every wrapper (C2.3) plus the bare tuple. */
+  /** Live rows: `Either` of a derived payload in every wrapper (C2.3), tuples in every position
+    * (C2.13) and Java enums (C2.14).
+    */
   private val suspects =
-    List("either_plain", "either_list", "either_map", "either_option", "tuple_plain")
+    List(
+      "either_plain",
+      "either_list",
+      "either_map",
+      "either_option",
+      "tuple_plain",
+      "tuple_option",
+      "tuple_list",
+      "tuple_map",
+      "tuple_nested",
+      "tuple_field",
+      "dayofweek",
+      "month",
+      "timeunit",
+      "timeunit_list",
+      "timeunit_map",
+      "timeunit_field"
+    )
 
   private val params =
     Test.Parameters.default.withMinSuccessfulTests(40).withInitialSeed(Seed(20260908L))
@@ -175,28 +258,8 @@ class SchemaDecoderConsistencyTest extends AnyFunSuite:
       acceptsRequiredOnlyInstance(tool)
     }
 
-  // DEFERRED to 1.0.1 (C2.13): `Option[(Int, String)]` advertises the `{"_1","_2"}` object that the
-  // bare tuple decodes, but the Option arm reaches zio-json's tuple codec, which wants a JSON array.
-  test("tuple_option: every schema-conforming argument object decodes") {
-    pendingUntilFixed(acceptsEveryConformingInstance("tuple_option"))
-  }
-
-  test("tuple_option: the required-keys-only argument object decodes") {
-    acceptsRequiredOnlyInstance("tuple_option")
-  }
-
-  // DEFERRED to 1.0.1 (C2.14): the `java.time.DayOfWeek` schema is a bare string while the decoder
-  // accepts only the seven names — the schema must carry `enum`.
-  test("dayofweek: every schema-conforming argument object decodes") {
-    pendingUntilFixed(acceptsEveryConformingInstance("dayofweek"))
-  }
-
-  test("dayofweek: the required-keys-only argument object decodes") {
-    pendingUntilFixed(acceptsRequiredOnlyInstance("dayofweek"))
-  }
-
   test("dropping a required key is rejected (non-Option parameters)") {
-    val nonOption = (controls ++ suspects :+ "dayofweek").filterNot(Set("either_option"))
+    val nonOption = (controls ++ suspects).filterNot(Set("either_option", "tuple_option"))
     nonOption.foreach { tool =>
       assert(h.required(tool) == List("p"), s"$tool required = ${h.required(tool)}")
       val out = h.call(tool, "{}")
@@ -216,19 +279,94 @@ class SchemaDecoderConsistencyTest extends AnyFunSuite:
     assert(!out.isError && out.text == "(1,x)", s"tuple reply: $out")
   }
 
-  // DEFERRED to 1.0.1 (C2.14), see above.
-  test("java.time.DayOfWeek: the schema enumerates the seven names the decoder accepts") {
-    pendingUntilFixed {
-      val schema = h.inputSchema("dayofweek")
-      val property = schema.asObject
-        .flatMap(_.get("properties"))
-        .flatMap(_.asObject)
-        .flatMap(_.get("p"))
-        .getOrElse(Json.Null)
-      val names = MacroDxHarness.stringArray(property, "enum")
-      assert(
-        names.toSet == java.time.DayOfWeek.values.map(_.name).toSet,
-        s"DayOfWeek schema advertises ${property.toJson}; enum = $names"
-      )
+  test("Option[(Int, String)] decodes the same object as the bare tuple, and refuses an array") {
+    val wrapped = h.call("tuple_option", """{"p":{"_1":1,"_2":"x"}}""")
+    assert(!wrapped.isError && wrapped.text == "Some((1,x))", s"tuple_option reply: $wrapped")
+    val omitted = h.call("tuple_option", "{}")
+    assert(!omitted.isError && omitted.text == "None", s"tuple_option {} reply: $omitted")
+    for tool <- List("tuple_plain", "tuple_option") do
+      val array = h.call(tool, """{"p":[1,"x"]}""")
+      assert(array.isError, s"$tool accepted the array shape its schema does not describe: $array")
+  }
+
+  test("IndexedSeq[(Int, String)] still compiles and registers") {
+    val out = h.call("tuple_indexed_seq", """{"p":[]}""")
+    assert(!out.isError && out.text == "Vector()", s"tuple_indexed_seq reply: $out")
+  }
+
+  test("a tuple inside a collection or a case class is the same object") {
+    val list = h.call("tuple_list", """{"p":[{"_1":1,"_2":"a"},{"_1":2,"_2":"b"}]}""")
+    assert(!list.isError && list.text == "List((1,a), (2,b))", s"tuple_list reply: $list")
+    val map = h.call("tuple_map", """{"p":{"k":{"_1":1,"_2":"RED"}}}""")
+    assert(!map.isError && map.text == "Map(k -> (1,RED))", s"tuple_map reply: $map")
+    val field = h.call(
+      "tuple_field",
+      """{"p":{"pair":{"_1":1,"_2":"a"},"maybe":{"_1":"b","_2":"BLUE"}}}"""
+    )
+    assert(
+      !field.isError && field.text == "TupleHolder((1,a),Some((b,BLUE)))",
+      s"tuple_field reply: $field"
+    )
+  }
+
+  private def enumOf(tool: String, path: String*): List[String] =
+    val property = path.foldLeft(h.inputSchema(tool)) { (schema, key) =>
+      schema.asObject.flatMap(_.get(key)).getOrElse(Json.Null)
     }
+    MacroDxHarness.stringArray(property, "enum")
+
+  test("java.time.DayOfWeek and Month: the schema enumerates the names the decoder accepts") {
+    assert(enumOf("dayofweek", "properties", "p") == java.time.DayOfWeek.values.map(_.name).toList)
+    assert(enumOf("month", "properties", "p") == java.time.Month.values.map(_.name).toList)
+    val ok = h.call("dayofweek", """{"p":"MONDAY"}""")
+    assert(!ok.isError && ok.text == "MONDAY", s"dayofweek reply: $ok")
+    val bad = h.call("dayofweek", """{"p":"x"}""")
+    assert(bad.isError && bad.text.contains("must be one of"), s"dayofweek reply: $bad")
+  }
+
+  test("a Java enum derives a string-enum schema and a decoder by constant name") {
+    val names = java.util.concurrent.TimeUnit.values.map(_.name).toList
+    assert(enumOf("timeunit", "properties", "p") == names)
+    assert(enumOf("timeunit_list", "properties", "p", "items") == names)
+    assert(enumOf("timeunit_map", "properties", "p", "additionalProperties") == names)
+    assert(enumOf("timeunit_field", "properties", "p", "properties", "unit") == names)
+
+    val bare = h.call("timeunit", """{"p":"SECONDS"}""")
+    assert(!bare.isError && bare.text == "SECONDS", s"timeunit reply: $bare")
+    val list = h.call("timeunit_list", """{"p":["DAYS","HOURS"]}""")
+    assert(!list.isError && list.text == "List(DAYS, HOURS)", s"timeunit_list reply: $list")
+    val field = h.call("timeunit_field", """{"p":{"unit":"MINUTES","others":["DAYS"]}}""")
+    assert(
+      !field.isError && field.text == "TimeUnitHolder(MINUTES,List(DAYS))",
+      s"timeunit_field reply: $field"
+    )
+    val unknown = h.call("timeunit", """{"p":"seconds"}""")
+    assert(unknown.isError && unknown.text.contains("must be one of"), s"timeunit reply: $unknown")
+  }
+
+  test("a Java enum value outside the names is refused by the decoder when validation is off") {
+    val server = com.tjclp.fastmcp.server.McpServer(
+      "java-enum-no-validation",
+      settings = com.tjclp.fastmcp.server.McpServerSettings(validateToolInput = false)
+    )
+    val _ = server.scanAnnotations[WireShapeTools.type]
+    val refused = MacroDxHarness.runUnsafe(
+      server.toolManager.callTool("timeunit", Map("p" -> Json.Str("seconds")), None).either
+    )
+    assert(
+      refused.left.toOption.exists(_.getMessage.contains("expected one of NANOSECONDS")),
+      s"got $refused"
+    )
+  }
+
+  test("a JsonDecoder the user defines for a tuple type is used as written") {
+    val server = com.tjclp.fastmcp.server.McpServer(
+      "user-tuple-decoder",
+      settings = com.tjclp.fastmcp.server.McpServerSettings(validateToolInput = false)
+    )
+    val _ = server.scanAnnotations[UserTupleDecoderTools.type]
+    val decoded = MacroDxHarness.runUnsafe(
+      server.toolManager.callTool("user_tuple", Map("p" -> Json.Str("tt")), None).either
+    )
+    assert(decoded == Right("Some((true,true))"), s"got $decoded")
   }

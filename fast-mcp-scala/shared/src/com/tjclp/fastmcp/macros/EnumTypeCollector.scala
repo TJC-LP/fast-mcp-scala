@@ -51,10 +51,14 @@ private[fastmcp] object EnumTypeCollector:
       rootSym.caseFields.foreach(f => walk(rootTpe.memberType(f), 1))
     found.toList
 
-  /** All zio-json-derivable types (Scala 3 enums AND case classes) reachable through `root`'s field
-    * tree, excluding `root` itself, in POST-ORDER (dependencies before dependents) — so a planted
-    * `JsonDecoder` local for an inner type is in scope when an outer type's derivation expands.
-    * Same walk as [[collectEnums]]; ordering and the product inclusion differ.
+  /** All zio-json-derivable types reachable through `root`'s field tree, excluding `root` itself,
+    * in POST-ORDER (dependencies before dependents) — so a planted `JsonDecoder` local for an inner
+    * type is in scope when an outer type's derivation expands. Same walk as [[collectEnums]];
+    * ordering and what is included differ:
+    *   - Scala 3 enums and monomorphic case classes;
+    *   - Java enums ([[isJavaEnum]]), for which zio-json has no derivation at all;
+    *   - tuples ([[isTuple]]), which the caller derives as products where the wire shape must be
+    *     the `{"_1": ..., "_2": ...}` object the schema advertises.
     */
   def collectDerivable(using q: Quotes)(root: q.reflect.TypeRepr): List[q.reflect.TypeRepr] =
     import q.reflect.*
@@ -68,18 +72,21 @@ private[fastmcp] object EnumTypeCollector:
         if !visited.exists(_ =:= tpe) then
           visited += tpe
           val sym = tpe.typeSymbol
+          val javaEnum = isJavaEnum(tpe)
+          val tuple = isTuple(tpe)
           val isScalaEnum =
             sym.flags.is(Flags.Enum) && !sym.flags.is(Flags.Case) && !sym.flags.is(
               Flags.JavaDefined
             )
-          val isProduct = !isScalaEnum && sym.isClassDef && sym.flags.is(Flags.Case) &&
-            sym.caseFields.nonEmpty
+          val isProduct = !isScalaEnum && !javaEnum && sym.isClassDef &&
+            sym.flags.is(Flags.Case) && sym.caseFields.nonEmpty
           tpe match
             case AppliedType(_, args) => args.foreach(walk(_, depth + 1))
             case _ => ()
           if isProduct then sym.caseFields.foreach(f => walk(tpe.memberType(f), depth + 1))
           // Post-order: children recorded above, self after — dependency-safe local ordering.
-          if isScalaEnum || (isProduct && tpe.typeArgs.isEmpty) then found += tpe
+          if isScalaEnum || javaEnum || tuple || (isProduct && tpe.typeArgs.isEmpty) then
+            found += tpe
 
     val rootTpe = root.dealias.simplified
     visited += rootTpe
@@ -90,5 +97,35 @@ private[fastmcp] object EnumTypeCollector:
     if rootSym.isClassDef && rootSym.caseFields.nonEmpty then
       rootSym.caseFields.foreach(f => walk(rootTpe.memberType(f), 1))
     found.toList
+
+  /** A Java `enum` class (`java.util.concurrent.TimeUnit`, a user's own). The compiler gives it a
+    * `Mirror.SumOf`, but zio-json's derivation does not terminate on it, so every derivation entry
+    * point must take the [[ZioJsonEnumDerivation.javaEnumDecoder]] path instead.
+    */
+  def isJavaEnum(using q: Quotes)(tpe: q.reflect.TypeRepr): Boolean =
+    import q.reflect.*
+    val sym = tpe.dealias.simplified.typeSymbol
+    sym.isClassDef && sym.flags.is(Flags.Enum) && sym.flags.is(Flags.JavaDefined)
+
+  /** The constants of the Java enum class `enumClass`, in DECLARATION order.
+    *
+    * Read from the declared static fields of the class, not from `Symbol.children`: the compiler
+    * registers a Java enum constant as a child when it first completes it, so `children` lists the
+    * constants in the order the current compilation run happened to reference them
+    * (`TimeUnit.MILLISECONDS` first, if another source file mentions it first). A schema whose
+    * `enum` order changed from build to build would be a moving wire shape. `children` remains the
+    * fallback should a compiler version stop listing the fields.
+    */
+  def javaEnumConstants(using q: Quotes)(enumClass: q.reflect.Symbol): List[q.reflect.Symbol] =
+    import q.reflect.*
+    val declared = enumClass.companionModule.declaredFields.filter { field =>
+      field.flags.is(Flags.Enum) && field.flags.is(Flags.JavaStatic)
+    }
+    if declared.nonEmpty then declared else enumClass.children
+
+  /** `TupleN[...]` for N >= 1. */
+  def isTuple(using q: Quotes)(tpe: q.reflect.TypeRepr): Boolean =
+    import q.reflect.*
+    defn.isTupleClass(tpe.dealias.simplified.typeSymbol)
 
   private val MaxDepth = 32

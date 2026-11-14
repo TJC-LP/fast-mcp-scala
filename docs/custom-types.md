@@ -29,20 +29,30 @@ typed contracts.
 - Union types (`A | B`), literal types (`"asc" | "desc"`) and opaque types are **not** derived: the
   macro aborts with `Cannot derive an MCP JSON Schema for ...`. Supply a `given McpInputCodec[T]`
   (below) for such a field.
-- Sealed-trait hierarchies as a field type and Java enums (`java.util.concurrent.TimeUnit`,
-  `java.time.DayOfWeek`) are not derived either: provide a `given McpInputCodec[T]` for them.
-  Prefer case classes to tuples — a tuple field advertises an object schema (`_1`, `_2`) while the
-  decoder reads a JSON array.
-- A typed tool's `In` must be a case class (`case class NoArgs()` for no arguments; `Map[String, V]`
-  and types with a user `McpSchema` also qualify) and `.withOutputSchema` needs a case-class (or
-  `Unit`) `Out`: MCP `arguments` and `structuredContent` are always JSON objects, so a scalar,
-  `Option`, collection, `Either` or enum root is a compile-time error naming the type and the fix.
-  (`McpTool[Unit, _]` has a schema but no `McpDecoder[Unit]` in 1.0.0, hence `NoArgs`.)
-- Typed results without `.withOutputSchema`: an enum *field* of `Out` derives, but a bare enum
-  `Out` (`McpTool[In, Color]`) needs a `given JsonEncoder[Color]`; for collection results use
-  `Seq[T]` / `Set[T]` or a case class rather than `List[T]` / `Vector[T]` (the encoder summon is
-  ambiguous for those); write `Option.empty[T]` rather than `None` where the builder overloads
-  would otherwise be ambiguous.
+- Java enums (`java.util.concurrent.TimeUnit`, your own) derive like Scala 3 enums: a string-enum
+  schema of the constant names and a codec that reads and writes exactly those names.
+  `java.time.DayOfWeek` and `java.time.Month` advertise their names too (zio-json's decoders for
+  the two also accept other letter cases, but input validation requires the listed spelling).
+- Sealed-trait hierarchies as a field type are not derived: provide a `given McpInputCodec[T]` for
+  them.
+- A tuple on the input side is the object `{"_1": ..., "_2": ...}` its schema describes, wherever it
+  appears: as a parameter, inside `Option`, a collection or a map, and as a field of a case class
+  whose decoder is derived by the library. A `JsonDecoder` you define yourself for the tuple, or
+  for the case class around it (`derives JsonDecoder` included), keeps zio-json's JSON-array shape
+  and then contradicts the derived schema; give that type an `McpSchema` / `McpInputCodec`. On the
+  output side a tuple is always written as a JSON array, while a derived `outputSchema` describes
+  the object. Prefer case classes to tuples in results.
+- A typed tool's `In` must be a case class or `Unit` (`McpTool[Unit, String]` for a tool without
+  arguments; `Map[String, V]` and types with a user `McpSchema` also qualify) and
+  `.withOutputSchema` needs a case-class (or `Unit`) `Out`: MCP `arguments` and `structuredContent`
+  are always JSON objects, so a scalar, `Option`, collection, `Either` or enum root is a
+  compile-time error naming the type and the fix.
+- Typed results without `.withOutputSchema`: a bare Scala 3 enum `Out` (`McpTool[In, Color]`) is
+  written as its case name, and `List[T]` / `Vector[T]` / `Seq[T]` / `Set[T]` of a type with a
+  `JsonEncoder` as a JSON array. A list whose elements are themselves collections
+  (`List[List[Int]]`) is ambiguous: wrap it in a case class. Write `Option.empty[T]` rather than
+  `None` where the builder overloads would otherwise be ambiguous. When no encoder exists the
+  compiler says `No McpEncoder[T] found` and lists the remedies.
 - Derived schemas use the `format` keywords `date-time`, `date`, `time`, `duration`, `uuid` and
   `uri` for the matching `java.time` / `UUID` / `URI` types; validators running in strict mode
   (`ajv --strict`) need their formats plugin (`ajv-formats`) to accept them.
@@ -55,6 +65,14 @@ that does not conform is answered with an `isError` tool result naming the locat
 constraint — the same in-band answer an undecodable argument gets. The handler is not invoked. This
 holds for derived schemas, `@Param(schema = ...)` fragments, `McpSchema` / `McpInputCodec` schemas
 and `McpTool.withSchema`, on every transport, on the JVM, Scala.js and Scala Native.
+
+A missing required argument is such a case. Both registration paths answer it with the same
+`isError` result, `Invalid arguments for tool '<tool>': missing required property '<name>'`, and
+not with a JSON-RPC `-32602`: the MCP specification (2026-07-28, *Tools* § *Error Handling*) keeps
+protocol errors for unknown tools and malformed requests, and lists input validation errors under
+tool execution errors, which are "reported in tool results with `isError: true`" so that the model
+can correct the call. With enforcement off the decoder reports it instead, again with one message
+on both paths: `Missing required argument '<name>'`.
 
 The check is a built-in, dependency-free validator
 (`com.tjclp.fastmcp.core.JsonSchemaValidator`) for a subset of JSON Schema:
@@ -167,10 +185,15 @@ a typed contract named the tool there instead of the argument).
 ## Per-field override: `@Param(schema = ...)`
 
 For a one-off field, `@Param(schema = Some("..."))` replaces that field's generated schema with a
-raw JSON Schema fragment — the whole property, `description` and `examples` included, so repeat
-the description inside the fragment. This is the right tool for enum constraints, length limits
-or numeric bounds that Scala types cannot express, and the fragment is enforced on `tools/call`
-(a `pattern` or `format` in it is advertised only — check those in the method):
+raw JSON Schema fragment. The `description` and `examples` of the same `@Param` are added to the
+fragment, unless the fragment states its own `description` / `examples`, which then win. This is
+the right tool for enum constraints, length limits or numeric bounds that Scala types cannot
+express, and the fragment is enforced on `tools/call` (a `pattern` or `format` in it is advertised
+only — check those in the method). The literal is parsed when the server is compiled: one that is
+not JSON, or not a JSON object (or `true` / `false`), is a compile-time error.
+
+The parameter below is advertised as
+`{"type":"string","enum":["relevance","date"],"description":"Sort order"}`:
 
 ```scala 3 raw
 @Param(

@@ -67,3 +67,36 @@ object NoisyStdioApp:
       t.start()
     }
     LoggingStdioApp.main(args)
+
+/** The URI parameters of [[BadTemplateStdioApp]] / [[BadTemplatePlainApp]]. */
+case class BadTemplateArgs(a: String, b: String)
+
+/** A typed resource template the registration refuses (adjacent placeholders), mounted through
+  * `McpServerApp[Stdio]`: the server must fail to start, say why on stderr, and write nothing to
+  * stdout, which is the wire (D1.27).
+  */
+object BadTemplateStdioApp extends McpServerApp[Stdio, BadTemplateStdioApp.type]:
+
+  override def templateResources: List[McpTemplateResource[?]] = List(
+    McpTemplateResource[BadTemplateArgs](
+      uriPattern = "x://{a}{b}",
+      arguments = List(ResourceArgument("a", None), ResourceArgument("b", None))
+    )(args => args.a + args.b)
+  )
+
+/** The same registration from a plain `ZIOAppDefault`. It fails before `runStdio()` is reached, so
+  * the stdio runner never gets to move ZIO's logger, and it is `ZIOAppDefault` itself that reports
+  * the failure. The documented way to keep that report off stdout is to install the stdio logging
+  * layer as the application's `bootstrap`, which is what `McpServerApp[Stdio]` does.
+  */
+object BadTemplatePlainApp extends ZIOAppDefault:
+
+  override val bootstrap: ZLayer[ZIOAppArgs, Any, Any] = StdioLogging.bootstrap
+
+  override def run: ZIO[Any, Throwable, Unit] =
+    val server = McpServer("BadTemplatePlainApp")
+    val template = McpTemplateResource[BadTemplateArgs](
+      uriPattern = "x://{a}{b}",
+      arguments = List(ResourceArgument("a", None), ResourceArgument("b", None))
+    )(args => args.a + args.b)
+    server.resource(template) *> server.runStdio()

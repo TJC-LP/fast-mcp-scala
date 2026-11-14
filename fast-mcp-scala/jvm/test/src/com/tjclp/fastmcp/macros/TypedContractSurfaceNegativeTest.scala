@@ -20,9 +20,9 @@ import com.tjclp.fastmcp.macros.MacroDxHarness.{assertSomeMessageContains, messa
   *     advertises a non-object `outputSchema` while emitting no `structuredContent` at all — the
   *     spec says a tool with `outputSchema` MUST return a conforming `structuredContent`; `Out =
   *     Unit` advertises the empty object but emits nothing (C2.5).
-  *   - `McpTool[DxItem, Color]` (an enum result) fails with "No given instance of type
+  *   - `McpTool[DxItem, Color]` (an enum result) used to fail with "No given instance of type
   *     McpEncoder[Color]" although docs/custom-types.md promises Scala 3 enums in `In`/`Out` need
-  *     no user-supplied givens (GH #78) — DEFERRED to 1.0.1 (C2.12).
+  *     no user-supplied givens (GH #78); fixed in 1.1.0 (C2.12, see `TypedCodecGapsTest`).
   */
 class TypedContractSurfaceNegativeTest extends AnyFunSuite:
 
@@ -106,14 +106,10 @@ class TypedContractSurfaceNegativeTest extends AnyFunSuite:
     assert(errs.isEmpty, messages(errs))
   }
 
-  // DEFERRED to 1.0.1 (C2.12): the `McpEncoder` Mirror fallback needs `ProductOf`, so a bare enum
-  // `Out` has no encoder although enum FIELDS of `Out` derive. Additive fix (Mirror.SumOf path).
   test("an enum result type needs no hand-written McpEncoder (docs/custom-types.md)") {
-    pendingUntilFixed {
-      val errs: List[Error] =
-        typeCheckErrors("""McpTool[DxItem, Color](name = "e")(_ => Color.RED)""")
-      assert(errs.isEmpty, s"McpTool[DxItem, Color] does not compile:\n${messages(errs)}")
-    }
+    val errs: List[Error] =
+      typeCheckErrors("""McpTool[DxItem, Color](name = "e")(_ => Color.RED)""")
+    assert(errs.isEmpty, s"McpTool[DxItem, Color] does not compile:\n${messages(errs)}")
   }
 
   test("control: a case-class In and a String Out compile") {

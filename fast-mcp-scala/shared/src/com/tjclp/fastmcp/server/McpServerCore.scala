@@ -102,10 +102,8 @@ trait McpServerCore[R]:
       definition = contract.definition,
       handler = (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
         ZIO
-          .attempt(
-            McpServerCore
-              .decodeArguments(contract.decoder, contract.definition.name, args, decodeContext)
-          )
+          .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
+          .mapError(McpServerCore.toolArgumentError(contract.definition.name, _))
           .flatMap(input => contract.handler(input, ctxOpt))
           // Carry both renderings while `Out` is still known; the wire layer emits
           // structuredContent from it only when the tool declares an outputSchema.
@@ -132,10 +130,8 @@ trait McpServerCore[R]:
       definition = contract.definition,
       handler = (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
         ZIO
-          .attempt(
-            McpServerCore
-              .decodeArguments(contract.decoder, contract.definition.name, args, decodeContext)
-          )
+          .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
+          .mapError(McpServerCore.toolArgumentError(contract.definition.name, _))
           .flatMap(input => contract.handler(input, ctxOpt))
           // Carry both renderings while `Out` is still known; the wire layer emits
           // structuredContent from it only when the tool declares an outputSchema.
@@ -388,6 +384,63 @@ object McpServerCore:
     catch
       case failure: ArgumentDecodeFailure if failure.parameter == owner =>
         throw failure.forField.getOrElse(failure)
+
+  /** The failure of decoding a typed tool's arguments, worded for the caller of the tool.
+    *
+    * The default decoders are handed the TOOL name as the name of what they decode, so their
+    * messages read `Failed to decode parameter '<tool>' from JSON: ...`, which calls the tool a
+    * parameter. Those messages are rewritten here, where the tool is known:
+    *   - a missing top-level member (zio-json's `.name(missing)`) becomes `Missing required
+    *     argument 'name'`, a `NoSuchElementException`: exactly what an annotated tool reports for
+    *     the same call, so the two registration paths agree when input validation is off (with
+    *     validation on, the schema check answers first, with one message for both);
+    *   - any other decode failure becomes `Failed to decode the arguments of tool '<tool>': ...`;
+    *   - a number outside the input limits becomes `Arguments of tool '<tool>' rejected: ...`.
+    *
+    * Failures of a user's own `McpDecoder` are returned as they are.
+    */
+  private[fastmcp] def toolArgumentError(tool: String, error: Throwable): Throwable =
+    val decodePrefix = s"Failed to decode parameter '$tool' from JSON: "
+    val rejectPrefix = s"Parameter '$tool' rejected: "
+    val message = Option(error.getMessage).getOrElse("")
+    error match
+      // The default decode path's own failure: zio-json's error path says which argument it is
+      // about. A missing one is reported as the annotation path reports it; any other is named
+      // after that argument (GH #115, D6.23).
+      case failure: ArgumentDecodeFailure if failure.parameter == tool =>
+        missingTopLevelMember(failure.reason) match
+          case Some(name) => new NoSuchElementException(s"Missing required argument '$name'")
+          case None =>
+            failure.forField.getOrElse(
+              new RuntimeException(
+                s"Failed to decode the arguments of tool '$tool': ${message.stripPrefix(decodePrefix)}"
+              )
+            )
+      case _: IllegalArgumentException if message.startsWith(rejectPrefix) =>
+        new IllegalArgumentException(
+          s"Arguments of tool '$tool' rejected: ${message.drop(rejectPrefix.length)}"
+        )
+      case e: RuntimeException
+          if e.getClass == classOf[RuntimeException] && message.startsWith(decodePrefix) =>
+        val detail = message.drop(decodePrefix.length)
+        missingTopLevelMember(detail) match
+          case Some(name) => new NoSuchElementException(s"Missing required argument '$name'")
+          case None =>
+            new RuntimeException(s"Failed to decode the arguments of tool '$tool': $detail")
+      case other => other
+
+  /** `Some(name)` when a zio-json decode error says that the top-level member `name` is absent: the
+    * text `.name(missing)`, alone or followed by the `. Value: ...` preview.
+    */
+  private def missingTopLevelMember(detail: String): Option[String] =
+    val marker = "(missing)"
+    val end = detail.indexOf(marker)
+    if !detail.startsWith(".") || end < 2 then None
+    else
+      val name = detail.substring(1, end)
+      val rest = detail.substring(end + marker.length)
+      val nested = name.exists(c => c == '.' || c == '[' || c == '(' || c == ')')
+      if !nested && (rest.isEmpty || rest.startsWith(". Value: ")) then Some(name) else None
 
   /** The failure the default `skills` / `removeSkills` / `skillProvider` return on an
     * implementation that does not override them.

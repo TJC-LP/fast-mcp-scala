@@ -13,6 +13,17 @@
 # NATIVE_SMOKE_CMD overrides the server command entirely — e.g. a JVM run under
 # `-agentlib:native-image-agent` when regenerating metadata (see docs/native-image.md). The
 # binary-only checks (netty-shed) are skipped in that mode.
+#
+# Limits (docs/platforms.md, "Scala Native"):
+# - The assertions are bound to the AnnotatedServer fixture (`add`, `calculator`, `hello_prompt`,
+#   `static://welcome`). Against another server the run fails by design at the first reply that
+#   differs from the fixture's; only the handshake and the printed transcript are useful there.
+# - stdin is a named FIFO. Bun and Node never see EOF on a FIFO (observed on macOS with Bun 1.4.1
+#   and Node 26), so for a Scala.js bundle the exit-on-EOF check always fails with "server did not
+#   exit on stdin EOF within 10s". That is a limit of this script, not a server defect: read the
+#   `--- stdout ---` dump instead, or feed the bundle through a pipe (`printf '...' | bun run x.mjs`).
+# - With NATIVE_SMOKE_CMD the recorded pid is the wrapping `bash -c`, so cleanup may leave the
+#   server it started running after a failure.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
