@@ -59,6 +59,8 @@ specification's rule for a missing header).
 | DNS-rebinding / browser-origin protection (`allowedHosts`, `allowedOrigins`) | ✅ (on by default for a loopback bind; a non-loopback bind needs `allowedHosts` and warns at startup without it; opt-out `dnsRebindingProtection = false`) |
 | Input limits (`limits: LimitSettings`) + HTTP body / session caps (`maxRequestBodyBytes`, `maxSessions`) | ✅ (on by default) |
 | Legacy session idle eviction + SSE keepalives | ✅ |
+| SSE `retry` field on the legacy adapter (SEP-1699, 2025-11-25) | ✅ (opt-in: `sseRetryInterval`) |
+| SSE priming event, event ids, `Last-Event-ID` resumption (SEP-1699, 2025-11-25) | ❌ by design: removed in 2026-07-28; a broken request is stopped, not kept. See [transports.md](./transports.md#sse-retry-sseretryinterval) |
 
 The deliberately unimplemented pieces (no dynamic subscription publishers, no task-status notifications for modern bearer tasks — legacy 2025-11-25 sessions
 do receive `notifications/tasks/status` — no authorization server) are enumerated in the upgrade

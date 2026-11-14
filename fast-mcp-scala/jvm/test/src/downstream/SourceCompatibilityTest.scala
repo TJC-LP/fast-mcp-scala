@@ -138,6 +138,7 @@ class SourceCompatibilityTest extends AnyFunSuite with Matchers:
       true,
       true,
       McpServerSettings.DefaultStdioDrainTimeout,
+      None,
       Nil
     ) shouldBe allServerFields
     val routers = RouterBuilder.build[Any]

@@ -498,6 +498,49 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     }
   }
 
+  test("sseRetryInterval: every legacy SSE body begins with the retry line; a 2026-07-28 body does not") {
+    val settings = baseSettings.copy(sseRetryInterval = Some(java.time.Duration.ofSeconds(3)))
+    withServer(settings) { port =>
+      // A fixed-length reply: the retry line is the first line of its one event, and it is
+      // counted in the Content-Length.
+      val init = request(port, post(initFrame))
+      init.status shouldBe 200
+      init.header("transfer-encoding") shouldBe None
+      init.header("content-length").map(_.toInt) shouldBe
+        Some(init.body.getBytes(StandardCharsets.UTF_8).length)
+      init.body should startWith("retry: 3000\nevent: message\ndata: ")
+      init.body.indexOf("\n\n") shouldBe init.body.length - 2
+      val sid = init.header("mcp-session-id").getOrElse(fail("initialize did not mint a session"))
+      request(port, post(initializedFrame, Some(sid))).status shouldBe 202
+
+      // A streamed reply: the stream opens with an event that is only the retry line.
+      val chatty =
+        """{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"chatty","arguments":{}}}"""
+      val streamed = request(port, post(chatty, Some(sid)))
+      streamed.header("transfer-encoding") shouldBe Some("chunked")
+      streamed.body should startWith("retry: 3000\n\nevent: message\ndata: ")
+      streamed.body should include("chatty done")
+      streamed.body.split("retry: ", -1).length shouldBe 2
+
+      // The GET stream: the retry event is its first chunk, before anything is pushed.
+      val stream = new RawClient(port)
+      try
+        stream.send(get(Some(sid)))
+        stream.readHead()._1 shouldBe 200
+        stream.readChunk() shouldBe Some("retry: 3000\n\n")
+      finally stream.close()
+
+      // 2026-07-28 has no stream to reconnect to: its reply is what it is without the setting.
+      val modern = request(
+        port,
+        post(modernAddFrame, extra = List(modernVersion, callMethod, "Mcp-Name" -> "add"))
+      )
+      modern.status shouldBe 200
+      modern.body should startWith("event: message\ndata: ")
+      modern.body should not include "retry"
+    }
+  }
+
   test("keep-alive: several requests on one connection, including an SSE reply in the middle") {
     withServer() { port =>
       val client = new RawClient(port)

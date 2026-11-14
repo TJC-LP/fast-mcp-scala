@@ -51,17 +51,31 @@ private[fastmcp] object HttpRequest:
   /** For requests built without a wire behind them (tests driving the handler directly). */
   val NoHeaderNames: () => Iterator[String] = () => Iterator.empty
 
-/** One server-sent event: an optional `event:` type and the `data:` payload. */
-private[fastmcp] final case class SseFrame(event: Option[String], data: String):
+/** One server-sent event: an optional `event:` type, the `data:` payload, and an optional `retry:`
+  * field (the reconnection delay in milliseconds, `McpServerSettings.sseRetryInterval`). A frame
+  * with neither type nor payload and only `retry` is how a stream announces the delay when it opens
+  * ([[HttpReply.Sse.opening]]): clients store the value and dispatch no event for it.
+  */
+private[fastmcp] final case class SseFrame(
+    event: Option[String],
+    data: String,
+    retry: Option[Long] = None
+):
 
-  /** Wire form per the SSE spec: `event: <type>` (when present), one `data:` line per payload line,
-    * then the blank line that dispatches the event. Mirrors zio-http's `ServerSentEvent` encoding
-    * so the socket and Netty backends emit identical bytes.
+  /** Wire form per the SSE spec: `retry: <ms>` (when present), `event: <type>` (when present), one
+    * `data:` line per payload line, then the blank line that dispatches the event. Mirrors
+    * zio-http's `ServerSentEvent` encoding so the socket and Netty backends emit identical bytes
+    * for a message. A frame that carries `retry` is written with this encoder on every backend: it
+    * is either the one frame of an [[HttpReply.SseComplete]] or the [[HttpReply.Sse.opening]] of a
+    * stream, and neither goes through zio-http's encoder.
     */
   def encode: String =
     val sb = new java.lang.StringBuilder(data.length + 32)
+    retry.foreach(ms => sb.append("retry: ").append(ms).append('\n'))
     event.foreach(e => sb.append("event: ").append(e).append('\n'))
-    // An empty payload produces no data line — exactly what zio-http emits for its keepalive ping.
+    // An empty payload produces no data line. (zio-http 3.11.4 writes an empty `data:` line for an
+    // event without payload, so its keepalive ping is `event: ping`, `data: `, blank line where
+    // this encoder's is `event: ping`, blank line; clients skip the `ping` type either way.)
     // JSON-RPC payloads are single-line (the encoder never emits a raw newline), so the common case
     // is one append with no line splitting.
     if data.nonEmpty then
@@ -81,6 +95,9 @@ private[fastmcp] object SseFrame:
     * parses `message` events).
     */
   val Ping: SseFrame = SseFrame(Some("ping"), "")
+
+  /** The frame that opens a stream with the reconnection delay: `retry: <ms>` and a blank line. */
+  def retry(millis: Long): SseFrame = SseFrame(None, "", Some(millis))
 
 /** The platform-neutral reply [[StreamableHttpHandler]] produces. Backends render it onto their own
   * response type. Header names are given in their canonical wire form; HTTP header matching is
@@ -136,12 +153,20 @@ private[fastmcp] object HttpReply:
     *
     * `abandon` sits in its own parameter list: it is a handle on the reply's resources, not part of
     * the reply's value, and pattern matches on the reply stay as they were.
+    *
+    * `opening`, when set, is an event the backend writes as soon as the response body starts,
+    * before it runs `frames` and before any heartbeat: the `retry` announcement of a legacy stream
+    * (`McpServerSettings.sseRetryInterval`). It is not an element of `frames` because a backend
+    * merges its heartbeat into those, and the first heartbeat of a stream is due at once: only
+    * something written ahead of the merge is certain to come first. It is encoded with
+    * [[SseFrame.encode]] on every backend. It shares the second parameter list so that the existing
+    * matches on the three fields above keep their shape.
     */
   final case class Sse(
       headers: List[(String, String)],
       frames: ZStream[Any, Nothing, SseFrame],
       keepAlive: Option[Duration] = None
-  )(val abandon: UIO[Unit])
+  )(val abandon: UIO[Unit], val opening: Option[SseFrame] = None)
       extends HttpReply:
     def status: Int = 200
 

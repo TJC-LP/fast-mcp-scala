@@ -1,0 +1,53 @@
+name: Workflow analysis
+
+# zizmor (https://docs.zizmor.sh) statically analyses what GitHub Actions runs for this repository:
+# every workflow here, the composite action in .github/actions/setup-build, and dependabot.yml. It
+# looks for what these files are written to avoid (an action that is not pinned to a commit, a
+# checkout that keeps its credentials, a workflow with more permissions than it needs, an
+# expression expanded inside a script), so that a change which reintroduces one fails here instead
+# of waiting for a review to notice.
+#
+# Deterministic for a given commit:
+#   * the action is pinned to a commit, and installs the zizmor release named below from a wheel
+#     whose SHA-256 is listed in that commit's own lock file (`pip download --require-hashes`);
+#   * `online-audits: "false"` runs only the audits that read the files in the checkout. Nothing is
+#     looked up through the GitHub API, so the result does not depend on the state of other
+#     repositories.
+#
+# What fails the job: a finding of severity medium or high. Low and informational findings are not
+# reported. The one known group of those is `self-repository` (zizmor >= 1.30) on every
+# `uses: ./.github/actions/setup-build`; GH #121 tracks whether to move those lines to the
+# `uses: $/...` form, which has to be tried on a runner first.
+#
+# To bump zizmor: change `version` to a release the pinned action carries a lock for
+# (`support/locks/zizmor-<version>.txt` in zizmorcore/zizmor-action at that commit). Dependabot
+# moves the action pin; the zizmor version moves only by hand.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  zizmor:
+    name: zizmor (GitHub Actions static analysis)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # the checkout; nothing is written or uploaded
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # advanced-security: "false" keeps the results in the job log and as annotations on the
+      # changed lines. The default uploads SARIF to code scanning, which needs
+      # `security-events: write`.
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          version: "1.32.0"
+          online-audits: "false"
+          advanced-security: "false"
+          annotations: "true"
+          min-severity: medium

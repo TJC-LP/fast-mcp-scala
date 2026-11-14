@@ -376,6 +376,27 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     available on `@Tool` and `@Prompt` only. Before, a template reported that its URI parameters
     did not match and a static resource that it must not have parameters.
   - Two `McpContext` parameters on one method are a compile-time error.
+- **`McpServerSettings.sseRetryInterval: Option[java.time.Duration]`** (GH #121): the SSE `retry`
+  field on the legacy HTTP adapter (protocol versions before 2026-07-28), the time a client should
+  wait before it reconnects after a stream ends. Unset by default, and then nothing changes on the
+  wire. When set, every `text/event-stream` body the adapter writes begins with the line
+  `retry: <milliseconds>`: the standalone GET stream and a streamed POST reply open with an event
+  that is only that line, written before the first message and before any heartbeat, and a
+  fixed-length POST reply carries it as the first line of its one event. It is written the same
+  way on zio-http, the socket backend (JVM and Scala Native) and Bun; Bun serves no GET stream, so
+  there it reaches POST replies only. It is never sent on a 2026-07-28 reply, in legacy stateless mode
+  (JSON replies) or over stdio. A negative interval is refused at construction. Reference:
+  [docs/transports.md](docs/transports.md#sse-retry-sseretryinterval).
+  - This is the `retry` half of SEP-1699 only. The server still sends no event ids and no priming
+    event, and does not resume a stream from `Last-Event-ID`: a client reads an event id on a POST
+    stream as a promise that the reply can be fetched again over GET, and a request whose
+    connection breaks is stopped here, not kept. SSE resumability was removed from MCP in
+    2026-07-28. The conformance harness's unscored `server-sse-polling` scenario (2025-11-25
+    only) therefore reports `server-sse-retry-field` as passed for a server that sets the option
+    and keeps its priming-event recommendation as a warning; `ConformanceServer` does not set the
+    option and registers no `test_reconnection` tool.
+  - The new field is the last one of `McpServerSettings`; the 1.0.x constructors, `apply` and
+    `copy` forwarders give it its default or keep it, as for the other 1.1.0 fields.
 - **`McpServerSettings.stdioDrainTimeout`** (GH #113, TJC-2359): how long a stdio server waits at
   end of stdin for the replies to frames it has already read, before it interrupts what is still
   running. Default five seconds; zero interrupts without waiting; a negative value is refused when
@@ -787,6 +808,14 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - `conformance.yml` runs the mode for the JVM, Bun and Scala Native on every pull request, and
     `native.yml` runs it against the GraalVM image. The Antithesis workload runs it against a
     node once faults have stopped, as a third drawn mode (`antithesis/README.md`).
+- **CI: the workflows are checked by zizmor** (GH #121). A new workflow, `zizmor.yml`, runs
+  [zizmor](https://docs.zizmor.sh) 1.32.0 over the workflows, the `setup-build` composite action
+  and `dependabot.yml` on every pull request and push to `main`, and fails on a finding of
+  severity medium or high. It runs the offline audits only, so its result depends on the commit
+  and on nothing else; the action is pinned to a commit and installs zizmor from a hash-locked
+  wheel. Low findings are not reported: the known ones are `self-repository` on each
+  `uses: ./.github/actions/setup-build`, and moving those lines to the `uses: $/...` form is
+  left open until it has been tried on a runner.
 
 - **A parameter or input field with a Scala default is no longer advertised as `required`**
   (TJC-5117, #116 C2.6). Before, a default alone left the name in the `required` array of the
@@ -891,6 +920,16 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 - **CI: the OSV job fails when classpath resolution fails** (#117): the resolve step now runs with
   `pipefail`, and advisory text is escaped before it is printed as a workflow annotation.
 - The JVM test module no longer depends on mockito and zio-test, which no test used.
+- **Build: the coverage reports are no longer empty** (GH #121). `ScoverageModule` was mixed into
+  the JVM module, but the tests ran on uninstrumented classes, so nothing was ever measured, and
+  the report tasks failed to resolve their own tooling (`scoverageVersion` named 2.3.1, which was
+  never published for Scala 3). `./mill fast-mcp-scala.jvm.coverage` now runs the JVM test sources
+  on the instrumented classes, and `./mill fast-mcp-scala.jvm.scoverage.htmlReport` (also
+  `xmlReport`, `consoleReport`) renders what it measured; the reporter is scoverage 2.5.2
+  (`Versions.scoverage`, a build tool on no published classpath). `fast-mcp-scala.jvm.test` is
+  unchanged and still runs on the classes that are published. CI: the `Coverage report (JVM)` job
+  of `ci.yml` uploads both reports as the `coverage-jvm` artifact and prints the totals in the job
+  summary; it compares nothing with a threshold. Scala.js and Scala Native are not measured.
 - **At the session cap, sessions last used in the same millisecond are evicted in the order they
   were used** (#117). They tied on `lastSeen`, and the map's iteration order then picked the
   victim. Legacy streamable HTTP on every backend.

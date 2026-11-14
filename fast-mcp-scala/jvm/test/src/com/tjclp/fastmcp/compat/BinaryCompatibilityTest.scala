@@ -47,6 +47,7 @@ class BinaryCompatibilityTest extends AnyFunSuite with Matchers:
     validateToolInput = false,
     dnsRebindingProtection = false,
     stdioDrainTimeout = java.time.Duration.ofSeconds(9),
+    sseRetryInterval = Some(java.time.Duration.ofSeconds(3)),
     httpRoutes = List(HttpRoute.get("/health")(_ => ZIO.succeed(HttpRouteResponse.text("ok"))))
   )
 
@@ -103,6 +104,7 @@ class BinaryCompatibilityTest extends AnyFunSuite with Matchers:
     copied.validateToolInput shouldBe false
     copied.dnsRebindingProtection shouldBe false
     copied.stdioDrainTimeout shouldBe java.time.Duration.ofSeconds(9)
+    copied.sseRetryInterval shouldBe Some(java.time.Duration.ofSeconds(3))
     copied.httpRoutes.map(_.path) shouldBe List("/health")
   }
 
