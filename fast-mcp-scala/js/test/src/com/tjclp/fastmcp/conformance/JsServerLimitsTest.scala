@@ -130,7 +130,7 @@ class JsServerLimitsTest extends AsyncFlatSpec with Matchers:
     }
 
   "Bun HTTP limits (stateless)" should "reject a 243-colliding-key body with 400/-32700 in < 2 s, then serve normally" in {
-    withServer(38934, stateless = true) { port =>
+    withServer(28934, stateless = true) { port =>
       for
         _ <- post(port, pingBody) // warm-up
         start = now()
@@ -161,7 +161,7 @@ class JsServerLimitsTest extends AsyncFlatSpec with Matchers:
   }
 
   it should "answer a within-limits worst case (20 × 64 colliding keys) normally in < 5 s" in {
-    withServer(38933, stateless = true) { port =>
+    withServer(28933, stateless = true) { port =>
       val obj = collidingObject(collidingKeys(4).take(64))
       val body =
         s"""{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"batch","arguments":{"items":[${List
@@ -181,7 +181,7 @@ class JsServerLimitsTest extends AsyncFlatSpec with Matchers:
   }
 
   "Bun HTTP limits (stateful)" should "reject a limit-violating POST with 400 and no mcp-session-id" in {
-    withServer(38932, stateless = false) { port =>
+    withServer(28932, stateless = false) { port =>
       for
         bad <- post(port, collidingBody)
         badText <- textOf(bad)
