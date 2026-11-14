@@ -176,8 +176,10 @@ Every pull request must pass:
   classes of `jvm.scoverage`
   (the JVM module compiled with the compiler's coverage instrumentation). The job uploads the HTML
   and XML reports as the `coverage-jvm` artifact and prints statement and branch coverage in its
-  summary; it fails only when a test fails on the instrumented classes or a report cannot be
-  written. `jvm.test` itself stays uninstrumented, so the gated suite runs what is published.
+  summary; it fails only when a report cannot be written. A test that fails on the instrumented
+  classes is noted in the summary and does not fail the job: instrumented code is slower, so the
+  suite's elapsed-time bounds can fail there, and the "Build and Test" jobs are the gate for test
+  results. `jvm.test` itself stays uninstrumented, so the gated suite runs what is published.
   Locally the HTML report is under `out/fast-mcp-scala/jvm/scoverage/htmlReport.dest/`. The
   compiler skips initializers above 3000 tree nodes (the derived JSON codecs, the conformance
   fixture's tool lists) and says so in a warning; nothing is measured for those.

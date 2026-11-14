@@ -361,15 +361,20 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     val clock = new ManualClock
     val tm = newManager(clock = clock)
     val interrupted = runUnsafe(Ref.make(false))
+    val started = runUnsafe(Promise.make[Nothing, Unit])
     val created = runUnsafe(
       tm.create(
         sessionId = Some("evict"),
         requestedTtlMs = Some(150L),
-        run = ZIO.never.onInterrupt(interrupted.set(true)),
+        run = (started.succeed(()) *> ZIO.never).onInterrupt(interrupted.set(true)),
         onStatusChange = _ => ZIO.unit
       )
     )
     val taskId = created.task.taskId
+    // The body must be running before time passes. A task whose fiber has not reached its body
+    // when the sweep interrupts it never runs the body at all, hook included: on a loaded runner
+    // the fiber sat unscheduled until after the sweep, and `interrupted` stayed false for good.
+    runUnsafe(started.await)
     // The sweeper sleeps to the task's deadline. One millisecond short of it nothing is due...
     runUnsafe(clock.awaitSleepers(1) *> clock.advance(149.millis) *> clock.awaitSleepers(1))
     runUnsafe(tm.get(taskId, Some("evict"))).map(_.status) shouldBe Some(TaskStatus.Working)
