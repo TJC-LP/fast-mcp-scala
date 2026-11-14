@@ -203,9 +203,6 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
     val rMethodRepr = rMethodType match { case '[t] => TypeRepr.of[t] }
     requireEnvironment[R]("@Tool", methodSym, rMethodRepr)
 
-    // Handler typed at the method's required environment. Scala's normal type-checker enforces
-    // that the surrounding `server.tool[R1 >: R](handler: ContextualToolHandler[R1])` constraint
-    // is satisfied — but we've already verified that above with a friendlier message.
     // The decoded-argument map the method is called with: the wire arguments, plus the context
     // under the name of the parameter that takes it.
     val withContext: Expr[(Map[String, Any], Option[McpContext]) => Map[String, Any]] =
@@ -216,6 +213,9 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
           }
         case None => '{ (args: Map[String, Any], _: Option[McpContext]) => args }
 
+    // Handler typed at the method's required environment. Scala's normal type-checker enforces
+    // that the surrounding `server.tool[R1 >: R](handler: ContextualToolHandler[R1])` constraint
+    // is satisfied — but we've already verified that above with a friendlier message.
     val registration: Expr[ZIO[Any, Throwable, McpServerCore[R]]] = rMethodType match
       case '[rMethod] =>
         val handler: Expr[ContextualToolHandler[rMethod]] = effectShape match

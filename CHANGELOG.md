@@ -340,8 +340,9 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - Java enums (`java.util.concurrent.TimeUnit`, your own) derive a string-enum schema of the
     constant names and a codec that reads and writes exactly those names: as an annotated
     parameter, inside `Option` / collections / maps, and as a field of a typed tool's `In` or
-    `Out`. Before, an annotated `TimeUnit` parameter stopped the compiler with `Maximal number of
-    successive inlines exceeded` and a `TimeUnit` field had no decoder.
+    `Out`. The names are listed in declaration order. Before, an annotated `TimeUnit` parameter
+    stopped the compiler with `Maximal number of successive inlines exceeded` and a `TimeUnit`
+    field had no decoder.
   - `McpEncoder` and `McpDecoder` carry `@implicitNotFound`: a missing instance is reported as
     `No McpEncoder[T] found: ...` with what derives automatically and the three remedies, in
     place of the compiler's generic text.
@@ -531,7 +532,11 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   template compiled and the server failed when it started. Registration at run time (a typed
   `McpTemplateResource`, `server.resourceTemplate(...)`) still fails then, and the error message
   now carries the reason: `Failed to register resource template '<pattern>': <reason>` (it was
-  only in the cause).
+  only in the cause). Where that failure is printed is unchanged, and now tested and documented:
+  `McpServerApp[Stdio]` reports it on stderr and writes nothing to stdout; a plain
+  `ZIOAppDefault` that fails before it reaches `runStdio()` is reported by ZIO itself, on
+  stdout, unless it installs `StdioLogging.bootstrap` (`docs/transports.md`, "stdout is the
+  wire").
 - **Typed tools: argument decode errors name the tool as a tool, and a missing argument reads as
   on the annotation path** (GH #116, TJC-2362; C2.18, D1.13). Only the text of an `isError`
   result changes, and only for calls that reach the decoder: with input validation on (the
@@ -764,18 +769,15 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   templated read has the `mimeType` of its template: the one written on `@Resource(mimeType = ...)`
   or passed to `McpTemplateResource`. What changes on the wire: a typed `McpTemplateResource`
   that does not pass `mimeType` gets the contract's default, `text/plain`, on every read, as a
-  typed static resource always did; pass `mimeType = None` to send none. An annotated template
-  without `mimeType` is unchanged.
+  typed static resource always did. That includes a typed template whose handler returns bytes:
+  its blob was labelled `application/octet-stream` and is now labelled `text/plain` unless the
+  contract states the real type. Pass `mimeType = None` to send none (bytes are then
+  `application/octet-stream` again). An annotated template without `mimeType` is unchanged.
 - **The `@Resource` Scaladoc no longer claims a `text/plain` default** (GH #116, TJC-2362; D1.24).
   An annotated resource that does not state `mimeType` advertises none on `resources/list` and
   sends none with a text body; a binary body is served as `application/octet-stream`. That is
   what 1.0.x did; only the documentation said otherwise. The behaviour is unchanged, because
   adding `text/plain` to every annotated resource would label binary bodies wrongly.
-- **A server that cannot start because of an invalid resource template says so on stderr**
-  (GH #116, TJC-2362; D1.27): `McpServerApp[Stdio]` reports the registration failure on stderr and
-  writes nothing to stdout. A plain `ZIOAppDefault` that fails before `runStdio()` is reported by
-  ZIO itself, on stdout, unless it installs `StdioLogging.bootstrap`; `docs/transports.md`
-  ("stdout is the wire") now says so.
 - **One stdio lifecycle on the JVM, Bun and Scala Native** (GH #113, TJC-2359). The edges of a
   stdio session behaved differently per platform; they now behave the same, and
   `docs/transports.md` ("stdio") states the contract.

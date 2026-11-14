@@ -232,12 +232,12 @@ object MapToFunctionMacro:
           // JSON array, while the schema describes a tuple as the `{"_1": ..., "_2": ...}` object
           // a bare tuple parameter has always decoded. Derive the product decoder instead, so a
           // tuple has ONE wire shape wherever it appears (bare, in Option, in a collection).
-          val resolved = tpe.dealias.simplified
-          Option
-            .when(!ZioJsonEnumDerivation.needsDerivedDecoder(using q)(resolved))(
-              Expr.summon[JsonDecoder[t]]
-            )
-            .flatten
+          val isTuple = EnumTypeCollector.isTuple(using q)(tpe)
+          Expr
+            .summon[JsonDecoder[t]]
+            .filterNot { found =>
+              isTuple && ZioJsonEnumDerivation.isZioJsonTupleInstance(using q)(found.asTerm)
+            }
             // Java enums: by constant name. They have a Mirror, but zio-json's derivation does not
             // terminate on one (it used to end in "Maximal number of successive inlines exceeded").
             .orElse(ZioJsonEnumDerivation.javaEnumDecoder[t])
