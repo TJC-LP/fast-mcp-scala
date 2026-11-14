@@ -240,7 +240,7 @@ private[macros] object MacroUtils:
                 }
               // Named schema
               case NamedArg("schema", valueTerm) =>
-                paramSchema = parseOptionStringLiteral(valueTerm, "@Param(schema)")
+                paramSchema = parseSchemaLiteral(valueTerm)
                 schemaSetByName = true
               // Positional args: description, examples, required, schema
               case term =>
@@ -260,7 +260,7 @@ private[macros] object MacroUtils:
                       case _ => ()
                     }
                   case 3 if !schemaSetByName =>
-                    paramSchema = parseOptionStringLiteral(term, "@Param(schema)")
+                    paramSchema = parseSchemaLiteral(term)
                   case _ => ()
                 }
                 positionalIndex += 1
@@ -270,6 +270,64 @@ private[macros] object MacroUtils:
         (paramDesc, paramExamples, paramRequired, paramSchema)
       case None => (None, Nil, !optionalUnlessStated, None) // Defaults if no @Param
     }
+
+  /** The literal of `@Param(schema = ...)`, checked at expansion time: it replaces the parameter's
+    * derived JSON Schema, so it has to be JSON and a schema (an object, or `true` / `false`).
+    * Anything else aborts compilation at the argument. Before, a literal that did not parse was
+    * dropped without a word and the derived property was advertised instead (C2.21).
+    */
+  private def parseSchemaLiteral(using quotes: Quotes)(
+      argTerm: quotes.reflect.Term
+  ): Option[String] =
+    import quotes.reflect.*
+    parseOptionStringLiteral(argTerm, "@Param(schema)").map { literal =>
+      schemaLiteralProblem(literal).foreach(problem => report.errorAndAbort(problem, argTerm.pos))
+      literal
+    }
+
+  /** Why `literal` cannot be used as a `@Param(schema)` fragment, if it cannot. */
+  private[macros] def schemaLiteralProblem(literal: String): Option[String] =
+    val example = """{"type": "string", "enum": ["a", "b"]}"""
+    literal.fromJson[Json] match
+      case Left(error) =>
+        Some(
+          s"@Param(schema) is not valid JSON: $error. The literal replaces the parameter's " +
+            s"derived JSON Schema, so it must be a JSON object such as $example."
+        )
+      case Right(_: Json.Obj) | Right(_: Json.Bool) => None
+      case Right(other) =>
+        val kind = other match
+          case _: Json.Str => "a JSON string"
+          case _: Json.Num => "a JSON number"
+          case _: Json.Arr => "a JSON array"
+          case _ => "null"
+        Some(
+          s"@Param(schema) must be a JSON Schema, that is a JSON object such as $example " +
+            s"(or true / false), but the literal is $kind."
+        )
+
+  /** The description a Scaladoc comment contributes when `description` is not written on the
+    * annotation: its first paragraph as one line of text. `raw` is the comment as the compiler
+    * hands it over, delimiters included. The opening and closing comment markers and the leading
+    * asterisk of each line are removed; the text ends at the first blank line, the first `@tag`
+    * line or the first code block (three opening braces), whichever comes first; the lines of the
+    * paragraph are joined with a space. Inline markup (wiki links, backticks) is left as written.
+    * `None` when nothing is left. Before, the whole raw comment went on the wire (C2.20).
+    */
+  private[macros] def cookDocstring(raw: String): Option[String] =
+    val body = raw.trim.stripPrefix("/**").stripSuffix("*/")
+    val lines = body.linesIterator.map { line =>
+      val trimmed = line.trim
+      if trimmed.startsWith("*") then trimmed.drop(1).trim else trimmed
+    }.toList
+    val paragraph = lines
+      .dropWhile(_.isEmpty)
+      .takeWhile(line => line.nonEmpty && !line.startsWith("@") && !line.startsWith("{{{"))
+    Some(paragraph.mkString(" ").trim).filter(_.nonEmpty)
+
+  /** [[cookDocstring]] of the Scaladoc comment of `sym`, when the compiler has one. */
+  def docDescription(using quotes: Quotes)(sym: quotes.reflect.Symbol): Option[String] =
+    sym.docstring.flatMap(cookDocstring)
 
   /** The parameters of `methodSym`'s first parameter list whose Scala default the generated handler
     * applies when the argument is omitted, by name, with the compiler-generated
@@ -398,7 +456,9 @@ private[macros] object MacroUtils:
                 if !isOption && !hasDefault then
                   report.errorAndAbort(
                     s"Field '${fieldSym.name}' in typed request ${tpeSym.name} is marked as required=false " +
-                      s"but is not an Option type and has no default value."
+                      s"but is not an Option type and has no default value. " +
+                      s"Use Option[${fieldTpe.show(using Printer.TypeReprShortCode)}] or provide a " +
+                      "default value."
                   )
               ParamMetadata(desc, examples, required, schema)
             }
@@ -450,6 +510,21 @@ private[macros] object MacroUtils:
             Some('{ SchemaMetadataNode(properties = Map(${ Varargs(entries) }*)) })
           else None
 
+  /** The `uri` of a `@Resource`: a string literal or a `final val` constant. Anything else aborts
+    * with that cause; it used to fall through to "must have a 'uri' parameter", which the
+    * annotation plainly had.
+    */
+  private def parseUriLiteral(using quotes: Quotes)(argTerm: quotes.reflect.Term): String =
+    import quotes.reflect.*
+    constantOf(argTerm) { case StringConstant(s) => s }.getOrElse {
+      report.errorAndAbort(
+        s"@Resource(uri) must be a string literal (or a `final val` constant), but was " +
+          s"`${stripTerm(argTerm).show}`. Annotation arguments are read at compile time, and the " +
+          "URI decides whether the resource is static or a template.",
+        argTerm.pos
+      )
+    }
+
   // Helper to parse @Resource annotation arguments
   def parseResourceParams(using quotes: Quotes)(
       term: quotes.reflect.Term
@@ -466,7 +541,7 @@ private[macros] object MacroUtils:
     term match {
       case Apply(Select(New(_), _), argTerms) =>
         argTerms.zipWithIndex.foreach {
-          case (NamedArg("uri", Literal(StringConstant(s))), _) => uri = s
+          case (NamedArg("uri", valueTerm), _) => uri = parseUriLiteral(valueTerm)
           case (NamedArg("name", valueTerm), _) =>
             resourceName = parseOptionStringLiteral(valueTerm, "@Resource(name)")
           case (NamedArg("description", valueTerm), _) =>
@@ -474,7 +549,7 @@ private[macros] object MacroUtils:
           case (NamedArg("mimeType", valueTerm), _) =>
             mimeType = parseOptionStringLiteral(valueTerm, "@Resource(mimeType)")
           case (NamedArg(_, _), _) => ()
-          case (Literal(StringConstant(s)), 0) => uri = s
+          case (valueTerm, 0) => uri = parseUriLiteral(valueTerm)
           case (valueTerm, 1) =>
             resourceName = parseOptionStringLiteral(valueTerm, "@Resource(name)")
           case (valueTerm, 2) =>
@@ -749,7 +824,8 @@ private[macros] object MacroUtils:
     *   - description: Added to each property object
     *   - examples: Added as array to each property object (JSON Schema format)
     *   - required: Updates top-level "required" array
-    *   - schema: Replaces entire property definition with custom schema
+    *   - schema: Replaces the derived property with the custom schema, keeping the description and
+    *     examples above unless the custom schema states its own
     */
   def injectParamMetadata(schemaJson: Json, metadataMap: Map[String, ParamMetadata]): Json =
     if metadataMap.isEmpty then schemaJson
@@ -839,20 +915,37 @@ private[macros] object MacroUtils:
           case None => withItems
       case _ => withItems
 
+  /** The property schema with one `@Param` applied.
+    *
+    * Without a `schema` fragment the description and the examples are written onto the derived
+    * property. With one, the fragment replaces the derived property, and the description and the
+    * examples of the same `@Param` are added to it where the fragment does not state its own
+    * `description` / `examples` (C2.19): what the fragment says wins, and a fragment that is not an
+    * object (`true` / `false`) is left as it is. An empty description adds nothing.
+    *
+    * A fragment that is not JSON cannot come out of a 1.1.0 expansion (`parseSchemaLiteral` aborts
+    * on it). A jar expanded by 1.0.x may still carry one; it keeps the 1.0.x outcome, the derived
+    * property, so that such a jar starts as it did.
+    */
   private def applyMetadata(schemaJson: Json, metadata: ParamMetadata): Json =
-    metadata.schema.flatMap(_.fromJson[Json].toOption).getOrElse {
-      val baseObject = schemaJson.asObject.getOrElse(Json.Obj())
-      val withDescription = metadata.description.fold(baseObject) { description =>
-        replaceField(baseObject, "description", Json.Str(description))
-      }
-      if metadata.examples.nonEmpty then
-        replaceField(
-          withDescription,
-          "examples",
-          Json.Arr(metadata.examples.map(Json.Str(_))*)
-        )
-      else withDescription
-    }
+    def examplesJson: Json = Json.Arr(metadata.examples.map(Json.Str(_))*)
+    metadata.schema.flatMap(_.fromJson[Json].toOption) match
+      case Some(fragment: Json.Obj) =>
+        val withDescription = metadata.description.filter(_.trim.nonEmpty) match
+          case Some(description) if !fragment.contains("description") =>
+            Json.Obj(fragment.fields :+ ("description" -> Json.Str(description)))
+          case _ => fragment
+        if metadata.examples.nonEmpty && !withDescription.contains("examples") then
+          Json.Obj(withDescription.fields :+ ("examples" -> examplesJson))
+        else withDescription
+      case Some(other) => other
+      case None =>
+        val baseObject = schemaJson.asObject.getOrElse(Json.Obj())
+        val withDescription = metadata.description.fold(baseObject) { description =>
+          replaceField(baseObject, "description", Json.Str(description))
+        }
+        if metadata.examples.nonEmpty then replaceField(withDescription, "examples", examplesJson)
+        else withDescription
 
   private def stringArrayField(json: Json, name: String): List[String] =
     json.asObject

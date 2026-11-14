@@ -228,8 +228,19 @@ object MapToFunctionMacro:
                 summon[JsonDecoder[Either[a, b]]]
               }
         case '[t] =>
+          // A summoned instance wins, with one exception: zio-json's own tuple decoder reads a
+          // JSON array, while the schema describes a tuple as the `{"_1": ..., "_2": ...}` object
+          // a bare tuple parameter has always decoded. Derive the product decoder instead, so a
+          // tuple has ONE wire shape wherever it appears (bare, in Option, in a collection).
+          val isTuple = EnumTypeCollector.isTuple(using q)(tpe)
           Expr
             .summon[JsonDecoder[t]]
+            .filterNot { found =>
+              isTuple && ZioJsonEnumDerivation.isZioJsonTupleInstance(using q)(found.asTerm)
+            }
+            // Java enums: by constant name. They have a Mirror, but zio-json's derivation does not
+            // terminate on one (it used to end in "Maximal number of successive inlines exceeded").
+            .orElse(ZioJsonEnumDerivation.javaEnumDecoder[t])
             .orElse(
               // Enum-aware derivation: plants string-based JsonDecoder locals for enum FIELD
               // types lacking a user instance, so case-class params with enum fields decode
@@ -243,10 +254,34 @@ object MapToFunctionMacro:
                 s"Cannot decode parameter '$paramName': no McpDecoder, JsonDecoder or " +
                   s"Mirror-derivable JsonDecoder found for ${tpe.show}. Provide a given " +
                   s"JsonDecoder[${tpe.show}] or McpInputCodec[${tpe.show}] (decoder + schema in one " +
-                  "value). Primitives, java.time values, Scala 3 enums, case classes, Option, Either, " +
-                  "List, Vector, Set, Seq, Array and Map[String, V] derive automatically."
+                  "value). Primitives, java.time values, Scala 3 and Java enums, case classes, " +
+                  "tuples, Option, Either, List, Vector, Set, Seq, Array and Map[String, V] derive " +
+                  "automatically."
               )
             )
+
+    /** A tuple somewhere in the type arguments of `tpe` (not `tpe` itself, and not inside the
+      * fields of a case class, whose derivation handles its own tuples).
+      */
+    def hasTupleArgument(tpe: TypeRepr): Boolean =
+      tpe.dealias.simplified match
+        case AppliedType(_, args) =>
+          args.exists(arg => EnumTypeCollector.isTuple(using q)(arg) || hasTupleArgument(arg))
+        case _ => false
+
+    /** `McpDecoders.zioJsonDecoder` (directly, or through its `com.tjclp.fastmcp` export). */
+    def isLibraryZioJsonDecoder(term: Term): Boolean =
+      @tailrec
+      def head(t: Term): Term = t match
+        case Inlined(_, _, inner) => head(inner)
+        case Typed(inner, _) => head(inner)
+        case Block(Nil, inner) => head(inner)
+        case Apply(fn, _) => head(fn)
+        case TypeApply(fn, _) => head(fn)
+        case other => other
+      val sym = head(term).symbol
+      sym.exists && sym.name == "zioJsonDecoder" && sym.maybeOwner.exists &&
+      sym.maybeOwner.fullName.startsWith("com.tjclp.fastmcp")
 
     /** The `McpDecoder` for one parameter: a user instance wins; otherwise the zio-json decoder is
       * summoned or derived and wrapped. The derived decoder is CHECKED against `JsonDecoder[t]`
@@ -257,12 +292,28 @@ object MapToFunctionMacro:
     def summonDecoder(tpe: TypeRepr, paramName: String)(using Quotes): Expr[McpDecoder[?]] =
       tpe.dealias.simplified.asType match
         case '[t] =>
-          Expr.summon[McpDecoder[t]].getOrElse {
+          // The library's own `zioJsonDecoder` given lifts whatever `JsonDecoder[t]` zio-json
+          // resolves. For a type with a tuple inside a container (`Option[(A, B)]`,
+          // `List[(A, B)]`) that is zio-json's array-shaped tuple decoder, which contradicts the
+          // advertised object schema, so the structural derivation below is used instead. A
+          // user's own `McpDecoder` is never set aside.
+          val inScope = Expr.summon[McpDecoder[t]]
+          val summoned = inScope.filterNot { found =>
+            hasTupleArgument(tpe.dealias.simplified) && isLibraryZioJsonDecoder(found.asTerm)
+          }
+          summoned.getOrElse {
             // `isExprOf`, not a quoted `'{ $d: JsonDecoder[t] }` pattern: a lowercase type name in a
             // quoted pattern binds a FRESH type variable, so that pattern matches any decoder.
             val derived = summonOrDeriveJsonDecoder(tpe, paramName)
             if derived.isExprOf[JsonDecoder[t]] then
               jsonDecoderToMcpDecoder[t](derived.asExprOf[JsonDecoder[t]])
+            else if inScope.isDefined then
+              // A container SUBTYPE with a tuple inside (`IndexedSeq[(A, B)]`, `SortedSet[(A, B)]`):
+              // the structural arms only build decoders for the supertypes, so the instance that
+              // was set aside above is the one that fits, as it was before tuples got one shape.
+              inScope.getOrElse(
+                report.errorAndAbort(s"unreachable: no McpDecoder for '$paramName'")
+              )
             else
               report.errorAndAbort(
                 s"Cannot decode parameter '$paramName' of type ${tpe.show}: derivation produced a " +

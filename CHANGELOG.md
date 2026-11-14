@@ -323,6 +323,44 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Added
 
+- **Typed contracts: `Unit` input, enum and `List` / `Vector` results, Java enums** (GH #116,
+  TJC-2362; C2.11, C2.12, C2.14). Type arguments that had no codec in 1.0.x now have one, on the
+  JVM, Scala.js and Scala Native:
+  - `McpTool[Unit, Out]` compiles: `given McpDecoder[Unit]` reads nothing. The derived schema is
+    the empty object with `additionalProperties: false`, so a call that sends arguments is
+    refused. `case class NoArgs()` keeps working.
+  - A bare Scala 3 enum result (`McpTool[In, Color]`) is derived like an enum field of a result
+    case class: the case name as a JSON string (`"RED"`); an enum with parameterized cases keeps
+    zio-json's wrapper object. A `JsonEncoder` or `McpEncoder` you define for the enum wins. The
+    instance is in the implicit scope of `McpEncoder` and is not part of
+    `import com.tjclp.fastmcp.given`, so an instance in the enum's companion is preferred to it.
+  - `List[A]` and `Vector[A]` results are a JSON array in one `TextContent`, for an `A` with a
+    `JsonEncoder`, as `Seq[A]` already was. `List[Content]` is still passed through as content.
+    A list of collections (`List[List[Int]]`) is still ambiguous: wrap it in a case class.
+  - Java enums (`java.util.concurrent.TimeUnit`, your own) derive a string-enum schema of the
+    constant names and a codec that reads and writes exactly those names: as an annotated
+    parameter, inside `Option` / collections / maps, and as a field of a typed tool's `In` or
+    `Out`. The names are listed in declaration order. Before, an annotated `TimeUnit` parameter
+    stopped the compiler with `Maximal number of successive inlines exceeded` and a `TimeUnit`
+    field had no decoder.
+  - `McpEncoder` and `McpDecoder` carry `@implicitNotFound`: a missing instance is reported as
+    `No McpEncoder[T] found: ...` with what derives automatically and the three remedies, in
+    place of the compiler's generic text.
+  - Not changed: `_ => None` for `Out = Option[T]` is still an ambiguous `Builder.apply` overload
+    (write `Option.empty[T]`). The pure and the effectful overload both accept it, and no change
+    that keeps their signatures removes the ambiguity.
+- **`McpContext` is injected by type, on `@Tool` and `@Prompt`** (GH #116, GH #119, TJC-2362;
+  D1.32, D1.33, C2.15). An annotated method receives the request context through the parameter
+  whose type is `McpContext`, whatever its name and position; `ctx: McpContext` keeps working.
+  - `@Tool`: in 1.0.x only a parameter named exactly `ctx` was recognised, and any other name
+    failed to compile with `Cannot derive an MCP JSON Schema for ...McpContext`.
+  - `@Prompt`: the context is now injected (the prompt is registered through
+    `promptContextual`). In 1.0.x a `ctx: McpContext` parameter compiled, was advertised as a
+    required prompt argument, and no `prompts/get` could satisfy it.
+  - `@Resource`: a `McpContext` parameter is a compile-time error that says the context is
+    available on `@Tool` and `@Prompt` only. Before, a template reported that its URI parameters
+    did not match and a static resource that it must not have parameters.
+  - Two `McpContext` parameters on one method are a compile-time error.
 - **`McpServerSettings.stdioDrainTimeout`** (GH #113, TJC-2359): how long a stdio server waits at
   end of stdin for the replies to frames it has already read, before it interrupts what is still
   running. Default five seconds; zero interrupts without waiting; a negative value is refused when
@@ -452,6 +490,91 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   `docs/skills-conformance.md`).
 
 ### Changed
+
+- **A tuple has one wire shape on input: the object `{"_1": ..., "_2": ...}`** (GH #116,
+  TJC-2362; C2.13). The derived schema always described a tuple that way, and a bare tuple
+  parameter decoded it, but a tuple inside `Option`, a collection, a map or a case-class field was
+  decoded by zio-json's tuple decoder, which reads a JSON array. With input validation on (the
+  1.1.0 default) such an argument could not be sent at all: the array is refused by the schema and
+  the object by the decoder. The derived decoders now read the object everywhere, on the
+  annotation path and for the fields of a typed tool's `In`.
+  - What can be noticed: with validation off, a call that sent `[1, "x"]` for a nested tuple was
+    decoded in 1.0.x and is now refused; send the object the schema advertises.
+  - A `JsonDecoder` you define for the tuple type, or for the case class that contains it
+    (`derives JsonDecoder` included), is used as written and keeps zio-json's array shape. Results
+    are unchanged: a tuple in an `Out` is still written as a JSON array.
+- **`@Param(schema = ...)` keeps the `description` and `examples` of its `@Param`** (GH #116,
+  TJC-2362; C2.19). The fragment still replaces the derived property, but the description and the
+  examples written next to it are now added to the fragment where it does not state its own; what
+  the fragment says wins, and an empty description adds nothing. Before, both were dropped from
+  the advertised schema, so `@Param(description = "Sort order", schema = Some("""{"type":
+  "string", "enum": [...]}"""))` was advertised without a description. What changes on the wire:
+  such a property gains `description` and `examples` in `tools/list`. The merge is done by the
+  library when the tool is registered, so a server compiled against 1.0.x gets it without a
+  recompile. Validation is unaffected (both keywords are annotations).
+- **A malformed `@Param(schema = ...)` literal is a compile-time error** (GH #116, TJC-2362;
+  C2.21): `@Param(schema) is not valid JSON: ...`, or `@Param(schema) must be a JSON Schema ...`
+  for JSON that is not an object (or `true` / `false`), reported at the argument, on `@Tool`
+  parameters and on the fields of a typed tool's `In`. Before, such a literal compiled, was
+  dropped without a word, and the derived property was advertised (and enforced) in its place.
+  Code that compiled only because the mistake went unnoticed now has to be corrected. A server
+  compiled against 1.0.x with such a literal keeps starting as it did.
+- **A Scaladoc comment used as a description is cleaned up** (GH #116, TJC-2362; C2.20). When
+  `@Tool`, `@Prompt` or `@Resource` has no `description`, the method's Scaladoc is the fallback.
+  The whole raw comment used to go on the wire, `/**`, `*/` and the leading asterisks included.
+  Now it is the first paragraph as one line: the markers are removed, and the text stops at the
+  first blank line, `@tag` or code block. A comment with no text gives no description. Inline
+  markup (`[[links]]`, backticks) is left as written.
+- **An invalid `@Resource` URI template is a compile-time error** (GH #116, TJC-2362; D1.27).
+  Adjacent placeholders (`x://{a}{b}`), a repeated placeholder name, unbalanced or nested braces
+  and a `/` inside a placeholder are reported at the method: `@Resource method 'r' has an invalid
+  URI template: template 'x://{a}{b}' has adjacent placeholders before '{b}' ...`. Before, such a
+  template compiled and the server failed when it started. Registration at run time (a typed
+  `McpTemplateResource`, `server.resourceTemplate(...)`) still fails then, and the error message
+  now carries the reason: `Failed to register resource template '<pattern>': <reason>` (it was
+  only in the cause). Where that failure is printed is unchanged, and now tested and documented:
+  `McpServerApp[Stdio]` reports it on stderr and writes nothing to stdout; a plain
+  `ZIOAppDefault` that fails before it reaches `runStdio()` is reported by ZIO itself, on
+  stdout, unless it installs `StdioLogging.bootstrap` (`docs/transports.md`, "stdout is the
+  wire").
+- **Typed tools: argument decode errors name the tool as a tool, and a missing argument reads as
+  on the annotation path** (GH #116, TJC-2362; C2.18, D1.13). Only the text of an `isError`
+  result changes, and only for calls that reach the decoder: with input validation on (the
+  default) a missing or mistyped argument is refused by the schema check first, with the message
+  both paths already share (`Invalid arguments for tool '<tool>': missing required property
+  '<name>'`).
+  - A missing top-level argument of a typed tool is `Missing required argument '<name>'`, the
+    message of an annotated tool. Before: `Failed to decode parameter '<tool>' from JSON:
+    .<name>(missing). Value: {}`.
+  - Any other decode failure is `Failed to decode the arguments of tool '<tool>': ...`; a number
+    outside the input limits is `Arguments of tool '<tool>' rejected: ...`. Before, both called
+    the tool a parameter (`... parameter '<tool>' ...`).
+  - A missing argument is still an `isError` tool result, not a JSON-RPC `-32602`, although the
+    1.0.0 notes had planned the latter. The 2026-07-28 specification (*Tools*, *Error Handling*)
+    keeps protocol errors for unknown tools and malformed requests and lists input validation
+    errors under tool execution errors, reported with `isError: true`.
+- **Clearer compile-time diagnostics on the annotation path** (GH #116, TJC-2362; C2.18). Texts
+  only; nothing that compiled stops compiling.
+  - Errors about one annotated method are reported at that method (when it is compiled in the
+    same run), not at the object that is scanned: the environment mismatch, `required = false`
+    without an `Option` or default, `@Tool(taskSupport)`, the `@Resource` parameter checks.
+  - Environment mismatch: on a server without an environment the remedy reads
+    `McpServer.typed[Ref[Int]]`, not `McpServer.typed[scala.Any & zio.Ref[scala.Int]]`.
+  - A parameter type no schema can be derived for (a recursive case class, an arbitrary class, a
+    map with non-string keys) is pointed at `McpInputCodec` only. `McpSchema` and
+    `McpTool.withSchema` were offered too, but neither helps an annotated parameter, which also
+    needs a decoder. Typed contracts keep all three remedies.
+  - `@Resource(uri = someVal)` says that the URI must be a string literal or a `final val`
+    constant (it said the annotation "must have a 'uri' parameter"). A `final val` is accepted.
+  - `@Tool(taskSupport = Some("..."))` with an unknown value names the method.
+  - `@Param(required = false)` on a repeated parameter (`parts: String*`) says that such a
+    parameter cannot be optional and what to write instead; the message used to print the
+    compiler's internal `@scala.annotation.internal.Repeated`. On a field of a typed tool's `In`
+    the message now ends with the same remedy as on a method parameter.
+- **`java.time.DayOfWeek` and `java.time.Month` advertise `enum`** (GH #116, TJC-2362; C2.14):
+  `{"type":"string","enum":["MONDAY", ...]}` in place of `{"type":"string"}`. zio-json's decoders
+  for the two also accept other letter cases (`"monday"`); with input validation on, only the
+  listed spelling is accepted now.
 
 - **HTTP refusals are the same on every backend** (GH #114, TJC-2360). zio-http, the socket
   backend and Bun disagreed on a handful of requests that are refused either way; they now take
@@ -665,6 +788,21 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 - Tests no longer wait on fixed sleeps (#117): time-dependent behaviour is tested on a clock the
   test moves, everything else by waiting for the condition. See CONTRIBUTING.md, "Tests and time".
 
+- **`resources/read` on a resource template returns the template's `mimeType`** (GH #116,
+  TJC-2362; D1.23). The declared mime type was sent for static resources only; a templated read
+  carried none (and a binary body always `application/octet-stream`). Now the content entry of a
+  templated read has the `mimeType` of its template: the one written on `@Resource(mimeType = ...)`
+  or passed to `McpTemplateResource`. What changes on the wire: a typed `McpTemplateResource`
+  that does not pass `mimeType` gets the contract's default, `text/plain`, on every read, as a
+  typed static resource always did. A template whose handler returns bytes is the exception:
+  `text/plain`, the default of the typed and programmatic template APIs, is not applied to a
+  binary body, which stays `application/octet-stream` unless the template states another type.
+  An annotated template without `mimeType` is unchanged.
+- **The `@Resource` Scaladoc no longer claims a `text/plain` default** (GH #116, TJC-2362; D1.24).
+  An annotated resource that does not state `mimeType` advertises none on `resources/list` and
+  sends none with a text body; a binary body is served as `application/octet-stream`. That is
+  what 1.0.x did; only the documentation said otherwise. The behaviour is unchanged, because
+  adding `text/plain` to every annotated resource would label binary bodies wrongly.
 - **One stdio lifecycle on the JVM, Bun and Scala Native** (GH #113, TJC-2359). The edges of a
   stdio session behaved differently per platform; they now behave the same, and
   `docs/transports.md` ("stdio") states the contract.

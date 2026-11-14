@@ -5,9 +5,9 @@ import com.tjclp.fastmcp.*
 
 /** `McpContext` introspection from inside a tool handler.
   *
-  * The annotation path detects a parameter named `ctx: McpContext` and threads the runtime context
-  * through instead of decoding it from the JSON-RPC args. The handler below uses it to surface the
-  * client's declared info and capabilities.
+  * The annotation path detects a parameter of type `McpContext` (any name) and threads the runtime
+  * context through instead of decoding it from the JSON-RPC args. The handler below uses it to
+  * surface the client's declared info and capabilities.
   */
 object ContextEchoServer extends McpServerApp[Stdio, ContextEchoServer.type]:
 

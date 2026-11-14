@@ -88,7 +88,7 @@ object MyServer extends McpServerApp[Stdio, MyServer.type]:
   )
 ```
 
-A typed tool's `In` is a case class (its schema must be a JSON object, as MCP `arguments` always are); a tool with no arguments takes an empty one — `case class NoArgs()` — since `McpTool[Unit, _]` has no decoder. Handler lambdas return plain values, `ZIO`, `Either[Throwable, _]`, or `scala.util.Try`; the `ToHandlerEffect[F[_], R]` typeclass picks the right lift (`R` is the ZIO environment — `Any` for the plain builders), and you can bring your own given for other effect systems by implementing `ToHandlerEffect[F, Any]` for your effect type `F`. See [`AnnotatedServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts.
+A typed tool's `In` is a case class (its schema must be a JSON object, as MCP `arguments` always are); a tool with no arguments takes `Unit` (`McpTool[Unit, String]`) or an empty case class. Handler lambdas return plain values, `ZIO`, `Either[Throwable, _]`, or `scala.util.Try`; the `ToHandlerEffect[F[_], R]` typeclass picks the right lift (`R` is the ZIO environment — `Any` for the plain builders), and you can bring your own given for other effect systems by implementing `ToHandlerEffect[F, Any]` for your effect type `F`. See [`AnnotatedServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts.
 
 ## Tools and `@Param` metadata
 
@@ -113,7 +113,7 @@ def search(
 - `examples` populates the JSON Schema `examples` array (clients can show suggestions)
 - `required` is derived from the parameter: an `Option[...]` parameter and a parameter with a default value are optional, every other parameter is required. A client may omit an optional argument; the method then gets `None` or the default. The same holds for the fields of a case class used as an argument, at any depth. Write `required = true` to require an `Option` or defaulted parameter anyway. `required = false` is accepted only on an `Option` or defaulted parameter, where it states what is already the case
 - `required` lists the parameters in declaration order, the order of `properties`
-- `schema` is a raw JSON Schema fragment that overrides the derived schema entirely — repeat the `description` inside the fragment, since the derived property (description and examples included) is replaced wholesale
+- `schema` is a raw JSON Schema fragment that replaces the derived property. The `description` and `examples` of the same `@Param` are added to the fragment unless it states its own. A literal that is not a JSON object (or `true` / `false`) is a compile-time error
 
 The advertised `inputSchema` is enforced: a `tools/call` whose arguments do not conform (a value outside an `enum`, a number outside its bounds, a missing `required` member, a wrong type) is answered with an `isError` result before the method runs. `pattern` and `format` are among the keywords that are advertised but not evaluated; the full list, the opt-outs (`McpServerSettings(validateToolInput = false)`, per-tool `ToolRegistrationOptions(validateInputSchema = false)`) and `server.toolInputValidation` are in [docs/custom-types.md](docs/custom-types.md#what-the-server-enforces).
 
@@ -171,7 +171,7 @@ turns it on:
 override def settings = McpServerSettings(exposeTemplatesEndpoint = true)
 ```
 
-A placeholder matches a non-empty run of characters within one path segment (never `/`); literal text is matched verbatim (not as a regex); placeholders in the same segment must be separated by literal text (a template such as `x://{a}{b}` is rejected at registration, so the server fails to start). Client URIs longer than `limits.maxUriChars` (8192) are rejected with `-32602`.
+A placeholder matches a non-empty run of characters within one path segment (never `/`); literal text is matched verbatim (not as a regex); placeholders in the same segment must be separated by literal text. A template that breaks the rules (`x://{a}{b}`, a repeated placeholder name, unbalanced braces) is a compile-time error on `@Resource`; a typed `McpTemplateResource` with such a pattern fails when it is registered, with the reason in the error. `resources/read` on a template returns the `mimeType` the template declares. An annotated resource that does not state a `mimeType` advertises none (a binary body is served as `application/octet-stream`); the typed contracts default to `text/plain`. Client URIs longer than `limits.maxUriChars` (8192) are rejected with `-32602`.
 
 ## Skills (`io.modelcontextprotocol/skills`)
 
@@ -224,7 +224,7 @@ A prompt that returns a single `String` is automatically wrapped into a `User` m
 
 ## Context (`McpContext`)
 
-Add a parameter named exactly `ctx` of type `McpContext` to a `@Tool` method to read the client's declared info and capabilities, request metadata, and to send progress or logging (the parameter is recognised by its name and is not part of the tool's schema; `@Prompt` and `@Resource` methods do not take a context parameter):
+Add a parameter of type `McpContext` to a `@Tool` or `@Prompt` method to read the client's declared info and capabilities, request metadata, and to send progress or logging. The parameter is recognised by its type, so it may have any name and position; it is not part of the tool's schema or the prompt's arguments, and a method takes at most one. A `@Resource` method cannot take a context parameter (a compile-time error says so):
 
 ```scala 3 raw
 @Tool(name = Some("echo"), description = Some("Echo client and request context"))

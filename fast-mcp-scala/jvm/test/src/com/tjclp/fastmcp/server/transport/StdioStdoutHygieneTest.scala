@@ -207,6 +207,24 @@ class StdioStdoutHygieneTest extends AnyFunSuite with Matchers:
     }
   }
 
+  // D1.27: a template the registration refuses. `McpServerApp[Stdio]` reports it on stderr by
+  // itself; a plain `ZIOAppDefault` does once it installs `StdioLogging.bootstrap` (without it,
+  // ZIO's own failure report goes to stdout before any library code is in control).
+  for mainClass <- List("BadTemplateStdioApp", "BadTemplatePlainApp") do
+    test(s"$mainClass: an invalid resource template fails startup on stderr, not on stdout") {
+      withServer(s"com.tjclp.fastmcp.server.transport.$mainClass") { server =>
+        val exit = server.close()
+        val stdout = server.stdoutLines.asScala.toList
+        val stderr = server.stderrLines.asScala.toList
+        withClue(s"stdout (the wire) was:\n${describe(stdout)}\nstderr was:\n${describe(stderr)}\n") {
+          stdout.filter(_.trim.nonEmpty) shouldBe empty
+          stderr.exists(_.contains("adjacent placeholders")) shouldBe true
+          stderr.exists(_.contains("x://{a}{b}")) shouldBe true
+          exit should not be 0
+        }
+      }
+    }
+
   /** A WHOLE stray line on stdout: the fixture's `noise` println, or a pure ZIO log line (the
     * pre-fix default logger). Tolerated here — this test is about frame integrity, the logger has
     * its own tests above — whereas a spliced `{...}noise` / `{...}timestamp=...` is neither a

@@ -34,29 +34,100 @@ object ZioJsonEnumDerivation:
   inline def deriveEncoder[T](using m: Mirror.Of[T]): JsonEncoder[T] =
     ${ deriveEncoderImpl[T]('m) }
 
+  /** zio-json's own tuple instance (`JsonDecoder.tuple2` ...), which reads a JSON ARRAY. The schema
+    * macro describes a tuple as the product it is (`{"_1": ..., "_2": ...}`), so on the input side
+    * this instance is replaced by a product decoder. A tuple decoder a user defines is not one of
+    * these and is left alone.
+    */
+  private[macros] def isZioJsonTupleInstance(using Quotes)(term: quotes.reflect.Term): Boolean =
+    import quotes.reflect.*
+    @scala.annotation.tailrec
+    def head(t: Term): Term = t match
+      case Inlined(_, _, inner) => head(inner)
+      case Typed(inner, _) => head(inner)
+      case Block(Nil, inner) => head(inner)
+      case Apply(fn, _) => head(fn)
+      case TypeApply(fn, _) => head(fn)
+      case other => other
+    val sym = head(term).symbol
+    sym.exists && sym.name.startsWith("tuple") &&
+    sym.maybeOwner.exists && sym.maybeOwner.fullName.startsWith("zio.json.")
+
+  /** Whether the input-side derivation must supply its own `JsonDecoder` for `tpe`: nothing is
+    * summonable, or what is summonable is zio-json's array-shaped tuple decoder.
+    */
+  private[macros] def needsDerivedDecoder(using Quotes)(tpe: quotes.reflect.TypeRepr): Boolean =
+    import quotes.reflect.*
+    tpe.asType match
+      case '[et] =>
+        Expr.summon[JsonDecoder[et]] match
+          case None => true
+          case Some(found) =>
+            EnumTypeCollector.isTuple(tpe) && isZioJsonTupleInstance(found.asTerm)
+
+  /** The constants of the Java enum `T`, by name, in declaration order. */
+  private def javaEnumConstants[T: Type](using Quotes): List[(String, Expr[T])] =
+    import quotes.reflect.*
+    EnumTypeCollector.javaEnumConstants(TypeRepr.of[T].dealias.simplified.typeSymbol).map {
+      constant => constant.name -> Ref(constant).asExprOf[T]
+    }
+
+  /** A decoder for the Java enum `T` that reads exactly the constant names the schema macro
+    * enumerates (`"SECONDS"`), or `None` when `T` is not a Java enum.
+    */
+  private[macros] def javaEnumDecoder[T: Type](using Quotes): Option[Expr[JsonDecoder[T]]] =
+    import quotes.reflect.*
+    if !EnumTypeCollector.isJavaEnum(TypeRepr.of[T]) then None
+    else
+      val constants = javaEnumConstants[T]
+      val entries = constants.map { case (name, value) => '{ (${ Expr(name) }, $value) } }
+      val expected = Expr(constants.map(_._1).mkString(", "))
+      Some('{
+        val byName: Map[String, T] = Map(${ Varargs(entries) }*)
+        JsonDecoder.string.mapOrFail { name =>
+          byName.get(name).toRight("expected one of " + $expected)
+        }
+      })
+
+  /** The encoder twin of [[javaEnumDecoder]]: the constant's name as a JSON string. */
+  private[macros] def javaEnumEncoder[T: Type](using Quotes): Option[Expr[JsonEncoder[T]]] =
+    import quotes.reflect.*
+    if !EnumTypeCollector.isJavaEnum(TypeRepr.of[T]) then None
+    else
+      val constants = javaEnumConstants[T]
+      val entries = constants.map { case (name, value) => '{ ($value, ${ Expr(name) }) } }
+      Some('{
+        val names: Map[T, String] = Map(${ Varargs(entries) }*)
+        JsonEncoder.string.contramap[T](value => names.getOrElse(value, value.toString))
+      })
+
   private[macros] def deriveDecoderImpl[T: Type](
       mirror: Expr[Mirror.Of[T]]
   )(using Quotes): Expr[JsonDecoder[T]] =
     import quotes.reflect.*
-    val missing = EnumTypeCollector
-      .collectDerivable(TypeRepr.of[T])
-      .filter { e =>
-        e.asType match
-          case '[et] => Expr.summon[JsonDecoder[et]].isEmpty
-      }
+    val missing = EnumTypeCollector.collectDerivable(TypeRepr.of[T]).filter(needsDerivedDecoder)
     def withLocals(remaining: List[TypeRepr]): Expr[JsonDecoder[T]] =
       remaining match
-        case Nil => '{ DeriveJsonDecoder.gen[T](using $mirror) }
+        case Nil =>
+          // A Java enum has a Mirror too, but `gen` does not terminate on it.
+          javaEnumDecoder[T].getOrElse('{ DeriveJsonDecoder.gen[T](using $mirror) })
         case e :: rest =>
           e.asType match
             case '[et] =>
-              Expr.summon[Mirror.Of[et]] match
-                case Some(em) =>
+              javaEnumDecoder[et] match
+                case Some(decoder) =>
                   '{
-                    given JsonDecoder[et] = DeriveJsonDecoder.gen[et](using $em)
+                    given JsonDecoder[et] = $decoder
                     ${ withLocals(rest) }
                   }
-                case None => withLocals(rest) // let gen[T] surface its own error
+                case None =>
+                  Expr.summon[Mirror.Of[et]] match
+                    case Some(em) =>
+                      '{
+                        given JsonDecoder[et] = DeriveJsonDecoder.gen[et](using $em)
+                        ${ withLocals(rest) }
+                      }
+                    case None => withLocals(rest) // let gen[T] surface its own error
     withLocals(missing)
 
   private[macros] def deriveEncoderImpl[T: Type](
@@ -68,23 +139,36 @@ object ZioJsonEnumDerivation:
     val config = Expr.summon[JsonCodecConfiguration].getOrElse {
       report.errorAndAbort("No given JsonCodecConfiguration found (zio-json provides a default)")
     }
+    // Tuples are never planted here: a result keeps the JSON array zio-json's own tuple encoder
+    // writes. That encoder is resolved where `gen` expands, with the locals planted below for the
+    // tuple's element types in scope, so it is found even when an element (an enum, say) has no
+    // encoder that could be summoned from here.
     val missing = EnumTypeCollector
       .collectDerivable(TypeRepr.of[T])
+      .filterNot(EnumTypeCollector.isTuple)
       .filter { e =>
         e.asType match
           case '[et] => Expr.summon[JsonEncoder[et]].isEmpty
       }
     def withLocals(remaining: List[TypeRepr]): Expr[JsonEncoder[T]] =
       remaining match
-        case Nil => '{ DeriveJsonEncoder.gen[T](using $config, $mirror) }
+        case Nil =>
+          javaEnumEncoder[T].getOrElse('{ DeriveJsonEncoder.gen[T](using $config, $mirror) })
         case e :: rest =>
           e.asType match
             case '[et] =>
-              Expr.summon[Mirror.Of[et]] match
-                case Some(em) =>
+              javaEnumEncoder[et] match
+                case Some(encoder) =>
                   '{
-                    given JsonEncoder[et] = DeriveJsonEncoder.gen[et](using $config, $em)
+                    given JsonEncoder[et] = $encoder
                     ${ withLocals(rest) }
                   }
-                case None => withLocals(rest)
+                case None =>
+                  Expr.summon[Mirror.Of[et]] match
+                    case Some(em) =>
+                      '{
+                        given JsonEncoder[et] = DeriveJsonEncoder.gen[et](using $config, $em)
+                        ${ withLocals(rest) }
+                      }
+                    case None => withLocals(rest)
     withLocals(missing)

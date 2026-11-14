@@ -366,6 +366,12 @@ the template is registered, so the server fails to start:
 IllegalArgumentException: template 'x://{a}{b}' has adjacent placeholders before '{b}' — ambiguous; separate placeholders with literal text
 ```
 
+Since 1.1.0 an annotated `@Resource` with such a template no longer compiles
+(`@Resource method 'r' has an invalid URI template: ...`); the registration-time error remains for
+typed `McpTemplateResource` contracts and `server.resourceTemplate(...)` calls, and its message
+carries the reason (`Failed to register resource template 'x://{a}{b}': template ... has adjacent
+placeholders ...`).
+
 Within a segment each separator still binds to its last occurrence: `{name}.{ext}` on
 `archive.tar.gz` gives `name = archive.tar`, `ext = gz`, exactly as before. Two templates with
 the same placeholder shape (`users://{id}` vs `users://{userId}`) log a warning.

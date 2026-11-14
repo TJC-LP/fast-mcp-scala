@@ -11,9 +11,10 @@ import com.tjclp.fastmcp.macros.schema.FunctionAnalyzer
 /** Native JSON Schema derivation for annotation parameters and typed contracts.
   *
   * The macro emits the small JSON Schema subset MCP tools need directly from Scala types. It
-  * supports primitives, options, collections, maps, Scala 3 enums, products, and tagged sums. A
-  * user-provided [[com.tjclp.fastmcp.core.McpInputCodec]] is the escape hatch for domain types
-  * whose wire representation cannot be inferred from their Scala shape.
+  * supports primitives, options, collections, maps, Scala 3 and Java enums, products (tuples
+  * included), and tagged sums. A user-provided [[com.tjclp.fastmcp.core.McpInputCodec]] is the
+  * escape hatch for domain types whose wire representation cannot be inferred from their Scala
+  * shape.
   *
   * ==`required` and Scala defaults==
   * A schema is derived for one of two directions, and the two treat a case-class field with a Scala
@@ -34,6 +35,14 @@ import com.tjclp.fastmcp.macros.schema.FunctionAnalyzer
   * `McpInputCodec` for the type.
   */
 object JsonSchemaMacro:
+
+  /** Which registration path a schema is derived for; it decides the remedies a diagnostic names.
+    * An annotated parameter needs a decoder as well as a schema, and it has no hand-written
+    * `inputSchema`, so `McpSchema` (schema only) and `McpTool.withSchema` are not remedies there:
+    * `McpInputCodec` (decoder + schema in one given) is.
+    */
+  private enum Path:
+    case AnnotatedMethod, TypedContract
 
   /** Produces a JSON schema describing the parameters of the given function.
     *
@@ -90,6 +99,8 @@ object JsonSchemaMacro:
       .extractParams(fn.asTerm.tpe, paramNamesOpt)
       .filterNot(param => excluded.contains(param._1))
 
+    given Path = Path.AnnotatedMethod
+
     // Function arguments are always input. Top-level parameters are required unless `Option`:
     // their Scala defaults are not visible here (see the Scaladoc of `schemaForFunctionArgs`).
     val fields = params.map { case (name, tpe) => name -> schemaFor(tpe, Nil, input = true) }
@@ -107,6 +118,7 @@ object JsonSchemaMacro:
     '{ MacroUtils.injectSchemaMetadata($rawSchema, $metadata) }
 
   private def schemaForTypeImpl[T: Type](input: Boolean)(using Quotes): Expr[Json] =
+    given Path = Path.TypedContract
     val rawSchema = schemaFor(quotes.reflect.TypeRepr.of[T], Nil, input)
     val metadata = MacroUtils.schemaMetadataForType[T](input)
     '{ MacroUtils.injectSchemaMetadata($rawSchema, $metadata) }
@@ -166,7 +178,7 @@ object JsonSchemaMacro:
       rawTpe: quotes.reflect.TypeRepr,
       seenProducts: List[quotes.reflect.TypeRepr],
       input: Boolean
-  ): Expr[Json] =
+  )(using path: Path): Expr[Json] =
     import quotes.reflect.*
 
     val tpe = rawTpe.dealias.simplified
@@ -183,8 +195,13 @@ object JsonSchemaMacro:
         case '[Map[k, v]] =>
           report.errorAndAbort(
             s"Cannot derive an MCP JSON Schema for non-string-keyed map ${tpe.show}. " +
-              s"JSON objects have string keys; provide a given McpSchema[${tpe.show}] or use " +
-              "McpTool.withSchema."
+              "JSON objects have string keys; " + (path match
+                case Path.AnnotatedMethod =>
+                  s"use Map[String, V], or provide a given McpInputCodec[${tpe.show}] " +
+                    "(decoder + schema)."
+                case Path.TypedContract =>
+                  s"provide a given McpSchema[${tpe.show}] or use McpTool.withSchema."
+              )
           )
         // Either mirrors zio-json's wire shape: {"Left": ...} / {"Right": ...} wrapper objects
         // (a bare payload oneOf would advertise inputs the decoder rejects).
@@ -214,7 +231,7 @@ object JsonSchemaMacro:
       tpe: quotes.reflect.TypeRepr,
       seenProducts: List[quotes.reflect.TypeRepr],
       input: Boolean
-  ): Expr[Json] =
+  )(using path: Path): Expr[Json] =
     import quotes.reflect.*
 
     val symbol = tpe.typeSymbol
@@ -249,9 +266,13 @@ object JsonSchemaMacro:
       formattedStringSchema("time")
     else if fullName == "java.time.Duration" || fullName == "java.time.Period" then
       formattedStringSchema("duration")
+    // By name, not through the symbol: on Scala.js and Scala Native `java.time` may come from a
+    // library that does not declare these as Java enums. The names are what zio-json's decoders
+    // for the two types accept (they also accept other letter cases; the schema lists the
+    // canonical spelling, which is what input validation then requires).
+    else if fullName == "java.time.DayOfWeek" then stringEnumSchema(DayOfWeekNames)
+    else if fullName == "java.time.Month" then stringEnumSchema(MonthNames)
     else if Set(
-        "java.time.DayOfWeek",
-        "java.time.Month",
         "java.time.MonthDay",
         "java.time.Year",
         "java.time.YearMonth",
@@ -276,9 +297,15 @@ object JsonSchemaMacro:
       )
     else
       report.errorAndAbort(
-        s"Cannot derive an MCP JSON Schema for ${tpe.show}. " +
-          s"Define a given McpInputCodec[${tpe.show}] (decoder + schema), a given " +
-          s"McpSchema[${tpe.show}] (schema only), or construct the tool with McpTool.withSchema."
+        s"Cannot derive an MCP JSON Schema for ${tpe.show}. " + (path match
+          case Path.AnnotatedMethod =>
+            s"Define a given McpInputCodec[${tpe.show}] (decoder + schema in one value): an " +
+              "annotated parameter needs both, so a McpSchema alone is not enough."
+          case Path.TypedContract =>
+            s"Define a given McpInputCodec[${tpe.show}] (decoder + schema), a given " +
+              s"McpSchema[${tpe.show}] (schema only), or construct the tool with " +
+              "McpTool.withSchema."
+        )
       )
 
   /** The object schema of a case class. A field is in `required` unless it is an `Option` or, for
@@ -291,7 +318,7 @@ object JsonSchemaMacro:
       tpe: quotes.reflect.TypeRepr,
       seenProducts: List[quotes.reflect.TypeRepr],
       input: Boolean
-  ): Expr[Json] =
+  )(using path: Path): Expr[Json] =
     import quotes.reflect.*
 
     val symbol = tpe.typeSymbol
@@ -299,8 +326,12 @@ object JsonSchemaMacro:
     // the Wrapper symbol at a different argument and is finite, not recursive.
     if seenProducts.exists(_ =:= tpe) then
       report.errorAndAbort(
-        s"Recursive type ${tpe.show} cannot be inlined into an MCP tool schema. " +
-          s"Provide a given McpSchema[${tpe.show}] or use McpTool.withSchema."
+        s"Recursive type ${tpe.show} cannot be inlined into an MCP tool schema. " + (path match
+          case Path.AnnotatedMethod =>
+            s"Provide a given McpInputCodec[${tpe.show}] (decoder + schema in one value)."
+          case Path.TypedContract =>
+            s"Provide a given McpSchema[${tpe.show}] or use McpTool.withSchema."
+        )
       )
 
     val fields = symbol.caseFields.map { field =>
@@ -316,7 +347,11 @@ object JsonSchemaMacro:
   private def enumSchema(using Quotes)(tpe: quotes.reflect.TypeRepr): Expr[Json] =
     import quotes.reflect.*
 
-    val cases = tpe.typeSymbol.children
+    // A Java enum's constants come from its declared fields: `children` is not in a stable
+    // order for a Java class (see EnumTypeCollector.javaEnumConstants).
+    val cases =
+      if EnumTypeCollector.isJavaEnum(tpe) then EnumTypeCollector.javaEnumConstants(tpe.typeSymbol)
+      else tpe.typeSymbol.children
     val casesWithParameters = cases.filter(_.caseFields.nonEmpty)
     if cases.isEmpty || casesWithParameters.nonEmpty then
       report.errorAndAbort(
@@ -324,7 +359,28 @@ object JsonSchemaMacro:
           s"Provide a given McpInputCodec[${tpe.show}] for an enum with parameterized cases."
       )
 
-    val valueExprs = cases.map(enumCaseName).map(value => '{ Json.Str(${ Expr(value) }) })
+    stringEnumSchema(cases.map(enumCaseName))
+
+  private val DayOfWeekNames: List[String] =
+    List("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY")
+
+  private val MonthNames: List[String] = List(
+    "JANUARY",
+    "FEBRUARY",
+    "MARCH",
+    "APRIL",
+    "MAY",
+    "JUNE",
+    "JULY",
+    "AUGUST",
+    "SEPTEMBER",
+    "OCTOBER",
+    "NOVEMBER",
+    "DECEMBER"
+  )
+
+  private def stringEnumSchema(values: List[String])(using Quotes): Expr[Json] =
+    val valueExprs = values.map(value => '{ Json.Str(${ Expr(value) }) })
     '{
       Json.Obj(
         "type" -> Json.Str("string"),
@@ -336,7 +392,7 @@ object JsonSchemaMacro:
       tpe: quotes.reflect.TypeRepr,
       seenProducts: List[quotes.reflect.TypeRepr],
       input: Boolean
-  ): Expr[Json] =
+  )(using path: Path): Expr[Json] =
     import quotes.reflect.*
 
     val variants = tpe.typeSymbol.children.map { child =>

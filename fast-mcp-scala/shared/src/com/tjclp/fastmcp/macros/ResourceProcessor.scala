@@ -9,6 +9,7 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.McpServerCore
 import com.tjclp.fastmcp.server.manager.ResourceHandler
 import com.tjclp.fastmcp.server.manager.ResourceTemplateHandler
+import com.tjclp.fastmcp.server.manager.ResourceTemplatePattern
 
 /** Cross-platform `@Resource` annotation processor. Handles both static and templated (URI with
   * `{placeholders}`) resources. Emits registration against [[McpServerCore]].
@@ -57,7 +58,17 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
 
     val (uri, nameOpt, descOpt, mimeTypeOpt) = MacroUtils.parseResourceParams(resourceAnnot)
     val finalName = nameOpt.orElse(Some(methodName))
-    val finalDesc = descOpt.orElse(methodSym.docstring)
+    val finalDesc = descOpt.orElse(MacroUtils.docDescription(methodSym))
+
+    contextParameter("@Resource", methodSym).foreach { name =>
+      report.errorAndAbort(
+        s"@Resource method '$methodName' declares an McpContext parameter ('$name'), which a " +
+          "resource method cannot take: the request context is injected into @Tool and @Prompt " +
+          "methods only, and every parameter of a resource template must be a {placeholder} of " +
+          "its URI. Remove the parameter, or expose the operation as a @Tool.",
+        methodPosition(methodSym)
+      )
+    }
 
     val placeholders = placeholderRegex.findAllMatchIn(uri).map(_.group(1)).toList
     val isTemplate = placeholders.nonEmpty
@@ -66,15 +77,29 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
     val methodParamNames = paramSyms.map(_.name)
 
     if isTemplate then
+      // The same check registration runs (`ResourceTemplatePattern.parse`), at compile time: a
+      // template it refuses (adjacent placeholders such as `{a}{b}`, a repeated name, unbalanced
+      // or nested braces, a `/` inside a placeholder) would otherwise compile and fail only when
+      // the server starts (D1.27).
+      ResourceTemplatePattern.parse(uri).left.foreach { reason =>
+        report.errorAndAbort(
+          s"@Resource method '$methodName' has an invalid URI template: $reason.",
+          methodPosition(methodSym)
+        )
+      }
       val missing = placeholders.filterNot(methodParamNames.contains)
       val extra = methodParamNames.filterNot(placeholders.contains)
       if missing.nonEmpty || extra.nonEmpty then
         report.errorAndAbort(
           s"Resource template URI parameters {${placeholders.mkString(",")}} " +
-            s"do not match method parameters (${methodParamNames.mkString(",")}) for method '$methodName'"
+            s"do not match method parameters (${methodParamNames.mkString(",")}) for method '$methodName'",
+          methodPosition(methodSym)
         )
     else if methodParamNames.nonEmpty then
-      report.errorAndAbort(s"Static resource method '$methodName' must not have parameters.")
+      report.errorAndAbort(
+        s"Static resource method '$methodName' must not have parameters.",
+        methodPosition(methodSym)
+      )
 
     val argsExpr: Expr[Option[List[ResourceArgument]]] =
       if !isTemplate then '{ None }
@@ -94,8 +119,8 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
                       case _ => ()
                     }
                   case _ => ()
-                (d.orElse(pSym.docstring), req)
-              case None => (pSym.docstring, true)
+                (d.orElse(MacroUtils.docDescription(pSym)), req)
+              case None => (MacroUtils.docDescription(pSym), true)
 
           '{ ResourceArgument(${ Expr(pSym.name) }, ${ Expr(descOpt) }, ${ Expr(required) }) }
         }
@@ -117,15 +142,8 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
       .map(_.asType)
       .getOrElse(TypeRepr.of[Any].asType)
 
-    val rServerRepr = TypeRepr.of[R]
     val rMethodRepr = rMethodType match { case '[t] => TypeRepr.of[t] }
-    if !(rServerRepr <:< rMethodRepr) then
-      report.errorAndAbort(
-        s"@Resource '$methodName' requires ZIO environment '${rMethodRepr.show}' but the server's " +
-          s"environment type is '${rServerRepr.show}', which does not provide it. " +
-          s"Construct the server as McpServer.typed[${rServerRepr.show} & ${rMethodRepr.show}] " +
-          s"(or wider), or remove the environment requirement from the method body."
-      )
+    requireEnvironment[R]("@Resource", methodSym, rMethodRepr)
 
     val registration: Expr[ZIO[Any, Throwable, McpServerCore[R]]] = rMethodType match
       case '[rMethod] =>
