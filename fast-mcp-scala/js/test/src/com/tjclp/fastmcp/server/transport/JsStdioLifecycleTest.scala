@@ -168,7 +168,7 @@ class JsStdioLifecycleTest extends AsyncFlatSpec with Matchers:
         interrupted <- Promise.make[Nothing, Unit]
         router <- routerWith(
           McpServerSettings(),
-          tool("hang")(started.succeed(()) *> ZIO.never.onInterrupt(interrupted.succeed(())))
+          tool("hang")((started.succeed(()) *> ZIO.never).onInterrupt(interrupted.succeed(())))
         )
         wired <- wire(router, drainTimeout = 100.millis)
         _ <- wired.data(handshake + call(2, "hang") + "\n")
@@ -406,7 +406,7 @@ class JsStdioLifecycleTest extends AsyncFlatSpec with Matchers:
         interrupted <- Promise.make[Nothing, Unit]
         router <- routerWith(
           McpServerSettings(),
-          tool("hang")(started.succeed(()) *> ZIO.never.onInterrupt(interrupted.succeed(())))
+          tool("hang")((started.succeed(()) *> ZIO.never).onInterrupt(interrupted.succeed(())))
         )
         wired <- wire(router)
         _ <- wired.data(handshake + call(2, "hang") + "\n")
