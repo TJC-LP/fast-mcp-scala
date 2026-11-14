@@ -158,7 +158,9 @@ final class Builtins[R](
       val tools = toolManager
         .listDefinitions()
         .sortBy(_.name)
-        .map(WireMapping.toolToWire(_, tasksEnabled && modern.isEmpty))
+        // `execution.taskSupport` is a 2025-11-25 field, and only for a session that can use
+        // the legacy task surface: the stateless adapter declares no `tasks` capability.
+        .map(WireMapping.toolToWire(_, tasksEnabled && modern.isEmpty && session.supportsTasks))
       ok(ListToolsResult(tools = tools))
     }
 
