@@ -61,6 +61,17 @@ object McpDecoder:
       def decode(name: String, rawValue: Any, context: McpDecodeContext): T =
         f(name, rawValue, context)
 
+  /** `McpTool[Unit, Out]`: a tool without arguments. Nothing is read from the arguments object; the
+    * derived `inputSchema` for `Unit` is the empty object with `additionalProperties: false`, so a
+    * call that sends arguments is refused by input validation before this runs.
+    *
+    * Defined here, in the companion, and not among the exported givens: it is found only when no
+    * `McpDecoder[Unit]` is in lexical scope, so a decoder a user already defined (the 1.0.x
+    * workaround) keeps winning and never becomes ambiguous with this one.
+    */
+  given unitDecoder: McpDecoder[Unit] with
+    def decode(name: String, rawValue: Any, context: McpDecodeContext): Unit = ()
+
 /** Public typed result encoder used by mounted tool contracts.
   *
   * Any type with a given `JsonEncoder[A]` (from `zio-json`) gets an `McpEncoder[A]` for free via
