@@ -126,7 +126,7 @@ class StdioLifecycleContractTest extends AnyFunSuite with Matchers:
         interrupted <- Promise.make[Nothing, Unit]
         router <- serverWith(
           McpServerSettings(),
-          tool("hang")(started.succeed(()) *> ZIO.never.onInterrupt(interrupted.succeed(())))
+          tool("hang")((started.succeed(()) *> ZIO.never).onInterrupt(interrupted.succeed(())))
         )
         // EOF only once the handler runs: a fiber interrupted before it starts would never
         // install the `onInterrupt` this test waits for.
@@ -333,7 +333,7 @@ class StdioLifecycleContractTest extends AnyFunSuite with Matchers:
         interrupted <- Promise.make[Nothing, Unit]
         router <- serverWith(
           McpServerSettings(),
-          tool("hang")(started.succeed(()) *> ZIO.never.onInterrupt(interrupted.succeed(())))
+          tool("hang")((started.succeed(()) *> ZIO.never).onInterrupt(interrupted.succeed(())))
         )
         session <- Session.makeDrained("stdio-lifecycle", Session.DefaultOutboundCapacity)
         open <- Queue.unbounded[String] // never closed: stdin stays open, as under SIGTERM
