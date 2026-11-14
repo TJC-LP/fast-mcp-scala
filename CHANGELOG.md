@@ -538,10 +538,11 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     cancel is answered, a parked legacy `tasks/result` gets `-32602` (`Task <id> was cancelled`),
     and a legacy session gets its `notifications/tasks/status`.
   - **The body is not stopped.** It runs until it returns, and what it returns or throws then is
-    dropped: the task stays `cancelled` and nothing more is sent. The entry no longer counts as
-    running and holds neither the fiber nor the request, so such a body runs outside the running
-    caps and byte budgets until it returns (as a synchronous body whose task is removed by its
-    TTL or with its session always has). Write long tools as effects that can be interrupted
+    dropped: the task stays `cancelled` and nothing more is sent. The entry holds neither the
+    fiber nor the request, but the body keeps its place under `maxConcurrentPerSession` and
+    `maxConcurrentTotal` until it returns, so cancelling synchronous tasks in turn cannot stack
+    up running bodies beyond the caps. The same now holds for a synchronous body whose task is
+    removed by its TTL or with its session; in 1.0.x those ran uncounted. Write long tools as effects that can be interrupted
     (`ZIO.sleep`, streams, `ZIO.attemptBlockingInterrupt` on the JVM). The library does not lift
     bodies with `attemptBlockingInterrupt` itself: that is JVM thread interruption, unsafe for
     arbitrary code and absent on Scala.js and Scala Native.
@@ -583,6 +584,9 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - A `JsonDecoder` you define for the tuple type, or for the case class that contains it
     (`derives JsonDecoder` included), is used as written and keeps zio-json's array shape. Results
     are unchanged: a tuple in an `Out` is still written as a JSON array.
+  - The same holds for a tuple inside a collection SUBTYPE that zio-json has a decoder for
+    (`IndexedSeq[(A, B)]`, `SortedSet[(A, B)]`): the tuple is read as the object its schema
+    advertises.
 - **`@Param(schema = ...)` keeps the `description` and `examples` of its `@Param`** (GH #116,
   TJC-2362; C2.19). The fragment still replaces the derived property, but the description and the
   examples written next to it are now added to the fragment where it does not state its own; what
@@ -947,7 +951,8 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   The 2026-07-28 discovery result is unchanged: it declares the extension and no `tasks` field.
   The stateless legacy adapter (`stateless = true`) refuses every legacy task method with
   `-32601`, and its `initialize` result now declares no `tasks` capability at all. It used to
-  declare `requests.tools.call` there too.
+  declare `requests.tools.call` there too. Its `tools/list` no longer carries
+  `execution.taskSupport` either.
 - **`subscriptions/listen` refuses task notifications from a client without the Tasks extension**
   (GH #115, TJC-2361). A 2026-07-28 `subscriptions/listen` request that names `taskIds` but does
   not declare `io.modelcontextprotocol/tasks` in its capabilities is answered `-32021`, as

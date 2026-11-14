@@ -365,20 +365,21 @@ fiber. What happens next depends on how the tool's body is written.
   task; the 2026-07-28 reply is the empty acknowledgement);
 - a legacy `tasks/result` waiter is answered `-32602` (`Task <id> was cancelled`), and the legacy
   session gets its `notifications/tasks/status`;
-- the entry is a stored result from then on: it no longer counts as running, and it holds neither
-  the fiber nor the request;
+- the entry is a stored result from then on and holds neither the fiber nor the request;
 - **the body keeps running until it returns.** Whatever it returns or throws then is dropped: the
   task stays `cancelled` and no second notification is sent. Its side effects still happen.
 
 Until 1.1.0 the cancel reply waited for the body, however long that took. To get that back, set
 `cancelGraceMs` to a value longer than any body runs; `0` answers without waiting at all.
 
-A body that outlives its cancellation is work the store no longer counts: it holds a thread (on
-the JVM and Scala Native) and the request it was started with until it returns, outside
-`maxConcurrentPerSession`, `maxConcurrentTotal` and the byte budgets. The same has always been
-true of a synchronous body whose task is removed by its TTL or with its session. A tool that can
-run long should therefore be written as an effect that can be interrupted; the grace bounds the
-client's wait, not the work.
+A body that outlives its cancellation is still running work, and it is counted as such: until it
+returns it keeps its place under `maxConcurrentPerSession` and `maxConcurrentTotal`, so a client
+cannot stack such bodies up by starting and cancelling tasks in turn (the next create is refused
+as it would be beside a running task). The same holds for a synchronous body whose task is removed
+by its TTL or with its session; until 1.1.0 those bodies ran uncounted. The byte budgets no longer
+charge the request such a body was started with; `maxRequestBytes` bounds it. A tool that can run
+long should still be written as an effect that can be interrupted: the grace bounds the client's
+wait, not the work.
 
 ## Legacy (2025-11-25) task surface
 
