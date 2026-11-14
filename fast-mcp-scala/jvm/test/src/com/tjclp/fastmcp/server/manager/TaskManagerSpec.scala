@@ -329,7 +329,8 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
   // GH #115, D6.20: `ttl` 0 and -1 were accepted (echoed as `ttl: 0`, status `working`) and the
   // sweeper removed the task within `sweepIntervalMs`, so the client held a dead handle.
   "a requested TTL of zero or less" should "be refused with -32602 before anything is created" in {
-    val tm = newManager()
+    // A clock that stands still: the 1 ms lifetime created below cannot run out during the test.
+    val tm = newManager(clock = new ManualClock)
     try
       for ttl <- List(0L, -1L, Long.MinValue) do
         val ran = runUnsafe(Ref.make(false))
