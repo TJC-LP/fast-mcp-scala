@@ -22,13 +22,13 @@ Two registration paths, `@Tool`-style annotations and typed `McpTool` contracts,
 
 ```scala 3 ignore
 // sbt — JVM
-libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "1.0.1"
+libraryDependencies += "com.tjclp" %% "fast-mcp-scala" % "1.1.0"
 
 // sbt — Scala.js (Bun-first) or Scala Native (experimental); %%% picks the platform artifact
-libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "1.0.1"
+libraryDependencies += "com.tjclp" %%% "fast-mcp-scala" % "1.1.0"
 
-//> using dep com.tjclp::fast-mcp-scala:1.0.1    // scala-cli, JVM
-//> using dep com.tjclp::fast-mcp-scala::1.0.1   // scala-cli, Scala.js or Native (with `//> using platform ...`)
+//> using dep com.tjclp::fast-mcp-scala:1.1.0    // scala-cli, JVM
+//> using dep com.tjclp::fast-mcp-scala::1.1.0   // scala-cli, Scala.js or Native (with `//> using platform ...`)
 ```
 
 Built against Scala 3.9.0 LTS: **consuming 1.0.0 requires Scala 3.9.0 or newer** (it emits TASTy 28.9, which 3.8 and older compilers cannot read; the RC3 prerelease, built with Scala 3.8.3, is the last release a Scala 3.8 project can use). 1.0.0 is not compiled with `-experimental`, so consumers no longer need the flag (the release candidates required it on every registration path; TJC-2335). JVM: JDK 17+ (CI tests the LTS releases 17, 21, and 25). Scala.js: `sjs1_3`, runs on Bun (first-class) and, for stdio, on Node 18+ (verified with Node 18 and 26 in the 1.0.0 dogfood, not yet in CI; the HTTP listener is `Bun.serve`-only, and bearer task ids come from `globalThis.crypto`, which Node 18 exposes only behind `--experimental-global-webcrypto`); Scala 3.9 output needs a Scala.js 1.22+ linker (Mill: mill-bun 0.3.x with an explicit `scalaJSVersion`; scala-cli: `--js-version 1.22.0`). Scala Native: `native0.5_3`, experimental (stdio in 1.0.x; streamable HTTP is on `main`, unreleased). Platform details and quickstarts: [docs/platforms.md](docs/platforms.md).
@@ -39,7 +39,7 @@ A single-file server with one tool; the same code lives in [`HelloWorld.scala`](
 
 ```scala 3 raw
 //> using scala 3.9.0
-//> using dep com.tjclp::fast-mcp-scala:1.0.1
+//> using dep com.tjclp::fast-mcp-scala:1.1.0
 
 import com.tjclp.fastmcp.{*, given}
 
@@ -344,7 +344,7 @@ One core, three targets. The protocol layer is shared; each platform contributes
 | Tasks extension | ✅ | ✅ | ✅ |
 | Standalone binary | GraalVM native image | — | LLVM via Scala Native |
 
-¹ zio-http has no Scala Native artifacts, so Scala Native serves HTTP through a built-in HTTP/1.1 + SSE server over `java.net.ServerSocket` (plaintext; terminate TLS at a proxy). It is unreleased (on `main`, after 1.0.1) and **experimental**: the backend is marked `@experimental`, so an HTTP server on Scala Native compiles only with the `-experimental` compiler flag (stdio servers need nothing). The reason is a Scala Native 0.5.12 runtime defect that can abort the process under concurrent payloads of 8 KiB and up — see [the socket backend](docs/transports.md#the-socket-backend). The same server is an opt-in, netty-free HTTP backend on the JVM.
+¹ zio-http has no Scala Native artifacts, so Scala Native serves HTTP through a built-in HTTP/1.1 + SSE server over `java.net.ServerSocket` (plaintext; terminate TLS at a proxy). It is new in 1.1.0 and **experimental**: the backend is marked `@experimental`, so an HTTP server on Scala Native compiles only with the `-experimental` compiler flag (stdio servers need nothing). The reason is a Scala Native 0.5.12 runtime defect that can abort the process under concurrent payloads of 8 KiB and up — see [the socket backend](docs/transports.md#the-socket-backend). The same server is an opt-in, netty-free HTTP backend on the JVM.
 
 The official MCP conformance suite runs in CI against the JVM, Bun and Scala Native servers and against the GraalVM native binary, with empty expected-failure baselines. Full parity matrix, Bun and Scala Native quickstarts: [docs/platforms.md](docs/platforms.md); coverage details: [docs/spec-coverage.md](docs/spec-coverage.md).
 
@@ -376,7 +376,7 @@ Add to `claude_desktop_config.json`:
       "command": "scala-cli",
       "args": [
         "-e",
-        "//> using scala 3.9.0\n//> using dep com.tjclp::fast-mcp-scala:1.0.1",
+        "//> using scala 3.9.0\n//> using dep com.tjclp::fast-mcp-scala:1.1.0",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]
@@ -395,7 +395,7 @@ environment variables). Without the separator it takes the server's `-e` and fai
 
 ```bash
 npx @modelcontextprotocol/inspector --cli scala-cli \
-  -e $'//> using scala 3.9.0\n//> using dep com.tjclp::fast-mcp-scala:1.0.1' \
+  -e $'//> using scala 3.9.0\n//> using dep com.tjclp::fast-mcp-scala:1.1.0' \
   --main-class com.tjclp.fastmcp.examples.AnnotatedServer \
   -- --method tools/list
 ```

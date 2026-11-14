@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The next release is **1.1.0** (the `1.0.2` patch line was not cut).
+## [1.1.0] - 2026-11-14
+
+The `1.0.2` patch line was not cut; 1.1.0 follows 1.0.1.
 
 ### Compatibility
 
