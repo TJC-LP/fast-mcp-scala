@@ -760,6 +760,14 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - `conformance.yml` runs the mode for the JVM, Bun and Scala Native on every pull request, and
     `native.yml` runs it against the GraalVM image. The Antithesis workload runs it against a
     node once faults have stopped, as a third drawn mode (`antithesis/README.md`).
+- **CI: the workflows are checked by zizmor** (GH #121). A new workflow, `zizmor.yml`, runs
+  [zizmor](https://docs.zizmor.sh) 1.32.0 over the workflows, the `setup-build` composite action
+  and `dependabot.yml` on every pull request and push to `main`, and fails on a finding of
+  severity medium or high. It runs the offline audits only, so its result depends on the commit
+  and on nothing else; the action is pinned to a commit and installs zizmor from a hash-locked
+  wheel. Low findings are not reported: the known ones are `self-repository` on each
+  `uses: ./.github/actions/setup-build`, and moving those lines to the `uses: $/...` form is
+  left open until it has been tried on a runner.
 
 - **A parameter or input field with a Scala default is no longer advertised as `required`**
   (TJC-5117, #116 C2.6). Before, a default alone left the name in the `required` array of the
