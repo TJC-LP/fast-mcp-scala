@@ -412,6 +412,10 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     init should include(""""capabilities":{""")
     init should include(""""tools":{""")
     init should not include """"tasks":{"""
+    // ... and its tool listing does not say a tool supports (or requires) task augmentation.
+    val listed = bodyOf(post(routes, """{"jsonrpc":"2.0","id":29,"method":"tools/list"}""", None))
+    listed should include(""""name":"slow"""")
+    listed should not include "taskSupport"
     // All legacy stateless POSTs share the literal session id "stateless" — task ownership keyed
     // on it would let every client list, read, and cancel every other client's tasks.
     val create = bodyOf(post(routes, augmentedCall(30, "slow"), None))
