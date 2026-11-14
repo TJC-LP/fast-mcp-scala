@@ -763,6 +763,31 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Fixed
 
+- **A request that races the end of its session is interrupted** (#117). A request's handler is
+  started before it is registered as in flight, so a `DELETE` (or an idle or session-cap eviction)
+  that ended the session in between missed it: the handler kept running and its reply stream
+  never ended. A request registered on a session that is already terminated is now interrupted at
+  registration.
+- **A cancellation that overtakes its request is no longer dropped** (#117). Frames are dispatched
+  concurrently, so a `notifications/cancelled` sent right after its request could be processed
+  before the request was registered, and was then ignored: the handler ran to completion. A
+  session now remembers the last 64 cancelled ids it had no request for and cancels the request
+  if it is registered within 10 seconds. `initialize` stays exempt. Request ids must be unique
+  within a session (JSON-RPC, MCP): a client that cancels a finished request and reuses its id
+  within those 10 seconds gets the new request cancelled.
+- **Build: `PUBLISH_VERSION` is read on every Mill run** (#117). `publishVersion` was an ordinary
+  cached task, so with a warm `out/` a local `PUBLISH_VERSION=<v> ./mill ... publishLocal`
+  published whatever version had been cached first. It is now a `Task.Input`. Releases were not
+  affected (the workflow starts from an empty `out/`).
+- **CI: the OSV job fails when classpath resolution fails** (#117): the resolve step now runs with
+  `pipefail`, and advisory text is escaped before it is printed as a workflow annotation.
+- The JVM test module no longer depends on mockito and zio-test, which no test used.
+- **At the session cap, sessions last used in the same millisecond are evicted in the order they
+  were used** (#117). They tied on `lastSeen`, and the map's iteration order then picked the
+  victim. Legacy streamable HTTP on every backend.
+- Tests no longer wait on fixed sleeps (#117): time-dependent behaviour is tested on a clock the
+  test moves, everything else by waiting for the condition. See CONTRIBUTING.md, "Tests and time".
+
 - **`resources/read` on a resource template returns the template's `mimeType`** (GH #116,
   TJC-2362; D1.23). The declared mime type was sent for static resources only; a templated read
   carried none (and a binary body always `application/octet-stream`). Now the content entry of a

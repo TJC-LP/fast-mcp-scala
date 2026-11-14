@@ -6,7 +6,8 @@ import zio.{Task as _, *}
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.jsonrpc.McpErrorCarrier
-import com.tjclp.fastmcp.server.TaskSettings
+import com.tjclp.fastmcp.server.{ServerClock, TaskSettings}
+import com.tjclp.fastmcp.testkit.{Eventually, ManualClock}
 
 /** Tests for [[TaskManager]] lifecycle, status transitions, session isolation, and cancellation
   * semantics. The state machine implements the spec 2025-11-25 task lifecycle.
@@ -26,7 +27,8 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
       maxStoredTotal: Int = 4096,
       minResultRetentionMs: Long = 30_000L,
       sweepIntervalMs: Long = 1_000L,
-      checkpoint: String => UIO[Unit] = _ => ZIO.unit
+      checkpoint: String => UIO[Unit] = _ => ZIO.unit,
+      clock: ServerClock = ServerClock.system
   ): TaskManager[Any] =
     TaskManager.makeUnsafe[Any](
       TaskSettings(
@@ -42,7 +44,8 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
         sweepIntervalMs = sweepIntervalMs
       ),
       newId = ZIO.succeed(java.util.UUID.randomUUID().toString),
-      checkpoint = checkpoint
+      checkpoint = checkpoint,
+      clock = clock
     )
 
   private def exitOf[A](z: ZIO[Any, Throwable, A]): Exit[Throwable, A] =
@@ -65,21 +68,14 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
 
   /** Never assert `Fiber.roots` after a fixed sleep: poll until the delta settles. */
   private def awaitRootsSettle(before: Int, tolerance: Int = 5): Unit =
-    runUnsafe(
-      (ZIO.sleep(25.millis) *> Fiber.roots.map(_.size))
-        .repeatUntil(_ - before <= tolerance)
-        .timeoutFail(new RuntimeException("root fibers did not settle"))(10.seconds)
-        .unit
+    val _ = runUnsafe(
+      Eventually(s"root fibers settle within $tolerance of $before")(Fiber.roots.map(_.size))(
+        _ - before <= tolerance
+      )
     )
 
   private def awaitStats(tm: TaskManager[Any])(p: TaskStoreStats => Boolean): TaskStoreStats =
-    runUnsafe(
-      (ZIO.sleep(20.millis) *> tm.stats)
-        .repeatUntil(p)
-        .timeoutFail(new RuntimeException("task store never reached the expected state"))(
-          10.seconds
-        )
-    )
+    runUnsafe(Eventually("the task store reaches the expected state")(tm.stats)(p))
 
   "create" should "return a CreateTaskResult in Working status" in {
     val tm = newManager()
@@ -227,10 +223,12 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     val (parkedExit, cancelOutcome) = runUnsafe(
       for
         waiter <- tm.result(taskId, Some("s1")).exit.fork
-        _ <- ZIO.sleep(100.millis)
+        // Parked for certain: the fiber is suspended, and the only thing `result` waits on is the
+        // task's outcome.
+        _ <- Eventually.holds("the result waiter is parked")(waiter.status.map(_.isSuspended))
         cancelled <- tm.cancel(taskId, Some("s1"))
         exit <- waiter.join.timeoutFail(new RuntimeException("parked result never resolved"))(
-          5.seconds
+          60.seconds
         )
       yield (exit, cancelled)
     )
@@ -329,7 +327,8 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
   }
 
   "TTL eviction" should "remove the entry and interrupt still-running work" in {
-    val tm = newManager()
+    val clock = new ManualClock
+    val tm = newManager(clock = clock)
     val interrupted = runUnsafe(Ref.make(false))
     val created = runUnsafe(
       tm.create(
@@ -340,17 +339,22 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
       )
     )
     val taskId = created.task.taskId
-    runUnsafe(
-      (ZIO.sleep(25.millis) *> (tm.get(taskId, Some("evict")).map(_.isEmpty) zip interrupted.get))
-        .repeatUntil { case (gone, wasInterrupted) => gone && wasInterrupted }
-        .timeoutFail(new RuntimeException("TTL eviction did not remove + interrupt the task"))(
-          10.seconds
-        )
+    // The sweeper sleeps to the task's deadline. One millisecond short of it nothing is due...
+    runUnsafe(clock.awaitSleepers(1) *> clock.advance(149.millis) *> clock.awaitSleepers(1))
+    runUnsafe(tm.get(taskId, Some("evict"))).map(_.status) shouldBe Some(TaskStatus.Working)
+    runUnsafe(interrupted.get) shouldBe false
+    // ...and at the deadline the entry goes and the work is interrupted.
+    runUnsafe(clock.advance(1.millis))
+    val _ = runUnsafe(
+      Eventually("TTL eviction removes and interrupts the task")(
+        tm.get(taskId, Some("evict")).map(_.isEmpty) zip interrupted.get
+      ) { case (gone, wasInterrupted) => gone && wasInterrupted }
     )
   }
 
   it should "leave terminal tasks to age out without interrupting anything" in {
-    val tm = newManager()
+    val clock = new ManualClock
+    val tm = newManager(clock = clock)
     val created = runUnsafe(
       tm.create(
         sessionId = Some("done"),
@@ -362,12 +366,13 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     val taskId = created.task.taskId
     // Completed result stays pollable until the TTL sweeps the entry.
     runUnsafe(tm.result(taskId, Some("done"))) shouldBe "ok"
+    runUnsafe(clock.awaitSleepers(1) *> clock.advance(149.millis) *> clock.awaitSleepers(1))
+    runUnsafe(tm.get(taskId, Some("done"))).map(_.status) shouldBe Some(TaskStatus.Completed)
+    runUnsafe(clock.advance(1.millis))
     runUnsafe(
-      (ZIO.sleep(25.millis) *> tm.get(taskId, Some("done")).map(_.isEmpty))
-        .repeatUntil(identity)
-        .timeoutFail(new RuntimeException("TTL eviction did not remove the terminal task"))(
-          10.seconds
-        )
+      Eventually.holds("TTL eviction removes the terminal task")(
+        tm.get(taskId, Some("done")).map(_.isEmpty)
+      )
     )
   }
 
@@ -451,17 +456,19 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     // entries only, so a flooder's fresh entries never nominate V — the only stale entries are V's
     // own two, and once they are gone the pool is full of ungraced results and admission is
     // refused rather than evicting anything younger than the grace.
+    val clock = new ManualClock
     val tm = newManager(
       maxConcurrent = 8,
       maxConcurrentTotal = 8,
       maxStoredPerOwner = 8,
       maxStoredTotal = 8,
-      minResultRetentionMs = 400L
+      minResultRetentionMs = 400L,
+      clock = clock
     )
     try
       val v = TaskScope.session("V")
       val vIds = (1 to 2).map(_ => completed(tm, v))
-      runUnsafe(ZIO.sleep(500.millis)) // V's results age past the grace
+      clock.advanceMs(401L) // V's results are now older than the grace; nothing created later is
       val flooders = (1 to 3).map(i => TaskScope.session(s"F$i"))
       flooders.foreach(f => (1 to 2).foreach(_ => completed(tm, f)))
       runUnsafe(tm.stats).total shouldBe 8
@@ -595,12 +602,17 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "exit when the store drains and restart on the next create" in {
-    val tm = newManager(sweepIntervalMs = 50L)
+    val clock = new ManualClock
+    val tm = newManager(sweepIntervalMs = 50L, clock = clock)
     val before = rootFibers
     try
       val scope = TaskScope.session("drain")
       (1 to 3).foreach(_ => runUnsafe(tm.create(scope, Some(50L), ZIO.succeed("x"), _ => ZIO.unit)))
       runUnsafe(tm.stats).sweeperActive shouldBe true
+      // The sweeper is asleep until the first deadline; nothing drains before the clock gets there.
+      runUnsafe(clock.awaitSleepers(1))
+      runUnsafe(tm.stats).total shouldBe 3
+      clock.advanceMs(50L)
       val drained = awaitStats(tm)(s => s.total == 0 && !s.sweeperActive)
       drained.perOwner shouldBe empty
       drained.perPool shouldBe empty
@@ -626,7 +638,7 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     )
     // create returns before the task body starts. Await the signal inside onInterrupt so shutdown
     // cannot cancel the parked task before this test's interruption callback has been installed.
-    runUnsafe(started.await.timeoutFail(new RuntimeException("task did not start"))(10.seconds))
+    runUnsafe(started.await.timeoutFail(new RuntimeException("task did not start"))(60.seconds))
     completed(tm, TaskScope.bearer(Some("k")))
     runUnsafe(tm.shutdown)
     val stats = runUnsafe(tm.stats)
@@ -634,9 +646,7 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     stats.running shouldBe 0
     stats.sweeperActive shouldBe false
     runUnsafe(
-      (ZIO.sleep(10.millis) *> interrupted.get)
-        .repeatUntil(identity)
-        .timeoutFail(new RuntimeException("running task was not interrupted"))(10.seconds)
+      Eventually.holds("the running task is interrupted")(interrupted.get)
     )
     awaitRootsSettle(before)
   }
@@ -657,7 +667,7 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
       )
       // create returns before the task body starts: a release that lands first interrupts a task
       // that never ran, and the body's own onInterrupt is then never installed (seen once in CI).
-      runUnsafe(started.await.timeoutFail(new RuntimeException("task did not start"))(10.seconds))
+      runUnsafe(started.await.timeoutFail(new RuntimeException("task did not start"))(60.seconds))
       val doneId = completed(tm, mine)
       val otherId = completed(tm, TaskScope.session("other"))
       val anonId = completed(tm, TaskScope.bearer(None))
@@ -667,9 +677,7 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
       runUnsafe(tm.get(otherId, Some("other"))).isDefined shouldBe true
       runUnsafe(tm.get(anonId, None)).isDefined shouldBe true
       runUnsafe(
-        (ZIO.sleep(10.millis) *> interrupted.get)
-          .repeatUntil(identity)
-          .timeoutFail(new RuntimeException("released task was not interrupted"))(10.seconds)
+        Eventually.holds("the released task is interrupted")(interrupted.get)
       )
       val stats = runUnsafe(tm.stats)
       stats.total shouldBe 2
@@ -857,9 +865,19 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "still sweep an entry whose create is held past its TTL and stop counting it" in {
+    // The first create is held at "registered" until the test lets it go: the TTL passes while it
+    // is parked there, however slowly anything runs.
+    val clock = new ManualClock
+    val reached = runUnsafe(Promise.make[Nothing, Unit])
+    val letGo = runUnsafe(Promise.make[Nothing, Unit])
+    val firstCreate = new java.util.concurrent.atomic.AtomicBoolean(true)
     val hook: String => UIO[Unit] =
-      s => if s == "registered" then ZIO.sleep(400.millis) else ZIO.unit
-    val tm = newManager(maxConcurrent = 1, sweepIntervalMs = 50L, checkpoint = hook)
+      s =>
+        if s == "registered" && firstCreate.compareAndSet(true, false) then
+          reached.succeed(()) *> letGo.await
+        else ZIO.unit
+    val tm =
+      newManager(maxConcurrent = 1, sweepIntervalMs = 50L, checkpoint = hook, clock = clock)
     val before = rootFibers
     try
       // forkDaemon: a plain fork would be interrupted when runUnsafe's parent fiber completes.
@@ -867,7 +885,10 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
         tm.create(TaskScope.session("held"), Some(100L), ZIO.never, _ => ZIO.unit).forkDaemon
       )
       // The sweeper is claimed by the insert itself, so the TTL fires while the create is still
-      // parked in the hook (400 ms); poll rather than sleep so a scheduling stall cannot flake it.
+      // parked in the hook.
+      runUnsafe(reached.await *> clock.awaitSleepers(1))
+      runUnsafe(tm.stats).total shouldBe 1
+      clock.advanceMs(100L)
       val held = awaitStats(tm)(s => s.total == 0 && s.running == 0)
       held.sweeperActive shouldBe false
       // The owner's slot is free again — a concurrent create is admitted despite maxConcurrent = 1.
@@ -875,6 +896,7 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
         tm.create(TaskScope.session("held"), Some(60_000L), ZIO.succeed("free"), _ => ZIO.unit)
       )
       runUnsafe(tm.result(other.task.taskId, Some("held"))) shouldBe "free"
+      val _ = runUnsafe(letGo.succeed(()))
       val exit = runUnsafe(fiber.await)
       failureOf(exit) shouldBe a[TaskNotFoundError]
       awaitRootsSettle(before)

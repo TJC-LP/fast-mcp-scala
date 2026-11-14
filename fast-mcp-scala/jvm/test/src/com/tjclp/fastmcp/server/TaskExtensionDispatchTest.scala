@@ -7,6 +7,7 @@ import zio.json.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.{given, *}
+import com.tjclp.fastmcp.testkit.Await
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.wire.ElicitRequestParams
 import com.tjclp.fastmcp.jsonrpc.McpError
@@ -55,7 +56,9 @@ class TaskExtensionDispatchTest extends AnyFunSuite with Matchers:
     private val tools: List[McpTool[?, ?]] = List(
       McpTool[NoArgs, String](name = "greet")(_ => "hello"),
       McpTool[SleepArgs, String](name = "slow")((args: SleepArgs) =>
-        ZIO.sleep(args.ms.millis).as("slow done"): zio.Task[String]
+        // `ms` of a second or more stands for "still running whenever the test looks"; less for
+        // "finishes by itself". Neither is measured on a clock.
+        (if args.ms >= 1000 then ZIO.never else ZIO.yieldNow).as("slow done"): zio.Task[String]
       ).withTaskSupport(TaskSupport.Optional),
       // One question, asked the way any handler asks it.
       McpTool[NoArgs, String](name = "confirm")
@@ -149,17 +152,7 @@ class TaskExtensionDispatchTest extends AnyFunSuite with Matchers:
 
     /** Poll `tasks/get` until the task shows `status`. */
     def awaitStatus(taskId: String, status: String): Json =
-      val deadline = java.lang.System.nanoTime() + 5_000_000_000L
-      @scala.annotation.tailrec
-      def loop(): Json =
-        val task = get(taskId)
-        if field(task, "status") == status then task
-        else if java.lang.System.nanoTime() > deadline then
-          fail(s"task $taskId never became $status; last: ${task.toJson}")
-        else
-          Thread.sleep(5)
-          loop()
-      loop()
+      Await.until(s"task $taskId becomes $status")(get(taskId))(field(_, "status") == status)
 
     def update(taskId: String, responses: String): Either[Json, Json] =
       send("tasks/update", s""""taskId":"$taskId","inputResponses":$responses""")
@@ -366,17 +359,10 @@ class TaskExtensionDispatchTest extends AnyFunSuite with Matchers:
       f.update(taskId, s"""{"$firstKey":{"action":"accept","content":{"confirm":true}}}""").isRight shouldBe true
 
       // The second question has its own key; the first is never shown again.
-      val deadline = java.lang.System.nanoTime() + 5_000_000_000L
-      @scala.annotation.tailrec
-      def secondRound(): Json =
-        val task = f.get(taskId)
+      val second = Await.until("the task asks its second question")(f.get(taskId)) { task =>
         val keys = members(task, "inputRequests").map(_._1)
-        if field(task, "status") == "input_required" && keys.nonEmpty && keys != List(firstKey) then task
-        else if java.lang.System.nanoTime() > deadline then fail(s"no second round: ${task.toJson}")
-        else
-          Thread.sleep(5)
-          secondRound()
-      val second = secondRound()
+        field(task, "status") == "input_required" && keys.nonEmpty && keys != List(firstKey)
+      }
       second.toJson should include("Color?")
       has(second, "requestState") shouldBe false
       val secondKey = members(second, "inputRequests").head._1

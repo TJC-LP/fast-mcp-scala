@@ -9,6 +9,7 @@ import zio.json.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.testkit.Eventually
 import com.tjclp.fastmcp.core.{ProgressToken, TaskSupport, Tasks}
 import com.tjclp.fastmcp.core.wire.Implementation
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, RequestId}
@@ -50,13 +51,7 @@ class TaskMemoryBoundsTest extends AnyFunSuite with Matchers:
     }
 
   private def awaitStats(tm: TaskManager[Any])(p: TaskStoreStats => Boolean): TaskStoreStats =
-    runUnsafe(
-      (ZIO.sleep(10.millis) *> tm.stats)
-        .repeatUntil(p)
-        .timeoutFail(new RuntimeException("task store never reached the expected state"))(
-          15.seconds
-        )
-    )
+    runUnsafe(Eventually("the task store reaches the expected state")(tm.stats)(p))
 
   private val initFrame =
     """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1.0"}}}"""
@@ -422,10 +417,8 @@ class TaskMemoryBoundsTest extends AnyFunSuite with Matchers:
   private def finished(tm: TaskManager[Any], scope: TaskScope, chars: Int): String =
     val created = runUnsafe(tm.create(scope, None, ZIO.succeed(resultOf(chars)), _ => ZIO.unit))
     val id = created.task.taskId
-    runUnsafe(
-      (ZIO.sleep(2.millis) *> tm.get(id, scope.sessionId))
-        .repeatUntil(_.forall(_.status.isTerminal))
-        .timeoutFail(new RuntimeException("task never finished"))(15.seconds)
+    val _ = runUnsafe(
+      Eventually("the task is terminal")(tm.get(id, scope.sessionId))(_.forall(_.status.isTerminal))
     )
     id
 

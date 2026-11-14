@@ -6,6 +6,7 @@ import zio.json.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.testkit.Eventually
 import com.tjclp.fastmcp.core.{TaskSupport, Tasks}
 import com.tjclp.fastmcp.core.wire.ElicitRequestParams
 import com.tjclp.fastmcp.jsonrpc.McpError
@@ -117,9 +118,9 @@ class TaskInputRequiredNativeTest extends AnyFunSuite:
           member(reply, "error").flatMap(member(_, "code")).map(_.toJson).getOrElse("none")
         )
       until = (taskId: String, status: String) =>
-        (ZIO.sleep(5.millis) *> result("tasks/get", s""""taskId":"$taskId""""))
-          .repeatUntil(task => text(task, "status") == status)
-          .timeoutFail(new RuntimeException(s"task never became $status"))(10.seconds)
+        Eventually(s"the task becomes $status")(
+            result("tasks/get", s""""taskId":"$taskId"""")
+          )(task => text(task, "status") == status)
 
       // One question: input_required, an ignored key, the answer, completed.
       created <- result("tools/call", """"name":"confirm","arguments":{}""")

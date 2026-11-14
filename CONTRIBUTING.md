@@ -43,6 +43,9 @@ cd fast-mcp-scala
 ./mill fast-mcp-scala.js.test                       # Scala.js conformance tests on Bun
 ./mill fast-mcp-scala.scalaNative.test              # links a native test binary
 ./mill fast-mcp-scala.jvm.test.testOnly com.tjclp.fastmcp.macros.ToolProcessorTest   # class selectors go through testOnly
+# testOnly ignores a selector that matches no class and still reports SUCCESS: check the
+# "Total number of tests run" line. A file with chained `package a` / `package b.c` clauses has
+# the FQCN a.b.c.<Class>.
 
 # Scala.js / Bun housekeeping
 ./mill fast-mcp-scala.js.bunLock                    # regenerate js/bun.lock after changing bunDevDeps
@@ -70,6 +73,69 @@ and expansion then fails with a `NoClassDefFoundError` or a spurious `-Xcheck-ma
 
 ```bash
 rm -rf out/fast-mcp-scala && ./mill fast-mcp-scala.compile
+```
+
+## Tests and time
+
+No test may pass or fail depending on how fast the machine is. That means **no fixed sleeps**: a
+test never waits "long enough" and then asserts. It either moves a clock it owns, or it waits for
+the thing it is about to assert on.
+
+**Server time goes through one seam.** `ServerClock` (`shared/.../server/ServerClock.scala`,
+`private[fastmcp]`) is two operations, `monotonicMs()` and `sleep(duration)`. The router carries
+one (`McpRouter.clock`) and everything built for that server reads it: a session's `lastSeen` and
+its early-cancellation window, the task manager's TTL, retention grace and sweeper, the HTTP
+handler's head and heartbeat timers, its unstarted-reply watchdog, the idle sweep and cap
+eviction. Production runs on `ServerClock.system` (`System.nanoTime` and `ZIO.sleep`). New server
+code that decides something by time reads the clock it was given, never `System.nanoTime`,
+`System.currentTimeMillis` or `ZIO.sleep` directly. (Wire timestamps such as a task's `createdAt`
+are wall-clock and stay so; the blocking socket server in `jvm-native/` waits on kernel timeouts
+and reads `System.nanoTime` itself.)
+
+**A test passes its own clock.** `testkit.ManualClock` (`shared/test/src`, compiled into all three
+test modules) only moves when the test calls `advance` / `advanceMs`:
+
+```scala
+val clock  = new ManualClock
+val router = runUnsafe(server.buildRouterOn(clock))            // router, sessions, task manager
+val tm     = TaskManager.makeUnsafe[Any](settings, newId, checkpoint, clock)
+val one    = runUnsafe(Session.makeOn(clock, "s"))
+val bun    = startHttpHandleOn(server, clock)                   // Scala.js
+```
+
+Two rules make such a test exact:
+
+- Before advancing past a deadline a fiber sleeps to, wait until it is parked:
+  `clock.awaitSleepers(n)`, or `clock.awaitSleeping(duration)` to name one timer among several by
+  the delay it asked for. A fiber that reaches `sleep` after the advance sleeps from the new
+  reading.
+- Waking a fiber does not run it. After an advance, wait for the effect you expect before asserting
+  on it. What must *not* have happened needs no wait when only a further advance could cause it:
+  advance to one millisecond short of the deadline, assert, advance the last millisecond.
+
+A tool or hook in a fixture that "takes a while" sleeps on the same clock (`clock.sleep(...)`),
+waits for a `Promise` the test completes, or is `ZIO.never` when the test only ever cancels it.
+
+**Everything else waits on a condition.** `testkit.Eventually` (ZIO, all platforms) and
+`testkit.Await` (blocking, JVM and Scala Native) poll a condition and fail, naming what was
+awaited and the last value seen, at a deadline no healthy run comes near (60 s). Use them for what
+another fiber, thread or process does: a task reaching a status, a fiber being parked
+(`fiber.status.map(_.isSuspended)`), a child process answering, a socket being accepted. A test
+clock cannot reach another process or the kernel, so real-process and real-socket tests are written
+this way throughout. The pause between two polls in those two helpers is the only place the suite
+sleeps on the real clock in order to wait.
+
+**Bounds on elapsed time** are for contracts that are stated in real time, and only those: a
+linear-time guarantee (a parser or matcher that must not go quadratic), a deadline the socket
+server enforces, a process that must exit promptly on a signal. Make the bound generous (several
+times what a healthy run needs, still far from what the failure costs) and put the measured value
+in the failure message (`withClue(s"$elapsed ms: ")`).
+
+To check a change, run the suite repeatedly and under load; a test that fails once in fifty runs is
+broken:
+
+```bash
+for i in $(seq 10); do ./mill fast-mcp-scala.jvm.test || break; done
 ```
 
 ## Quality gates
@@ -264,7 +330,12 @@ through [SECURITY.md](SECURITY.md), never a public issue.
 
 ## Releasing (maintainers)
 
-- `build.mill` holds a `-SNAPSHOT` default during development.
+- `build.mill` holds a `-SNAPSHOT` default during development. `publishVersion` is a Mill
+  input task: `PUBLISH_VERSION=<v> ./mill ...` takes effect on every run, with a warm `out/` or a
+  running daemon too.
+- When changing the build, run a module's `compile` and its `test.compile` as separate Mill
+  invocations at least once: with mill-bun 0.3.1 on Mill 1.1.5, `./mill a.compile a.test.compile`
+  in one invocation reported SUCCESS without compiling the test module.
 - A release-prep PR strips the suffix, dates the CHANGELOG section (`## [X.Y.Z] - <tag day>`;
   everything under `[Unreleased]` moves below it), and updates every version pin in the README,
   `docs/` and `scripts/*.sc`. Before it merges, sweep for stale pins — the coordinate grep

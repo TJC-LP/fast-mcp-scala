@@ -2,7 +2,7 @@ package com.tjclp.fastmcp.server.router
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.wire.Implementation
-import com.tjclp.fastmcp.server.{CompletionHandler, McpServerSettings}
+import com.tjclp.fastmcp.server.{CompletionHandler, McpServerSettings, ServerClock}
 import com.tjclp.fastmcp.server.manager.{PromptManager, ResourceManager, TaskManager, ToolManager}
 import com.tjclp.fastmcp.server.skills.SkillRegistry
 
@@ -60,6 +60,40 @@ object RouterBuilder:
       extraMiddlewares: List[Middleware[R]] = Nil,
       hooks: ServerHooks[R] = ServerHooks.noop[R],
       skillRegistry: Option[SkillRegistry[R]] = None
+  ): McpRouter[R] =
+    buildOn(
+      ServerClock.system,
+      serverInfo,
+      instructions,
+      toolManager,
+      promptManager,
+      resourceManager,
+      settings,
+      taskManager,
+      completionHandler,
+      validator,
+      extraMiddlewares,
+      hooks,
+      skillRegistry
+    )
+
+  /** [[build]] with the router's clock stated ([[McpRouter.clock]]). A `taskManager` passed here
+    * should have been built on the same clock.
+    */
+  private[fastmcp] def buildOn[R](
+      clock: ServerClock,
+      serverInfo: Implementation,
+      instructions: Option[String],
+      toolManager: ToolManager[R],
+      promptManager: PromptManager[R],
+      resourceManager: ResourceManager[R],
+      settings: McpServerSettings,
+      taskManager: Option[TaskManager[R]],
+      completionHandler: Option[CompletionHandler[R]],
+      validator: SchemaValidator,
+      extraMiddlewares: List[Middleware[R]],
+      hooks: ServerHooks[R],
+      skillRegistry: Option[SkillRegistry[R]]
   ): McpRouter[R] =
     val tasksOn = settings.tasks.enabled && taskManager.isDefined
 
@@ -206,5 +240,6 @@ object RouterBuilder:
       tasksEnabled = tasksOn,
       resourcesSubscribe = resourcesSubscribe,
       listChanged = listChanged,
-      limits = settings.limits
+      limits = settings.limits,
+      clock = clock
     )

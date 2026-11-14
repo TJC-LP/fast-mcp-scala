@@ -106,8 +106,8 @@ jobs:
 
       # `./mill show a b c` prints only a's value (b and c are parsed as arguments to a); the wildcard
       # yields all three modules keyed by task, and jq asserts each equals the extracted version.
-      # --no-server: build.mill reads PUBLISH_VERSION inside a task and a warm daemon would keep the
-      # environment it was started with.
+      # publishVersion is a Task.Input reading Task.env, so it follows PUBLISH_VERSION on every run;
+      # --no-server is kept so that no daemon outlives the step.
       - name: Verify Publishing Setup
         run: |
           echo "Version: $PUBLISH_VERSION"

@@ -11,6 +11,7 @@ import zio.json.ast.Json
 import zio.stream.*
 
 import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.testkit.{Await, Eventually}
 import com.tjclp.fastmcp.jsonrpc.JsonRpcMessage
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import com.tjclp.fastmcp.server.*
@@ -53,7 +54,7 @@ class SessionOutboundBoundTest extends AnyFunSuite with Matchers:
       Runtime.default.unsafe.run(
         ZIO
           .foreachDiscard(1 to 500)(i => session.send(note(i)))
-          .timeoutFail(new RuntimeException("send blocked at the bound"))(10.seconds)
+          .timeoutFail(new RuntimeException("send blocked at the bound"))(60.seconds)
       )
     )
     exit.isSuccess shouldBe true
@@ -68,7 +69,7 @@ class SessionOutboundBoundTest extends AnyFunSuite with Matchers:
         .foreachParDiscard(1 to 32)(f =>
           ZIO.foreachDiscard(1 to 200)(i => session.send(note(f * 1000 + i)))
         )
-        .timeoutFail(new RuntimeException("send blocked at the bound"))(20.seconds)
+        .timeoutFail(new RuntimeException("send blocked at the bound"))(60.seconds)
     )
     runUnsafe(session.outbound.size) shouldBe 16
   }
@@ -165,12 +166,18 @@ class SessionOutboundBoundTest extends AnyFunSuite with Matchers:
   private def completedTask(routes: Routes[Any, Response], sid: String, id: Int): String =
     val taskId = taskIdOf(bodyOf(post(routes, augmentedCall(id), Some(sid))))
     val get = s"""{"jsonrpc":"2.0","id":9,"method":"tasks/get","params":{"taskId":"$taskId"}}"""
-    runUnsafe(
-      (ZIO.sleep(5.millis) *> ZIO.attempt(bodyOf(post(routes, get, Some(sid)))))
-        .repeatUntil(_.contains(""""status":"completed""""))
-        .timeoutFail(new RuntimeException(s"task $taskId never completed"))(15.seconds)
+    val _ = Await.until(s"task $taskId completes")(bodyOf(post(routes, get, Some(sid))))(
+      _.contains(""""status":"completed"""")
     )
     taskId
+
+  /** Wait until `emitter` has either parked (the only place it can: an offer to the full outbound
+    * buffer) or finished, and say which. Decided by the fiber's own state, not by a delay.
+    */
+  private def parkedOrDone(emitter: Fiber.Runtime[?, ?]): ZIO[Any, Throwable, Boolean] =
+    Eventually("the emitter parks on the full buffer or finishes")(emitter.status)(s =>
+      s.isSuspended || s.isDone
+    ).map(_.isSuspended)
 
   private def openGet(routes: Routes[Any, Response], sid: String): Response =
     run(routes, Request.get(URL(Path.root / "mcp")).addHeader(Header.Custom(SessionIdHeader, sid)))
@@ -184,12 +191,19 @@ class SessionOutboundBoundTest extends AnyFunSuite with Matchers:
     val sid = initSession(routes)
     // Many more completed tasks than the bound, and nobody reading the standalone stream.
     val ids = (1 to 40).map(i => completedTask(routes, sid, 100 + i))
-    // What the session kept is exactly what a GET opened now is handed.
+    // What the session kept is exactly what a GET opened now is handed, oldest first. The newest
+    // message it can hold is the last task's `completed` notification, so the backlog has been
+    // handed over in full once that one has arrived: read up to it, not for a fixed time.
+    def lastCompletedSeen(text: String): Boolean =
+      text.split("\n\n").exists(f => f.contains(ids.last) && f.contains(""""status":"completed""""))
     val backlog = runUnsafe(
       openGet(routes, sid).body.asStream
-        .interruptAfter(1500.millis)
-        .runCollect
-        .map(bytes => new String(bytes.toArray, java.nio.charset.StandardCharsets.UTF_8))
+        .mapChunks(c => Chunk.single(new String(c.toArray, java.nio.charset.StandardCharsets.UTF_8)))
+        .scan("")(_ + _)
+        .takeUntil(lastCompletedSeen)
+        .runLast
+        .map(_.getOrElse(""))
+        .timeoutFail(new RuntimeException("the GET stream never delivered the backlog"))(60.seconds)
     )
     statusEvents(backlog) should be <= bound
     statusEvents(backlog) should be >= 1
@@ -214,7 +228,7 @@ class SessionOutboundBoundTest extends AnyFunSuite with Matchers:
         ids <- ZIO.foreach((1 to 24).toList) { i =>
           ZIO
             .attemptBlocking(completedTask(routes, sid, 200 + i))
-            .tap(id => (ZIO.sleep(5.millis) *> seen.get).repeatUntil(_.contains(id)))
+            .tap(id => Eventually(s"the stream shows task $id")(seen.get)(_.contains(id)))
         }
         text <- seen.get
         _ <- reader.interrupt
@@ -251,7 +265,7 @@ class SessionOutboundBoundTest extends AnyFunSuite with Matchers:
         _ <- inQ.offer(augmentedCall(2))
         line <- takeUntil(outQ, _.contains("notifications/tasks/status"))
         _ <- loop.interrupt
-      yield line).timeoutFail(new RuntimeException("no task status on stdio"))(15.seconds)
+      yield line).timeoutFail(new RuntimeException("no task status on stdio"))(60.seconds)
     )
     status should include(""""status":"completed"""")
   }
@@ -262,14 +276,13 @@ class SessionOutboundBoundTest extends AnyFunSuite with Matchers:
       (for
         emitter <- ZIO.foreachDiscard(1 to 40)(i => session.send(note(i))).fork
         // No reader yet: the emitter fills the buffer and waits. It neither finishes nor drops.
-        _ <- ZIO.sleep(300.millis)
-        parked <- emitter.poll.map(_.isEmpty)
+        parked <- parkedOrDone(emitter)
         seen <- Ref.make(Vector.empty[JsonRpcMessage])
         drainer <- session.outbound.take.flatMap(m => seen.update(_ :+ m)).forever.fork
         _ <- emitter.join
-        all <- (ZIO.sleep(5.millis) *> seen.get).repeatUntil(_.size >= 40)
+        all <- Eventually("all 40 messages are read")(seen.get)(_.size >= 40)
         _ <- drainer.interrupt
-      yield (parked, all)).timeoutFail(new RuntimeException("emitter never resumed"))(30.seconds)
+      yield (parked, all)).timeoutFail(new RuntimeException("emitter never resumed"))(60.seconds)
     )
     parked shouldBe true
     numbers(received) shouldBe (1 to 40).toList
@@ -292,7 +305,7 @@ class SessionOutboundBoundTest extends AnyFunSuite with Matchers:
           )
           .fork
         _ <- ZIO.foreachDiscard(1 to 100)(i => session.send(note(i)))
-        all <- (ZIO.sleep(5.millis) *> written.get).repeatUntil(_.size >= 100)
+        all <- Eventually("all 100 lines are written")(written.get)(_.size >= 100)
         _ <- loop.interrupt
       yield all).timeoutFail(new RuntimeException("the stdio writer lost messages"))(60.seconds)
     )
@@ -310,10 +323,11 @@ class SessionOutboundBoundTest extends AnyFunSuite with Matchers:
         // A finite inbound stream IS the EOF: the loop returns and its writer is gone.
         _ <- StdioLoop.run(router, session, ZStream(initFrame), s => outQ.offer(s).unit)
         // Far more than the bound, with nobody reading: every send returns at once.
+        // The loop closed the channel before it returned, so each send discards its message as
+        // it is made: there is nothing left that could reach the writer later.
         _ <- ZIO.foreachDiscard(1 to 100)(i => session.send(note(i)))
-        _ <- ZIO.sleep(100.millis)
         all <- outQ.takeAll
-      yield all).timeoutFail(new RuntimeException("a send blocked after EOF"))(15.seconds)
+      yield all).timeoutFail(new RuntimeException("a send blocked after EOF"))(60.seconds)
     )
     written.count(_.contains("notifications/test")) shouldBe 0
   }
@@ -323,13 +337,12 @@ class SessionOutboundBoundTest extends AnyFunSuite with Matchers:
     val (parked, ended) = runUnsafe(
       (for
         emitter <- ZIO.foreachDiscard(1 to 20)(i => session.send(note(i))).fork
-        _ <- ZIO.sleep(300.millis)
-        parked <- emitter.poll.map(_.isEmpty)
+        parked <- parkedOrDone(emitter)
         _ <- session.closeOutbound
         exit <- emitter.await
         // From now on a send keeps nothing and returns at once.
         _ <- ZIO.foreachDiscard(1 to 50)(i => session.send(note(i)))
-      yield (parked, exit)).timeoutFail(new RuntimeException("emitter still parked"))(15.seconds)
+      yield (parked, exit)).timeoutFail(new RuntimeException("emitter still parked"))(60.seconds)
     )
     parked shouldBe true
     ended.isInterrupted shouldBe true
@@ -367,24 +380,33 @@ class SessionOutboundBoundTest extends AnyFunSuite with Matchers:
     // A bare `Session.make(` would give a per-request session a buffered channel nobody reads.
     handler should not include "Session.make("
     handler should include("""Session.makeRequestScoped(s"request-""")
-    handler should include("""Session.makeRequestScoped("notification")""")
-    handler should include("""Session.makeRequestScoped("stateless",supportsTasks=false)""")
+    handler should include("""Session.makeRequestScoped("notification",clock=router.clock)""")
+    handler should include(
+      """Session.makeRequestScoped("stateless",supportsTasks=false,clock=router.clock)"""
+    )
     // The JVM's standalone GET stream drains a legacy session's channel: bounded by the setting.
     // (The middle argument is the peer address the session store counts sessions by.)
     handler should include(
-      "Session.makeProtocolSession(id,req.clientKey,settings.limits.maxOutboundMessages)"
+      "Session.makeProtocolSession(id,req.clientKey,settings.limits.maxOutboundMessages,router.clock)"
     )
 
     // Bun answers the standalone GET with 405, so no HTTP session there has a reader.
     bun should not include "Session.make("
     bun should include("""Session.makeRequestScoped(s"request-""")
-    bun should include("""Session.makeRequestScoped("notification")""")
-    bun should include("""Session.makeRequestScoped("stateless",supportsTasks=false)""")
-    bun should include("Session.makeProtocolSession(sid,peer,outboundCapacity=0)")
+    bun should include("""Session.makeRequestScoped("notification",clock=router.clock)""")
+    bun should include(
+      """Session.makeRequestScoped("stateless",supportsTasks=false,clock=router.clock)"""
+    )
+    bun should include("Session.makeProtocolSession(sid,peer,outboundCapacity=0,router.clock)")
 
     // stdio always has a reader (the drainer), on every platform.
-    bun should include("""Session.makeDrained("stdio",router.limits.maxOutboundMessages)""")
-    stdio should include("""Session.makeDrained("stdio",router.limits.maxOutboundMessages)""")
+    // (Every session is built on the router's clock.)
+    bun should include(
+      """Session.makeDrained("stdio",router.limits.maxOutboundMessages,router.clock)"""
+    )
+    stdio should include(
+      """Session.makeDrained("stdio",router.limits.maxOutboundMessages,router.clock)"""
+    )
     // ... until stdin reaches EOF: from then on the session must stop buffering for it. (The
     // drainer is interrupted without waiting for it: one blocked in a write to a stdout nobody
     // reads must not hold the exit.)

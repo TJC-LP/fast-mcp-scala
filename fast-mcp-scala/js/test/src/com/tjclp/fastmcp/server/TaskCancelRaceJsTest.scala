@@ -9,6 +9,7 @@ import zio.*
 
 import com.tjclp.fastmcp.{*, given}
 import com.tjclp.fastmcp.core.TaskStatus
+import com.tjclp.fastmcp.testkit.Eventually
 import com.tjclp.fastmcp.server.manager.{TaskCancelledError, TaskManager, TaskScope}
 
 /** Scala.js twin of the JVM `TaskCancelRaceTest`: a task cancelled before its fiber has run a step
@@ -35,10 +36,10 @@ class TaskCancelRaceJsTest extends AsyncFlatSpec with Matchers:
         created <- tm.create(TaskScope.bearer(Some(s"k$round")), None, ZIO.never, _ => ZIO.unit)
         id = created.task.taskId
         _ <- tm.cancel(id, None)
-        settled <- (ZIO.sleep(2.millis) *> tm.get(id, None))
-          .repeatUntil(_.forall(_.status == TaskStatus.Cancelled))
-          .timeout(1.second)
-        result <- tm.result(id, None).either.timeout(1.second)
+        settled <- Eventually("the task shows as cancelled")(tm.get(id, None))(
+          _.forall(_.status == TaskStatus.Cancelled)
+        ).option
+        result <- tm.result(id, None).either.timeout(Eventually.Deadline)
       yield (settled, result) match
         case (Some(_), Some(Left(_: TaskCancelledError))) => None
         case _ => Some(s"round $round: settled=${settled.isDefined}, result=$result")

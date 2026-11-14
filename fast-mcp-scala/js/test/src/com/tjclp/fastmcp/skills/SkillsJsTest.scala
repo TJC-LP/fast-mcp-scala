@@ -126,11 +126,11 @@ class SkillsJsTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAll:
           // The handshake first: the pre-init gate would otherwise reject concurrently dispatched frames.
           callbacks("data")(initFrame + "\n")
         }
-        initReply <- output.take.timeoutFail(new RuntimeException("missing initialize reply"))(10.seconds)
+        initReply <- output.take.timeoutFail(new RuntimeException("missing initialize reply"))(60.seconds)
         _ <- ZIO.succeed(frames.foreach(frame => callbacks("data")(frame + "\n")))
         replies <- ZIO
           .foreach(frames)(_ => output.take)
-          .timeoutFail(new RuntimeException("missing stdio reply"))(10.seconds)
+          .timeoutFail(new RuntimeException("missing stdio reply"))(60.seconds)
           .ensuring(session.terminate *> output.shutdown)
       yield (initReply :: replies).map(parse)
     runZio(program).map { replies =>

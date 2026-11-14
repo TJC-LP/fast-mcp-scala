@@ -7,6 +7,7 @@ import zio.json.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.{given, *}
+import com.tjclp.fastmcp.testkit.Await
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.wire.ElicitRequestUrlParams
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, RequestId}
@@ -394,7 +395,7 @@ class Protocol20260728Test extends AnyFunSuite with Matchers:
     val reply = runUnsafe(
       router
         .dispatch(session, listenForTasks("{}"))
-        .timeoutFail(new RuntimeException("no reply"))(5.seconds)
+        .timeoutFail(new RuntimeException("no reply"))(60.seconds)
     ).map(_.toJson).getOrElse("")
 
     reply should include("-32021")
@@ -528,11 +529,12 @@ class Protocol20260728Test extends AnyFunSuite with Matchers:
       "0.9.0",
       McpServerSettings(tasks = TaskSettings(enabled = true, pollIntervalMs = 10))
     )
+    // The tool finishes when the test says so: the handle is returned while it is still running.
+    val finish = runUnsafe(Promise.make[Nothing, Unit])
     runUnsafe(
       server.tool(
-        McpTool[RootsArgs, String](name = "async-tool")(_ =>
-          ZIO.sleep(25.millis).as("task complete")
-        ).withTaskSupport(TaskSupport.Optional)
+        McpTool[RootsArgs, String](name = "async-tool")(_ => finish.await.as("task complete"))
+          .withTaskSupport(TaskSupport.Optional)
       )
     )
     val router = runUnsafe(server.buildRouter)
@@ -558,11 +560,15 @@ class Protocol20260728Test extends AnyFunSuite with Matchers:
       .map(_.group(1))
       .getOrElse(fail(s"missing task id in $created"))
 
-    runUnsafe(ZIO.sleep(75.millis))
-    val completed = frame(
+    def poll(): String = frame(
       router,
       session,
       s"""{"jsonrpc":"2.0","id":22,"method":"tasks/get","params":{"taskId":"$taskId",$taskMeta}}"""
+    )
+    poll() should include("\"status\":\"working\"")
+    val _ = runUnsafe(finish.succeed(()))
+    val completed = Await.until("the task leaves `working`")(poll())(
+      !_.contains("\"status\":\"working\"")
     )
     completed should include("\"resultType\":\"complete\"")
     completed should include("\"status\":\"completed\"")

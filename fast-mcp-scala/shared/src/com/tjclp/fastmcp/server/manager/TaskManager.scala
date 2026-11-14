@@ -6,7 +6,7 @@ import zio.json.ast.Json
 
 import core.*
 import jsonrpc.{McpError, McpErrorCarrier}
-import server.TaskSettings
+import server.{ServerClock, TaskSettings}
 
 private[fastmcp] final case class TaskSnapshot(
     task: Task,
@@ -66,12 +66,12 @@ private final case class TaskEntry(
     pool: PoolKind,
     createdAtMs: Long,
     lastUpdatedAtMs: Long,
-    /** Monotonic ([[TaskManager.monotonicMs]]) twin of `lastUpdatedAtMs`; drives the retention
+    /** Monotonic (the manager's `ServerClock`) twin of `lastUpdatedAtMs`; drives the retention
       * grace and eviction order so a wall-clock step never reorders or un-ages entries.
       */
     lastUpdatedMonoMs: Long,
     ttlMs: Option[Long],
-    /** Monotonic deadline; the sweeper compares it against [[TaskManager.monotonicMs]]. */
+    /** Monotonic deadline; the sweeper compares it against the manager's `ServerClock`. */
     expiresAtMonoMs: Long,
     pollIntervalMs: Long,
     status: TaskStatus,
@@ -303,7 +303,7 @@ private object TaskStore:
   * discarded. A terminal entry holds neither its fiber nor anything of the request.
   *
   * Clocks. Wire timestamps (`createdAt`, `lastUpdatedAt`) are wall-clock; expiry, the retention
-  * grace and eviction order use the monotonic clock ([[TaskManager.monotonicMs]]) so an NTP step or
+  * grace and eviction order use the monotonic clock (the manager's `ServerClock`) so an NTP step or
   * VM resume neither sweeps running tasks early nor extends retention.
   *
   * Atomicity. `create` runs under `uninterruptibleMask`; an interrupt of the creating fiber (client
@@ -326,14 +326,17 @@ class TaskManager[R] private[manager] (
     storeRef: Ref[TaskStore],
     newId: UIO[String],
     sweeperRef: Ref[Option[Fiber.Runtime[Nothing, Unit]]],
-    /** Test hook invoked at `"forked"` (task fiber parked, nothing registered) and `"registered"`
-      * (entry admitted, gate still closed). `_ => ZIO.unit` in production.
+    /** Test hook invoked at `"forked"` (task fiber parked, nothing registered), `"registered"`
+      * (entry admitted, gate still closed) and `"result-waiting"` (a [[result]] call has found its
+      * task and waits for the outcome next). `_ => ZIO.unit` in production.
       */
     private[fastmcp] val checkpoint: String => UIO[Unit],
     /** The `FiberRef` values the sweeper fiber runs with: those of the fiber that built this
       * manager ([[TaskManager.make]]: the server's runtime configuration, no request in sight).
       */
-    sweeperFiberRefs: FiberRefs = FiberRefs.empty
+    sweeperFiberRefs: FiberRefs = FiberRefs.empty,
+    /** The clock of expiry, the retention grace, eviction order and the sweeper's sleep. */
+    clock: ServerClock = ServerClock.system
 ):
 
   private val perOwnerRunning: Int = settings.maxConcurrentPerSession
@@ -435,7 +438,7 @@ class TaskManager[R] private[manager] (
         promise <- Promise.make[Throwable, Any]
         start <- Promise.make[Nothing, Boolean]
         nowMs <- ZIO.succeed(System.currentTimeMillis())
-        nowMono <- ZIO.succeed(TaskManager.monotonicMs())
+        nowMono <- ZIO.succeed(clock.monotonicMs())
         ttlMs = effectiveTtl(requestedTtlMs)
         // acquireReleaseExitWith runs the release uninterruptibly, so the status update + promise
         // completion always happen, even if the fiber is interrupted via tasks/cancel. A closed
@@ -624,7 +627,7 @@ class TaskManager[R] private[manager] (
     * the same `modify` that observes the drain, when the store is empty.
     */
   private def sweepLoop: UIO[Unit] =
-    ZIO.succeed(TaskManager.monotonicMs()).flatMap { now =>
+    ZIO.succeed(clock.monotonicMs()).flatMap { now =>
       storeRef
         .modify { s =>
           val expired = s.entries.values.filter(_.expiresAtMonoMs <= now).toList
@@ -638,7 +641,7 @@ class TaskManager[R] private[manager] (
           interruptRunning(expired) *>
             next.fold(ZIO.unit) { deadline =>
               val sleepMs = math.max(1L, math.min(deadline - now, settings.sweepIntervalMs))
-              ZIO.sleep(Duration.fromMillis(sleepMs)) *> sweepLoop
+              clock.sleep(Duration.fromMillis(sleepMs)) *> sweepLoop
             }
         }
     }
@@ -755,7 +758,7 @@ class TaskManager[R] private[manager] (
     storeRef.get.flatMap { s =>
       visible(s.entries, taskId, sessionId) match
         case None => ZIO.fail(new TaskNotFoundError(taskId))
-        case Some(entry) => entry.result.await
+        case Some(entry) => checkpoint("result-waiting") *> entry.result.await
     }
 
   // ------- input_required -------
@@ -781,7 +784,7 @@ class TaskManager[R] private[manager] (
       for
         waiter <- Promise.make[Nothing, Map[String, Json]]
         nowMs <- ZIO.succeed(System.currentTimeMillis())
-        nowMono <- ZIO.succeed(TaskManager.monotonicMs())
+        nowMono <- ZIO.succeed(clock.monotonicMs())
         parked <- storeRef.modify { s =>
           s.entries.get(taskId) match
             case Some(entry) if !entry.status.isTerminal =>
@@ -828,7 +831,7 @@ class TaskManager[R] private[manager] (
   ): UIO[Either[Throwable, Unit]] =
     type Wake = Option[(Promise[Nothing, Map[String, Json]], Map[String, Json])]
     val nowMs = System.currentTimeMillis()
-    val nowMono = TaskManager.monotonicMs()
+    val nowMono = clock.monotonicMs()
     storeRef
       .modify[(Either[Throwable, Unit], Wake)] { s =>
         visible(s.entries, taskId, None) match
@@ -999,7 +1002,7 @@ class TaskManager[R] private[manager] (
   ): UIO[Unit] =
     val settled = settle(taskId, exit)
     val nowMs = System.currentTimeMillis()
-    val nowMono = TaskManager.monotonicMs()
+    val nowMono = clock.monotonicMs()
     for
       recorded <- storeRef.modify { s =>
         s.entries.get(taskId) match
@@ -1174,26 +1177,29 @@ object TaskManager:
     if message.length <= MaxStatusMessageChars then message
     else message.take(MaxStatusMessageChars) + "..."
 
-  /** Monotonic milliseconds (`System.nanoTime`, available on JVM, Scala.js and Scala Native). Only
-    * differences are meaningful; never persisted or put on the wire.
-    */
-  private[manager] def monotonicMs(): Long = System.nanoTime() / 1_000_000L
-
   /** Allocate a new manager with empty state. `newId` supplies task ids; production passes the
     * platform backend's CSPRNG (`TransportBackend.randomId()`) because task ids are bearer handles
     * and shared code has no `SecureRandom`.
     */
   def make[R](settings: TaskSettings, newId: UIO[String]): UIO[TaskManager[R]] =
+    make(settings, newId, ServerClock.system)
+
+  /** [[make]] on `clock` instead of the system clock (the router's, see [[ServerClock]]). */
+  private[fastmcp] def make[R](
+      settings: TaskSettings,
+      newId: UIO[String],
+      clock: ServerClock
+  ): UIO[TaskManager[R]] =
     for
       store <- Ref.make(TaskStore.empty)
       sweeper <- Ref.make(Option.empty[Fiber.Runtime[Nothing, Unit]])
       // The building fiber's FiberRefs (loggers, executors, environment) become the sweeper's.
       fiberRefs <- ZIO.getFiberRefs
-    yield new TaskManager[R](settings, store, newId, sweeper, noCheckpoint, fiberRefs)
+    yield new TaskManager[R](settings, store, newId, sweeper, noCheckpoint, fiberRefs, clock)
 
   /** Synchronous constructor for non-ZIO call sites (tests). Internally identical to [[make]]. */
   def makeUnsafe[R](settings: TaskSettings, newId: UIO[String]): TaskManager[R] =
-    makeUnsafe(settings, newId, noCheckpoint)
+    makeUnsafe(settings, newId, noCheckpoint, ServerClock.system)
 
   /** Test constructor with a checkpoint hook (see [[TaskManager.checkpoint]]). */
   private[fastmcp] def makeUnsafe[R](
@@ -1201,12 +1207,22 @@ object TaskManager:
       newId: UIO[String],
       checkpoint: String => UIO[Unit]
   ): TaskManager[R] =
+    makeUnsafe(settings, newId, checkpoint, ServerClock.system)
+
+  /** Test constructor on `clock`: the test moves it to age tasks and to wake the sweeper. */
+  private[fastmcp] def makeUnsafe[R](
+      settings: TaskSettings,
+      newId: UIO[String],
+      checkpoint: String => UIO[Unit],
+      clock: ServerClock
+  ): TaskManager[R] =
     Unsafe.unsafe { implicit unsafe =>
       new TaskManager[R](
         settings,
         Ref.unsafe.make(TaskStore.empty),
         newId,
         Ref.unsafe.make(Option.empty[Fiber.Runtime[Nothing, Unit]]),
-        checkpoint
+        checkpoint,
+        clock = clock
       )
     }

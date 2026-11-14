@@ -36,6 +36,9 @@ If the native Mill launcher cannot reach Maven Central through a TLS-interceptin
 ./mill fast-mcp-scala.scalaNative.test              # Scala Native tests (links a native binary)
 ./mill fast-mcp-scala.scalaNative.nativeLink        # Standalone LLVM binary of AnnotatedServer
 ./mill fast-mcp-scala.jvm.test.testOnly com.tjclp.fastmcp.macros.ToolProcessorTest   # class selectors go through testOnly
+# testOnly ignores a selector that matches no class and still reports SUCCESS: check the
+# "Total number of tests run" line. A file with chained `package a` / `package b.c` clauses has
+# the FQCN a.b.c.<Class>.
 
 # Publish
 ./mill fast-mcp-scala.jvm.publishLocal              # Publish JVM artifact to ~/.ivy2/local
@@ -370,6 +373,13 @@ Uses Scalafmt with config in `.scalafmt.conf`. Always run `./mill fast-mcp-scala
 ## Testing
 
 JVM tests in `fast-mcp-scala/jvm/test/src/`. Scala.js tests in `fast-mcp-scala/js/test/src/`.
+
+No fixed sleeps in tests (CONTRIBUTING.md § "Tests and time"): server time goes through
+`ServerClock` (`private[fastmcp]`, carried by `McpRouter.clock`); a test passes
+`testkit.ManualClock` (`shared/test/src`) via `server.buildRouterOn(clock)` /
+`TaskManager.makeUnsafe(..., clock)` / `Session.makeOn(clock, id)` / `startHttpHandleOn(server, clock)`
+(Bun) and advances it, or waits on a condition with `testkit.Eventually` (ZIO) / `testkit.Await`
+(blocking, JVM + Native).
 
 Key test classes:
 - `ToolProcessorTest` - Integration tests for @Tool processing

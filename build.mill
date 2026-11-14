@@ -144,9 +144,14 @@ trait FastMCPPublishingBase extends PublishModule {
 
   override def artifactName: T[String] = "fast-mcp-scala"
 
-  /** Version derived from PUBLISH_VERSION env var (set by CI), or SNAPSHOT for local dev */
-  override def publishVersion: T[String] =
-    sys.env.getOrElse("PUBLISH_VERSION", "1.1.0-SNAPSHOT")
+  /** Version derived from PUBLISH_VERSION env var (set by CI), or SNAPSHOT for local dev.
+    *
+    * A `Task.Input` reading `Task.env`: Mill re-evaluates it on every run, so a warm `out/` or a
+    * running daemon never serves the version of an earlier invocation.
+    */
+  override def publishVersion: T[String] = Task.Input {
+    Task.env.getOrElse("PUBLISH_VERSION", "1.1.0-SNAPSHOT")
+  }
 
   override def pomSettings: T[PomSettings] = PomSettings(
     description = artifactDescription,

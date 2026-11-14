@@ -236,19 +236,22 @@ class UriTemplateMatcherTest extends AnyFunSuite with Matchers:
       ("x://{a}aaab{b}", "x://" + aaa, None)
     )
 
+    // The bound is on real time, because "linear" is the contract. It is generous on purpose:
+    // a linear pass over these inputs takes a few milliseconds and a quadratic one many seconds,
+    // so a second tells them apart on a machine with every core busy too.
     cases.foreach { (template, uri, expected) =>
       val (direct, directMs) = timed(ResourceTemplatePattern(template).matches(uri))
-      withClue(s"$template direct") {
+      withClue(s"$template direct, $directMs ms") {
         val _ = direct shouldBe expected
-        directMs should be < 100L
+        directMs should be < 1000L
       }
     }
 
     // Through the manager, every registered template is tried against each URI.
     cases.foreach { (template, uri, expected) =>
       val (found, ms) = timed(rm.findMatchingTemplate(uri))
-      withClue(s"$template via ResourceManager") {
-        ms should be < 100L
+      withClue(s"$template via ResourceManager, $ms ms") {
+        ms should be < 1000L
         expected match
           case Some(params) =>
             found.map(_._1.pattern) shouldBe Some(template)

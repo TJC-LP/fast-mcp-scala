@@ -110,6 +110,14 @@ LEVELS = {"NONE": 0, "LOW": 1, "MODERATE": 2, "HIGH": 3, "CRITICAL": 4}
 FAIL_AT = LEVELS["MODERATE"]
 ANNOTATE = os.environ.get("GITHUB_ACTIONS") == "true"
 
+
+def gh_escape(text, prop=False):
+    """Escape text for a GitHub workflow command (message, or a property value with prop=True)."""
+    text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    if prop:
+        text = text.replace(":", "%3A").replace(",", "%2C")
+    return text
+
 coords = [l.strip() for l in open(coords_file) if l.strip() and not l.startswith("#")]
 if not coords:
     die("osv-scan: coordinates file is empty")
@@ -228,15 +236,23 @@ for vid in sorted(hits):
         failing.append(vid)
     else:
         low.append(vid)
-    rows.append((status, level, source, vid, aliases, ", ".join(affected), fixed,
-                 (vuln.get("summary") or "").strip()))
+    # Everything printed below is third-party text. Collapse it to one line each, so a newline
+    # inside an advisory cannot start a line of its own (GitHub reads workflow commands from any
+    # stdout line of the step).
+    rows.append(tuple(" ".join(str(field).split()) for field in (
+        status, level, source, vid, aliases, ", ".join(affected), fixed,
+        vuln.get("summary") or "")))
 
 for status, level, source, vid, aliases, affected, fixed, summary in rows:
     print(f"{status:7} {level:8} [{source}] {vid}{' (' + aliases + ')' if aliases else ''}")
     print(f"        affects {affected}")
     print(f"        fixed in {fixed}  — {summary}")
     if ANNOTATE and status == "FAIL":
-        print(f"::error title=OSV {level} {vid}::{affected}: {summary} (fixed in {fixed})")
+        # Advisory text comes from api.osv.dev: escape it so it cannot end this workflow command
+        # and start another (GitHub's rules: `%`, CR, LF in the message; also `:` and `,` in a
+        # property value).
+        print(f"::error title={gh_escape('OSV ' + level + ' ' + vid, prop=True)}::"
+              + gh_escape(f"{affected}: {summary} (fixed in {fixed})"))
 for vid, entry in ignored.items():
     if vid not in used_ignores:
         print(f"note    stale ignore entry (matches no advisory): {entry}")

@@ -9,6 +9,7 @@ import com.tjclp.fastmcp.{*, given}
 import com.tjclp.fastmcp.core.Tasks
 import com.tjclp.fastmcp.server.router.Session
 import com.tjclp.fastmcp.server.transport.{MessageLoop, TransportBackend}
+import com.tjclp.fastmcp.testkit.{Eventually, ManualClock}
 
 /** What a handler can learn about the HTTP request that carried its call, and when a silent
   * 2026-07-28 reply starts: allow-listed request headers (`McpServerSettings.contextHeaders`),
@@ -24,11 +25,18 @@ class RequestContextHandlerTest extends AnyFunSuite with Matchers:
   private def runUnsafe[A](effect: ZIO[Any, Throwable, A]): A =
     Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(effect).getOrThrowFiberFailure())
 
+  /** The clock of the handler the running test built, and of the tools it calls: every handler
+    * here gets a clock of its own that only the test moves, so a heartbeat or a head grace fires
+    * when the test says it does and a tool is "silent for 1.5 s" of that clock.
+    */
+  private def clock: ManualClock = Tools.clock.get()
+
   private def makeHandler(settings: McpServerSettings): StreamableHttpHandler[Any] =
     val server = McpServer.typed[Any]("RequestContextT", "0.1.0", settings)
     val _ = server.scanAnnotations[Tools.type]
+    Tools.clock.set(new ManualClock)
     runUnsafe(
-      server.buildRouter.flatMap { router =>
+      server.buildRouterOn(clock).flatMap { router =>
         StreamableHttpHandler.make(router, server.settings, summon[TransportBackend].randomId())
       }
     )
@@ -283,10 +291,12 @@ class RequestContextHandlerTest extends AnyFunSuite with Matchers:
         case HttpReply.Json(_, body, _) => ZIO.succeed(body)
         case other => ZIO.fail(new RuntimeException(s"unexpected reply $other"))
       }
+    // The creating request is over (its reply was read to the end above); only now does the
+    // tool's pause end and the tool read its headers.
+    runUnsafe(poll) should include(""""status":"working"""")
+    runUnsafe(clock.awaitSleeping(300.millis) *> clock.advance(300.millis))
     val done = runUnsafe(
-      (ZIO.sleep(50.millis) *> poll)
-        .repeatUntil(_.contains(""""status":"completed""""))
-        .timeoutFail(new RuntimeException(s"task $taskId never completed"))(15.seconds)
+      Eventually(s"task $taskId completes")(poll)(_.contains(""""status":"completed""""))
     )
     done should include("email=creator@example.com")
     done should not include "poller@example.com"
@@ -326,23 +336,56 @@ class RequestContextHandlerTest extends AnyFunSuite with Matchers:
 
   private val heartbeat = McpServerSettings(keepAliveInterval = Some(java.time.Duration.ofMillis(100)))
 
-  /** Run `handler.post` and report how long the REPLY took to come back (not its stream). */
-  private def timedPost(handler: StreamableHttpHandler[Any], req: HttpRequest): (HttpReply, Long) =
-    val started = java.lang.System.nanoTime()
-    val reply = runUnsafe(handler.post(req))
-    (reply, (java.lang.System.nanoTime() - started) / 1000000L)
+  /** `handler.post` running on a fiber of its own, so the test can move the clock under it. */
+  private def posting(
+      handler: StreamableHttpHandler[Any],
+      req: HttpRequest
+  ): Fiber.Runtime[Nothing, HttpReply] =
+    runUnsafe(handler.post(req).forkDaemon)
+
+  /** Wait until fibers are parked in sleeps of exactly these lengths on the test's clock. */
+  private def parked(sleeps: Duration*): Unit =
+    runUnsafe(
+      ZIO
+        .foreachDiscard(sleeps)(clock.awaitSleeping)
+        .timeoutFail(new RuntimeException(s"nothing sleeps for $sleeps; sleeping: ${clock.sleeping}"))(
+          60.seconds
+        )
+    )
+
+  private def joined(reply: Fiber.Runtime[Nothing, HttpReply]): HttpReply =
+    runUnsafe(reply.join.timeoutFail(new RuntimeException("the reply never came back"))(60.seconds))
+
+  /** The frames of `reply`, read while the clock moves on by `further`: what the tool still has to
+    * wait before it answers.
+    */
+  private def framesAfter(reply: HttpReply, further: Duration, toolSleep: Duration): List[SseFrame] =
+    reply match
+      case HttpReply.Sse(_, stream, _) =>
+        val reading = runUnsafe(stream.runCollect.forkDaemon)
+        parked(toolSleep)
+        clock.advanceMs(further.toMillis)
+        runUnsafe(
+          reading.join.timeoutFail(new RuntimeException("the stream never ended"))(60.seconds)
+        ).toList
+      case other => fail(s"expected a streamed SSE reply, got $other")
 
   test("a silent 2026-07-28 call opens its SSE reply at the first heartbeat, then delivers") {
     val handler = makeHandler(heartbeat)
-    val (reply, elapsedMs) =
-      timedPost(handler, post(modernHeaders("silent"), modernCall(20, "silent")))
-    // The tool is silent for 1.5 s; the reply must not wait for it.
-    elapsedMs should be < 1000L
+    val pending = posting(handler, post(modernHeaders("silent"), modernCall(20, "silent")))
+    // The tool is silent for 1.5 s; the reply must not wait for it. Before the first heartbeat
+    // there is no reply...
+    parked(100.millis, 1500.millis)
+    clock.advanceMs(99L)
+    runUnsafe(pending.poll) shouldBe None
+    // ...and at the heartbeat there is one, with the tool still silent.
+    clock.advanceMs(1L)
+    val reply = joined(pending)
     reply.status shouldBe 200
     reply match
       case HttpReply.Sse(_, _, keepAlive) => keepAlive shouldBe Some(100.millis)
       case other => fail(s"expected an SSE reply, got $other")
-    val all = frames(reply)
+    val all = framesAfter(reply, further = 1400.millis, toolSleep = 1500.millis)
     all.headOption shouldBe Some(SseFrame.Ping)
     all.lastOption.map(_.data).getOrElse("") should include("silent-done")
     all.count(_.data.contains("silent-done")) shouldBe 1
@@ -350,9 +393,14 @@ class RequestContextHandlerTest extends AnyFunSuite with Matchers:
 
   test("without keepAliveInterval a silent 2026-07-28 call still waits for its first frame") {
     val handler = makeHandler(McpServerSettings())
-    val (reply, elapsedMs) =
-      timedPost(handler, post(modernHeaders("silent"), modernCall(21, "silent")))
-    elapsedMs should be >= 1000L
+    val pending = posting(handler, post(modernHeaders("silent"), modernCall(21, "silent")))
+    // Nothing but the tool waits on the clock: no timer was armed for this reply.
+    parked(1500.millis)
+    clock.sleeping shouldBe List(1500L)
+    clock.advanceMs(1499L)
+    runUnsafe(pending.poll) shouldBe None
+    clock.advanceMs(1L)
+    val reply = joined(pending)
     val all = frames(reply)
     all.exists(_ == SseFrame.Ping) shouldBe false
     all.lastOption.map(_.data).getOrElse("") should include("silent-done")
@@ -379,10 +427,12 @@ class RequestContextHandlerTest extends AnyFunSuite with Matchers:
 
   test("a status-mapped error after the reply opened is delivered in-band") {
     val handler = makeHandler(heartbeat)
-    val reply =
-      runUnsafe(handler.post(post(modernHeaders("late-roots"), modernCall(62, "late-roots"))))
+    val pending = posting(handler, post(modernHeaders("late-roots"), modernCall(62, "late-roots")))
+    parked(100.millis, 400.millis)
+    clock.advanceMs(100L)
+    val reply = joined(pending)
     reply.status shouldBe 200
-    val all = frames(reply)
+    val all = framesAfter(reply, further = 300.millis, toolSleep = 400.millis)
     all.headOption shouldBe Some(SseFrame.Ping)
     all.lastOption.map(_.data).getOrElse("") should include("-32021")
   }
@@ -462,14 +512,20 @@ class RequestContextHandlerTest extends AnyFunSuite with Matchers:
     // even though nothing has arrived and no heartbeat is configured.
     val handler = makeHandler(McpServerSettings())
     val sid = initialize(handler)
-    val (reply, elapsedMs) =
-      timedPost(handler, post(List("mcp-session-id" -> sid), legacyCall(75, "very-silent")))
-    elapsedMs should be >= 900L
-    elapsedMs should be < 2500L // the tool is silent for 3 s
+    val grace = StreamableHttpHandler.LegacyHeadGrace
+    val pending =
+      posting(handler, post(List("mcp-session-id" -> sid), legacyCall(75, "very-silent")))
+    parked(grace, 3.seconds)
+    // Not before the grace...
+    clock.advanceMs(grace.toMillis - 1L)
+    runUnsafe(pending.poll) shouldBe None
+    // ...and at it, with the tool silent for another two seconds.
+    clock.advanceMs(1L)
+    val reply = joined(pending)
     reply match
       case HttpReply.Sse(_, _, keepAlive) => keepAlive shouldBe None
       case other => fail(s"expected a streamed SSE reply, got $other")
-    val all = frames(reply)
+    val all = framesAfter(reply, further = 2.seconds, toolSleep = 3.seconds)
     all.exists(_ == SseFrame.Ping) shouldBe false
     all.size shouldBe 1
     all.head.data should include("very-silent-done")
@@ -479,7 +535,11 @@ class RequestContextHandlerTest extends AnyFunSuite with Matchers:
     val handler = makeHandler(McpServerSettings())
     val sid = initialize(handler)
     // 300 ms of silence is inside the 1 s grace.
-    runUnsafe(handler.post(post(List("mcp-session-id" -> sid), legacyCall(76, "briefly-silent")))) match
+    val pending =
+      posting(handler, post(List("mcp-session-id" -> sid), legacyCall(76, "briefly-silent")))
+    parked(StreamableHttpHandler.LegacyHeadGrace, 300.millis)
+    clock.advanceMs(300L)
+    joined(pending) match
       case HttpReply.SseComplete(_, frame) => frame.data should include("briefly-silent-done")
       case other => fail(s"expected a complete SSE reply, got $other")
   }
@@ -487,10 +547,11 @@ class RequestContextHandlerTest extends AnyFunSuite with Matchers:
   test("a silent legacy call opens its SSE reply at the first heartbeat too") {
     val handler = makeHandler(heartbeat)
     val sid = initialize(handler)
-    val (reply, elapsedMs) =
-      timedPost(handler, post(List("mcp-session-id" -> sid), legacyCall(74, "silent")))
-    elapsedMs should be < 1000L
-    val all = frames(reply)
+    val pending = posting(handler, post(List("mcp-session-id" -> sid), legacyCall(74, "silent")))
+    parked(100.millis, 1500.millis)
+    clock.advanceMs(100L)
+    val reply = joined(pending)
+    val all = framesAfter(reply, further = 1400.millis, toolSleep = 1500.millis)
     all.headOption shouldBe Some(SseFrame.Ping)
     all.lastOption.map(_.data).getOrElse("") should include("silent-done")
   }
@@ -527,6 +588,11 @@ object RequestContextHandlerTest:
 
   object Tools:
 
+    /** The clock the tools below pause on: the one of the handler the running test built. */
+    val clock = new java.util.concurrent.atomic.AtomicReference(new ManualClock)
+
+    private def pause(duration: Duration): UIO[Unit] = ZIO.suspendSucceed(clock.get().sleep(duration))
+
     @Tool(name = Some("whoami"), description = Some("Reports what the context says of the caller"))
     def whoami(ctx: McpContext): String =
       val email = ctx.header("X-Forwarded-eMail").getOrElse("<none>")
@@ -544,25 +610,25 @@ object RequestContextHandlerTest:
     )
     def slowWhoami(ctx: McpContext): ZIO[Any, Throwable, String] =
       // Read AFTER the pause, i.e. when the creating request is long gone.
-      ZIO.sleep(300.millis).as(s"email=${ctx.header("x-forwarded-email").getOrElse("<none>")};")
+      pause(300.millis).as(s"email=${ctx.header("x-forwarded-email").getOrElse("<none>")};")
 
     @Tool(name = Some("progress-then-done"), description = Some("Reports progress, then answers"))
     def progressThenDone(ctx: McpContext): ZIO[Any, Throwable, String] =
       ZIO.foreachDiscard(ctx.progressToken)(t => ctx.sendProgress(t, 0.5)).as("progress-done")
 
     @Tool(name = Some("very-silent"), description = Some("Says nothing for 3 s, then answers"))
-    def verySilent(): ZIO[Any, Throwable, String] = ZIO.sleep(3.seconds).as("very-silent-done")
+    def verySilent(): ZIO[Any, Throwable, String] = pause(3.seconds).as("very-silent-done")
 
     @Tool(name = Some("briefly-silent"), description = Some("Says nothing for 300 ms"))
     def brieflySilent(): ZIO[Any, Throwable, String] =
-      ZIO.sleep(300.millis).as("briefly-silent-done")
+      pause(300.millis).as("briefly-silent-done")
 
     @Tool(name = Some("silent"), description = Some("Says nothing for a while, then answers"))
-    def silent(): ZIO[Any, Throwable, String] = ZIO.sleep(1500.millis).as("silent-done")
+    def silent(): ZIO[Any, Throwable, String] = pause(1500.millis).as("silent-done")
 
     @Tool(name = Some("needs-roots"), description = Some("Asks for roots the client never declared"))
     def needsRoots(ctx: McpContext): ZIO[Any, Throwable, String] = ctx.listRoots().as("roots")
 
     @Tool(name = Some("late-roots"), description = Some("Is silent, then asks for undeclared roots"))
     def lateRoots(ctx: McpContext): ZIO[Any, Throwable, String] =
-      ZIO.sleep(400.millis) *> ctx.listRoots().as("roots")
+      pause(400.millis) *> ctx.listRoots().as("roots")

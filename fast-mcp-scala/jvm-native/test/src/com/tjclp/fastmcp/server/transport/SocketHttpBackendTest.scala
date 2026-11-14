@@ -15,6 +15,7 @@ import com.tjclp.fastmcp.{*, given}
 import com.tjclp.fastmcp.core.{LoggingLevel, ProgressToken, TaskSupport}
 import com.tjclp.fastmcp.server.TaskSettings
 import com.tjclp.fastmcp.server.transport.http.SocketHttpServer
+import com.tjclp.fastmcp.testkit.Await
 
 /** Wire-level contract of the `java.net.ServerSocket` HTTP backend, driven by a hand-rolled
   * blocking HTTP/1.1 client over `java.net.Socket` (there is no `java.net.http` on Scala Native).
@@ -38,8 +39,14 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
   case class ChattyArgs(msg: Option[String] = None)
   given JsonDecoder[ChattyArgs] = DeriveJsonDecoder.gen[ChattyArgs]
 
-  /** Emits progress + a log after a beat. Run as a task, those pushes land on the session's
-    * outbound queue — i.e. the standalone GET SSE channel.
+  /** What the `chatty` tool waits for before it emits, when a test holds it back; `None` lets it
+    * emit at once.
+    */
+  private val chattyHold =
+    new java.util.concurrent.atomic.AtomicReference(Option.empty[Promise[Nothing, Unit]])
+
+  /** Emits progress + a log, once the test lets it ([[chattyHold]]). Run as a task, those pushes
+    * land on the session's outbound queue — i.e. the standalone GET SSE channel.
     */
   private val chattyTool = McpTool
     .withSchema[ChattyArgs, String](
@@ -48,7 +55,7 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       description = Some("Emits progress and a log mid-task")
     )
     .contextual { (_, ctx) =>
-      ZIO.sleep(200.millis) *>
+      ZIO.suspendSucceed(chattyHold.get().fold(ZIO.unit)(_.await)) *>
         ctx.get.sendProgress(ProgressToken.StringToken("t"), 0.5) *>
         ctx.get.sendLogMessage(LoggingLevel.Info, Json.Str("mid-task")).as("chatty done")
     }
@@ -455,9 +462,15 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       stream.send(get(Some(sid)))
       stream.readHead()._1 shouldBe 200
 
-      val created = request(port, post(chattyTaskFrame, Some(sid)))
+      // The task emits only once its creating POST has been answered in full.
+      val release = runUnsafe(Promise.make[Nothing, Unit])
+      chattyHold.set(Some(release))
+      val created =
+        try request(port, post(chattyTaskFrame, Some(sid)))
+        finally chattyHold.set(None)
       created.status shouldBe 200
       created.body should include(""""taskId"""")
+      val _ = runUnsafe(release.succeed(()))
 
       // The task's pushes are emitted after its creating POST completed; they can only travel
       // over the standalone stream. Collect until the log line shows up.
@@ -1049,14 +1062,13 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
 
       // The server notices the disconnect on its read side (no writes are pending) and runs the
       // stream's finalizer, so a replacement GET is accepted instead of answering 409.
-      val deadline = java.lang.System.currentTimeMillis() + 5_000
-      var status = 409
-      while status == 409 && java.lang.System.currentTimeMillis() < deadline do
-        Thread.sleep(100)
+      val status = Await.until("a replacement GET is admitted") {
         val retry = new RawClient(port)
         retry.send(get(Some(sid)))
-        status = retry.readHead()._1
+        val code = retry.readHead()._1
         retry.close()
+        code
+      }(_ != 409)
       status shouldBe 200
     }
   }
@@ -1074,14 +1086,13 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       Thread.sleep(200)
       stream.abort()
 
-      val deadline = java.lang.System.currentTimeMillis() + 5_000
-      var status = 409
-      while status == 409 && java.lang.System.currentTimeMillis() < deadline do
-        Thread.sleep(100)
+      val status = Await.until("a replacement GET is admitted") {
         val retry = new RawClient(port)
         retry.send(get(Some(sid)))
-        status = retry.readHead()._1
+        val code = retry.readHead()._1
         retry.close()
+        code
+      }(_ != 409)
       status shouldBe 200
     }
   }

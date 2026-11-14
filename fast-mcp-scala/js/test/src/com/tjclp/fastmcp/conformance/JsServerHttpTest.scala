@@ -6,22 +6,24 @@ import scala.concurrent.Future
 import scala.concurrent.Promise
 import scala.scalajs.js
 
-import org.scalatest.BeforeAndAfterAll
+import org.scalatest.{Assertion, BeforeAndAfterAll}
 import org.scalatest.flatspec.AsyncFlatSpec
 import org.scalatest.matchers.should.Matchers
 import zio.*
 import zio.json.*
 
 import com.tjclp.fastmcp.core.*
-import com.tjclp.fastmcp.server.TaskSettings
+import com.tjclp.fastmcp.server.{ServerClock, TaskSettings}
 import com.tjclp.fastmcp.core.wire.Implementation
 import com.tjclp.fastmcp.server.router.{Middleware, RequestHandler, RouterBuilder, Session}
 import com.tjclp.fastmcp.server.transport.{
   BunHttpHandle,
   JsTransportBackend,
+  startHttpHandleOn,
   startStatefulHttp,
   startStatelessHttp
 }
+import com.tjclp.fastmcp.testkit.{Eventually, ManualClock}
 
 /** Exercises the shared `McpServer` over `JsTransportBackend`'s Bun HTTP listener (stateless +
   * stateful) using the global `fetch` API. No TS SDK client involvement — just a raw HTTP wire
@@ -139,17 +141,22 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     extra.foreach { case (k, v) => headers(k) = v }
     headers
 
-  private def statefulServer(name: String, port: Int, tweak: McpServerSettings => McpServerSettings)
-      : BunHttpHandle =
-    com.tjclp.fastmcp.server
-      .McpServer(
+  private def statefulServer(
+      name: String,
+      port: Int,
+      tweak: McpServerSettings => McpServerSettings,
+      clock: ServerClock = ServerClock.system
+  ): BunHttpHandle =
+    startHttpHandleOn(
+      com.tjclp.fastmcp.server.McpServer(
         name,
         "0.1.0",
         tweak(
           McpServerSettings(host = "127.0.0.1", port = port, httpEndpoint = "/mcp", stateless = false)
         )
-      )
-      .startStatefulHttp()
+      ),
+      clock
+    )
 
   private def setupStatelessServer(): Future[Unit] =
     val server = com.tjclp.fastmcp.server.McpServer(
@@ -923,29 +930,39 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   // `Clock.currentDateTime` → scala-java-time `ZoneId.systemDefault()` → `ZoneRulesException` on
   // Scala.js without tzdb — the fiber died silently after its first tick and never evicted.
   "evictIdleSessions on Bun" should "drop an idle session from the dictionary when forked via unsafe.fork" in {
+    // On a clock the test moves: the sweep runs once at the start (nothing is idle yet), then
+    // after each interval (a quarter of the timeout, at least a second).
+    val clock = new ManualClock
     val settings = McpServerSettings(sessionIdleTimeout = Some(java.time.Duration.ofMillis(100)))
-    runZio(Session.make("idle-unit")).flatMap { session =>
+    runZio(Session.makeOn(clock, "idle-unit")).flatMap { session =>
       val store = js.Dictionary[Session]("idle-unit" -> session)
       val sweeper = Unsafe.unsafe(implicit u =>
-        Runtime.default.unsafe.fork(JsTransportBackend.evictIdleSessions(store, settings))
+        Runtime.default.unsafe.fork(JsTransportBackend.evictIdleSessions(store, settings, clock))
       )
-      def poll(remaining: Int): Future[Boolean] =
-        if store.isEmpty then Future.successful(true)
-        else if remaining <= 0 then Future.successful(false)
-        else delay(200).flatMap(_ => poll(remaining - 1))
-      poll(remaining = 25).map { evicted =>
-        val _ = Unsafe.unsafe(implicit u => Runtime.default.unsafe.fork(sweeper.interrupt))
-        evicted shouldBe true
-      }
+      runZio(
+        for
+          _ <- clock.awaitSleeping(1.second)
+          beforeInterval = store.contains("idle-unit")
+          _ <- clock.advance(1.second)
+          _ <- Eventually.holds("the idle session leaves the store")(ZIO.succeed(store.isEmpty))
+          // The loop went on to its next wait: it did not die after its first tick.
+          _ <- clock.awaitSleeping(1.second)
+          _ <- sweeper.interrupt
+        yield beforeInterval
+      ).map(beforeInterval => beforeInterval shouldBe true)
     }
   }
 
   "startStatefulHttp" should "run the idle-session sweeper: a session idle past sessionIdleTimeout 404s" in {
     val idlePort = 38928
+    // An 8 s timeout is swept every 2 s of the server's clock, which only this test moves.
+    val clock = new ManualClock
+    val sweepEvery = 2.seconds
     val handle = statefulServer(
       "JsHttpIdleServer",
       idlePort,
-      _.copy(sessionIdleTimeout = Some(java.time.Duration.ofMillis(200)))
+      _.copy(sessionIdleTimeout = Some(java.time.Duration.ofSeconds(8))),
+      clock
     )
     def listWith(sid: String): Future[Int] =
       fetchAt(
@@ -956,14 +973,11 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
           body = legacyListBody
         )
       ).map(status)
-    // The sweep interval floors at 1 s; each poll `touch`es the session, so wait out the first
-    // sweep untouched, then allow a few more sweeps before giving up (5 s deadline).
-    def pollUntil404(sid: String, remaining: Int): Future[Int] =
-      listWith(sid).flatMap { st =>
-        if st == 404 || remaining <= 0 then Future.successful(st)
-        else delay(1100).flatMap(_ => pollUntil404(sid, remaining - 1))
-      }
+    // One sweep: wake the sweeper, then wait until it is asleep again (the sweep is over).
+    def sweep(): Future[Unit] =
+      runZio(clock.advance(sweepEvery) *> clock.awaitSleeping(sweepEvery))
     val checked = for
+      _ <- runZio(clock.awaitSleeping(sweepEvery))
       initResp <- fetchAt(
         idlePort,
         js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyInitBody)
@@ -971,18 +985,31 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       _ <- text(initResp)
       sid = initResp.headers.get("mcp-session-id").asInstanceOf[String]
       live <- listWith(sid)
-      _ <- delay(1600)
-      afterIdle <- pollUntil404(sid, remaining = 3)
+      // Swept 2 s after its last use: well inside the timeout, so it stays (and this request
+      // counts as a use).
+      _ <- sweep()
+      stillLive <- listWith(sid)
+      // Idle for 8 s at the fourth sweep from here: not yet past the timeout. For 10 s at the
+      // fifth: evicted.
+      _ <- sweep().flatMap(_ => sweep()).flatMap(_ => sweep()).flatMap(_ => sweep())
+      _ <- sweep()
+      afterIdle <- listWith(sid)
     yield
       status(initResp) shouldBe 200
       live shouldBe 200
+      stillLive shouldBe 200
       afterIdle shouldBe 404
     checked.andThen { case _ => handle.stop() }
   }
 
-  "maxSessions on Bun" should "evict the longest-idle session at the cap instead of growing the store" in {
-    val capPort = 38929
-    val handle = statefulServer("JsHttpSessionCapServer", capPort, _.copy(maxSessions = Some(2)))
+  /** The cap test: `between` runs wherever the clock may or may not move between two uses. */
+  private def evictsTheLongestIdle(
+      name: String,
+      capPort: Int,
+      clock: ManualClock,
+      between: () => Unit
+  ): Future[Assertion] =
+    val handle = statefulServer(name, capPort, _.copy(maxSessions = Some(2)), clock)
     def init(): Future[String] =
       fetchAt(
         capPort,
@@ -1001,14 +1028,15 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
           headers = jsonHeaders("mcp-session-id" -> sid),
           body = legacyListBody
         )
-      ).map(status)
+      ).map { resp => between(); status(resp) }
     val checked = for
       sid1 <- init()
-      _ <- delay(10)
+      _ = between()
       sid2 <- init()
-      _ <- delay(10)
+      _ = between()
       touched2 <- listWith(sid2) // sid1 is now unambiguously the longest-idle session
       sid3 <- init() // at the cap: evicts sid1, admits sid3
+      _ = between()
       after1 <- listWith(sid1)
       after2 <- listWith(sid2)
       after3 <- listWith(sid3)
@@ -1024,6 +1052,16 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       after4 shouldBe 200
       Option(sid3) should not be None
     checked.andThen { case _ => handle.stop() }
+
+  "maxSessions on Bun" should "evict the longest-idle session at the cap instead of growing the store" in {
+    // Every use happens at a reading of its own on the server's clock.
+    val clock = new ManualClock
+    evictsTheLongestIdle("JsHttpSessionCapServer", 38929, clock, () => clock.advanceMs(10L))
+  }
+
+  it should "evict the session used longest ago when all were last seen in the same millisecond" in {
+    // The clock never moves: every `lastSeen` is equal, and the order of use alone decides.
+    evictsTheLongestIdle("JsHttpSessionCapTieServer", 38944, new ManualClock, () => ())
   }
 
   "runHttp (stateful tasks)" should "handle tasks/list without params" in {
@@ -1095,9 +1133,9 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       .withSchema[PingArgs, PingResult](
         name = "slow-task",
         inputSchema = pingSchema,
-        description = Some("Sleeps long enough to be cancelled")
+        description = Some("Never finishes: there to be cancelled")
       )
-      .contextual((args, _) => ZIO.sleep(30.seconds).as(PingResult(args.msg)))
+      .contextual((args, _) => ZIO.never.as(PingResult(args.msg)))
       .withTaskSupport(TaskSupport.Optional)
     val taskIdPattern = """"taskId":"([^"]+)"""".r
 
@@ -1199,12 +1237,13 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
           .withSchema[PingArgs, String](
             name = "slow-progress",
             inputSchema = pingSchema,
-            description = Some("Reports progress, then sleeps")
+            description = Some("Reports progress, then never finishes")
           )
           .contextual { (_, ctx) =>
-            // The early notification opens the SSE stream; the sleep leaves it quiet for pings.
+            // The early notification opens the SSE stream; the tool then never finishes, which
+            // leaves the stream quiet for pings.
             ZIO.foreachDiscard(ctx.get.progressToken)(t => ctx.get.sendProgress(t, 0.5)) *>
-              ZIO.sleep(30.seconds).as("done")
+              ZIO.never.as("done")
           }
         runZio(server.tool(slowProgressTool) *> server.tool(sleepTool).unit).map { _ =>
           val handle = server.startStatefulHttp()
@@ -1556,7 +1595,6 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       ).map(status)
     val checked = for
       idle <- Future.sequence(List(init(), init()))
-      _ <- delay(10)
       // 16 initializes race for the two slots: snapshot + decision + insert are one synchronous
       // step, so nobody is refused (503) while an idle, GET-less session exists.
       raced <- Future.sequence((1 to 16).toList.map(_ => init()))
@@ -1761,12 +1799,35 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   }
 
   "a silent 2026-07-28 call (Bun)" should "open its SSE reply at the first heartbeat, then deliver" in {
+    // A server of its own, on a clock only this test moves: the heartbeat and the tool's silence
+    // are both lengths of that clock, so "at the first heartbeat, long before the tool answers"
+    // is checked as an order of events, not as a number of milliseconds on a busy machine.
+    val silentPort = 38945
     val sleepMs = 8 * keepAliveMs
-    for
-      _ <- contextServer()
-      started = js.Date.now()
-      resp <- fetchAt(
-        contextPort,
+    val clock = new ManualClock
+    val server = com.tjclp.fastmcp.server.McpServer(
+      "JsHttpSilentServer",
+      "0.1.0",
+      McpServerSettings(
+        host = "127.0.0.1",
+        port = silentPort,
+        httpEndpoint = "/mcp",
+        keepAliveInterval = Some(java.time.Duration.ofMillis(keepAliveMs.toLong))
+      )
+    )
+    val silentTool = McpTool
+      .withSchema[SleepArgs, String](
+        name = "sleep",
+        inputSchema = sleepSchema,
+        description = Some("Is silent for millis of the test's clock, then replies")
+      )
+      .contextual((args, _) => clock.sleep(args.millis.millis).as(s"slept ${args.millis}"))
+    runZio(server.tool(silentTool).unit).flatMap { _ =>
+      val handle = startHttpHandleOn(server, clock)
+      @SuppressWarnings(Array("org.wartremover.warts.Var"))
+      var headIn = false
+      val pending = fetchAt(
+        silentPort,
         js.Dynamic.literal(
           method = "POST",
           headers = jsonHeaders(
@@ -1778,16 +1839,28 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
           body =
             s"""{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"sleep","arguments":{"millis":$sleepMs},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
         )
-      )
-      headersAfterMs = js.Date.now() - started
-      body <- withTimeout(text(resp), sleepMs + 5000, "silent modern call")
-    yield
-      status(resp) shouldBe 200
-      header(resp, "content-type").getOrElse("") should include("text/event-stream")
-      // The response head arrived at the first heartbeat, long before the tool answered.
-      headersAfterMs should be < (sleepMs - 2 * keepAliveMs).toDouble
-      body should startWith(": ping")
-      body should include(s"slept $sleepMs")
+      ).map { resp => headIn = true; resp }
+      val checked = for
+        // The request is in: its head timer and the tool are both waiting on the clock.
+        _ <- runZio(
+          clock.awaitSleeping(keepAliveMs.millis) *> clock.awaitSleeping(sleepMs.millis)
+        )
+        headBeforeHeartbeat = headIn
+        _ <- runZio(clock.advance(keepAliveMs.millis))
+        resp <- pending
+        // The response head is here, and the tool has not answered: it is still asleep.
+        toolSilentAtHead = clock.sleeping.contains(sleepMs.toLong)
+        _ <- runZio(clock.advance(sleepMs.millis))
+        body <- withTimeout(text(resp), WaitMs, "silent modern call")
+      yield
+        headBeforeHeartbeat shouldBe false
+        status(resp) shouldBe 200
+        header(resp, "content-type").getOrElse("") should include("text/event-stream")
+        toolSilentAtHead shouldBe true
+        body should startWith(": ping")
+        body should include(s"slept $sleepMs")
+      checked.andThen { case _ => handle.stop() }
+    }
   }
 
   "a 2026-07-28 reply that is complete at once (Bun)" should "be a fixed-length SSE body" in {
@@ -1830,20 +1903,24 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private var watchedInterrupted = 0
 
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private var watchedStarted = 0
+
   private val watchedTool = McpTool
     .withSchema[SleepArgs, String](
       name = "watched",
       inputSchema = sleepSchema,
-      description = Some("Sleeps silently and counts how often it is interrupted")
+      description = Some("Never answers; counts how often it started and was interrupted")
     )
-    .contextual { (args, _) =>
-      ZIO
-        .sleep(args.millis.millis)
+    .contextual { (_, _) =>
+      (ZIO.succeed { watchedStarted += 1 } *> ZIO.never)
         .as("watched done")
         .onInterrupt(ZIO.succeed { watchedInterrupted += 1 })
     }
 
-  /** No `keepAliveInterval`: nothing but the abort signal can end the wait for a first frame. */
+  /** No `keepAliveInterval`, and a clock nobody moves, so the legacy head grace never passes
+    * either: nothing but the abort signal can end the wait for a first frame.
+    */
   private def abortServer(): Future[BunHttpHandle] =
     abortHandle match
       case Some(handle) => Future.successful(handle)
@@ -1854,28 +1931,33 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
           McpServerSettings(host = "127.0.0.1", port = abortPort, httpEndpoint = "/mcp")
         )
         runZio(server.tool(watchedTool).unit).map { _ =>
-          val handle = server.startStatefulHttp()
+          val handle = startHttpHandleOn(server, new ManualClock)
           abortHandle = Some(handle)
           handle
         }
 
-  /** POST, then abort the request after `afterMs`, as a client that gives up does. */
-  private def abortedPost(headers: js.Dictionary[String], body: String, afterMs: Int): Future[Unit] =
+  /** POST, then abort the request once `handlerRuns`, as a client that gives up does. */
+  private def abortedPost(headers: js.Dictionary[String], body: String)(
+      handlerRuns: => Boolean
+  ): Future[Unit] =
     val controller = js.Dynamic.newInstance(js.Dynamic.global.AbortController)()
     val call = fetchAt(
       abortPort,
       js.Dynamic.literal(method = "POST", headers = headers, body = body, signal = controller.signal)
     )
-    delay(afterMs).flatMap { _ =>
+    waitFor("the handler's start", WaitMs)(handlerRuns).flatMap { _ =>
       val _ = controller.abort()
       call.map(_ => ()).recover { case _ => () }
     }
+
+  /** The deadline of a [[waitFor]]: far beyond what a healthy run needs on a busy host. */
+  private val WaitMs = 60000
 
   private def waitFor(what: String, timeoutMs: Int)(done: => Boolean): Future[Unit] =
     def loop(left: Int): Future[Unit] =
       if done then Future.unit
       else if left <= 0 then Future.failed(new RuntimeException(s"$what did not happen in ${timeoutMs}ms"))
-      else delay(50).flatMap(_ => loop(left - 50))
+      else delay(5).flatMap(_ => loop(left - 5))
     loop(timeoutMs)
 
   "a client that goes away before the response exists (Bun)" should "cancel the handler on both protocol paths" in {
@@ -1897,13 +1979,14 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       )
       _ <- text(ack)
       before = watchedInterrupted
-      // Legacy: aborted 200 ms in, inside the 1 s grace, so no response exists yet.
+      started = watchedStarted
+      // Legacy: aborted while the tool runs and before the head grace (which never passes on
+      // this server's clock), so no response exists yet.
       _ <- abortedPost(
         jsonHeaders("mcp-session-id" -> sid),
-        """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"watched","arguments":{"millis":30000}}}""",
-        200
-      )
-      _ <- waitFor("the legacy handler's interruption", 5000)(watchedInterrupted >= before + 1)
+        """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"watched","arguments":{"millis":30000}}}"""
+      )(watchedStarted >= started + 1)
+      _ <- waitFor("the legacy handler's interruption", WaitMs)(watchedInterrupted >= before + 1)
       // 2026-07-28: the wait for a first frame is unbounded without keepAliveInterval.
       _ <- abortedPost(
         jsonHeaders(
@@ -1911,10 +1994,9 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
           "mcp-method" -> "tools/call",
           "mcp-name" -> "watched"
         ),
-        """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"watched","arguments":{"millis":30000},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}""",
-        200
-      )
-      _ <- waitFor("the 2026-07-28 handler's interruption", 5000)(watchedInterrupted >= before + 2)
+        """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"watched","arguments":{"millis":30000},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+      )(watchedStarted >= started + 2)
+      _ <- waitFor("the 2026-07-28 handler's interruption", WaitMs)(watchedInterrupted >= before + 2)
     yield watchedInterrupted shouldBe before + 2
   }
 
@@ -1926,7 +2008,10 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   private var initInterrupted = 0
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private var initDelayMs = 30000
+  private var initParks = true
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private var initStarted = 0
 
   "a client that goes away during a header-less initialize (Bun)" should "stop its dispatch and store no session" in {
     val initPort = 38943
@@ -1938,9 +2023,11 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
         if method != "initialize" then next
         else
           (session, params) =>
-            ZIO
-              .sleep(initDelayMs.millis)
-              .onInterrupt(ZIO.succeed { initInterrupted += 1 }) *> next(session, params)
+            ZIO.suspendSucceed {
+              initStarted += 1
+              (if initParks then ZIO.never else ZIO.unit)
+                .onInterrupt(ZIO.succeed { initInterrupted += 1 })
+            } *> next(session, params)
     val router = RouterBuilder.build[Any](
       serverInfo = Implementation(name = "JsHttpInitAbortServer", version = "0.1.0"),
       instructions = None,
@@ -1960,21 +2047,21 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
 
     val checked =
       for
-        // Aborted 200 ms into an initialize that would take 30 s.
+        // Aborted while the handler chain of an initialize that never answers is parked.
         _ <- {
           val controller = js.Dynamic.newInstance(js.Dynamic.global.AbortController)()
           val call = initialize(controller.signal)
-          delay(200).flatMap { _ =>
+          waitFor("the initialize dispatch's start", WaitMs)(initStarted >= 1).flatMap { _ =>
             val _ = controller.abort()
             call.map(_ => ()).recover { case _ => () }
           }
         }
-        _ <- waitFor("the abandoned initialize's interruption", 5000)(initInterrupted >= 1)
+        _ <- waitFor("the abandoned initialize's interruption", WaitMs)(initInterrupted >= 1)
         // Let whatever follows the interruption on the server settle before looking at the store.
         _ <- delay(100)
         abandonedStored = store.size
         // An initialize whose client stays is answered and stored as before.
-        _ = initDelayMs = 20
+        _ = initParks = false
         kept <- initialize(js.undefined)
         _ <- text(kept)
       yield

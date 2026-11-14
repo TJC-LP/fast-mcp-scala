@@ -18,7 +18,7 @@ class JvmStdinReaderTest extends AnyFunSuite with Matchers:
   private def runUnsafe[A](effect: ZIO[Any, Throwable, A]): A =
     Unsafe.unsafe(implicit u =>
       Runtime.default.unsafe
-        .run(effect.timeoutFail(new RuntimeException("stdin reader test hung"))(30.seconds))
+        .run(effect.timeoutFail(new RuntimeException("stdin reader test hung"))(60.seconds))
         .getOrThrowFiberFailure()
     )
 

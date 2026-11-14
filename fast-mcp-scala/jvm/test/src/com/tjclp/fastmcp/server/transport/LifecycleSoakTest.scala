@@ -10,6 +10,7 @@ import zio.stream.ZPipeline
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import com.tjclp.fastmcp.server.*
+import com.tjclp.fastmcp.testkit.{Await, Eventually, ManualClock}
 import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
 /** RC1 soak gate (docs/2026-07-28-upgrade.md): disconnected `subscriptions/listen` streams and
@@ -22,7 +23,7 @@ class LifecycleSoakTest extends AnyFunSuite with Matchers:
   object SoakServer:
 
     @Tool(name = Some("blocky"), description = Some("Long-running"), taskSupport = Some("optional"))
-    def blocky(): ZIO[Any, Throwable, String] = ZIO.sleep(30.seconds).as("blocky")
+    def blocky(): ZIO[Any, Throwable, String] = ZIO.never.as("blocky")
 
     @Tool(
       name = Some("quick"),
@@ -39,7 +40,7 @@ class LifecycleSoakTest extends AnyFunSuite with Matchers:
   private def runUnsafe[A](effect: ZIO[Any, Throwable, A]): A =
     Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(effect).getOrThrowFiberFailure())
 
-  private def buildRoutes(): Routes[Any, Response] =
+  private def buildRoutes(clock: ServerClock = ServerClock.system): Routes[Any, Response] =
     val server = McpServer.typed[Any](
       "SoakT",
       "0.1.0",
@@ -47,7 +48,7 @@ class LifecycleSoakTest extends AnyFunSuite with Matchers:
     )
     val _ = server.scanAnnotations[SoakServer.type]
     runUnsafe(
-      server.buildRouter.flatMap(r =>
+      server.buildRouterOn(clock).flatMap(r =>
         JvmHttpBackend.httpRoutes(r, server.settings, ZEnvironment.empty)
       )
     )
@@ -72,9 +73,9 @@ class LifecycleSoakTest extends AnyFunSuite with Matchers:
   /** Poll rather than sleep-then-assert: interruption finalizers settle at their own pace. */
   private def awaitRootsSettle(before: Int, tolerance: Int = 5): Int =
     runUnsafe(
-      (ZIO.sleep(25.millis) *> Fiber.roots.map(_.size))
-        .repeatUntil(_ - before <= tolerance)
-        .timeoutFail(new RuntimeException("root fibers did not settle"))(10.seconds)
+      Eventually(s"root fibers settle within $tolerance of $before")(Fiber.roots.map(_.size))(
+        _ - before <= tolerance
+      )
     )
 
   test("dropped subscriptions/listen streams leave no fibers behind") {
@@ -95,7 +96,7 @@ class LifecycleSoakTest extends AnyFunSuite with Matchers:
             .scan("")(_ + _)
             .takeUntil(_.contains("acknowledged"))
             .runLast
-            .timeoutFail(new RuntimeException("no acknowledgement"))(10.seconds)
+            .timeoutFail(new RuntimeException("no acknowledgement"))(60.seconds)
             .unit
         }
         // Scope close ends the response stream mid-listen: the finalizer must interrupt the
@@ -104,15 +105,16 @@ class LifecycleSoakTest extends AnyFunSuite with Matchers:
 
     val before = rootFibers
     runUnsafe(ZIO.foreachDiscard(1 to 25)(openReadAckAndDrop))
-    runUnsafe(ZIO.sleep(500.millis)) // let interruption finalizers settle
-    val after = rootFibers
+    // Interruption finalizers settle at their own pace: wait for the count, do not guess a delay.
+    val after = awaitRootsSettle(before)
     withClue(s"root fibers before=$before after=$after: ") {
       (after - before) should be <= 5
     }
   }
 
   test("expired task TTLs interrupt running work and sweep the entries") {
-    val routes = buildRoutes()
+    val clock = new ManualClock
+    val routes = buildRoutes(clock)
     val sid = initSession(routes)
     def augmented(id: Int): String =
       s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"blocky","arguments":{},"task":{"ttl":300}}}"""
@@ -123,16 +125,20 @@ class LifecycleSoakTest extends AnyFunSuite with Matchers:
       val body = bodyOf(post(routes, augmented(100 + i), Some(sid)))
       TaskIdPattern.findFirstMatchIn(body).map(_.group(1)).getOrElse(fail(s"no taskId in: $body"))
     }
-    // Each task sleeps 30s; the 300ms TTL must interrupt the work and sweep the entry.
-    runUnsafe(ZIO.sleep(1500.millis))
-    taskIds.foreach { taskId =>
-      val reply = bodyOf(
-        post(
-          routes,
-          s"""{"jsonrpc":"2.0","id":200,"method":"tasks/get","params":{"taskId":"$taskId"}}""",
-          Some(sid)
-        )
+    def get(taskId: String): String = bodyOf(
+      post(
+        routes,
+        s"""{"jsonrpc":"2.0","id":200,"method":"tasks/get","params":{"taskId":"$taskId"}}""",
+        Some(sid)
       )
+    )
+    // No task ever finishes by itself. One millisecond before the TTL all ten are still there...
+    clock.advanceMs(299L)
+    taskIds.foreach(taskId => get(taskId) should include(""""status":"working""""))
+    // ...and at the TTL the sweeper must interrupt the work and remove the entries.
+    clock.advanceMs(1L)
+    taskIds.foreach { taskId =>
+      val reply = Await.until(s"task $taskId is swept")(get(taskId))(_.contains("Unknown task"))
       reply should include(""""code":-32602""")
       reply should include("Unknown task")
     }

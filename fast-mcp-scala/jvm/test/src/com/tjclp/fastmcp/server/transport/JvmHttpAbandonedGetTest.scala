@@ -11,6 +11,7 @@ import zio.*
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 import com.tjclp.fastmcp.server.transport.http.StreamableHttpHandler
+import com.tjclp.fastmcp.testkit.Await
 
 /** The legacy GET slot over a real zio-http (netty) listener: a client that closes its GET
   * connection as soon as it has read the response head must not leave the session answering 409 to
@@ -86,14 +87,12 @@ class JvmHttpAbandonedGetTest extends AnyFunSuite with Matchers:
     (socket, statusOf(readHead(socket)))
 
   private def awaitListening(port: Int): Unit =
-    val deadline = java.lang.System.nanoTime() + 20_000_000_000L
-    var up = false
-    while !up && java.lang.System.nanoTime() < deadline do
+    Await.holds(s"the server listens on port $port") {
       try
         connect(port).close()
-        up = true
-      catch case _: java.io.IOException => Thread.sleep(50)
-    if !up then fail(s"the server never listened on port $port")
+        true
+      catch case _: java.io.IOException => false
+    }
 
   test("a GET closed right after its response head frees the session's GET slot") {
     val port = freePort()
@@ -112,13 +111,14 @@ class JvmHttpAbandonedGetTest extends AnyFunSuite with Matchers:
       // first, cold round always does) or after.
       val perRoundMs = StreamableHttpHandler.UnstartedReplyGrace.toMillis + 15000L
       (1 to 12).foreach { round =>
-        val deadline = java.lang.System.nanoTime() + perRoundMs * 1_000_000L
-        var status = 409
-        while status == 409 && java.lang.System.nanoTime() < deadline do
-          val (socket, code) = openGet(port, sid)
-          socket.close()
-          status = code
-          if code == 409 then Thread.sleep(50)
+        val status =
+          try
+            Await.until(s"round $round: a GET is admitted", perRoundMs) {
+              val (socket, code) = openGet(port, sid)
+              socket.close()
+              code
+            }(_ != 409)
+          catch case _: AssertionError => 409
         withClue(s"round $round: the GET slot was still taken after the previous client left: ") {
           status shouldBe 200
         }

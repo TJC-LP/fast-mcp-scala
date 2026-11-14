@@ -46,7 +46,10 @@ jobs:
 
       # Dependency resolution only (no compilation). The job token is scoped to this Mill step, as
       # in ci.yml; the OSV query step below talks to a third party and gets no token.
+      # `shell: bash` makes GitHub run the step with `-eo pipefail`; the default shell has no
+      # pipefail, so a failed resolve would be hidden by `tee` and the gate would scan nothing.
       - name: Resolve the production classpath (jvm, js, native)
+        shell: bash
         run: scripts/osv-scan.sh resolve | tee osv-coords.list
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill step (not the query step)

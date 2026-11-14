@@ -71,9 +71,12 @@ class FromJsonAstDecodeTest extends AnyFunSuite:
     val result = pattern.matches(uri)
     val elapsed = now() - start
     assert(result.isEmpty)
-    assert(elapsed < 100.0, s"took $elapsed ms")
+    // Real time, because "linear" is the contract; generous, because a linear pass takes a few
+    // milliseconds and a quadratic one many seconds, whatever else the machine is doing.
+    assert(elapsed < 1000.0, s"took $elapsed ms")
     val three = ResourceTemplatePattern("x://{a}.{b}.{c}")
     val start2 = now()
     assert(three.matches("x://" + "a" * 99_999 + ".").isEmpty)
-    assert(now() - start2 < 100.0)
+    val elapsed2 = now() - start2
+    assert(elapsed2 < 1000.0, s"took $elapsed2 ms")
   }

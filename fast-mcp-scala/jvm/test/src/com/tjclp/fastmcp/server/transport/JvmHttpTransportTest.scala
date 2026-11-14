@@ -7,6 +7,7 @@ import zio.*
 import zio.http.*
 
 import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.testkit.{Eventually, ManualClock}
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.router.Session
@@ -20,23 +21,28 @@ import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
   */
 class JvmHttpTransportTest extends AnyFunSuite with Matchers:
 
+  /** How many times the `slow` tool has started running: what a test waits on before it cancels. */
+  private val slowStarted = new java.util.concurrent.atomic.AtomicInteger(0)
+
   object TestServer:
     @Tool(name = Some("add"), description = Some("Add two numbers"))
     def add(@Param("a") a: Int, @Param("b") b: Int): Int = a + b
 
-    @Tool(name = Some("slow"), description = Some("Sleeps forever (cancellation target)"))
-    def slow(): ZIO[Any, Throwable, String] = ZIO.sleep(30.seconds).as("done")
+    @Tool(name = Some("slow"), description = Some("Never finishes (cancellation target)"))
+    def slow(): ZIO[Any, Throwable, String] =
+      ZIO.succeed(slowStarted.incrementAndGet()) *> ZIO.never.as("done")
 
     @Tool(name = Some("needs-roots"), description = Some("Requires the roots capability"))
     def needsRoots(ctx: McpContext): ZIO[Any, Throwable, String] =
       ctx.listRoots().as("roots received")
 
-    @Tool(name = Some("slow-progress"), description = Some("Reports progress, then sleeps"))
+    @Tool(name = Some("slow-progress"), description = Some("Reports progress, then never finishes"))
     def slowProgress(ctx: McpContext): ZIO[Any, Throwable, String] =
       // The early notification opens the SSE stream (modern POSTs hold the response until the
-      // first queued message); the long sleep then leaves the stream quiet for keepalives.
+      // first queued message); the tool then never finishes, which leaves the stream quiet for
+      // keepalives.
       ZIO.foreachDiscard(ctx.progressToken)(t => ctx.sendProgress(t, 0.5)) *>
-        ZIO.sleep(30.seconds).as("done")
+        ZIO.never.as("done")
 
     @Tool(name = Some("boom"), description = Some("Dies with a defect (error-boundary target)"))
     def boom(): ZIO[Any, Throwable, String] =
@@ -66,7 +72,8 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
       allowedOrigins: Option[Set[String]] = None,
       maxRequestBodyBytes: Int = 1024 * 1024,
       maxSessions: Option[Int] = Some(1000),
-      sessionIdleTimeout: Option[java.time.Duration] = Some(java.time.Duration.ofMinutes(30))
+      sessionIdleTimeout: Option[java.time.Duration] = Some(java.time.Duration.ofMinutes(30)),
+      clock: ServerClock = ServerClock.system
   ): Routes[Any, Response] =
     val server = McpServer.typed[Any](
       "T",
@@ -83,7 +90,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     )
     val _ = server.scanAnnotations[TestServer.type]
     runUnsafe(
-      server.buildRouter.flatMap(r =>
+      server.buildRouterOn(clock).flatMap(r =>
         JvmHttpBackend.httpRoutes(r, server.settings, ZEnvironment.empty)
       )
     )
@@ -272,6 +279,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     val cancelFrame =
       """{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"""
 
+    val startedBefore = slowStarted.get()
     val (cancelStatus, body) = runUnsafe(
       for
         // Drain the slow call's SSE body in a fiber — it only completes when the stream closes.
@@ -286,7 +294,8 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
           )
           .flatMap(_.body.asString)
           .fork
-        _ <- ZIO.sleep(300.millis) // let the dispatch start
+        // The tool is running: the cancellation below is for a request in flight.
+        _ <- Eventually("the slow tool has started")(ZIO.succeed(slowStarted.get()))(_ > startedBefore)
         cancelResp <- ZIO.scoped(
           routes.runZIO(
             Request
@@ -296,7 +305,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
           )
         )
         body <- bodyFiber.join
-          .timeoutFail(new RuntimeException("cancelled stream never closed"))(10.seconds)
+          .timeoutFail(new RuntimeException("cancelled stream never closed"))(60.seconds)
       yield (cancelResp.status, body)
     )
     cancelStatus shouldBe Status.Accepted
@@ -317,6 +326,71 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
         _ <- session.cancelInflight(com.tjclp.fastmcp.jsonrpc.RequestId.NumId(1))
         poll <- fiber.poll
       yield poll shouldBe None // still running — the cancel was ignored
+    )
+  }
+
+  test("a cancellation processed before its request is registered still cancels it; initialize stays exempt; the memory is bounded") {
+    import com.tjclp.fastmcp.jsonrpc.RequestId.NumId
+    runUnsafe(
+      for
+        session <- Session.make("early-cancel")
+        // The cancellation arrives first.
+        _ <- session.cancelInflight(NumId(7))
+        handler <- ZIO.never.forkDaemon
+        _ <- session.trackInflight(NumId(7), "tools/call", handler)
+        exit <- handler.await.timeoutFail(new RuntimeException("not cancelled"))(60.seconds)
+        // One cancellation cancels one request: the entry is consumed.
+        again <- ZIO.never.forkDaemon
+        _ <- session.clearInflight(NumId(7))
+        _ <- session.trackInflight(NumId(7), "tools/call", again)
+        stillRunning <- again.poll
+        // initialize is never cancelled, early or late.
+        _ <- session.cancelInflight(NumId(1))
+        init <- ZIO.never.forkDaemon
+        _ <- session.trackInflight(NumId(1), "initialize", init)
+        initPoll <- init.poll
+        // Only the most recent MaxEarlyCancels unknown ids are remembered.
+        _ <- ZIO.foreachDiscard(100 to 100 + Session.MaxEarlyCancels)(n =>
+          session.cancelInflight(NumId(n.toLong))
+        )
+        oldest <- ZIO.never.forkDaemon
+        _ <- session.trackInflight(NumId(100), "tools/call", oldest)
+        oldestPoll <- oldest.poll
+        newest <- ZIO.never.forkDaemon
+        _ <- session.trackInflight(NumId(100L + Session.MaxEarlyCancels), "tools/call", newest)
+        newestExit <- newest.await.timeoutFail(new RuntimeException("not cancelled"))(60.seconds)
+        _ <- again.interrupt *> init.interrupt *> oldest.interrupt
+      yield
+        exit.isInterrupted shouldBe true
+        stillRunning shouldBe None
+        initPoll shouldBe None
+        oldestPoll shouldBe None
+        newestExit.isInterrupted shouldBe true
+    )
+  }
+
+  test("an early cancellation applies to a request registered within the window, and to none after it") {
+    import com.tjclp.fastmcp.jsonrpc.RequestId.NumId
+    val clock = new ManualClock
+    runUnsafe(
+      for
+        session <- Session.makeOn(clock, "early-cancel-window")
+        // Registered at the last millisecond of the window: still cancelled.
+        _ <- session.cancelInflight(NumId(7))
+        _ <- clock.advance(Session.EarlyCancelWindowMs.millis)
+        inTime <- ZIO.never.forkDaemon
+        _ <- session.trackInflight(NumId(7), "tools/call", inTime)
+        inTimeExit <- inTime.await.timeoutFail(new RuntimeException("not cancelled"))(60.seconds)
+        // Registered one millisecond after it: the cancellation was for some earlier request.
+        _ <- session.cancelInflight(NumId(8))
+        _ <- clock.advance((Session.EarlyCancelWindowMs + 1).millis)
+        late <- ZIO.never.forkDaemon
+        _ <- session.trackInflight(NumId(8), "tools/call", late)
+        latePoll <- late.poll
+        _ <- late.interrupt
+      yield
+        inTimeExit.isInterrupted shouldBe true
+        latePoll shouldBe None
     )
   }
 
@@ -345,7 +419,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
       getResp.body.asStream
         .take(64)
         .runCollect
-        .timeoutFail(new RuntimeException("no keepalive emitted"))(10.seconds)
+        .timeoutFail(new RuntimeException("no keepalive emitted"))(60.seconds)
     )
     new String(bytes.toArray, java.nio.charset.StandardCharsets.UTF_8) should include("ping")
   }
@@ -386,7 +460,7 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
         .scan("")(_ + _)
         .takeUntil(_.contains("ping"))
         .runLast
-        .timeoutFail(new RuntimeException("no keepalive on the modern POST SSE"))(10.seconds)
+        .timeoutFail(new RuntimeException("no keepalive on the modern POST SSE"))(60.seconds)
     )
     seen.getOrElse("") should include("ping")
   }
@@ -615,11 +689,13 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
   // ---- F12: bounded legacy session store ----
 
   test("maxSessions: at the cap the longest-idle session without a live GET is evicted, not the newcomer") {
-    val routes = buildRoutes(stateless = false, maxSessions = Some(2))
+    // Each step happens at its own reading of the server's clock: no two `lastSeen` values tie.
+    val clock = new ManualClock
+    val routes = buildRoutes(stateless = false, maxSessions = Some(2), clock = clock)
     val sid1 = initSid(routes)
-    Thread.sleep(5)
+    clock.advanceMs(5L)
     val sid2 = initSid(routes)
-    Thread.sleep(5)
+    clock.advanceMs(5L)
     // Touch sid2 so sid1 is unambiguously the longest-idle session.
     post(routes, listFrame, Some(sid2)).status shouldBe Status.Ok
 
@@ -662,15 +738,26 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
 
   test("maxSessions: when every stored session holds a live GET, the longest-idle one past sessionIdleTimeout is evicted instead of refusing 503") {
     val idle = java.time.Duration.ofMillis(300)
-    val routes =
-      buildRoutes(stateless = false, maxSessions = Some(2), sessionIdleTimeout = Some(idle))
+    val clock = new ManualClock
+    val routes = buildRoutes(
+      stateless = false,
+      maxSessions = Some(2),
+      sessionIdleTimeout = Some(idle),
+      clock = clock
+    )
     val sid1 = initSid(routes)
     openGet(routes, sid1)
-    Thread.sleep(5) // sid1 is unambiguously the longest-idle session
+    clock.advanceMs(5L) // sid1 is unambiguously the longest-idle session
     val sid2 = initSid(routes)
     openGet(routes, sid2)
     // Both clients now go silent: their GET streams stay open and neither ever POSTs again.
-    Thread.sleep(idle.toMillis + 150)
+    // Exactly at the timeout nobody is "idle past" it yet, so the cap still refuses...
+    clock.advanceMs(idle.toMillis - 5L)
+    val early = post(routes, initFrame, None)
+    val _ = bodyOf(early)
+    early.status.code shouldBe 503
+    // ...and one millisecond later sid1 (idle for timeout + 1) is evictable.
+    clock.advanceMs(1L)
 
     val third = post(routes, initFrame, None)
     val thirdBody = bodyOf(third)
@@ -686,13 +773,18 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
 
   test("maxSessions: an idle GET-less session is still evicted before an idle GET holder") {
     val idle = java.time.Duration.ofMillis(300)
-    val routes =
-      buildRoutes(stateless = false, maxSessions = Some(2), sessionIdleTimeout = Some(idle))
+    val clock = new ManualClock
+    val routes = buildRoutes(
+      stateless = false,
+      maxSessions = Some(2),
+      sessionIdleTimeout = Some(idle),
+      clock = clock
+    )
     val holder = initSid(routes)
     openGet(routes, holder)
-    Thread.sleep(5)
+    clock.advanceMs(5L)
     val plain = initSid(routes) // younger, but holds no GET
-    Thread.sleep(idle.toMillis + 150) // both are now idle past the timeout
+    clock.advanceMs(idle.toMillis + 1L) // both are now idle past the timeout
 
     val third = post(routes, initFrame, None)
     val _ = bodyOf(third)
@@ -702,12 +794,18 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
   }
 
   test("maxSessions: with sessionIdleTimeout = None, GET holders stay exempt from cap eviction (503)") {
-    val routes = buildRoutes(stateless = false, maxSessions = Some(2), sessionIdleTimeout = None)
+    val clock = new ManualClock
+    val routes = buildRoutes(
+      stateless = false,
+      maxSessions = Some(2),
+      sessionIdleTimeout = None,
+      clock = clock
+    )
     val sid1 = initSid(routes)
     openGet(routes, sid1)
     val sid2 = initSid(routes)
     openGet(routes, sid2)
-    Thread.sleep(50) // any amount of idleness: there is no timeout to exceed
+    clock.advanceMs(24L * 60 * 60 * 1000) // any amount of idleness: there is no timeout to exceed
 
     val refused = post(routes, initFrame, None)
     refused.status.code shouldBe 503

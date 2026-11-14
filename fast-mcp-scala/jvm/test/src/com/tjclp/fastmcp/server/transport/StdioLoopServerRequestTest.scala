@@ -77,7 +77,7 @@ class StdioLoopServerRequestTest extends AnyFunSuite with Matchers:
     val result = runUnsafe(
       program.timeoutFail(
         new RuntimeException("DEADLOCK: stdio loop did not complete the server→client round-trip")
-      )(15.seconds)
+      )(60.seconds)
     )
     result should include("file:///workspace")
     result should include("file:///tmp")

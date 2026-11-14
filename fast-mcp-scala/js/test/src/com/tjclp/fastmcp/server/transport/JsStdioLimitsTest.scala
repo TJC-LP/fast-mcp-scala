@@ -52,7 +52,7 @@ class JsStdioLimitsTest extends AsyncFlatSpec with Matchers:
       }
       replies <- ZIO
         .foreach(List.fill(expected)(()))(_ => output.take)
-        .timeoutFail(new RuntimeException("missing stdio reply"))(5.seconds)
+        .timeoutFail(new RuntimeException("missing stdio reply"))(60.seconds)
         .ensuring(session.terminate *> output.shutdown)
       parsed <- ZIO.foreach(replies)(reply =>
         ZIO.fromEither(reply.fromJson[JsonRpcMessage]).mapError(new RuntimeException(_))

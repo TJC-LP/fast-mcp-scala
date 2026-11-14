@@ -9,6 +9,7 @@ import zio.json.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.{given, *}
+import com.tjclp.fastmcp.testkit.Await
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.wire.ElicitRequestParams
 import com.tjclp.fastmcp.server.manager.{TaskManager, ToolRegistrationOptions}
@@ -122,7 +123,9 @@ class TaskMrtrCompositionTest extends AnyFunSuite with Matchers:
       reports("reports-upfront").withTaskSupport(TaskSupport.Optional),
       reports("reports-plain"),
       McpTool[SleepArgs, String](name = "slow")((args: SleepArgs) =>
-        ZIO.sleep(args.ms.millis).as("slow done"): zio.Task[String]
+        // `ms` of a second or more stands for "still running whenever the test looks"; less for
+        // "finishes by itself". Neither is measured on a clock.
+        (if args.ms >= 1000 then ZIO.never else ZIO.yieldNow).as("slow done"): zio.Task[String]
       ).withTaskSupport(TaskSupport.Optional)
     )
     runUnsafe(ZIO.foreachDiscard(tools)(server.tool(_)))
@@ -158,17 +161,7 @@ class TaskMrtrCompositionTest extends AnyFunSuite with Matchers:
     def get(taskId: String): Json = result("tasks/get", s""""taskId":"$taskId"""")
 
     def awaitStatus(taskId: String, status: String): Json =
-      val deadline = java.lang.System.nanoTime() + 5_000_000_000L
-      @scala.annotation.tailrec
-      def loop(): Json =
-        val task = get(taskId)
-        if field(task, "status") == status then task
-        else if java.lang.System.nanoTime() > deadline then
-          fail(s"task $taskId never became $status; last: ${task.toJson}")
-        else
-          Thread.sleep(5)
-          loop()
-      loop()
+      Await.until(s"task $taskId becomes $status")(get(taskId))(field(_, "status") == status)
 
     def stored: Int = runUnsafe(manager.stats).total
 

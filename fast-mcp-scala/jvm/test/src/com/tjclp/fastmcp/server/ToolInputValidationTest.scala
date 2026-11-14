@@ -9,6 +9,7 @@ import zio.json.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.{given, *}
+import com.tjclp.fastmcp.testkit.Eventually
 import com.tjclp.fastmcp.core.JsonSchemaValidator
 import com.tjclp.fastmcp.server.manager.{ToolArgumentError, ToolInputValidation, ToolRegistrationOptions}
 import com.tjclp.fastmcp.server.router.{McpRouter, Session}
@@ -301,14 +302,15 @@ class ToolInputValidationTest extends AnyFunSuite with Matchers:
       .getOrElse(fail(s"no taskId in: $created"))
 
     val terminal = runUnsafe(
-      (ZIO.sleep(20.millis) *> ZIO.attempt(
-        frame(
-          router,
-          session,
-          s"""{"jsonrpc":"2.0","id":3,"method":"tasks/get","params":{"taskId":"$taskId"}}"""
+      Eventually("the task leaves `working`")(
+        ZIO.attempt(
+          frame(
+            router,
+            session,
+            s"""{"jsonrpc":"2.0","id":3,"method":"tasks/get","params":{"taskId":"$taskId"}}"""
+          )
         )
-      )).repeatUntil(body => !body.contains(""""status":"working""""))
-        .timeoutFail(new RuntimeException("task never left `working`"))(15.seconds)
+      )(body => !body.contains(""""status":"working""""))
     )
     val result = frame(
       router,
