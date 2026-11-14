@@ -51,6 +51,13 @@ object McpDecoders extends McpDecodersLowPriority:
     def decode(name: String, rawValue: Any, context: McpDecodeContext): T =
       DefaultDecodeContext.decodeRaw[T](name, rawValue, context, decoder)
 
+  /** `McpTool[Unit, Out]`: a tool without arguments. Nothing is read from the arguments object; the
+    * derived `inputSchema` for `Unit` is the empty object with `additionalProperties: false`, so a
+    * call that sends arguments is refused by input validation before this runs.
+    */
+  given unitDecoder: McpDecoder[Unit] with
+    def decode(name: String, rawValue: Any, context: McpDecodeContext): Unit = ()
+
   /** Identity decoder so the contract layer can thread the runtime context uniformly. */
   given McpDecoder[McpContext] with
 

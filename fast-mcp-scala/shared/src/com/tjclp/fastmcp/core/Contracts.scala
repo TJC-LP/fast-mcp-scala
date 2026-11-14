@@ -1,5 +1,6 @@
 package com.tjclp.fastmcp.core
 
+import scala.annotation.implicitNotFound
 import scala.annotation.targetName
 import scala.reflect.ClassTag
 
@@ -32,6 +33,14 @@ trait McpDecodeContext:
   * @tparam T
   *   the target Scala type produced from the decoded argument
   */
+@implicitNotFound(
+  "No McpDecoder[${T}] found: MCP arguments are decoded into ${T} through an McpDecoder. " +
+    "Case classes (with primitive, java.time, Scala 3 enum, Option, collection and nested " +
+    "case-class fields) and Unit derive one automatically, and any given zio.json.JsonDecoder[${T}] " +
+    "is lifted. For another type, define a given zio.json.JsonDecoder[${T}], a given " +
+    "McpInputCodec[${T}] (decoder + schema), or a given McpDecoder[${T}]. If the compiler adds an " +
+    "\"I found: ...\" note below, it names the field type that has no JsonDecoder"
+)
 trait McpDecoder[T]:
   def decode(name: String, rawValue: Any, context: McpDecodeContext): T
 
@@ -62,6 +71,13 @@ object McpDecoder:
   * @tparam A
   *   contravariant in the source type; supply a narrower encoder to get broader coverage
   */
+@implicitNotFound(
+  "No McpEncoder[${A}] found: a tool result of type ${A} is turned into MCP content through an " +
+    "McpEncoder. String, numbers, Boolean, Unit, Content, case classes, Scala 3 enums, and List / " +
+    "Vector / Seq / Set / Option of a type with a zio.json.JsonEncoder have one. For another type, " +
+    "define a given zio.json.JsonEncoder[${A}] (the result is sent as JSON text) or a given " +
+    "McpEncoder[${A}] (you choose the content), or return a String / Content instead"
+)
 trait McpEncoder[-A]:
   def encode(value: A): List[Content]
 
@@ -88,7 +104,32 @@ final case class StructuredToolResult(
     structured: Option[zio.json.ast.Json]
 )
 
-trait McpEncoderLowPriority:
+/** Fallbacks that are found through the implicit scope of `McpEncoder` only: they are NOT part of
+  * `export McpEncoder.given` (see `Exports.scala`), so they are consulted after everything a call
+  * site imports or defines, and a user's `given McpEncoder[E]` in the companion of `E` is preferred
+  * to them (it is the more specific instance).
+  */
+trait McpEncoderImplicitScopeOnly:
+
+  /** A bare Scala 3 enum result (`McpTool[In, Color]`) with no `JsonEncoder` in scope: derived
+    * through [[com.tjclp.fastmcp.macros.ZioJsonEnumDerivation]], like an enum FIELD of a result
+    * case class. An enum of parameterless cases is written as its case name (`"RED"`), the same
+    * string the derived input decoder reads and the derived schema enumerates; an enum with
+    * parameterized cases keeps zio-json's wrapper-object encoding.
+    *
+    * The bound keeps the given to Scala 3 enums: other types with a `Mirror.SumOf` (`Option`,
+    * `Either`, sealed traits, Java enums) are not eligible. `NotGiven` makes it disjoint from the
+    * `JsonEncoder`-based given, so a hand-written `JsonEncoder` always wins.
+    */
+  inline given derivedZioJsonEnumEncoder[A <: scala.reflect.Enum](using
+      m: scala.deriving.Mirror.SumOf[A],
+      ev: scala.util.NotGiven[JsonEncoder[A]]
+  ): McpEncoder[A] =
+    McpEncoder.fromJsonEncoder(
+      com.tjclp.fastmcp.macros.ZioJsonEnumDerivation.deriveEncoder[A](using m)
+    )
+
+trait McpEncoderLowPriority extends McpEncoderImplicitScopeOnly:
 
   given [A](using encoder: JsonEncoder[A]): McpEncoder[A] with
 
@@ -97,6 +138,28 @@ trait McpEncoderLowPriority:
 
     override def encodeStructured(value: A): Option[zio.json.ast.Json] =
       value.toJsonAST.toOption
+
+  /** `List[A]` results. Needed because `McpEncoder` is contravariant: resolving
+    * `McpEncoder[List[A]]` through the given above leaves its type argument free to be any
+    * supertype of `List[A]`, and zio-json offers an encoder for several of them (`List`, `Seq`,
+    * `LinearSeq`), which is an ambiguity. This instance names the type, so it is preferred. The
+    * result is a JSON array in a single `TextContent`, like `Seq[A]`. `List[Content]` keeps its own
+    * instance (content is passed through, not serialized).
+    *
+    * An alias given with a declared type on purpose: `export McpEncoder.given` turns every given
+    * into a forwarder, and the compiler compares a forwarder of a `given ... with` instance by its
+    * implementation class, which is unrelated to every other instance. Only an alias given is
+    * compared by the `McpEncoder[List[A]]` it implements, and so ranks above the generic instance.
+    *
+    * The element type is found from a lower bound as well, so an element that is itself a
+    * collection (`List[List[Int]]`) stays ambiguous: wrap such a result in a case class.
+    */
+  given listJsonEncoder[A](using encoder: JsonEncoder[A]): McpEncoder[List[A]] =
+    McpEncoder.fromJsonEncoder(JsonEncoder.list[A](using encoder))
+
+  /** `Vector[A]` results; see [[listJsonEncoder]]. */
+  given vectorJsonEncoder[A](using encoder: JsonEncoder[A]): McpEncoder[Vector[A]] =
+    McpEncoder.fromJsonEncoder(JsonEncoder.vector[A](using encoder))
 
   /** Mirror fallback for case classes with NO `JsonEncoder` anywhere in scope.
     *
@@ -120,6 +183,17 @@ trait McpEncoderLowPriority:
 
 object McpEncoder extends McpEncoderLowPriority:
   def apply[A](using encoder: McpEncoder[A]): McpEncoder[A] = encoder
+
+  /** The encoder a `JsonEncoder` gives: the compact JSON text in one `TextContent`, and the JSON
+    * AST as the structured form. Public because the inline enum given splices a call to it into
+    * user code.
+    */
+  def fromJsonEncoder[A](encoder: JsonEncoder[A]): McpEncoder[A] =
+    new McpEncoder[A]:
+      def encode(value: A): List[Content] =
+        List(TextContent(encoder.encodeJson(value, None).toString))
+      override def encodeStructured(value: A): Option[zio.json.ast.Json] =
+        encoder.toJsonAST(value).toOption
 
   def instance[A](f: A => List[Content]): McpEncoder[A] =
     new McpEncoder[A]:

@@ -323,6 +323,31 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Added
 
+- **Typed contracts: `Unit` input, enum and `List` / `Vector` results, Java enums** (GH #116,
+  TJC-2362; C2.11, C2.12, C2.14). Type arguments that had no codec in 1.0.x now have one, on the
+  JVM, Scala.js and Scala Native:
+  - `McpTool[Unit, Out]` compiles: `given McpDecoder[Unit]` reads nothing. The derived schema is
+    the empty object with `additionalProperties: false`, so a call that sends arguments is
+    refused. `case class NoArgs()` keeps working.
+  - A bare Scala 3 enum result (`McpTool[In, Color]`) is derived like an enum field of a result
+    case class: the case name as a JSON string (`"RED"`); an enum with parameterized cases keeps
+    zio-json's wrapper object. A `JsonEncoder` or `McpEncoder` you define for the enum wins. The
+    instance is in the implicit scope of `McpEncoder` and is not part of
+    `import com.tjclp.fastmcp.given`, so an instance in the enum's companion is preferred to it.
+  - `List[A]` and `Vector[A]` results are a JSON array in one `TextContent`, for an `A` with a
+    `JsonEncoder`, as `Seq[A]` already was. `List[Content]` is still passed through as content.
+    A list of collections (`List[List[Int]]`) is still ambiguous: wrap it in a case class.
+  - Java enums (`java.util.concurrent.TimeUnit`, your own) derive a string-enum schema of the
+    constant names and a codec that reads and writes exactly those names: as an annotated
+    parameter, inside `Option` / collections / maps, and as a field of a typed tool's `In` or
+    `Out`. Before, an annotated `TimeUnit` parameter stopped the compiler with `Maximal number of
+    successive inlines exceeded` and a `TimeUnit` field had no decoder.
+  - `McpEncoder` and `McpDecoder` carry `@implicitNotFound`: a missing instance is reported as
+    `No McpEncoder[T] found: ...` with what derives automatically and the three remedies, in
+    place of the compiler's generic text.
+  - Not changed: `_ => None` for `Out = Option[T]` is still an ambiguous `Builder.apply` overload
+    (write `Option.empty[T]`). The pure and the effectful overload both accept it, and no change
+    that keeps their signatures removes the ambiguity.
 - **`McpServerSettings.stdioDrainTimeout`** (GH #113, TJC-2359): how long a stdio server waits at
   end of stdin for the replies to frames it has already read, before it interrupts what is still
   running. Default five seconds; zero interrupts without waiting; a negative value is refused when
@@ -452,6 +477,23 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   `docs/skills-conformance.md`).
 
 ### Changed
+
+- **A tuple has one wire shape on input: the object `{"_1": ..., "_2": ...}`** (GH #116,
+  TJC-2362; C2.13). The derived schema always described a tuple that way, and a bare tuple
+  parameter decoded it, but a tuple inside `Option`, a collection, a map or a case-class field was
+  decoded by zio-json's tuple decoder, which reads a JSON array. With input validation on (the
+  1.1.0 default) such an argument could not be sent at all: the array is refused by the schema and
+  the object by the decoder. The derived decoders now read the object everywhere, on the
+  annotation path and for the fields of a typed tool's `In`.
+  - What can be noticed: with validation off, a call that sent `[1, "x"]` for a nested tuple was
+    decoded in 1.0.x and is now refused; send the object the schema advertises.
+  - A `JsonDecoder` you define for the tuple type, or for the case class that contains it
+    (`derives JsonDecoder` included), is used as written and keeps zio-json's array shape. Results
+    are unchanged: a tuple in an `Out` is still written as a JSON array.
+- **`java.time.DayOfWeek` and `java.time.Month` advertise `enum`** (GH #116, TJC-2362; C2.14):
+  `{"type":"string","enum":["MONDAY", ...]}` in place of `{"type":"string"}`. zio-json's decoders
+  for the two also accept other letter cases (`"monday"`); with input validation on, only the
+  listed spelling is accepted now.
 
 - **HTTP refusals are the same on every backend** (GH #114, TJC-2360). zio-http, the socket
   backend and Bun disagreed on a handful of requests that are refused either way; they now take

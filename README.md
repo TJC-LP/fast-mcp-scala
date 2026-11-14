@@ -88,7 +88,7 @@ object MyServer extends McpServerApp[Stdio, MyServer.type]:
   )
 ```
 
-A typed tool's `In` is a case class (its schema must be a JSON object, as MCP `arguments` always are); a tool with no arguments takes an empty one — `case class NoArgs()` — since `McpTool[Unit, _]` has no decoder. Handler lambdas return plain values, `ZIO`, `Either[Throwable, _]`, or `scala.util.Try`; the `ToHandlerEffect[F[_], R]` typeclass picks the right lift (`R` is the ZIO environment — `Any` for the plain builders), and you can bring your own given for other effect systems by implementing `ToHandlerEffect[F, Any]` for your effect type `F`. See [`AnnotatedServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts.
+A typed tool's `In` is a case class (its schema must be a JSON object, as MCP `arguments` always are); a tool with no arguments takes `Unit` (`McpTool[Unit, String]`) or an empty case class. Handler lambdas return plain values, `ZIO`, `Either[Throwable, _]`, or `scala.util.Try`; the `ToHandlerEffect[F[_], R]` typeclass picks the right lift (`R` is the ZIO environment — `Any` for the plain builders), and you can bring your own given for other effect systems by implementing `ToHandlerEffect[F, Any]` for your effect type `F`. See [`AnnotatedServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts.
 
 ## Tools and `@Param` metadata
 

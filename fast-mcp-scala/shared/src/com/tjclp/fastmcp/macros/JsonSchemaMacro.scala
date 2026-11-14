@@ -249,9 +249,13 @@ object JsonSchemaMacro:
       formattedStringSchema("time")
     else if fullName == "java.time.Duration" || fullName == "java.time.Period" then
       formattedStringSchema("duration")
+    // By name, not through the symbol: on Scala.js and Scala Native `java.time` may come from a
+    // library that does not declare these as Java enums. The names are what zio-json's decoders
+    // for the two types accept (they also accept other letter cases; the schema lists the
+    // canonical spelling, which is what input validation then requires).
+    else if fullName == "java.time.DayOfWeek" then stringEnumSchema(DayOfWeekNames)
+    else if fullName == "java.time.Month" then stringEnumSchema(MonthNames)
     else if Set(
-        "java.time.DayOfWeek",
-        "java.time.Month",
         "java.time.MonthDay",
         "java.time.Year",
         "java.time.YearMonth",
@@ -324,7 +328,28 @@ object JsonSchemaMacro:
           s"Provide a given McpInputCodec[${tpe.show}] for an enum with parameterized cases."
       )
 
-    val valueExprs = cases.map(enumCaseName).map(value => '{ Json.Str(${ Expr(value) }) })
+    stringEnumSchema(cases.map(enumCaseName))
+
+  private val DayOfWeekNames: List[String] =
+    List("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY")
+
+  private val MonthNames: List[String] = List(
+    "JANUARY",
+    "FEBRUARY",
+    "MARCH",
+    "APRIL",
+    "MAY",
+    "JUNE",
+    "JULY",
+    "AUGUST",
+    "SEPTEMBER",
+    "OCTOBER",
+    "NOVEMBER",
+    "DECEMBER"
+  )
+
+  private def stringEnumSchema(values: List[String])(using Quotes): Expr[Json] =
+    val valueExprs = values.map(value => '{ Json.Str(${ Expr(value) }) })
     '{
       Json.Obj(
         "type" -> Json.Str("string"),

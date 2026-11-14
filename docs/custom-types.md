@@ -29,20 +29,30 @@ typed contracts.
 - Union types (`A | B`), literal types (`"asc" | "desc"`) and opaque types are **not** derived: the
   macro aborts with `Cannot derive an MCP JSON Schema for ...`. Supply a `given McpInputCodec[T]`
   (below) for such a field.
-- Sealed-trait hierarchies as a field type and Java enums (`java.util.concurrent.TimeUnit`,
-  `java.time.DayOfWeek`) are not derived either: provide a `given McpInputCodec[T]` for them.
-  Prefer case classes to tuples — a tuple field advertises an object schema (`_1`, `_2`) while the
-  decoder reads a JSON array.
-- A typed tool's `In` must be a case class (`case class NoArgs()` for no arguments; `Map[String, V]`
-  and types with a user `McpSchema` also qualify) and `.withOutputSchema` needs a case-class (or
-  `Unit`) `Out`: MCP `arguments` and `structuredContent` are always JSON objects, so a scalar,
-  `Option`, collection, `Either` or enum root is a compile-time error naming the type and the fix.
-  (`McpTool[Unit, _]` has a schema but no `McpDecoder[Unit]` in 1.0.0, hence `NoArgs`.)
-- Typed results without `.withOutputSchema`: an enum *field* of `Out` derives, but a bare enum
-  `Out` (`McpTool[In, Color]`) needs a `given JsonEncoder[Color]`; for collection results use
-  `Seq[T]` / `Set[T]` or a case class rather than `List[T]` / `Vector[T]` (the encoder summon is
-  ambiguous for those); write `Option.empty[T]` rather than `None` where the builder overloads
-  would otherwise be ambiguous.
+- Java enums (`java.util.concurrent.TimeUnit`, your own) derive like Scala 3 enums: a string-enum
+  schema of the constant names and a codec that reads and writes exactly those names.
+  `java.time.DayOfWeek` and `java.time.Month` advertise their names too (zio-json's decoders for
+  the two also accept other letter cases, but input validation requires the listed spelling).
+- Sealed-trait hierarchies as a field type are not derived: provide a `given McpInputCodec[T]` for
+  them.
+- A tuple on the input side is the object `{"_1": ..., "_2": ...}` its schema describes, wherever it
+  appears: as a parameter, inside `Option`, a collection or a map, and as a field of a case class
+  whose decoder is derived by the library. A `JsonDecoder` you define yourself for the tuple, or
+  for the case class around it (`derives JsonDecoder` included), keeps zio-json's JSON-array shape
+  and then contradicts the derived schema; give that type an `McpSchema` / `McpInputCodec`. On the
+  output side a tuple is always written as a JSON array, while a derived `outputSchema` describes
+  the object. Prefer case classes to tuples in results.
+- A typed tool's `In` must be a case class or `Unit` (`McpTool[Unit, String]` for a tool without
+  arguments; `Map[String, V]` and types with a user `McpSchema` also qualify) and
+  `.withOutputSchema` needs a case-class (or `Unit`) `Out`: MCP `arguments` and `structuredContent`
+  are always JSON objects, so a scalar, `Option`, collection, `Either` or enum root is a
+  compile-time error naming the type and the fix.
+- Typed results without `.withOutputSchema`: a bare Scala 3 enum `Out` (`McpTool[In, Color]`) is
+  written as its case name, and `List[T]` / `Vector[T]` / `Seq[T]` / `Set[T]` of a type with a
+  `JsonEncoder` as a JSON array. A list whose elements are themselves collections
+  (`List[List[Int]]`) is ambiguous: wrap it in a case class. Write `Option.empty[T]` rather than
+  `None` where the builder overloads would otherwise be ambiguous. When no encoder exists the
+  compiler says `No McpEncoder[T] found` and lists the remedies.
 - Derived schemas use the `format` keywords `date-time`, `date`, `time`, `duration`, `uuid` and
   `uri` for the matching `java.time` / `UUID` / `URI` types; validators running in strict mode
   (`ajv --strict`) need their formats plugin (`ajv-formats`) to accept them.

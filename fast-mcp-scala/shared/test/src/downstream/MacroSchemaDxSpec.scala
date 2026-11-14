@@ -1,0 +1,226 @@
+package downstream
+
+import java.util.concurrent.TimeUnit
+
+import scala.concurrent.{ExecutionContext, Future}
+
+import org.scalatest.funsuite.AsyncFunSuite
+import zio.*
+import zio.json.*
+import zio.json.ast.Json
+
+import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.core.StructuredToolResult
+
+enum DxShade:
+  case LIGHT, DARK
+
+case class DxPoint(x: Int, y: Int)
+case class DxPair(pair: (Int, String), maybe: Option[(String, DxShade)])
+case class DxUnits(unit: TimeUnit, others: List[TimeUnit])
+case class DxUnitOut(unit: TimeUnit, shade: DxShade)
+
+object DxAnnotated:
+
+  @Tool(name = Some("tuple_option"))
+  def tupleOption(p: Option[(Int, String)]): String = p.toString
+
+  @Tool(name = Some("tuple_list"))
+  def tupleList(p: List[(Int, DxShade)]): String = p.toString
+
+  @Tool(name = Some("time_unit"))
+  def timeUnit(unit: TimeUnit, more: Map[String, TimeUnit]): String =
+    s"$unit/${more.toList.sortBy(_._1).map((k, v) => s"$k=$v").mkString(",")}"
+
+  @Tool(name = Some("day"))
+  def day(day: java.time.DayOfWeek, month: java.time.Month): String = s"$day/$month"
+
+/** The macro and schema behaviour of TJC-2362 (GH #116) that depends on what each platform's
+  * compiler and runtime see: codec derivation (`Unit` input, enum / `List` / `Vector` results,
+  * tuples, Java enums) and the schemas that go with it. Compiled into the JVM, Scala.js and Scala
+  * Native test modules (`shared/test/src`), from a package outside `com.tjclp.fastmcp`, with the
+  * root import a user writes.
+  */
+class MacroSchemaDxSpec extends AsyncFunSuite:
+
+  // See StdioLoggingSpec: ScalaTest's serial context does not run ZIO's completions on Scala.js.
+  override implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+  private def run[A](effect: Task[A]): Future[A] =
+    Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.runToFuture(effect))
+
+  private def json(text: String): Json =
+    text.fromJson[Json].fold(error => fail(s"bad test JSON <$text>: $error"), identity)
+
+  private def arguments(text: String): Map[String, Any] =
+    json(text).asObject.map(_.fields.toMap).getOrElse(fail(s"not an object: $text"))
+
+  /** One call through the tool manager (schema validation, then decode, then the handler): the
+    * text a client would receive, or the failure.
+    */
+  private def call(server: McpServer[Any], tool: String, args: String): Task[Either[String, String]] =
+    server.toolManager.callTool(tool, arguments(args), None).either.map {
+      case Right(StructuredToolResult(content, _)) =>
+        Right(content.collect { case text: TextContent => text.text }.mkString)
+      case Right(other) => Right(other.toString)
+      case Left(error) => Left(String.valueOf(error.getMessage))
+    }
+
+  private def inputSchema(server: McpServer[Any], tool: String): Json =
+    server.toolManager
+      .getToolDefinition(tool)
+      .map(_.inputSchema.toJsonString)
+      .map(json)
+      .getOrElse(fail(s"tool '$tool' is not registered"))
+
+  private def at(schema: Json, path: String*): Json =
+    path.foldLeft(schema)((node, key) => node.asObject.flatMap(_.get(key)).getOrElse(Json.Null))
+
+  private def strings(node: Json): List[String] =
+    node.asArray.map(_.toList.flatMap(_.asString)).getOrElse(Nil)
+
+  private val timeUnitNames =
+    List("NANOSECONDS", "MICROSECONDS", "MILLISECONDS", "SECONDS", "MINUTES", "HOURS", "DAYS")
+
+  private def annotated: McpServer[Any] =
+    val server = McpServer("macro-schema-dx")
+    val _ = server.scanAnnotations[DxAnnotated.type]
+    server
+
+  // ---- C2.11: McpTool[Unit, Out] ----
+
+  test("McpTool[Unit, String] compiles, is called with {} and refuses arguments") {
+    val server = McpServer("unit-in")
+    val program =
+      for
+        _ <- server.tool(McpTool[Unit, String](name = "ping")(_ => "pong"))
+        ok <- call(server, "ping", "{}")
+        extra <- call(server, "ping", """{"a":1}""")
+      yield (ok, extra)
+    run(program).map { (ok, extra) =>
+      assert(ok == Right("pong"))
+      assert(extra == Left("Invalid arguments for tool 'ping': unexpected property 'a'"))
+      assert(
+        inputSchema(server, "ping") ==
+          json("""{"type":"object","properties":{},"additionalProperties":false}""")
+      )
+    }
+  }
+
+  // ---- C2.12: results that had no McpEncoder ----
+
+  test("a bare Scala 3 enum result is written as its case name") {
+    val server = McpServer("enum-out")
+    val program =
+      server.tool(McpTool[DxPoint, DxShade](name = "shade")(p => if p.x > 0 then DxShade.LIGHT else DxShade.DARK)) *>
+        call(server, "shade", """{"x":1,"y":2}""")
+    run(program).map(out => assert(out == Right("\"LIGHT\"")))
+  }
+
+  test("List and Vector results are written as a JSON array") {
+    val server = McpServer("list-out")
+    val program =
+      for
+        _ <- server.tool(McpTool[DxPoint, List[String]](name = "names")(p => List(s"x${p.x}", s"y${p.y}")))
+        _ <- server.tool(McpTool[DxPoint, Vector[Int]](name = "numbers")(p => Vector(p.x, p.y)))
+        _ <- server.tool(
+          McpTool[DxPoint, List[Content]](name = "content")(p => List(TextContent(s"${p.x},${p.y}")))
+        )
+        names <- call(server, "names", """{"x":1,"y":2}""")
+        numbers <- call(server, "numbers", """{"x":1,"y":2}""")
+        content <- call(server, "content", """{"x":1,"y":2}""")
+      yield (names, numbers, content)
+    run(program).map { (names, numbers, content) =>
+      assert(names == Right("""["x1","y2"]"""))
+      assert(numbers == Right("[1,2]"))
+      // List[Content] is content, not JSON: it keeps its own instance.
+      assert(content == Right("1,2"))
+    }
+  }
+
+  // ---- C2.13: one wire shape for a tuple ----
+
+  test("a tuple is the {_1, _2} object its schema advertises, also inside Option and List") {
+    val server = annotated
+    val tupleSchema = json(
+      """{"type":"object","properties":{"_1":{"type":"integer"},"_2":{"type":"string"}},"required":["_1","_2"]}"""
+    )
+    assert(at(inputSchema(server, "tuple_option"), "properties", "p", "anyOf").asArray.map(_.head).contains(tupleSchema))
+    val program =
+      for
+        some <- call(server, "tuple_option", """{"p":{"_1":1,"_2":"x"}}""")
+        none <- call(server, "tuple_option", "{}")
+        array <- call(server, "tuple_option", """{"p":[1,"x"]}""")
+        list <- call(server, "tuple_list", """{"p":[{"_1":1,"_2":"DARK"}]}""")
+      yield (some, none, array, list)
+    run(program).map { (some, none, array, list) =>
+      assert(some == Right("Some((1,x))"))
+      assert(none == Right("None"))
+      assert(array.isLeft, s"the array shape is not what the schema describes: $array")
+      assert(list == Right("List((1,DARK))"))
+    }
+  }
+
+  test("a tuple field of a typed tool's input is the same object") {
+    val server = McpServer("tuple-field")
+    val program =
+      server.tool(McpTool[DxPair, String](name = "pair")(_.toString)) *>
+        call(server, "pair", """{"pair":{"_1":1,"_2":"a"},"maybe":{"_1":"b","_2":"LIGHT"}}""")
+    run(program).map(out => assert(out == Right("DxPair((1,a),Some((b,LIGHT)))")))
+  }
+
+  // ---- C2.14: Java enums ----
+
+  test("a Java enum parameter advertises its constant names and decodes them") {
+    val server = annotated
+    val schema = inputSchema(server, "time_unit")
+    assert(strings(at(schema, "properties", "unit", "enum")) == timeUnitNames)
+    assert(strings(at(schema, "properties", "more", "additionalProperties", "enum")) == timeUnitNames)
+    val program =
+      for
+        ok <- call(server, "time_unit", """{"unit":"SECONDS","more":{"a":"DAYS","b":"HOURS"}}""")
+        bad <- call(server, "time_unit", """{"unit":"seconds","more":{}}""")
+      yield (ok, bad)
+    run(program).map { (ok, bad) =>
+      assert(ok == Right("SECONDS/a=DAYS,b=HOURS"))
+      assert(bad.left.exists(_.contains("must be one of: NANOSECONDS")), s"got $bad")
+    }
+  }
+
+  test("a Java enum field of a typed tool's input and output derives its codec") {
+    val server = McpServer("java-enum-typed")
+    val program =
+      for
+        _ <- server.tool(McpTool[DxUnits, String](name = "units")(u => s"${u.unit}+${u.others.mkString(",")}"))
+        _ <- server.tool(
+          McpTool[DxUnits, DxUnitOut](name = "unit_out")(u => DxUnitOut(u.unit, DxShade.DARK))
+        )
+        in <- call(server, "units", """{"unit":"MINUTES","others":["DAYS","HOURS"]}""")
+        out <- call(server, "unit_out", """{"unit":"MINUTES","others":[]}""")
+      yield (in, out)
+    run(program).map { (in, out) =>
+      assert(strings(at(inputSchema(server, "units"), "properties", "unit", "enum")) == timeUnitNames)
+      assert(in == Right("MINUTES+DAYS,HOURS"))
+      assert(out.map(json) == Right(json("""{"unit":"MINUTES","shade":"DARK"}""")))
+    }
+  }
+
+  test("java.time.DayOfWeek and Month advertise their names") {
+    val server = annotated
+    val schema = inputSchema(server, "day")
+    assert(
+      strings(at(schema, "properties", "day", "enum")) ==
+        List("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY")
+    )
+    assert(strings(at(schema, "properties", "month", "enum")).take(2) == List("JANUARY", "FEBRUARY"))
+    assert(strings(at(schema, "properties", "month", "enum")).sizeIs == 12)
+    val program =
+      for
+        ok <- call(server, "day", """{"day":"FRIDAY","month":"MAY"}""")
+        bad <- call(server, "day", """{"day":"Friyay","month":"MAY"}""")
+      yield (ok, bad)
+    run(program).map { (ok, bad) =>
+      assert(ok == Right("FRIDAY/MAY"))
+      assert(bad.left.exists(_.contains("must be one of: MONDAY")), s"got $bad")
+    }
+  }
