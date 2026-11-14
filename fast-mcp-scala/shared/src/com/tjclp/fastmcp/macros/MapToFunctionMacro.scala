@@ -263,6 +263,38 @@ object MapToFunctionMacro:
     /** A tuple somewhere in the type arguments of `tpe` (not `tpe` itself, and not inside the
       * fields of a case class, whose derivation handles its own tuples).
       */
+    /** zio-json's decoder for exactly `T`, a `Seq`, `Set` or `Map[String, _]` subtype, resolved
+      * with the structurally derived decoder of its element as the given `JsonDecoder` of that
+      * element. `None` when `T` is none of those or zio-json has no instance for it.
+      */
+    def exactContainerDecoder[T: Type](tpe: TypeRepr, paramName: String)(using
+        Quotes
+    ): Option[Expr[JsonDecoder[T]]] =
+      def withElement[A: Type]: Option[Expr[JsonDecoder[T]]] =
+        val inner = summonOrDeriveJsonDecoder(TypeRepr.of[A], paramName)
+        // Probe first, outside the quote: the nested splice below cannot report "no instance"
+        // other than by aborting.
+        if !inner.isExprOf[JsonDecoder[A]] || Expr.summon[JsonDecoder[T]].isEmpty then None
+        else
+          val element = inner.asExprOf[JsonDecoder[A]]
+          Some('{
+            given JsonDecoder[A] = $element
+            ${
+              Expr
+                .summon[JsonDecoder[T]]
+                .getOrElse(
+                  quotes.reflect.report.errorAndAbort(
+                    s"Cannot decode parameter '$paramName': no JsonDecoder[${Type.show[T]}]"
+                  )
+                )
+            }
+          })
+      tpe.asType match
+        case '[Seq[a]] => withElement[a]
+        case '[Set[a]] => withElement[a]
+        case '[Map[String, v]] => withElement[v]
+        case _ => None
+
     def hasTupleArgument(tpe: TypeRepr): Boolean =
       tpe.dealias.simplified match
         case AppliedType(_, args) =>
@@ -309,11 +341,15 @@ object MapToFunctionMacro:
               jsonDecoderToMcpDecoder[t](derived.asExprOf[JsonDecoder[t]])
             else if inScope.isDefined then
               // A container SUBTYPE with a tuple inside (`IndexedSeq[(A, B)]`, `SortedSet[(A, B)]`):
-              // the structural arms only build decoders for the supertypes, so the instance that
-              // was set aside above is the one that fits, as it was before tuples got one shape.
-              inScope.getOrElse(
-                report.errorAndAbort(s"unreachable: no McpDecoder for '$paramName'")
-              )
+              // the structural arms only build decoders for the supertypes. zio-json has an
+              // instance for the exact type; it is summoned with the ELEMENT's structural decoder
+              // in scope, so the tuple inside is read in the object shape the schema advertises.
+              // Where that is not possible, the instance that was set aside above is kept, as in
+              // 1.0.x.
+              exactContainerDecoder[t](tpe.dealias.simplified, paramName)
+                .map(jsonDecoderToMcpDecoder[t](_))
+                .orElse(inScope)
+                .getOrElse(report.errorAndAbort(s"unreachable: no McpDecoder for '$paramName'"))
             else
               report.errorAndAbort(
                 s"Cannot decode parameter '$paramName' of type ${tpe.show}: derivation produced a " +

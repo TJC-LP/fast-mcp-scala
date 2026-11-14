@@ -66,11 +66,16 @@ object WireShapeTools:
   @Tool(name = Some("tuple_list"))
   def tupleList(@Param("p") p: List[(Int, String)]): String = p.toString
 
-  // A container SUBTYPE with a tuple inside: no structural arm builds a decoder for it, so the
-  // macro keeps the in-scope zio-json decoder, as 1.0.x did. That this object compiles is the
-  // assertion (it stopped compiling when tuples got one wire shape; review of PR #149).
+  // A container SUBTYPE with a tuple inside: no structural arm builds a decoder for exactly that
+  // type. It must compile (it stopped compiling when tuples got one wire shape; review of PR
+  // #149) and read the tuple in the shape its schema advertises.
   @Tool(name = Some("tuple_indexed_seq"))
   def tupleIndexedSeq(@Param("p") p: IndexedSeq[(Int, String)]): String = p.toString
+
+  @Tool(name = Some("tuple_sorted_set"))
+  def tupleSortedSet(
+      @Param("p") p: scala.collection.immutable.SortedSet[(Int, String)]
+  ): String = p.toString
 
   @Tool(name = Some("tuple_map"))
   def tupleMap(@Param("p") p: Map[String, (Int, Color)]): String = p.toString
@@ -289,9 +294,17 @@ class SchemaDecoderConsistencyTest extends AnyFunSuite:
       assert(array.isError, s"$tool accepted the array shape its schema does not describe: $array")
   }
 
-  test("IndexedSeq[(Int, String)] still compiles and registers") {
-    val out = h.call("tuple_indexed_seq", """{"p":[]}""")
-    assert(!out.isError && out.text == "Vector()", s"tuple_indexed_seq reply: $out")
+  test("a tuple inside a container subtype is read in the shape its schema advertises") {
+    val empty = h.call("tuple_indexed_seq", """{"p":[]}""")
+    assert(!empty.isError && empty.text == "Vector()", s"tuple_indexed_seq reply: $empty")
+    // Input validation is on: these arguments pass the advertised schema, then the decoder.
+    val seq = h.call("tuple_indexed_seq", """{"p":[{"_1":1,"_2":"a"},{"_1":2,"_2":"b"}]}""")
+    assert(!seq.isError && seq.text == "Vector((1,a), (2,b))", s"tuple_indexed_seq reply: $seq")
+    val sorted = h.call("tuple_sorted_set", """{"p":[{"_1":2,"_2":"b"},{"_1":1,"_2":"a"}]}""")
+    assert(!sorted.isError && sorted.text == "TreeSet((1,a), (2,b))", s"tuple_sorted_set reply: $sorted")
+    // The array shape of 1.0.x is not what the schema says, and is refused by validation.
+    val array = h.call("tuple_indexed_seq", """{"p":[[1,"a"]]}""")
+    assert(array.isError, s"the array shape was accepted: $array")
   }
 
   test("a tuple inside a collection or a case class is the same object") {
