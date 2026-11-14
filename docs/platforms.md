@@ -31,8 +31,8 @@ contracts compile and mount unchanged on all three.
 
 ¹ zio-http is not published for Scala Native (upstream support is 4.x-milestoned), so the
 platform's `HttpTransportBackend` is `NativeHttpBackend`: a built-in HTTP/1.1 + SSE server over
-`java.net.ServerSocket` that renders the same shared `StreamableHttpHandler` as the JVM. It is on
-`main` (unreleased after 1.0.1), plaintext only, and **experimental**: `NativeHttpBackend` is marked
+`java.net.ServerSocket` that renders the same shared `StreamableHttpHandler` as the JVM. It is new
+in 1.1.0, plaintext only, and **experimental**: `NativeHttpBackend` is marked
 `@experimental`, so `McpServerApp[Http]` / `runHttp()` on Scala Native compile only with the
 `-experimental` compiler flag (`//> using options -experimental` in scala-cli,
 `scalacOptions += "-experimental"` in sbt or Mill) or inside a definition that is itself
@@ -100,7 +100,7 @@ What the Scala.js target gives you:
 //> using platform scala-js
 //> using jsVersion 1.22.0
 //> using jsModuleKind es
-//> using dep com.tjclp::fast-mcp-scala::1.0.1
+//> using dep com.tjclp::fast-mcp-scala::1.1.0
 
 import com.tjclp.fastmcp.{*, given}
 
@@ -151,7 +151,7 @@ published with 1.0.0.
 //> using scala 3.9.0
 //> using platform native
 //> using nativeVersion 0.5.12
-//> using dep com.tjclp::fast-mcp-scala::1.0.1
+//> using dep com.tjclp::fast-mcp-scala::1.1.0
 
 import com.tjclp.fastmcp.{*, given}
 
