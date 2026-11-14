@@ -283,9 +283,9 @@ case class SkillSettings(
 
 /** Settings for an MCP server. HTTP-specific fields (`host`, `port`, `httpEndpoint`, `stateless`,
   * `keepAliveInterval`, `sessionIdleTimeout`, `disallowDelete`, `allowedHosts`, `allowedOrigins`,
-  * `maxRequestBodyBytes`, `maxSessions`, `contextHeaders`, `dnsRebindingProtection`) are ignored
-  * under stdio transports; `stdioDrainTimeout` applies to stdio only. `limits`, `tasks` and
-  * `validateToolInput` apply on every transport.
+  * `maxRequestBodyBytes`, `maxSessions`, `contextHeaders`, `dnsRebindingProtection`, `httpRoutes`)
+  * are ignored under stdio transports; `stdioDrainTimeout` applies to stdio only. `limits`, `tasks`
+  * and `validateToolInput` apply on every transport.
   */
 case class McpServerSettings(
     // Spec: HTTP servers SHOULD bind to localhost by default (DNS-rebinding surface). Deployments
@@ -426,9 +426,23 @@ case class McpServerSettings(
     // a handler still running when this time is up is interrupted, so one that never finishes
     // cannot keep the process alive. Background task bodies (the Tasks extension) are not waited
     // for. Zero interrupts in-flight handlers at EOF without waiting. Must not be negative.
-    stdioDrainTimeout: java.time.Duration = McpServerSettings.DefaultStdioDrainTimeout
+    stdioDrainTimeout: java.time.Duration = McpServerSettings.DefaultStdioDrainTimeout,
+    // HTTP only: plain `GET` routes served next to the MCP endpoint on the same listener — a health
+    // or readiness probe (`HttpRoute.get("/health")(...)`). Empty by default: every path but the
+    // endpoint is then 404, as before. A route is matched on its exact path, can never be the MCP
+    // endpoint, and sits behind the same Host/Origin guard; the endpoint's other gates (content
+    // type, `Accept`, body and input limits, sessions) do not apply to it, and nothing
+    // authenticates it. A path that is the endpoint, is listed twice or that no request can name
+    // fails `runHttp()` at startup. See [[HttpRoute]].
+    httpRoutes: List[HttpRoute] = Nil
 ):
   require(!stdioDrainTimeout.isNegative, "McpServerSettings.stdioDrainTimeout must be >= 0")
+
+  /** `httpRoutes` by path, computed once per settings value (the first route wins a duplicate,
+    * which startup validation refuses anyway).
+    */
+  private[fastmcp] lazy val httpRouteIndex: Map[String, HttpRoute] =
+    httpRoutes.reverseIterator.map(route => route.path -> route).toMap
 
   /** The Host/Origin guard these settings resolve to (`transport.HostGuard`), computed once per
     * settings value so that no request re-derives it.

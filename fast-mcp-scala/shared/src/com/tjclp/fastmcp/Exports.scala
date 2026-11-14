@@ -97,6 +97,9 @@ export macros.RegistrationMacro.*
 export server.{
   CompletionHandler,
   Http,
+  HttpRoute,
+  HttpRouteRequest,
+  HttpRouteResponse,
   LimitSettings,
   McpContext,
   McpServer,

@@ -191,6 +191,8 @@ terminate TLS and authentication at a reverse proxy in front of the MCP endpoint
 preflight is answered 405 like any other method the endpoint does not serve: a browser-hosted
 client on another origin needs a CORS-terminating proxy in front of the endpoint (and its origin
 listed in `allowedOrigins`; see [Host / Origin validation](#host--origin-validation)).
+[`httpRoutes`](#other-routes-on-the-listener-httproutes) does not change that: a route can never
+be the MCP endpoint, so it cannot add headers to an MCP reply or answer its preflight.
 
 ### The endpoint: path and methods
 
@@ -198,7 +200,8 @@ listed in `allowedOrigins`; see [Host / Origin validation](#host--origin-validat
 `/mcp`; a setting without the leading slash, `"mcp"`, means the same) — an exact, case-sensitive
 match on every backend. A trailing slash (`/mcp/`), another case (`/MCP`), a longer path
 (`/mcp/extra`) and a prefixed one (`/api/mcp`) are all **404** with an empty body, before any other
-check. The query string is not part of the path: `/mcp?x=1` is the endpoint, and the query is
+check — unless the path is one of [`httpRoutes`](#other-routes-on-the-listener-httproutes), which
+are empty by default. The query string is not part of the path: `/mcp?x=1` is the endpoint, and the query is
 ignored. Because the match is exact, `runHttp()` refuses at startup an `httpEndpoint` that no
 request path could equal: one containing `?`, `#`, `%`, whitespace or a control character, a
 `.` / `..` segment, or a character every client percent-encodes (non-ASCII, `"`, `<`, `>`, `^`,
@@ -264,7 +267,7 @@ joined string.
 | Condition | HTTP | JSON-RPC code |
 |---|---|---|
 | `Host`/`Origin` refused by the Host/Origin guard (automatic on a loopback bind, or `allowedHosts` / `allowedOrigins`) | 403 | `-32000` |
-| Path is not the endpoint | 404 | none (empty body) |
+| Path is not the endpoint (and not one of `httpRoutes`) | 404 | none (empty body) |
 | Method the endpoint does not serve (`Allow` lists the ones it does) | 405 | `-32000` |
 | Missing or wrong `Content-Type` (any POST; a non-utf-8 `charset` counts as wrong) | 415 | `-32000` |
 | `Accept` does not allow the reply types — legacy POST or GET | 406 | `-32000` |
@@ -279,7 +282,8 @@ joined string.
 | Unknown request method | 404 | `-32601` |
 
 The admission gates run in a fixed order on every backend, on headers first and before any session
-state is touched: unknown path 404 → Host/Origin guard 403 → method 405 → `Content-Type` 415 →
+state is touched: unknown path 404 (a path in `httpRoutes` takes its own, shorter way: Host/Origin
+guard 403 → 405 unless `GET` → its handler) → Host/Origin guard 403 → method 405 → `Content-Type` 415 →
 declared `Content-Length` over `maxRequestBodyBytes` 413 → `Accept` 406 → body read (platform byte
 cap, then a first-party post-read check → 413) → frame limits (`-32700`, HTTP 400) → dispatch. A
 legacy GET or DELETE continues after the method check with: a 2026-07-28 version header 405 → (GET
@@ -295,6 +299,75 @@ alike — so keep secrets out of the exception messages your tools can throw.
 
 The complete wire-behavior and review matrix is in the
 [2026-07-28 upgrade guide](./2026-07-28-upgrade.md#wire-behavior).
+
+### Other routes on the listener (`httpRoutes`)
+
+A deployment often needs one or two plain HTTP answers next to the MCP endpoint: a health or
+readiness probe for the platform, a version page. `McpServerSettings.httpRoutes` (since 1.1.0)
+serves them from the same listener, on every HTTP backend:
+
+```scala
+import com.tjclp.fastmcp.{*, given}
+import zio.*
+
+val settings = McpServerSettings(
+  httpRoutes = List(
+    HttpRoute.get("/health")(_ => ZIO.succeed(HttpRouteResponse.text("ok"))),
+    HttpRoute.get("/ready") { request =>
+      databaseIsUp.map { up =>
+        if up then HttpRouteResponse.json("""{"ready":true}""")
+        else HttpRouteResponse.json("""{"ready":false}""", status = 503).withHeader("Retry-After", "5")
+      }
+    }
+  )
+)
+```
+
+The API is three small types, all in the root import:
+
+| | |
+|---|---|
+| `HttpRoute.get(path)(handler)` | A `GET` route. `handler: HttpRouteRequest => UIO[HttpRouteResponse]` |
+| `HttpRouteRequest` | `path`, and `header(name): Option[String]` (case-insensitive; a header sent more than once is seen joined) |
+| `HttpRouteResponse.text(body, status = 200)` / `.json(body, status = 200)` / `HttpRouteResponse(status, body, contentType)` | The reply; `.withHeader(name, value)` adds a header |
+
+What a route is and is not:
+
+- **`GET` on an exact path.** The path is compared as the endpoint's is: exactly,
+  case-sensitively, without the query string (`/health?x=1` is `/health`; `/health/` is 404).
+  Any other method on a route's path is **405** with `Allow: GET` (a `HEAD` gets the status and
+  headers only). There are no prefixes, wildcards or path parameters.
+- **Never the MCP endpoint.** `runHttp()` refuses at startup a route whose path is `httpEndpoint`,
+  one listed twice, one that does not start with `/`, and one no request path can equal (the
+  rules `httpEndpoint` is held to, on every backend). A route therefore cannot answer, observe or
+  decorate an MCP request, and a request cannot choose a handler: only the paths you list exist.
+- **The Host/Origin guard applies.** A request to a route meets the same check as a request to
+  the endpoint — [Host / Origin validation](#host--origin-validation), 403 — before the handler
+  runs and before its method is judged. A probe must send a `Host` the guard admits: on a
+  loopback bind `localhost` / `127.0.0.1` / `[::1]`; with `allowedHosts`, a listed name. A
+  platform that probes by pod or container address needs that address (or the `Host` the probe
+  is configured to send) in `allowedHosts`.
+- **The endpoint's other gates do not apply**, because they describe MCP requests: no
+  `Content-Type` or `Accept` check, no protocol headers, no session, no `limits`. Nothing
+  authenticates a route either. It is as reachable as the listener is; say only what a stranger
+  may read.
+- **No request body.** The handler sees the path and the headers. A body sent to a route is never
+  read by the library or handed to the handler (the socket backend closes the connection after
+  the reply; netty and Bun still bound it at `maxRequestBodyBytes`).
+- **A reply is checked where it is built.** The status is 200–599 except 204, 205 and 304; the
+  content type and header values are printable ASCII (no line break can reach the head); and
+  `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection` are the server's. A
+  violation throws `IllegalArgumentException` in your handler.
+- **A handler that dies is a 500** with the fixed JSON-RPC body every backend uses
+  (`Internal server error`); the cause is logged and never sent. The handler returns `UIO`: turn
+  the failures of what it calls into a reply (`.catchAll(_ => ZIO.succeed(HttpRouteResponse.text("down", 503)))`).
+- **No time limit.** The server does not bound how long a handler runs; a probe handler should
+  bound its own checks. On Scala Native keep reply bodies under 8 KiB (see
+  [The socket backend](#the-socket-backend)).
+
+Order on a route's path: Host/Origin guard 403 → method 405 → the handler. With no route listed
+(the default) nothing changes: every path but the endpoint is the empty 404 it was. CORS on the
+MCP endpoint, TLS and authentication stay with the proxy in front. Routes are ignored on stdio.
 
 ### Request headers in handlers (`contextHeaders`)
 
@@ -508,6 +581,7 @@ no reply (it fails with its timeout). A JVM client whose GET stream falls more t
 | `resourcesSubscribe` | `false` | Enable legacy `resources/subscribe`; modern clients use `subscriptions/listen`. |
 | `exposeTemplatesEndpoint` | `false` | List registered resource templates through `resources/templates/list`. `resources/list` never lists templates; with the default the templates endpoint answers an empty page (clients derive templates from `{}` URIs) and `resources/read` on a matching URI works either way. Applies on every transport. |
 | `contextHeaders` | `Set.empty` | HTTP request headers a handler may read through `McpContext.header` / `McpContext.headers`; nothing is exposed unless listed. See "Request headers in handlers". |
+| `httpRoutes` | `Nil` | Plain `GET` routes served next to the MCP endpoint (since 1.1.0): `HttpRoute.get("/health")(...)`. Behind the Host/Origin guard; never the endpoint itself. See [Other routes on the listener](#other-routes-on-the-listener-httproutes). |
 | `tasks` | `TaskSettings()` | The Tasks extension, off by default (see [tasks.md](./tasks.md)). |
 | `limits` | `LimitSettings()` | Input bounds on every transport: `maxFrameChars` 4 MiB, `maxDepth` 64, `maxObjectFields` 1024, `maxArrayElements` 4096, `maxValues` 65536, `maxNumberDigits` 512, `maxNumberExponent` 512 (`-32700` / HTTP 400 before dispatch), `maxUriChars` 8192 and `maxSubscriptionsPerSession` 1024 (`-32602`); plus `maxOutboundMessages` 256, the per-session buffer for messages emitted outside a request. See [Input limits](#input-limits). |
 
