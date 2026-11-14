@@ -156,8 +156,9 @@ class TaskCancelGraceSpec extends AsyncFunSuite:
         // Another owner is not affected by this one's leftover body.
         other <- tm.createSized(TaskScope.session("s2"), None, 16L, ZIO.never, _ => ZIO.unit).exit
         _ <- release.succeed(())
-        _ <- Eventually("the cancelled body's fiber settled")(settled.get)(_ >= 1)
-        after <- tm.stats
+        // Not the "settled" count: the cancel's own record has already raised it. What the next
+        // create depends on is the body's fiber having reported its end.
+        after <- Eventually("the cancelled body's fiber has ended")(tm.stats)(_.lingering == 0)
         admitted <- tm.createSized(scope, None, 16L, ZIO.never, _ => ZIO.unit).exit
         _ <- tm.shutdown
       yield
@@ -190,12 +191,14 @@ class TaskCancelGraceSpec extends AsyncFunSuite:
         scope = TaskScope.session("s1")
         _ <- tm.createSized(scope, Some(1_000L), 16L, synchronousBody(started, release, "late"), _ => ZIO.unit)
         _ <- started.await
+        // The sweeper must be parked on its interval before the clock moves, or it would park
+        // afterwards, 250 ms past the new reading, and never wake.
+        _ <- clock.awaitSleeping(250.millis)
         _ <- clock.advance(2.seconds)
         swept <- Eventually("the expired task was swept")(tm.stats)(_.total == 0)
         refused <- tm.createSized(scope, None, 16L, ZIO.never, _ => ZIO.unit).exit
         _ <- release.succeed(())
-        _ <- Eventually("the swept body's fiber settled")(settled.get)(_ >= 1)
-        after <- tm.stats
+        after <- Eventually("the swept body's fiber has ended")(tm.stats)(_.lingering == 0)
         admitted <- tm.createSized(scope, None, 16L, ZIO.never, _ => ZIO.unit).exit
         _ <- tm.shutdown
       yield
