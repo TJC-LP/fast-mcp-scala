@@ -86,7 +86,9 @@ export core.skills.{
 }
 export core.wire.{Skill, SkillFrontmatter, SkillResource, SkillResources, Skills}
 export server.skills.{SkillFileContent, SkillProvider}
-export core.McpEncoder.given
+// Every given of `McpEncoder` except the implicit-scope-only fallbacks (see
+// `McpEncoderImplicitScopeOnly`): those stay behind a user's own instances.
+export core.McpEncoder.{derivedZioJsonEnumEncoder as _, given}
 export core.ToHandlerEffect.given
 // Native-core shared codec + schema derivation (one copy for both platforms).
 export core.ToolSchemaProviders.given

@@ -27,7 +27,7 @@ private[macros] trait AnnotationProcessorBase:
     * taken as the registered name (a description-only annotation registers under the method name).
     * A present but non-literal `name` / `description` is a compile-time error (see
     * [[MacroUtils.parseOptionStringLiteral]]) rather than a silent fallback. Falls back to the
-    * method name and its Scaladoc.
+    * method name and to the first paragraph of its Scaladoc ([[MacroUtils.cookDocstring]]).
     */
   protected def nameAndDescription(using Quotes)(
       annot: quotes.reflect.Term,
@@ -51,7 +51,7 @@ private[macros] trait AnnotationProcessorBase:
         }
       case _ => (None, None)
 
-    (maybeName.getOrElse(methodSym.name), maybeDesc.orElse(methodSym.docstring))
+    (maybeName.getOrElse(methodSym.name), maybeDesc.orElse(MacroUtils.docDescription(methodSym)))
 
   /** `FunctionN` / `RefResolver.invokeFunctionWithArgs` ceiling on the number of parameters. */
   protected val MaxParameters: Int = 22
@@ -71,9 +71,7 @@ private[macros] trait AnnotationProcessorBase:
   ): Unit =
     import quotes.reflect.*
     val name = methodSym.name
-    val pos =
-      if methodSym.isDefinedInCurrentRun then methodSym.pos.getOrElse(Position.ofMacroExpansion)
-      else Position.ofMacroExpansion
+    val pos = methodPosition(methodSym)
     def abort(problem: String, remedy: String): Nothing =
       report.errorAndAbort(s"$kind method '$name' $problem. $remedy", pos)
 
@@ -101,6 +99,68 @@ private[macros] trait AnnotationProcessorBase:
       abort(
         s"has $arity parameters; at most $MaxParameters are supported",
         "Group parameters into a case class, or split the tool."
+      )
+
+  /** Where a diagnostic about `methodSym` is reported: at the method when it is compiled in this
+    * run, otherwise at the `scanAnnotations` call (a position in another compilation unit's source
+    * cannot be reported against).
+    */
+  protected def methodPosition(using Quotes)(
+      methodSym: quotes.reflect.Symbol
+  ): quotes.reflect.Position =
+    import quotes.reflect.*
+    if methodSym.isDefinedInCurrentRun then methodSym.pos.getOrElse(Position.ofMacroExpansion)
+    else Position.ofMacroExpansion
+
+  /** The name of the parameter through which `methodSym` receives the request's `McpContext`, if it
+    * declares one. The parameter is recognised by its TYPE, whatever it is called; it is not an MCP
+    * argument (no schema entry, never read from the wire) and the generated handler fills it in.
+    * Two such parameters are a compile-time error: there is one context per request.
+    */
+  protected def contextParameter(using Quotes)(
+      kind: String,
+      methodSym: quotes.reflect.Symbol
+  ): Option[String] =
+    import quotes.reflect.*
+    val contextType = TypeRepr.of[com.tjclp.fastmcp.server.McpContext]
+    methodSym.paramSymss.filterNot(_.exists(_.isTypeParam)).headOption.getOrElse(Nil).filter { p =>
+      val tpe = p.termRef.widenTermRefByName
+      tpe <:< contextType && !(tpe =:= TypeRepr.of[Nothing])
+    } match
+      case Nil => None
+      case one :: Nil => Some(one.name)
+      case many =>
+        report.errorAndAbort(
+          s"$kind method '${methodSym.name}' declares ${many.size} McpContext parameters " +
+            s"(${many.map(_.name).mkString(", ")}). A request has one context: keep one of them.",
+          methodPosition(methodSym)
+        )
+
+  /** Abort unless the server's environment `R` provides what the annotated method's `ZIO` return
+    * type requires (`rMethod`; `Any` for a method that does not return a `ZIO`). Friendlier than
+    * the bound violation the generated registration would otherwise produce. The remedy names the
+    * type to construct the server with: the method's environment when the server has none
+    * (`McpServer.typed[Ref[Int]]`, not `McpServer.typed[Any & Ref[Int]]`), the intersection
+    * otherwise.
+    */
+  protected def requireEnvironment[R: Type](using Quotes)(
+      kind: String,
+      methodSym: quotes.reflect.Symbol,
+      rMethod: quotes.reflect.TypeRepr
+  ): Unit =
+    import quotes.reflect.*
+    val rServer = TypeRepr.of[R]
+    if !(rServer <:< rMethod) then
+      def short(tpe: TypeRepr): String = tpe.show(using Printer.TypeReprShortCode)
+      val wanted =
+        if rServer =:= TypeRepr.of[Any] then short(rMethod)
+        else s"${short(rServer)} & ${short(rMethod)}"
+      report.errorAndAbort(
+        s"$kind '${methodSym.name}' requires ZIO environment '${rMethod.show}' but the server's " +
+          s"environment type is '${rServer.show}', which does not provide it. " +
+          s"Construct the server as McpServer.typed[$wanted] (or wider), or remove the " +
+          "environment requirement from the method body.",
+        methodPosition(methodSym)
       )
 
   /** Build a method reference expression that survives inlining and denotes EXACTLY `method` (the

@@ -451,7 +451,11 @@ class MacroUtilsTest extends AnyFunSuite { // Ensure this matches the import
     assert(!hasRequired, "required array should be removed when empty")
   }
 
-  test("injectParamMetadata should handle invalid custom schema gracefully") {
+  // A fragment that is not JSON cannot leave a 1.1.0 expansion: `@Param(schema)` is parsed at
+  // compile time and aborts (ParamSchemaAndDocTest). This run-time helper is also called by code
+  // that 1.0.x expanded, which could carry such a literal and started anyway; for that code the
+  // 1.0.x outcome is kept: the derived property, with the @Param's description.
+  test("injectParamMetadata keeps the derived property for a non-JSON fragment from a 1.0.x expansion") {
     val inputJsonString = """{
       "type": "object",
       "properties": {
@@ -460,13 +464,28 @@ class MacroUtilsTest extends AnyFunSuite { // Ensure this matches the import
       "required": ["status"]
     }"""
     val inputJson = unsafeParse(inputJsonString)
-    // Invalid JSON in schema
-    val metadata = Map("status" -> ParamMetadata(schema = Some("not valid json {")))
+    val metadata = Map(
+      "status" -> ParamMetadata(description = Some("State"), schema = Some("not valid json {"))
+    )
 
-    val actualJson = MacroUtils.injectParamMetadata(inputJson, metadata)
-    // Should fall back to original property definition
-    val propType = actualJson.hcursor.downField("properties").downField("status").downField("type").as[String]
-    assert(propType == Right("string"))
+    val status = MacroUtils.injectParamMetadata(inputJson, metadata).hcursor.downField("properties").downField("status")
+    assert(status.downField("type").as[String] == Right("string"))
+    assert(status.downField("description").as[String] == Right("State"))
+  }
+
+  test("injectParamMetadata adds description and examples to a custom schema that lacks them") {
+    val inputJson = unsafeParse("""{"type":"object","properties":{"status":{"type":"string"}},"required":["status"]}""")
+    val metadata = Map(
+      "status" -> ParamMetadata(
+        description = Some("State"),
+        examples = List("active"),
+        schema = Some("""{"type":"string","enum":["active","inactive"]}""")
+      )
+    )
+    val status = MacroUtils.injectParamMetadata(inputJson, metadata).hcursor.downField("properties").downField("status")
+    assert(status.downField("enum").as[List[String]] == Right(List("active", "inactive")))
+    assert(status.downField("description").as[String] == Right("State"))
+    assert(status.downField("examples").as[List[String]] == Right(List("active")))
   }
 
 }
