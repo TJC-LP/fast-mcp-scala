@@ -236,8 +236,12 @@ for vid in sorted(hits):
         failing.append(vid)
     else:
         low.append(vid)
-    rows.append((status, level, source, vid, aliases, ", ".join(affected), fixed,
-                 (vuln.get("summary") or "").strip()))
+    # Everything printed below is third-party text. Collapse it to one line each, so a newline
+    # inside an advisory cannot start a line of its own (GitHub reads workflow commands from any
+    # stdout line of the step).
+    rows.append(tuple(" ".join(str(field).split()) for field in (
+        status, level, source, vid, aliases, ", ".join(affected), fixed,
+        vuln.get("summary") or "")))
 
 for status, level, source, vid, aliases, affected, fixed, summary in rows:
     print(f"{status:7} {level:8} [{source}] {vid}{' (' + aliases + ')' if aliases else ''}")

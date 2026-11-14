@@ -1231,13 +1231,19 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     withServer(blockingExecutor = Some(failingForConnections)) { port =>
       // The first three connections are accepted and then dropped; a later one is served. The
       // accept loop dying would fail this test at once (`withServer` races the body against it).
+      // Connecting is part of the attempt: the kernel completes the handshake before the server
+      // accepts, so a dropped connection can already be closed when the client looks at it, and
+      // Scala Native's timed connect then reports "Connection refused" (its poll treats a
+      // readable socket as a refusal). Either way the server accepted the connection and dropped
+      // it, which is one injected failure; a listener that really is gone fails the counts below.
       def attempt(): Option[Int] =
-        val client = new RawClient(port, readTimeoutMs = 5_000)
         try
-          client.send(post(initFrame))
-          Some(client.readReply().status)
+          val client = new RawClient(port, readTimeoutMs = 5_000)
+          try
+            client.send(post(initFrame))
+            Some(client.readReply().status)
+          finally client.close()
         catch case _: Throwable => None
-        finally client.close()
       val outcomes = (1 to 8).map(_ => attempt())
       injected.get shouldBe 3
       outcomes.count(_.isEmpty) shouldBe 3
