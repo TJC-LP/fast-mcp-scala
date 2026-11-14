@@ -52,7 +52,8 @@ class BinaryCompatibilityTest extends AnyFunSuite with Matchers:
     maxRequestBytes = 1024L,
     maxResultBytes = 2048L,
     maxBytesPerOwner = 4096L,
-    maxBytesTotal = 8192L
+    maxBytesTotal = 8192L,
+    cancelGraceMs = 77L
   )
 
   private val limitsWithNewFields = LimitSettings(
@@ -219,6 +220,11 @@ class BinaryCompatibilityTest extends AnyFunSuite with Matchers:
       include("McpServerCore.removeSkills")
     failure(core.skillProvider(EmptyProvider)).getMessage should
       include("McpServerCore.skillProvider")
+
+    // `completion` moved up from McpServer to the trait in 1.1.0, with the same kind of default.
+    val completion = failure(core.completion[Any]((_, _) => ZIO.succeed(com.tjclp.fastmcp.core.wire.Completion(Nil))))
+    completion shouldBe an[UnsupportedOperationException]
+    completion.getMessage should (include(className) and include("McpServerCore.completion"))
 
     // The rest of the trait works on the old implementation, 1.1.0 additions included.
     core.toolInputValidation shouldBe Map.empty

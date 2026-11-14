@@ -447,9 +447,16 @@ object McpRouter:
         Option.when(methods.contains(Methods.PromptsList))(PromptsCapability(listChanged = lc)),
       completions = Option.when(methods.contains(Methods.CompletionComplete))(Json.Obj()),
       logging = Option.when(methods.contains(Methods.LoggingSetLevel))(Json.Obj()),
+      // 2025-11-25 `tasks` capability: `tasks/list` and `tasks/cancel` are registered together with
+      // task-augmented `tools/call` whenever tasks are enabled (RouterBuilder), so all three flags
+      // are declared together. (`tasks/get` and `tasks/result` have no flag in that revision.)
       tasks = Option.when(tasksEnabled)(
-        ServerTasksCapability(requests =
-          Some(ServerTasksRequests(tools = Some(ServerTasksToolsRequest(call = Some(Json.Obj())))))
+        ServerTasksCapability(
+          list = Some(Json.Obj()),
+          cancel = Some(Json.Obj()),
+          requests = Some(
+            ServerTasksRequests(tools = Some(ServerTasksToolsRequest(call = Some(Json.Obj()))))
+          )
         )
       )
     )

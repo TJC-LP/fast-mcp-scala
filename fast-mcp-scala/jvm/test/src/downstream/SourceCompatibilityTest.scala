@@ -111,8 +111,9 @@ class SourceCompatibilityTest extends AnyFunSuite with Matchers:
       10L,
       11L,
       12L,
-      13L
-    ).maxBytesTotal shouldBe 13L
+      13L,
+      14L
+    ).cancelGraceMs shouldBe 14L
     val server = McpServerSettings.apply
     server(
       "h",

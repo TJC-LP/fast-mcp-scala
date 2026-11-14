@@ -56,7 +56,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     )
     .contextual((_, context) => context.get.listRoots().as("roots received"))
 
-  private val port = 38917
+  private val port = 28917
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private var bunServer: BunHttpHandle = scala.compiletime.uninitialized
@@ -545,7 +545,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   }
 
   "a dying tool on Bun" should "be answered in-band as JSON (router boundary), never a raw 500 or HTML" in {
-    val boomPort = 38927
+    val boomPort = 28927
     val boomTool = McpTool
       .withSchema[PingArgs, String](
         name = "boom",
@@ -584,7 +584,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   // ---- F1 §2: body cap ----
 
   "maxRequestBodyBytes on Bun" should "answer 413 for a declared oversize body and never 200/500 for a streamed one" in {
-    val capPort = 38926
+    val capPort = 28926
     val handle = statefulServer(
       "JsHttpBodyCapServer",
       capPort,
@@ -659,7 +659,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   }
 
   "HostGuard on Bun" should "match Origin as a full origin: cross-port/scheme/null are 403, same authority 200" in {
-    val originPort = 38924
+    val originPort = 28924
     val handle = statefulServer(
       "JsHttpOriginServer",
       originPort,
@@ -706,7 +706,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   }
 
   it should "admit an explicitly listed allowedOrigins entry" in {
-    val listedPort = 38930
+    val listedPort = 28930
     val handle = statefulServer(
       "JsHttpAllowedOriginsServer",
       listedPort,
@@ -740,7 +740,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       "0.1.0",
       McpServerSettings(
         host = "127.0.0.1",
-        port = 38931,
+        port = 28931,
         stateless = true,
         allowedOrigins = Some(Set("app.example.com"))
       )
@@ -758,7 +758,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       "0.1.0",
       McpServerSettings(
         host = "127.0.0.1",
-        port = 38940,
+        port = 28940,
         stateless = true,
         contextHeaders = Set("x-forwarded-email:")
       )
@@ -769,7 +769,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   }
 
   it should "reject a foreign Origin with 403 when allowedHosts is set" in {
-    val guardPort = 38920
+    val guardPort = 28920
     val guardServer = com.tjclp.fastmcp.server.McpServer(
       "JsHttpGuardServer",
       "0.1.0",
@@ -800,7 +800,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   }
 
   "streamable session lifecycle on Bun" should "mint, reuse, DELETE, then 404" in {
-    val lifePort = 38921
+    val lifePort = 28921
     val lifeServer = com.tjclp.fastmcp.server.McpServer(
       "JsHttpLifecycleServer",
       "0.1.0",
@@ -858,7 +858,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   }
 
   "runHttp (streamable minting)" should "400 a headerless non-initialize POST without minting" in {
-    val mintPort = 38919
+    val mintPort = 28919
     val mintServer = com.tjclp.fastmcp.server.McpServer(
       "JsHttpMintServer",
       "0.1.0",
@@ -890,7 +890,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   }
 
   "runHttp (streamable gates)" should "415 a text/plain or Blob initialize and mint nothing" in {
-    val gatePort = 38925
+    val gatePort = 28925
     val handle = statefulServer("JsHttpGateServer", gatePort, identity)
     val textPlain = fetchAt(
       gatePort,
@@ -954,7 +954,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   }
 
   "startStatefulHttp" should "run the idle-session sweeper: a session idle past sessionIdleTimeout 404s" in {
-    val idlePort = 38928
+    val idlePort = 28928
     // An 8 s timeout is swept every 2 s of the server's clock, which only this test moves.
     val clock = new ManualClock
     val sweepEvery = 2.seconds
@@ -1056,16 +1056,16 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   "maxSessions on Bun" should "evict the longest-idle session at the cap instead of growing the store" in {
     // Every use happens at a reading of its own on the server's clock.
     val clock = new ManualClock
-    evictsTheLongestIdle("JsHttpSessionCapServer", 38929, clock, () => clock.advanceMs(10L))
+    evictsTheLongestIdle("JsHttpSessionCapServer", 28929, clock, () => clock.advanceMs(10L))
   }
 
   it should "evict the session used longest ago when all were last seen in the same millisecond" in {
     // The clock never moves: every `lastSeen` is equal, and the order of use alone decides.
-    evictsTheLongestIdle("JsHttpSessionCapTieServer", 38944, new ManualClock, () => ())
+    evictsTheLongestIdle("JsHttpSessionCapTieServer", 28944, new ManualClock, () => ())
   }
 
   "runHttp (stateful tasks)" should "handle tasks/list without params" in {
-    val taskPort = 38918
+    val taskPort = 28918
     val taskServer = com.tjclp.fastmcp.server.McpServer(
       "JsHttpTasksServer",
       "0.1.0",
@@ -1117,7 +1117,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   // TJC-2353 twin of TaskHttpTransportTest: a legacy tasks/result for a cancelled task must be
   // answered with an error frame on Bun too (the stream used to be closed with nothing in it).
   it should "answer tasks/result for a cancelled task with -32602 instead of closing the stream" in {
-    val cancelPort = 38937
+    val cancelPort = 28937
     val server = com.tjclp.fastmcp.server.McpServer(
       "JsHttpCancelledResultServer",
       "0.1.0",
@@ -1213,7 +1213,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     * 3N so its reply lands ON a heartbeat tick.
     */
   private val keepAliveMs = 150
-  private val keepAlivePort = 38923
+  private val keepAlivePort = 28923
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private var keepAliveHandle: Option[BunHttpHandle] = None
@@ -1381,10 +1381,10 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     * seconds exactly one time.
     *
     * The port must be unique across every Bun test suite in this module (they share one process):
-    * 38932 is `JsServerLimitsTest`'s stateful port, and sharing it made this test fail with
-    * "Failed to start server. Is port 38932 in use?" whenever the suites interleaved that way.
+    * 28932 is `JsServerLimitsTest`'s stateful port, and sharing it made this test fail with
+    * "Failed to start server. Is port 28932 in use?" whenever the suites interleaved that way.
     */
-  private val idleTimeoutPort = 38938
+  private val idleTimeoutPort = 28938
   private val slowReplyMs = 14000
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
@@ -1464,7 +1464,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   }
 
   "runHttp (stateless tasks)" should "refuse legacy task augmentation on the shared stateless session" in {
-    val statelessTaskPort = 38922
+    val statelessTaskPort = 28922
     val server = com.tjclp.fastmcp.server.McpServer(
       "JsHttpStatelessTasksServer",
       "0.1.0",
@@ -1514,7 +1514,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   "bearer tasks on Bun" should "be bucketed per peer address: two peers get independent caps (F9 wiring)" in {
     // Dual-stack listener: an IPv4 client arrives as `::ffff:127.0.0.1`, an IPv6 one as `::1` — two
     // distinct `server.requestIP` addresses on real sockets, hence two `Session.clientKey`s.
-    val peerPort = 38935
+    val peerPort = 28935
     val settings = McpServerSettings(
       host = "::",
       port = peerPort,
@@ -1577,7 +1577,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   }
 
   "maxSessions on Bun" should "admit concurrent header-less initializes at the cap while idle sessions exist" in {
-    val racePort = 38936
+    val racePort = 28936
     val handle = statefulServer("JsHttpSessionCapRaceServer", racePort, _.copy(maxSessions = Some(2)))
     def init(): Future[(Int, String)] =
       fetchAt(
@@ -1610,7 +1610,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   // Bun twin of the legacy session-store tests in `StreamableHttpHandlerTest`: a session is stored
   // only for an `initialize` that succeeded and passed the retention budget.
   "a failed initialize on Bun" should "return no session id and leave the store unchanged at the cap" in {
-    val failPort = 38961
+    val failPort = 28961
     // One slot, taken by an idle session: the first candidate for eviction.
     val handle = statefulServer("JsHttpFailedInitServer", failPort, _.copy(maxSessions = Some(1)))
     def post(body: String, sid: Option[String] = None): Future[(Int, Option[String], String)] =
@@ -1671,7 +1671,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   // --- request context: allow-listed headers, protocolSessionId, reply opening on a heartbeat ---
   // Bun twin of `RequestContextHandlerTest` (the JVM / Scala Native handler test).
 
-  private val contextPort = 38939
+  private val contextPort = 28939
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private var contextHandle: Option[BunHttpHandle] = None
@@ -1802,7 +1802,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
     // A server of its own, on a clock only this test moves: the heartbeat and the tool's silence
     // are both lengths of that clock, so "at the first heartbeat, long before the tool answers"
     // is checked as an order of events, not as a number of milliseconds on a busy machine.
-    val silentPort = 38945
+    val silentPort = 28945
     val sleepMs = 8 * keepAliveMs
     val clock = new ManualClock
     val server = com.tjclp.fastmcp.server.McpServer(
@@ -1895,7 +1895,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   // Until the first frame there is no ReadableStream whose cancel hook could report the
   // disconnect; the request's abort signal has to.
 
-  private val abortPort = 38942
+  private val abortPort = 28942
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private var abortHandle: Option[BunHttpHandle] = None
@@ -2014,7 +2014,7 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
   private var initStarted = 0
 
   "a client that goes away during a header-less initialize (Bun)" should "stop its dispatch and store no session" in {
-    val initPort = 38943
+    val initPort = 28943
     val settings = McpServerSettings(host = "127.0.0.1", port = initPort, httpEndpoint = "/mcp")
     val server = com.tjclp.fastmcp.server.McpServer("JsHttpInitAbortServer", "0.1.0", settings)
     // The handler chain parks before `initialize` answers, as a slow middleware would.

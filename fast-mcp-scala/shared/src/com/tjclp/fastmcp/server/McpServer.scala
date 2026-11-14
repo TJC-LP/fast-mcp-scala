@@ -138,7 +138,9 @@ final class McpServer[R](
   /** Register the `completion/complete` argument-completion provider. Advertises the `completions`
     * capability and routes completion requests to `handler`.
     */
-  def completion[R1 >: R](handler: CompletionHandler[R1]): ZIO[Any, Throwable, McpServerCore[R]] =
+  override def completion[R1 >: R](
+      handler: CompletionHandler[R1]
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
     ZIO.succeed {
       completionRef.set(Some(handler.asInstanceOf[CompletionHandler[R]]))
       this

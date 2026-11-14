@@ -5,6 +5,7 @@ import scala.annotation.unused
 
 import zio.*
 
+import com.tjclp.fastmcp.codec.ArgumentDecodeFailure
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.skills.McpSkill
 import com.tjclp.fastmcp.server.skills.SkillProvider
@@ -231,7 +232,10 @@ trait McpServerCore[R]:
       definition = contract.definition,
       handler = (params: Map[String, String]) =>
         ZIO
-          .attempt(contract.decoder.decode(contract.definition.uri, params, decodeContext))
+          .attempt(
+            McpServerCore
+              .decodeArguments(contract.decoder, contract.definition.uri, params, decodeContext)
+          )
           .flatMap(contract.handler)
     )
 
@@ -242,7 +246,10 @@ trait McpServerCore[R]:
       definition = contract.definition,
       handler = (params: Map[String, String]) =>
         ZIO
-          .attempt(contract.decoder.decode(contract.definition.uri, params, decodeContext))
+          .attempt(
+            McpServerCore
+              .decodeArguments(contract.decoder, contract.definition.uri, params, decodeContext)
+          )
           .flatMap(contract.handler)
     )
 
@@ -279,7 +286,10 @@ trait McpServerCore[R]:
       definition = contract.definition,
       handler = (args: Map[String, Any], ctx: Option[McpContext]) =>
         ZIO
-          .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
+          .attempt(
+            McpServerCore
+              .decodeArguments(contract.decoder, contract.definition.name, args, decodeContext)
+          )
           .flatMap(in => contract.handler(in, ctx))
     )
 
@@ -290,9 +300,28 @@ trait McpServerCore[R]:
       definition = contract.definition,
       handler = (args: Map[String, Any], ctx: Option[McpContext]) =>
         ZIO
-          .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
+          .attempt(
+            McpServerCore
+              .decodeArguments(contract.decoder, contract.definition.name, args, decodeContext)
+          )
           .flatMap(in => contract.handler(in, ctx))
     )
+
+  // --- Completion registration ---
+
+  /** Register the `completion/complete` argument-completion provider: the server then advertises
+    * the `completions` capability and routes completion requests to `handler`. One provider per
+    * server; a later registration replaces the earlier one.
+    *
+    * On this trait since 1.1.0 (until then a method of [[McpServer]] only), so that
+    * [[McpServerApp.completion]] can register through it. It is not abstract, so an implementation
+    * compiled against 1.0.x still links; the default fails with an `UnsupportedOperationException`
+    * naming the implementation. [[McpServer]] implements it.
+    */
+  def completion[R1 >: R](
+      @unused handler: CompletionHandler[R1]
+  ): ZIO[Any, Throwable, McpServerCore[R]] =
+    ZIO.fail(McpServerCore.completionUnsupported(this))
 
   // --- Skills registration (io.modelcontextprotocol/skills) ---
 
@@ -339,6 +368,23 @@ trait McpServerCore[R]:
 
 object McpServerCore:
 
+  /** Decode the whole argument object of a typed contract (`owner` is the tool or prompt name, or
+    * the template URI). A failure of the default decode path that zio-json located inside the
+    * object is re-thrown named after the argument it is about, as the annotation path names it,
+    * instead of after `owner` (GH #115, D6.23). Anything else passes through unchanged: a custom
+    * `McpDecoder`'s own exceptions, and failures about the arguments as a whole.
+    */
+  private[fastmcp] def decodeArguments[A](
+      decoder: McpDecoder[A],
+      owner: String,
+      arguments: Any,
+      context: McpDecodeContext
+  ): A =
+    try decoder.decode(owner, arguments, context)
+    catch
+      case failure: ArgumentDecodeFailure if failure.parameter == owner =>
+        throw failure.forField.getOrElse(failure)
+
   /** The failure of decoding a typed tool's arguments, worded for the caller of the tool.
     *
     * The default decoders are handed the TOOL name as the name of what they decode, so their
@@ -358,6 +404,18 @@ object McpServerCore:
     val rejectPrefix = s"Parameter '$tool' rejected: "
     val message = Option(error.getMessage).getOrElse("")
     error match
+      // The default decode path's own failure: zio-json's error path says which argument it is
+      // about. A missing one is reported as the annotation path reports it; any other is named
+      // after that argument (GH #115, D6.23).
+      case failure: ArgumentDecodeFailure if failure.parameter == tool =>
+        missingTopLevelMember(failure.reason) match
+          case Some(name) => new NoSuchElementException(s"Missing required argument '$name'")
+          case None =>
+            failure.forField.getOrElse(
+              new RuntimeException(
+                s"Failed to decode the arguments of tool '$tool': ${message.stripPrefix(decodePrefix)}"
+              )
+            )
       case _: IllegalArgumentException if message.startsWith(rejectPrefix) =>
         new IllegalArgumentException(
           s"Arguments of tool '$tool' rejected: ${message.drop(rejectPrefix.length)}"
@@ -398,6 +456,17 @@ object McpServerCore:
       s"${server.getClass.getName} cannot register tool '$tool': it was built with " +
         "McpTool.withDeferredTask, which only McpServer supports (added in fast-mcp-scala " +
         "1.1.0). Register the tool on the McpServer itself, or drop withDeferredTask."
+    )
+
+  /** The failure the default `completion` returns on an implementation that does not override it.
+    */
+  private[server] def completionUnsupported(
+      server: McpServerCore[?]
+  ): UnsupportedOperationException =
+    new UnsupportedOperationException(
+      s"${server.getClass.getName} does not implement McpServerCore.completion: it cannot " +
+        "register a completion/complete provider. The method was added to the trait in " +
+        "fast-mcp-scala 1.1.0; McpServer implements it."
     )
 
   private[server] def skillsUnsupported(

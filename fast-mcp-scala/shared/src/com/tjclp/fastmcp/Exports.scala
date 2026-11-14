@@ -95,6 +95,7 @@ export core.ToolSchemaProviders.given
 export codec.McpDecoders.given
 export macros.RegistrationMacro.*
 export server.{
+  CompletionHandler,
   Http,
   LimitSettings,
   McpContext,

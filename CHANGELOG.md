@@ -23,10 +23,10 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     unchanged, because new fields were only added at the end.
   - The forwarders are `private[fastmcp]`: present in the class files, not visible to source
     code. Code that is recompiled calls the current signatures, and no call becomes ambiguous.
-  - `McpServerCore.skills`, `removeSkills` and `skillProvider` have default implementations, so
-    an implementation of the trait compiled against 1.0.x still loads. The default fails with an
-    `UnsupportedOperationException` that names the implementation; `McpServer` implements all
-    three.
+  - `McpServerCore.skills`, `removeSkills`, `skillProvider` and `completion` have default
+    implementations, so an implementation of the trait compiled against 1.0.x still loads. The
+    default fails with an `UnsupportedOperationException` that names the implementation;
+    `McpServer` implements all four.
   - How it is checked: `./mill fast-mcp-scala.mimaCheck` runs MiMa against both releases on every
     pull request and before a release, and fails on any finding that `.github/mima-exclusions`
     does not list with a reason. `BinaryCompatibilityTest` runs a program compiled against the
@@ -323,6 +323,21 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Added
 
+- **`McpServerApp.completion`: a declarative server can answer `completion/complete`** (GH #115,
+  D6.9). Override `def completion: Option[CompletionHandler[Any]]` on an `McpServerApp` to
+  register the argument-completion provider; the default, `None`, registers nothing. Until now
+  only `McpServer.completion(...)` could register one, and `McpServerApp.buildCore` is final, so a
+  server written as an `McpServerApp` had to build its own `McpServerCoreFactory` to get one.
+  - `completion` is now a method of the `McpServerCore` trait (it was on `McpServer` only), with a
+    default that fails with an `UnsupportedOperationException` naming the implementation, like the
+    Skills methods. `McpServer` implements it; its signature is unchanged.
+  - `CompletionHandler` is exported from the root import.
+  - An object that extends `McpServerApp` and already has a parameterless member named
+    `completion` no longer compiles: rename the member. (A method that takes parameters, a tool
+    for instance, is an overload and is unaffected.)
+  - A class of your own that extends `McpServerCore` and already declares
+    `completion(handler)` (a wrapper that forwards to an inner `McpServer`, for instance) no
+    longer compiles either: add `override` to it.
 - **Typed contracts: `Unit` input, enum and `List` / `Vector` results, Java enums** (GH #116,
   TJC-2362; C2.11, C2.12, C2.14). Type arguments that had no codec in 1.0.x now have one, on the
   JVM, Scala.js and Scala Native:
@@ -491,6 +506,50 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Changed
 
+- **BEHAVIOUR CHANGE — `tasks/cancel` no longer waits for a body that does not stop** (GH #115,
+  D6.14 / C3.3). Affects servers with `TaskSettings(enabled = true)` whose task tools have a
+  synchronous body: a plain method on the annotation path, a typed-contract handler that returns
+  a plain value, `ZIO.attempt { ... }`. Such a body sees an interrupt only when it returns, and
+  until now the reply to `tasks/cancel` waited with it: cancelling an 8 s `Thread.sleep` took 8 s.
+  - New setting **`TaskSettings.cancelGraceMs`** (default `1000`): how long the cancel waits for
+    the body after interrupting it. A body that stops inside the grace is reported as it really
+    ended, as before. Otherwise the task is recorded `cancelled` when the grace has passed, the
+    cancel is answered, a parked legacy `tasks/result` gets `-32602` (`Task <id> was cancelled`),
+    and a legacy session gets its `notifications/tasks/status`.
+  - **The body is not stopped.** It runs until it returns, and what it returns or throws then is
+    dropped: the task stays `cancelled` and nothing more is sent. The entry no longer counts as
+    running and holds neither the fiber nor the request, so such a body runs outside the running
+    caps and byte budgets until it returns (as a synchronous body whose task is removed by its
+    TTL or with its session always has). Write long tools as effects that can be interrupted
+    (`ZIO.sleep`, streams, `ZIO.attemptBlockingInterrupt` on the JVM). The library does not lift
+    bodies with `attemptBlockingInterrupt` itself: that is JVM thread interruption, unsafe for
+    arbitrary code and absent on Scala.js and Scala Native.
+  - Tools written as ZIO effects are unaffected: they were and are cancelled within milliseconds.
+  - To keep the old reply timing, set `cancelGraceMs` above the longest body; `0` never waits.
+  - The legacy status notification of a task is now always sent on the session's out-of-request
+    channel, never on the reply stream of the request that happened to trigger it.
+  - `TaskSettings` gains the field at the end; the 11-field 1.0.x forwarders give it its default
+    (`copy` keeps it). Reference: `docs/tasks.md` § "Cancelling a task".
+- **A `params.task.ttl` of zero or less is refused** (GH #115, D6.20). A 2025-11-25
+  task-augmented `tools/call` with `"task": {"ttl": 0}` or a negative `ttl` is answered `-32602`
+  (`params.task.ttl must be greater than 0 (milliseconds), got 0`) and creates nothing. It used to
+  be accepted: the reply showed `ttl: 0` and `status: working`, and the TTL sweeper removed the
+  task within a second, so the client held a handle that answered `Unknown task`. Refusing was
+  chosen over raising the value to a minimum: the revision lets a server shorten a requested
+  lifetime, which is what the `maxTtlMs` clamp does, but a server that turns "no lifetime" into
+  one of its own choosing hides a client bug. A positive `ttl`, an absent one and `null` behave
+  as before. `TaskManager.create` fails with the new `TaskTtlNotPositive` for direct callers.
+- **A typed contract's decode failure names the argument, not the tool** (GH #115, D6.23). A
+  typed contract decodes the whole `arguments` object as one value, and a failure inside it was
+  reported under the tool's name: `Failed to decode parameter 'report' from JSON: .id(Invalid job
+  id 'nope'). Value: {"id":"nope"}`. It now reads `Failed to decode parameter 'id' from JSON:
+  (Invalid job id 'nope'). Value: "nope"`, the text the annotation path gives for a parameter of
+  that name. A failure deeper in an argument keeps the rest of the path (`parameter 'window' from
+  JSON: .job(...)`). The same applies to typed prompts and resource templates. Only the message
+  text changes: it is still an `isError` tool result, a custom `McpDecoder`'s own exceptions pass
+  through as they are, and a failure about the arguments as a whole keeps its message. Since
+  1.1.0 validates arguments against the `inputSchema` first, the decoder is reached mostly by
+  what the schema cannot express: a custom decoder's own check, a `pattern` or a `format`.
 - **A tuple has one wire shape on input: the object `{"_1": ..., "_2": ...}`** (GH #116,
   TJC-2362; C2.13). The derived schema always described a tuple that way, and a bare tuple
   parameter decoded it, but a tuple inside `Option`, a collection, a map or a case-class field was
@@ -546,9 +605,11 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - A missing top-level argument of a typed tool is `Missing required argument '<name>'`, the
     message of an annotated tool. Before: `Failed to decode parameter '<tool>' from JSON:
     .<name>(missing). Value: {}`.
-  - Any other decode failure is `Failed to decode the arguments of tool '<tool>': ...`; a number
-    outside the input limits is `Arguments of tool '<tool>' rejected: ...`. Before, both called
-    the tool a parameter (`... parameter '<tool>' ...`).
+  - Any other decode failure names the argument it is about, as an annotated tool does:
+    `Failed to decode parameter '<argument>' from JSON: ...` (#115, D6.23). One that is about the
+    arguments as a whole is `Failed to decode the arguments of tool '<tool>': ...`, and a number
+    outside the input limits is `Arguments of tool '<tool>' rejected: ...`. Before, all three
+    called the tool a parameter (`... parameter '<tool>' ...`).
   - A missing argument is still an `isError` tool result, not a JSON-RPC `-32602`, although the
     1.0.0 notes had planned the latter. The 2026-07-28 specification (*Tools*, *Error Handling*)
     keeps protocol errors for unknown tools and malformed requests and lists input validation
@@ -839,6 +900,15 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - `scripts/conformance.sh` fails a run on any platform whose server is still alive 15 s after
     SIGTERM (it checked the two native binaries only), and `scripts/native-smoke.sh` sends SIGTERM
     to the stdio binary while its stdin is open.
+- **The 2025-11-25 `tasks` capability declares `list` and `cancel`** (GH #115, D6.8). The
+  `initialize` result of a server with tasks enabled is now
+  `"tasks": {"list": {}, "cancel": {}, "requests": {"tools": {"call": {}}}}`. It used to declare
+  `requests.tools.call` only, although `tasks/list` and `tasks/cancel` were always served on the
+  same sessions, so a client that gates those calls on the server's capability never made them.
+  The 2026-07-28 discovery result is unchanged: it declares the extension and no `tasks` field.
+  The stateless legacy adapter (`stateless = true`) refuses every legacy task method with
+  `-32601`, and its `initialize` result now declares no `tasks` capability at all. It used to
+  declare `requests.tools.call` there too.
 - **`subscriptions/listen` refuses task notifications from a client without the Tasks extension**
   (GH #115, TJC-2361). A 2026-07-28 `subscriptions/listen` request that names `taskIds` but does
   not declare `io.modelcontextprotocol/tasks` in its capabilities is answered `-32021`, as
@@ -874,6 +944,13 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   costs one of them. Found by Antithesis pausing a node (run
   `138b4b66187ffc9deaf28072fff5b5d9-66-21`). Unreleased code: the grace was added in this cycle.
 
+- **Docs: when a legacy session gets `notifications/tasks/status`** (GH #115, D5.6 / D5.7).
+  `docs/tasks.md` said the notification was sent "on every terminal transition". It is sent when
+  a task's entry becomes `completed`, `failed` or `cancelled`, on every platform including Scala
+  Native. A running task that is removed instead (its TTL passed, its session ended, the server
+  shut down) emits none, because no entry is left to report on; that is now stated, with the
+  reminder that the 2025-11-25 revision makes the notification optional. Behaviour is unchanged.
+  The statement that bearer tasks work over stdio on Scala Native was already in the text.
 - **A task interrupted before its fiber had started stayed `working` for ever** (TJC-5087). A
   `tasks/cancel`, a session release or the TTL sweep that reached a task right after its creation
   could end the task's fiber before the step that records the terminal status was in place. The

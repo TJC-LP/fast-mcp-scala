@@ -94,7 +94,13 @@ private final case class TaskEntry(
     /** `input_required` only: the responses delivered so far for the current set of requests. */
     inputAnswers: Map[String, Json] = Map.empty,
     /** `input_required` only: completed with [[inputAnswers]] once no request is outstanding. */
-    inputWaiter: Option[Promise[Nothing, Map[String, Json]]] = None
+    inputWaiter: Option[Promise[Nothing, Map[String, Json]]] = None,
+    /** The creator's status callback while the task runs, so that a cancel which stops waiting for
+      * the body ([[TaskManager.cancel]]) can report the transition the fiber has not reported yet.
+      * A terminal entry holds [[TaskEntry.noNotify]]: the callback closes over the creating
+      * session.
+      */
+    onStatus: Task => UIO[Unit] = TaskEntry.noNotify
 ):
 
   def toTask: Task = Task(
@@ -106,6 +112,9 @@ private final case class TaskEntry(
     ttl = ttlMs,
     pollInterval = Some(pollIntervalMs)
   )
+
+private object TaskEntry:
+  val noNotify: Task => UIO[Unit] = _ => ZIO.unit
 
 /** Running (non-terminal) and total (terminal included) entry counts, and the estimated bytes
   * ([[RetainedBytes]]) those entries are charged.
@@ -280,7 +289,9 @@ private object TaskStore:
   *   - tracks status transitions (`working → completed | failed | cancelled`) and updates them
   *     atomically when the fiber finishes,
   *   - blocks `tasks/result` waiters via a [[Promise]] until the task reaches a terminal status,
-  *   - interrupts the fiber on `tasks/cancel`,
+  *   - interrupts the fiber on `tasks/cancel` and waits at most `cancelGraceMs` for it to stop; a
+  *     body that has not stopped by then (a synchronous one) is recorded `Cancelled` regardless and
+  *     whatever it returns later is dropped,
   *   - sweeps TTL-expired entries with ONE lazily started, self-terminating daemon fiber (expiry
   *     interrupts still-running work — an expired task never lingers as an invisible fiber, and N
   *     terminal tasks never hold N sleeping fibers).
@@ -327,8 +338,11 @@ class TaskManager[R] private[manager] (
     newId: UIO[String],
     sweeperRef: Ref[Option[Fiber.Runtime[Nothing, Unit]]],
     /** Test hook invoked at `"forked"` (task fiber parked, nothing registered), `"registered"`
-      * (entry admitted, gate still closed) and `"result-waiting"` (a [[result]] call has found its
-      * task and waits for the outcome next). `_ => ZIO.unit` in production.
+      * (entry admitted, gate still closed), `"result-waiting"` (a [[result]] call has found its
+      * task and waits for the outcome next), `"recorded"` (a terminal status has been written to
+      * the store, or found already written; the result promise is completed next) and `"settled"`
+      * (a task's fiber has ended and what it left has been recorded or dropped). `_ => ZIO.unit` in
+      * production.
       */
     private[fastmcp] val checkpoint: String => UIO[Unit],
     /** The `FiberRef` values the sweeper fiber runs with: those of the fiber that built this
@@ -367,7 +381,8 @@ class TaskManager[R] private[manager] (
     *   Visibility scope + accounting owner ([[TaskScope.session]] / [[TaskScope.bearer]]).
     * @param requestedTtlMs
     *   Requestor-supplied TTL in millis. Clamped to `settings.maxTtlMs`; defaulted to
-    *   `settings.defaultTtlMs` if `None`.
+    *   `settings.defaultTtlMs` if `None`. Zero or a negative value is refused with
+    *   [[TaskTtlNotPositive]] (`-32602`) and nothing is created.
     * @param run
     *   Effect producing the underlying request result (typed as `Any` because TaskManager is
     *   type-erased on result type — the dispatch layer narrows on retrieval).
@@ -409,21 +424,24 @@ class TaskManager[R] private[manager] (
       run: TaskInput => ZIO[R, Throwable, Any],
       onStatusChange: Task => UIO[Unit]
   ): ZIO[R, Throwable, CreateTaskResult] =
-    if requestBytes > settings.maxRequestBytes then
-      ZIO.fail(new TaskRequestTooLarge(settings.maxRequestBytes))
-    else
-      createAdmitted(
-        scope,
-        requestedTtlMs,
-        math.max(requestBytes, 0L),
-        taskId =>
-          run(
-            new TaskInput:
-              def await(requests: List[(String, Json)]): IO[Throwable, Map[String, Json]] =
-                awaitInput(taskId, requests)
-          ),
-        onStatusChange
-      )
+    requestedTtlMs.filter(_ <= 0L) match
+      // A lifetime of nothing: the handle would be dead as soon as the sweeper next ran.
+      case Some(ttl) => ZIO.fail(new TaskTtlNotPositive(ttl))
+      case None if requestBytes > settings.maxRequestBytes =>
+        ZIO.fail(new TaskRequestTooLarge(settings.maxRequestBytes))
+      case None =>
+        createAdmitted(
+          scope,
+          requestedTtlMs,
+          math.max(requestBytes, 0L),
+          taskId =>
+            run(
+              new TaskInput:
+                def await(requests: List[(String, Json)]): IO[Throwable, Map[String, Json]] =
+                  awaitInput(taskId, requests)
+            ),
+          onStatusChange
+        )
 
   private def createAdmitted(
       scope: TaskScope,
@@ -470,7 +488,8 @@ class TaskManager[R] private[manager] (
           requestBytes,
           fiber,
           promise,
-          start
+          start,
+          onStatusChange
         )
           .onExit(exit => ZIO.unless(exit.isSuccess)(rollback(taskId) *> start.succeed(false)).unit)
       yield result
@@ -501,7 +520,8 @@ class TaskManager[R] private[manager] (
       bytes: Long,
       fiber: Fiber.Runtime[Throwable, Any],
       promise: Promise[Throwable, Any],
-      start: Promise[Nothing, Boolean]
+      start: Promise[Nothing, Boolean],
+      onStatusChange: Task => UIO[Unit]
   ): IO[Throwable, CreateTaskResult] =
     for
       _ <- checkpoint("forked")
@@ -523,7 +543,8 @@ class TaskManager[R] private[manager] (
         statusMessage = Some("The operation is now in progress."),
         fiber = Some(fiber),
         result = promise,
-        bytes = bytes
+        bytes = bytes,
+        onStatus = onStatusChange
       )
       admission <- storeRef.modify(admit(entry, nowMono))
       result <- admission match
@@ -714,8 +735,14 @@ class TaskManager[R] private[manager] (
   /** Cancel a task. Returns `Right(Task)` on successful cancel; `Left(reason)` for unknown task,
     * different session, or already-terminal task.
     *
-    * Interrupting the fiber awaits its actual completion, so on return the task's status is
-    * `Cancelled` (or whatever terminal state it raced to).
+    * The fiber is interrupted and then awaited for at most `settings.cancelGraceMs` (on the
+    * manager's clock). A body that is a ZIO effect ends at once, and on return the task shows the
+    * terminal status it really ended in: `Cancelled`, or whatever it raced to. A synchronous body
+    * observes the interrupt only when it returns. When the grace passes first, the task is recorded
+    * `Cancelled` here: its result promise fails with [[TaskCancelledError]], the status callback
+    * fires, and the entry drops the fiber and the request's byte charge. The body itself cannot be
+    * stopped; it runs to its end as a fiber the store no longer counts, and [[recordTerminal]]
+    * drops whatever it returns.
     */
   def cancel(taskId: String, sessionId: Option[String]): UIO[Either[String, Task]] =
     storeRef.get.flatMap { s =>
@@ -729,23 +756,46 @@ class TaskManager[R] private[manager] (
             )
           )
         case Some(entry) =>
-          // Interrupt the fiber. `Fiber.interrupt` awaits the fiber's exit, including its
-          // release block (recordTerminal). After that, the store should reflect Cancelled, but
-          // under heavy concurrent test load the read can occasionally observe the pre-update
-          // entry. Synthesize a Cancelled view if so — the fiber is definitionally cancelled at
-          // this point regardless of what the Ref happens to show.
-          ZIO.foreachDiscard(entry.fiber)(_.interrupt) *> storeRef.get.map { latest =>
-            latest.entries.get(taskId) match
-              case Some(e) if e.status.isTerminal => Right(e.toTask)
-              case _ =>
-                Right(
-                  entry.toTask.copy(
-                    status = TaskStatus.Cancelled,
-                    statusMessage = Some("The task was cancelled by request."),
-                    lastUpdatedAt = TaskTimestamp.now()
-                  )
+          for
+            // A fiber that ended inside the grace has run its release block (recordTerminal), so
+            // the store shows how it ended.
+            ended <- ZIO.foreach(entry.fiber)(interruptWithin).map(_.getOrElse(true))
+            // Still running (a synchronous body): record the cancellation for it. Uninterruptible
+            // so that a cancel request aborted right here cannot leave the entry terminal with its
+            // result promise open. A no-op when the fiber ended in the meantime after all.
+            _ <- ZIO.unless(ended)(
+              recordTerminal(
+                taskId,
+                Exit.interrupt(FiberId.None),
+                entry.result,
+                entry.onStatus
+              ).uninterruptible
+            )
+            latest <- storeRef.get
+          yield latest.entries.get(taskId) match
+            case Some(e) if e.status.isTerminal => Right(e.toTask)
+            // Swept or released while the cancel waited: the task is gone, and it was cancelled.
+            case _ =>
+              Right(
+                entry.toTask.copy(
+                  status = TaskStatus.Cancelled,
+                  statusMessage = Some("The task was cancelled by request."),
+                  lastUpdatedAt = TaskTimestamp.now()
                 )
-          }
+              )
+    }
+
+  /** Interrupt `fiber` without waiting, then wait for it to end for at most
+    * `settings.cancelGraceMs` on the manager's clock. `true` when it has ended. The interrupt stays
+    * delivered either way: a body that outlasts the grace is interrupted as soon as it can be.
+    */
+  private def interruptWithin(fiber: Fiber.Runtime[Throwable, Any]): UIO[Boolean] =
+    fiber.interruptFork *> {
+      if settings.cancelGraceMs <= 0L then fiber.poll.map(_.isDefined)
+      else
+        fiber.await
+          .as(true)
+          .race(clock.sleep(Duration.fromMillis(settings.cancelGraceMs)).as(false))
     }
 
   /** Block until the task reaches a terminal status, then return the underlying request's result
@@ -1006,7 +1056,16 @@ class TaskManager[R] private[manager] (
     for
       recorded <- storeRef.modify { s =>
         s.entries.get(taskId) match
-          case None => ((None, settled.outcome), s)
+          // Swept or released: no entry to update, but a `tasks/result` waiter still holds the
+          // promise.
+          case None => ((None, Some(settled.outcome)), s)
+          // Already terminal: `cancel` stopped waiting for this task's body (`cancelGraceMs`) and
+          // recorded `Cancelled`, and the body has only now returned (or the body ended just as
+          // the cancel gave up on it). The first record stands. What arrives second is dropped:
+          // no status change, no second notification, and no outcome. Only the writer whose
+          // status was recorded completes the promise, so the two can never disagree, whichever
+          // of them reaches its `done` first.
+          case Some(entry) if entry.status.isTerminal => ((None, None), s)
           case Some(entry) =>
             // The terminal entry drops the fiber handle (and with it everything the fiber
             // inherited from the request) and swaps the request's byte charge for the result's.
@@ -1020,7 +1079,8 @@ class TaskManager[R] private[manager] (
                 bytes = as.bytes,
                 inputRequests = Nil,
                 inputAnswers = Map.empty,
-                inputWaiter = None
+                inputWaiter = None,
+                onStatus = TaskEntry.noNotify
               )
             val cutoff = nowMono - settings.minResultRetentionMs
             val kept = s.markTerminal(entry, terminal(settled))
@@ -1028,17 +1088,19 @@ class TaskManager[R] private[manager] (
             // past the retention grace make room; inside the grace nobody is evicted and it is
             // this result that is discarded.
             fitBytes(kept, entry.ownerKey, entry.pool, cutoff, 0L, Some(taskId)) match
-              case Right(fitted) => ((fitted.entries.get(taskId), settled.outcome), fitted)
+              case Right(fitted) => ((fitted.entries.get(taskId), Some(settled.outcome)), fitted)
               case Left(budget) =>
                 val discarded = failed(
                   new TaskResultDiscarded(taskId, budget.setting, budget.limitBytes)
                 )
                 val next = terminal(discarded)
-                ((Some(next), discarded.outcome), s.markTerminal(entry, next))
+                ((Some(next), Some(discarded.outcome)), s.markTerminal(entry, next))
       }
       (updated, outcome) = recorded
-      _ <- promise.done(outcome)
+      _ <- checkpoint("recorded")
+      _ <- ZIO.foreachDiscard(outcome)(promise.done)
       _ <- ZIO.foreachDiscard(updated)(e => onStatusChange(e.toTask).ignore)
+      _ <- checkpoint("settled")
     yield ()
 
 /** Raised by [[TaskManager.create]] when the calling owner (legacy session, or modern client
@@ -1077,6 +1139,17 @@ final class TaskByteBudgetExceeded(val setting: String, val limitBytes: Long)
     )
     with McpErrorCarrier:
   def toMcpError: McpError = McpError(ErrorCodes.CapacityExceeded, getMessage)
+
+/** A requested task TTL (2025-11-25 `params.task.ttl`) of zero or less. The request's own fault, so
+  * `-32602`; nothing is forked or stored. Until 1.1.0 such a TTL was accepted (as `ttl: 0`): the
+  * client got a `working` handle that the sweeper removed within `sweepIntervalMs`.
+  */
+final class TaskTtlNotPositive(val ttlMs: Long)
+    extends RuntimeException(
+      s"tools/call: params.task.ttl must be greater than 0 (milliseconds), got $ttlMs"
+    )
+    with McpErrorCarrier:
+  def toMcpError: McpError = McpError.invalidParams(getMessage)
 
 /** The request is too large to be kept for the lifetime of a task (`TaskSettings.maxRequestBytes`).
   * The request's own fault, so `-32602`; nothing is forked or stored.

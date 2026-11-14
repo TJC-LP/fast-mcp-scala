@@ -13,7 +13,7 @@ import com.tjclp.fastmcp.macros.RegistrationMacro.*
 import com.tjclp.fastmcp.core.wire.Implementation
 import com.tjclp.fastmcp.server.*
 import com.tjclp.fastmcp.server.manager.TaskManager
-import com.tjclp.fastmcp.server.router.{RouterBuilder, SchemaValidator, ServerHooks}
+import com.tjclp.fastmcp.server.router.{McpRouter, RouterBuilder, SchemaValidator, ServerHooks}
 import com.tjclp.fastmcp.testkit.{Await, ManualClock}
 import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
@@ -225,7 +225,41 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
   test("initialize advertises the tasks capability when enabled") {
     val routes = buildRoutes()
     val body = bodyOf(post(routes, initFrame, None))
-    body should include(""""tasks"""")
+    // The 2025-11-25 capability names everything that revision gives a flag and this server
+    // serves: tasks/list, tasks/cancel and task-augmented tools/call (GH #115, D6.8).
+    body should include(""""tasks":{"list":{},"cancel":{},"requests":{"tools":{"call":{}}}}""")
+  }
+
+  test("the advertised tasks/list and tasks/cancel are served on that session") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    val listed =
+      bodyOf(post(routes, """{"jsonrpc":"2.0","id":2,"method":"tasks/list"}""", Some(sid)))
+    listed should include(""""tasks":[]""")
+    // An unknown id is this method's own error (-32602), not "method not found" (-32601).
+    val cancelled = bodyOf(
+      post(
+        routes,
+        """{"jsonrpc":"2.0","id":3,"method":"tasks/cancel","params":{"taskId":"nope"}}""",
+        Some(sid)
+      )
+    )
+    cancelled should include("-32602")
+  }
+
+  test("2026-07-28 discovery declares the extension and no 2025-11-25 tasks capability") {
+    val legacy = McpRouter.deriveCapabilities(
+      methods = Set.empty,
+      tasksEnabled = true,
+      resourcesSubscribe = false,
+      listChanged = false
+    )
+    legacy.tasks.flatMap(_.list) shouldBe defined
+    legacy.tasks.flatMap(_.cancel) shouldBe defined
+    McpRouter.toModernCapabilities(legacy, tasksEnabled = true).tasks shouldBe None
+    McpRouter
+      .deriveCapabilities(Set.empty, tasksEnabled = false, false, false)
+      .tasks shouldBe None
   }
 
   test("tools/list carries execution.taskSupport for opted-in tools and omits it for plain") {
@@ -251,6 +285,31 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     created should include(""""ttl":60000""")
     created should include(""""pollInterval":50""")
     extractTaskId(created) should not be empty
+  }
+
+  test("params.task.ttl of zero or less is refused with -32602 and creates nothing (D6.20)") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    for (ttl, id) <- List("0" -> 30, "-1" -> 31) do
+      val call =
+        s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"slow","arguments":{},"task":{"ttl":$ttl}}}"""
+      val refused = bodyOf(post(routes, call, Some(sid)))
+      refused should include(""""code":-32602""")
+      refused should include(s"params.task.ttl must be greater than 0 (milliseconds), got $ttl")
+      refused should not include "taskId"
+    // No handle was handed out, and none exists.
+    val listed =
+      bodyOf(post(routes, """{"jsonrpc":"2.0","id":32,"method":"tasks/list"}""", Some(sid)))
+    listed should include(""""tasks":[]""")
+    // `null` is the 2025-11-25 spelling of "no preference": the server's default applies.
+    val defaulted = bodyOf(
+      post(
+        routes,
+        """{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"slow","arguments":{},"task":{"ttl":null}}}""",
+        Some(sid)
+      )
+    )
+    defaulted should include(""""status":"working"""")
   }
 
   test("bare call on a required-task tool is rejected -32601") {
@@ -347,6 +406,12 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
 
   test("legacy stateless: task augmentation and legacy task methods are refused with -32601") {
     val routes = buildRoutes(stateless = true)
+    // What is refused is not advertised: the stateless adapter's `initialize` declares no legacy
+    // `tasks` capability, while the rest of its capabilities stay.
+    val init = bodyOf(post(routes, initFrame, None))
+    init should include(""""capabilities":{""")
+    init should include(""""tools":{""")
+    init should not include """"tasks":{"""
     // All legacy stateless POSTs share the literal session id "stateless" — task ownership keyed
     // on it would let every client list, read, and cancel every other client's tasks.
     val create = bodyOf(post(routes, augmentedCall(30, "slow"), None))

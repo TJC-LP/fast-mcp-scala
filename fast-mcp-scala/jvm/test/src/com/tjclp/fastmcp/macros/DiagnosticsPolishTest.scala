@@ -117,17 +117,19 @@ class DiagnosticsPolishTest extends AnyFunSuite:
     assert(runUnsafe(off.toolManager.callTool("annotated", args, None)) == "x:1")
   }
 
-  test("typed path: other decode failures name the tool as a tool, not as a parameter") {
+  test("typed path: other decode failures name the argument, as the annotation path does") {
     val off = server(validate = false)
     val wrongType = failure(off, "typed", "p" -> Json.Num(1))
-    assert(wrongType.getMessage.startsWith("Failed to decode the arguments of tool 'typed': .p("), wrongType)
+    assert(wrongType.getMessage.startsWith("Failed to decode parameter 'p' from JSON: ("), wrongType)
     assert(!wrongType.getMessage.contains("parameter 'typed'"))
-    // A member missing inside a nested object is not a missing ARGUMENT: it keeps its path.
+    // A member missing inside a nested object is not a missing ARGUMENT: the failure is named
+    // after the argument and keeps the rest of its path.
     val nested = failure(off, "nested", "inner" -> Json.Obj())
     assert(
-      nested.getMessage.startsWith("Failed to decode the arguments of tool 'nested': .inner.p(missing)"),
+      nested.getMessage.startsWith("Failed to decode parameter 'inner' from JSON: .p(missing)"),
       nested
     )
+    assert(!nested.getMessage.contains("parameter 'nested'"))
     val huge = failure(off, "number", "n" -> Json.Num(BigDecimal("1e100000")))
     assert(huge.isInstanceOf[IllegalArgumentException], huge)
     assert(huge.getMessage.startsWith("Arguments of tool 'number' rejected: "), huge)

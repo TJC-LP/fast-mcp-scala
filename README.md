@@ -92,6 +92,26 @@ object MyServer extends McpServerApp[Stdio, MyServer.type]:
 
 A typed tool's `In` is a case class (its schema must be a JSON object, as MCP `arguments` always are); a tool with no arguments takes `Unit` (`McpTool[Unit, String]`) or an empty case class. Handler lambdas return plain values, `ZIO`, `Either[Throwable, _]`, or `scala.util.Try`; the `ToHandlerEffect[F[_], R]` typeclass picks the right lift (`R` is the ZIO environment — `Any` for the plain builders), and you can bring your own given for other effect systems by implementing `ToHandlerEffect[F, Any]` for your effect type `F`. See [`AnnotatedServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/AnnotatedServer.scala) for the annotation path and [`ContractServer.scala`](fast-mcp-scala/shared/src/com/tjclp/fastmcp/examples/ContractServer.scala) for typed contracts.
 
+### Argument completion
+
+A server answers `completion/complete` (autocompletion of prompt and resource-template arguments)
+when it has a completion provider. On an `McpServerApp`, override `completion`; on an `McpServer`
+you build yourself, sequence `server.completion(handler)` like any other registration. The
+`completions` capability is advertised only when a provider is registered.
+
+```scala 3 raw
+object MyServer extends McpServerApp[Stdio, MyServer.type]:
+  private val languages = List("scala", "scalajs", "kotlin")
+
+  @Prompt(name = Some("greet"))
+  def greet(@Param("Language") lang: String): String = s"Greet in $lang"
+
+  // request.ref names the prompt or resource template, request.argument the value typed so far
+  override def completion: Option[CompletionHandler[Any]] = Some { (request, _) =>
+    ZIO.succeed(Completion(languages.filter(_.startsWith(request.argument.value))))
+  }
+```
+
 ## Tools and `@Param` metadata
 
 Every tool parameter can carry metadata that flows into the derived JSON Schema:

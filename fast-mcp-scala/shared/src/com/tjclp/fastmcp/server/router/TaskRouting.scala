@@ -121,7 +121,12 @@ final class TaskMiddleware[R](
                       requestedTtlMs = ttl,
                       requestBytes = retainedBytes(params, None, None, headers),
                       run = TaskHandoff.inTask(next(session, params)),
-                      onStatusChange = task => session.send(statusNotification(task))
+                      // Without a sink wherever it is called from: the task's own fiber has
+                      // none, but a `tasks/cancel` that stops waiting for the body reports the
+                      // transition from the cancel request's fiber, whose sink is that
+                      // request's reply stream.
+                      onStatusChange =
+                        task => session.runWithoutSink(session.send(statusNotification(task)))
                     )
                   )
                   .tap(_ => release))

@@ -326,6 +326,37 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     createResult.task.ttl shouldBe Some(5_000L)
   }
 
+  // GH #115, D6.20: `ttl` 0 and -1 were accepted (echoed as `ttl: 0`, status `working`) and the
+  // sweeper removed the task within `sweepIntervalMs`, so the client held a dead handle.
+  "a requested TTL of zero or less" should "be refused with -32602 before anything is created" in {
+    // A clock that stands still: the 1 ms lifetime created below cannot run out during the test.
+    val tm = newManager(clock = new ManualClock)
+    try
+      for ttl <- List(0L, -1L, Long.MinValue) do
+        val ran = runUnsafe(Ref.make(false))
+        val refused = failureOf(
+          exitOf(tm.create(TaskScope.session("s1"), Some(ttl), ran.set(true), _ => ZIO.unit))
+        )
+        refused shouldBe a[TaskTtlNotPositive]
+        refused match
+          case e: McpErrorCarrier =>
+            e.toMcpError.code shouldBe ErrorCodes.InvalidParams
+            e.toMcpError.message should (include("params.task.ttl") and include(ttl.toString))
+          case other => fail(s"not an McpErrorCarrier: $other")
+        // Refused before the fork: the body never ran, and nothing was stored or started.
+        runUnsafe(ran.get) shouldBe false
+      val stats = runUnsafe(tm.stats)
+      stats.total shouldBe 0
+      stats.sweeperActive shouldBe false
+      // The smallest positive TTL is a lifetime the client may ask for; an absent one is the default.
+      val shortest =
+        runUnsafe(tm.create(TaskScope.session("s1"), Some(1L), ZIO.never, _ => ZIO.unit))
+      shortest.task.ttl shouldBe Some(1L)
+      val defaulted = runUnsafe(tm.create(TaskScope.session("s1"), None, ZIO.never, _ => ZIO.unit))
+      defaulted.task.ttl shouldBe Some(3_600_000L)
+    finally runUnsafe(tm.shutdown)
+  }
+
   "TTL eviction" should "remove the entry and interrupt still-running work" in {
     val clock = new ManualClock
     val tm = newManager(clock = clock)
@@ -501,6 +532,10 @@ class TaskManagerSpec extends AnyFlatSpec with Matchers {
     an[IllegalArgumentException] should be thrownBy TaskSettings(maxStoredTotal = -1)
     an[IllegalArgumentException] should be thrownBy TaskSettings(minResultRetentionMs = -1L)
     an[IllegalArgumentException] should be thrownBy TaskSettings(sweepIntervalMs = 0L)
+    an[IllegalArgumentException] should be thrownBy TaskSettings(cancelGraceMs = -1L)
+    // No grace at all is a setting, not an error.
+    TaskSettings(cancelGraceMs = 0L).cancelGraceMs shouldBe 0L
+    TaskSettings().cancelGraceMs shouldBe 1_000L
     // Equal running caps are fine; stored caps below the running caps are normalised, not rejected.
     noException should be thrownBy
       TaskSettings(maxConcurrentPerSession = 2, maxConcurrentTotal = 2, maxStoredTotal = 1)
