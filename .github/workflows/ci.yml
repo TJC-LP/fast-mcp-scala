@@ -97,7 +97,15 @@ jobs:
         with:
           cache-write: "false"
 
+      # A measurement, not a gate. Instrumented classes run slower, and the suite has tests whose
+      # contract is elapsed time (linear-time bounds such as `JsonLimitsTest`): one of them failed
+      # here at 1087 ms against a 1000 ms bound while passing in all three "Build and Test" jobs,
+      # which run the same sources on the real classes and are what gates a change. A failure in
+      # this step is reported in the job summary and does not fail the job; a report that cannot
+      # be written still does.
       - name: Test on the instrumented classes (JVM)
+        id: instrumented
+        continue-on-error: true
         run: ./mill -i fast-mcp-scala.jvm.coverage
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
@@ -118,9 +126,14 @@ jobs:
             echo '```'
             grep -oE '(Statement|Branch) coverage.*' coverage-console.txt || echo 'no coverage lines in the console report'
             echo '```'
+            if [ "$INSTRUMENTED_OUTCOME" != "success" ]; then
+              echo
+              echo "The run on the instrumented classes ended with '$INSTRUMENTED_OUTCOME' (see that step's log). Instrumented code is slower, so elapsed-time bounds can fail here; the Build and Test jobs are the gate for test results."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
+          INSTRUMENTED_OUTCOME: ${{ steps.instrumented.outcome }}
 
       - name: Upload the coverage reports
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
