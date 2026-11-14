@@ -295,7 +295,35 @@ final class Session private (
   // --- cancellation registry ---
 
   def trackInflight(id: RequestId, method: String, fiber: Fiber.Runtime[?, ?]): UIO[Unit] =
-    inflight.update(_ + (id -> (method, fiber)))
+    inflight.update(_ + (id -> (method, fiber))) *>
+      ZIO.suspendSucceed {
+        // A `notifications/cancelled` that was processed before this request was registered:
+        // honour it now. `initialize` stays exempt, as in `cancelInflight`.
+        if takeEarlyCancel(id) && method != Methods.Initialize then fiber.interruptFork
+        else ZIO.unit
+      }
+
+  // Ids cancelled while no request with that id was registered, oldest first, each with the
+  // monotonic time of the cancellation. Frames are dispatched concurrently, so a cancellation sent
+  // right after its request can be processed first; without this memory it would be dropped.
+  // Two bounds keep a cancellation of a request that already finished (or never existed) from
+  // touching anything else: at most `MaxEarlyCancels` entries, and an entry applies only to a
+  // request registered within `EarlyCancelWindowMs` of it. Request ids are unique within a
+  // session; the window limits the damage for a client that reuses them anyway.
+  private val earlyCancelled =
+    new java.util.concurrent.atomic.AtomicReference(Vector.empty[(RequestId, Long)])
+
+  private def rememberEarlyCancel(id: RequestId): Unit =
+    val now = Session.monotonicMs()
+    val _ = earlyCancelled.updateAndGet(entries =>
+      (entries.filterNot(_._1 == id) :+ (id -> now)).takeRight(Session.MaxEarlyCancels)
+    )
+
+  private def takeEarlyCancel(id: RequestId): Boolean =
+    val now = Session.monotonicMs()
+    earlyCancelled
+      .getAndUpdate(_.filterNot(_._1 == id))
+      .exists((cancelled, at) => cancelled == id && now - at <= Session.EarlyCancelWindowMs)
 
   def clearInflight(id: RequestId): UIO[Unit] = inflight.update(_ - id)
 
@@ -305,13 +333,23 @@ final class Session private (
   private[fastmcp] def inflightIds: UIO[Set[RequestId]] = inflight.get.map(_.keySet)
 
   /** Interrupt the in-flight fiber for `id`, if any (drives `notifications/cancelled`). The
-    * `initialize` request is exempt — the spec forbids cancelling it.
+    * `initialize` request is exempt — the spec forbids cancelling it. A cancellation for an id that
+    * is not registered yet is remembered (the last [[Session.MaxEarlyCancels]] of them) and applied
+    * by [[trackInflight]] if that request is registered within [[Session.EarlyCancelWindowMs]].
     */
   def cancelInflight(id: RequestId): UIO[Unit] =
     inflight.get.flatMap(_.get(id) match
       case Some((Methods.Initialize, _)) => ZIO.unit
       case Some((_, fiber)) => fiber.interrupt.unit *> clearInflight(id)
-      case None => ZIO.unit
+      case None =>
+        // Register-then-recheck, so a request registered between the lookup above and the
+        // write below is still cancelled by one side.
+        ZIO.succeed(rememberEarlyCancel(id)) *>
+          inflight.get.flatMap(_.get(id) match
+            case Some((method, fiber)) if method != Methods.Initialize =>
+              ZIO.when(takeEarlyCancel(id))(fiber.interrupt.unit *> clearInflight(id)).unit
+            case _ => ZIO.unit
+          )
     )
 
   // --- server-initiated request/response correlation ---
@@ -371,6 +409,14 @@ object Session:
 
   private def inboundClosedError(method: String): McpError =
     McpError.internalError(s"Server $method failed: the client closed its input stream")
+
+  /** How many cancellations of not-yet-registered request ids a session remembers. */
+  private[fastmcp] val MaxEarlyCancels: Int = 64
+
+  /** How long such a cancellation stays applicable, in milliseconds. Reordering between a request
+    * and its cancellation is a matter of milliseconds; the window is generous for a loaded host.
+    */
+  private[fastmcp] val EarlyCancelWindowMs: Long = 10_000L
 
   /** Milliseconds on the monotonic clock (`System.nanoTime`, available on the JVM, Scala.js and
     * Scala Native): the clock of [[Session.lastSeen]] and of every "how long idle" comparison in

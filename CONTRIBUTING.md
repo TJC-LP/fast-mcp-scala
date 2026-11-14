@@ -43,6 +43,9 @@ cd fast-mcp-scala
 ./mill fast-mcp-scala.js.test                       # Scala.js conformance tests on Bun
 ./mill fast-mcp-scala.scalaNative.test              # links a native test binary
 ./mill fast-mcp-scala.jvm.test.testOnly com.tjclp.fastmcp.macros.ToolProcessorTest   # class selectors go through testOnly
+# testOnly ignores a selector that matches no class and still reports SUCCESS: check the
+# "Total number of tests run" line. A file with chained `package a` / `package b.c` clauses has
+# the FQCN a.b.c.<Class>.
 
 # Scala.js / Bun housekeeping
 ./mill fast-mcp-scala.js.bunLock                    # regenerate js/bun.lock after changing bunDevDeps
@@ -264,7 +267,12 @@ through [SECURITY.md](SECURITY.md), never a public issue.
 
 ## Releasing (maintainers)
 
-- `build.mill` holds a `-SNAPSHOT` default during development.
+- `build.mill` holds a `-SNAPSHOT` default during development. `publishVersion` is a Mill
+  input task: `PUBLISH_VERSION=<v> ./mill ...` takes effect on every run, with a warm `out/` or a
+  running daemon too.
+- When changing the build, run a module's `compile` and its `test.compile` as separate Mill
+  invocations at least once: with mill-bun 0.3.1 on Mill 1.1.5, `./mill a.compile a.test.compile`
+  in one invocation reported SUCCESS without compiling the test module.
 - A release-prep PR strips the suffix, dates the CHANGELOG section (`## [X.Y.Z] - <tag day>`;
   everything under `[Unreleased]` moves below it), and updates every version pin in the README,
   `docs/` and `scripts/*.sc`. Before it merges, sweep for stale pins — the coordinate grep

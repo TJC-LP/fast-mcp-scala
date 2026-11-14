@@ -320,6 +320,46 @@ class JvmHttpTransportTest extends AnyFunSuite with Matchers:
     )
   }
 
+  test("a cancellation processed before its request is registered still cancels it; initialize stays exempt; the memory is bounded") {
+    import com.tjclp.fastmcp.jsonrpc.RequestId.NumId
+    runUnsafe(
+      for
+        session <- Session.make("early-cancel")
+        // The cancellation arrives first.
+        _ <- session.cancelInflight(NumId(7))
+        handler <- ZIO.never.forkDaemon
+        _ <- session.trackInflight(NumId(7), "tools/call", handler)
+        exit <- handler.await.timeoutFail(new RuntimeException("not cancelled"))(10.seconds)
+        // One cancellation cancels one request: the entry is consumed.
+        again <- ZIO.never.forkDaemon
+        _ <- session.clearInflight(NumId(7))
+        _ <- session.trackInflight(NumId(7), "tools/call", again)
+        stillRunning <- again.poll
+        // initialize is never cancelled, early or late.
+        _ <- session.cancelInflight(NumId(1))
+        init <- ZIO.never.forkDaemon
+        _ <- session.trackInflight(NumId(1), "initialize", init)
+        initPoll <- init.poll
+        // Only the most recent MaxEarlyCancels unknown ids are remembered.
+        _ <- ZIO.foreachDiscard(100 to 100 + Session.MaxEarlyCancels)(n =>
+          session.cancelInflight(NumId(n.toLong))
+        )
+        oldest <- ZIO.never.forkDaemon
+        _ <- session.trackInflight(NumId(100), "tools/call", oldest)
+        oldestPoll <- oldest.poll
+        newest <- ZIO.never.forkDaemon
+        _ <- session.trackInflight(NumId(100L + Session.MaxEarlyCancels), "tools/call", newest)
+        newestExit <- newest.await.timeoutFail(new RuntimeException("not cancelled"))(10.seconds)
+        _ <- again.interrupt *> init.interrupt *> oldest.interrupt
+      yield
+        exit.isInterrupted shouldBe true
+        stillRunning shouldBe None
+        initPoll shouldBe None
+        oldestPoll shouldBe None
+        newestExit.isInterrupted shouldBe true
+    )
+  }
+
   test("streamable POST requires Accept to allow text/event-stream too (406 otherwise)") {
     val routes = buildRoutes(stateless = false)
     val req = Request

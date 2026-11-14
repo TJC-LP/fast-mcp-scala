@@ -137,11 +137,7 @@ object `package` extends Module {
         with BinaryCompatTests {
       override def mvnDeps = Seq(
         mvn"org.scalatest::scalatest:${Versions.scalaTest}",
-        mvn"org.scalacheck::scalacheck:${Versions.scalaCheck}",
-        mvn"org.scalatestplus::mockito-5-12:3.2.19.0",
-        mvn"dev.zio::zio-test:${Versions.zio}",
-        mvn"dev.zio::zio-test-sbt:${Versions.zio}",
-        mvn"dev.zio::zio-test-magnolia:${Versions.zio}"
+        mvn"org.scalacheck::scalacheck:${Versions.scalaCheck}"
       )
 
       override def binaryCompatClient = Task { compat.client.compile().classes }

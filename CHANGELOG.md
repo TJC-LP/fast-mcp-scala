@@ -640,6 +640,21 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Fixed
 
+- **A cancellation that overtakes its request is no longer dropped** (#117). Frames are dispatched
+  concurrently, so a `notifications/cancelled` sent right after its request could be processed
+  before the request was registered, and was then ignored: the handler ran to completion. A
+  session now remembers the last 64 cancelled ids it had no request for and cancels the request
+  if it is registered within 10 seconds. `initialize` stays exempt. Request ids must be unique
+  within a session (JSON-RPC, MCP): a client that cancels a finished request and reuses its id
+  within those 10 seconds gets the new request cancelled.
+- **Build: `PUBLISH_VERSION` is read on every Mill run** (#117). `publishVersion` was an ordinary
+  cached task, so with a warm `out/` a local `PUBLISH_VERSION=<v> ./mill ... publishLocal`
+  published whatever version had been cached first. It is now a `Task.Input`. Releases were not
+  affected (the workflow starts from an empty `out/`).
+- **CI: the OSV job fails when classpath resolution fails** (#117): the resolve step now runs with
+  `pipefail`, and advisory text is escaped before it is printed as a workflow annotation.
+- The JVM test module no longer depends on mockito and zio-test, which no test used.
+
 - **One stdio lifecycle on the JVM, Bun and Scala Native** (GH #113, TJC-2359). The edges of a
   stdio session behaved differently per platform; they now behave the same, and
   `docs/transports.md` ("stdio") states the contract.

@@ -36,6 +36,9 @@ If the native Mill launcher cannot reach Maven Central through a TLS-interceptin
 ./mill fast-mcp-scala.scalaNative.test              # Scala Native tests (links a native binary)
 ./mill fast-mcp-scala.scalaNative.nativeLink        # Standalone LLVM binary of AnnotatedServer
 ./mill fast-mcp-scala.jvm.test.testOnly com.tjclp.fastmcp.macros.ToolProcessorTest   # class selectors go through testOnly
+# testOnly ignores a selector that matches no class and still reports SUCCESS: check the
+# "Total number of tests run" line. A file with chained `package a` / `package b.c` clauses has
+# the FQCN a.b.c.<Class>.
 
 # Publish
 ./mill fast-mcp-scala.jvm.publishLocal              # Publish JVM artifact to ~/.ivy2/local
