@@ -95,7 +95,7 @@ final class Session private (
   private[fastmcp] def awaitInboundClosed: UIO[Unit] = inboundClosedSignal.await
 
   /** When the client was last active (transports touch on every request), in milliseconds on the
-    * MONOTONIC clock ([[Session.monotonicMs]]) — comparable only with another reading of that
+    * MONOTONIC clock (the session's `ServerClock`) — comparable only with another reading of that
     * clock, never with wall-clock time. Drives idle eviction and the eviction order at the session
     * cap, so a wall-clock step (NTP, a VM resume, a manual change) can neither make a session just
     * used look like the longest idle one nor expire every session at once.
@@ -442,9 +442,10 @@ object Session:
     */
   private[fastmcp] val EarlyCancelWindowMs: Long = 10_000L
 
-  /** Milliseconds on the monotonic clock (`System.nanoTime`, available on the JVM, Scala.js and
-    * Scala Native): the clock of [[Session.lastSeen]] and of every "how long idle" comparison in
-    * the session stores. Its origin is arbitrary; only differences mean anything.
+  /** A reading of the system clock (`ServerClock.system`: `System.nanoTime`, in milliseconds) — the
+    * clock of [[Session.lastSeen]] and of every "how long idle" comparison in the session stores
+    * unless a session was built on another one. Its origin is arbitrary; only differences mean
+    * anything.
     */
   private[fastmcp] def monotonicMs(): Long = ServerClock.system.monotonicMs()
 

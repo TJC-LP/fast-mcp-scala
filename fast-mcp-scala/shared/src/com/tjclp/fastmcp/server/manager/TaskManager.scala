@@ -66,12 +66,12 @@ private final case class TaskEntry(
     pool: PoolKind,
     createdAtMs: Long,
     lastUpdatedAtMs: Long,
-    /** Monotonic ([[TaskManager.monotonicMs]]) twin of `lastUpdatedAtMs`; drives the retention
+    /** Monotonic (the manager's `ServerClock`) twin of `lastUpdatedAtMs`; drives the retention
       * grace and eviction order so a wall-clock step never reorders or un-ages entries.
       */
     lastUpdatedMonoMs: Long,
     ttlMs: Option[Long],
-    /** Monotonic deadline; the sweeper compares it against [[TaskManager.monotonicMs]]. */
+    /** Monotonic deadline; the sweeper compares it against the manager's `ServerClock`. */
     expiresAtMonoMs: Long,
     pollIntervalMs: Long,
     status: TaskStatus,
@@ -303,7 +303,7 @@ private object TaskStore:
   * discarded. A terminal entry holds neither its fiber nor anything of the request.
   *
   * Clocks. Wire timestamps (`createdAt`, `lastUpdatedAt`) are wall-clock; expiry, the retention
-  * grace and eviction order use the monotonic clock ([[TaskManager.monotonicMs]]) so an NTP step or
+  * grace and eviction order use the monotonic clock (the manager's `ServerClock`) so an NTP step or
   * VM resume neither sweeps running tasks early nor extends retention.
   *
   * Atomicity. `create` runs under `uninterruptibleMask`; an interrupt of the creating fiber (client
@@ -1176,11 +1176,6 @@ object TaskManager:
   private[manager] def clipStatusMessage(message: String): String =
     if message.length <= MaxStatusMessageChars then message
     else message.take(MaxStatusMessageChars) + "..."
-
-  /** Monotonic milliseconds (`System.nanoTime`, available on JVM, Scala.js and Scala Native). Only
-    * differences are meaningful; never persisted or put on the wire.
-    */
-  private[manager] def monotonicMs(): Long = ServerClock.system.monotonicMs()
 
   /** Allocate a new manager with empty state. `newId` supplies task ids; production passes the
     * platform backend's CSPRNG (`TransportBackend.randomId()`) because task ids are bearer handles

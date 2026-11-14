@@ -372,6 +372,13 @@ Uses Scalafmt with config in `.scalafmt.conf`. Always run `./mill fast-mcp-scala
 
 JVM tests in `fast-mcp-scala/jvm/test/src/`. Scala.js tests in `fast-mcp-scala/js/test/src/`.
 
+No fixed sleeps in tests (CONTRIBUTING.md § "Tests and time"): server time goes through
+`ServerClock` (`private[fastmcp]`, carried by `McpRouter.clock`); a test passes
+`testkit.ManualClock` (`shared/test/src`) via `server.buildRouterOn(clock)` /
+`TaskManager.makeUnsafe(..., clock)` / `Session.makeOn(clock, id)` / `startHttpHandleOn(server, clock)`
+(Bun) and advances it, or waits on a condition with `testkit.Eventually` (ZIO) / `testkit.Await`
+(blocking, JVM + Native).
+
 Key test classes:
 - `ToolProcessorTest` - Integration tests for @Tool processing
 - `JsonSchemaMacroTest` - Schema generation tests
