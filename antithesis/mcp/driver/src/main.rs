@@ -639,7 +639,7 @@ impl Driver {
         }
     }
 
-    /// The harness runs the eventually makes: every suite against the drawn node, unless
+    /// The harness runs the eventually makes: every suite against every node, unless
     /// `DRIVER_CONFORMANCE_NODE` / `DRIVER_CONFORMANCE_SUITE` say otherwise (the local loop).
     fn conformance_plan(&self, drawn_node: usize, drawn_suite: Suite) -> Vec<(usize, Suite)> {
         // Without a configured suite: all three, the drawn one first. One drawn suite per
@@ -653,7 +653,10 @@ impl Driver {
             (0..all.len()).map(|i| all[(first + i) % all.len()]).collect()
         };
         let nodes: Vec<usize> = match self.harness.node.as_deref() {
-            None => vec![drawn_node],
+            // Every node, the drawn one first, for the same reason as the suites: with one drawn
+            // node per timeline a whole run reached the harness on netty twice and finished it
+            // there never (fb3400fb), while socket and bun had about 80 runs of each suite.
+            None => (0..self.nodes.len()).map(|i| (drawn_node + i) % self.nodes.len()).collect(),
             Some("all") => (0..self.nodes.len()).collect(),
             Some(name) => self.nodes.iter().position(|n| n.name == name).into_iter().collect(),
         };

@@ -117,8 +117,9 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   `extensions['io.modelcontextprotocol/tasks']`); a legacy (2025-11-25) client that sends a
   bare `tools/call` without `params.task` gets `-32601`.
 
-Modern `tools/list` does not expose the removed `execution.taskSupport` field; legacy clients still
-see and use it.
+`tools/list` shows `execution.taskSupport` to 2025-11-25 sessions only, the one revision that
+defines the field: 2026-07-28 removed it, and earlier revisions never had it (since 1.1.0 they are
+no longer sent it — see [spec coverage](./spec-coverage.md#fields-by-revision-on-toolslist)).
 
 A tool with `optional` or `required` support becomes a task before its handler runs. A typed
 contract can instead start as a request and hand off later: see
@@ -365,20 +366,21 @@ fiber. What happens next depends on how the tool's body is written.
   task; the 2026-07-28 reply is the empty acknowledgement);
 - a legacy `tasks/result` waiter is answered `-32602` (`Task <id> was cancelled`), and the legacy
   session gets its `notifications/tasks/status`;
-- the entry is a stored result from then on: it no longer counts as running, and it holds neither
-  the fiber nor the request;
+- the entry is a stored result from then on and holds neither the fiber nor the request;
 - **the body keeps running until it returns.** Whatever it returns or throws then is dropped: the
   task stays `cancelled` and no second notification is sent. Its side effects still happen.
 
 Until 1.1.0 the cancel reply waited for the body, however long that took. To get that back, set
 `cancelGraceMs` to a value longer than any body runs; `0` answers without waiting at all.
 
-A body that outlives its cancellation is work the store no longer counts: it holds a thread (on
-the JVM and Scala Native) and the request it was started with until it returns, outside
-`maxConcurrentPerSession`, `maxConcurrentTotal` and the byte budgets. The same has always been
-true of a synchronous body whose task is removed by its TTL or with its session. A tool that can
-run long should therefore be written as an effect that can be interrupted; the grace bounds the
-client's wait, not the work.
+A body that outlives its cancellation is still running work, and it is counted as such: until it
+returns it keeps its place under `maxConcurrentPerSession` and `maxConcurrentTotal`, so a client
+cannot stack such bodies up by starting and cancelling tasks in turn (the next create is refused
+as it would be beside a running task). The same holds for a synchronous body whose task is removed
+by its TTL or with its session; until 1.1.0 those bodies ran uncounted. The byte budgets no longer
+charge the request such a body was started with; `maxRequestBytes` bounds it. A tool that can run
+long should still be written as an effect that can be interrupted: the grace bounds the client's
+wait, not the work.
 
 ## Legacy (2025-11-25) task surface
 
@@ -398,7 +400,9 @@ That surface works on any transport whose session
 outlives a single request: the legacy streamable-HTTP adapter and stdio (one durable session per
 process). On the **stateless** legacy adapter all clients share one session identity, so legacy
 task requests there are rejected with `-32601`, and its `initialize` result declares no `tasks`
-capability. Bearer tasks are invisible to legacy sessions and
+capability. A tool whose task support is `required` cannot be called there at all: a plain call is
+refused with `-32601` and a message that says so and points to 2026-07-28 task requests or a
+session-bearing transport. Bearer tasks are invisible to legacy sessions and
 vice versa. `tasks/result` is always answered: for a task that was cancelled (`tasks/cancel`, TTL
 sweep, session release) — whether already terminal or cancelled while the waiter was parked — it
 fails with `-32602` (`Task <id> was cancelled`); once the TTL has swept the entry, with `-32602`

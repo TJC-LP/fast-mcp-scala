@@ -139,13 +139,13 @@ def search(
 
 The advertised `inputSchema` is enforced: a `tools/call` whose arguments do not conform (a value outside an `enum`, a number outside its bounds, a missing `required` member, a wrong type) is answered with an `isError` result before the method runs. `pattern` and `format` are among the keywords that are advertised but not evaluated; the full list, the opt-outs (`McpServerSettings(validateToolInput = false)`, per-tool `ToolRegistrationOptions(validateInputSchema = false)`) and `server.toolInputValidation` are in [docs/custom-types.md](docs/custom-types.md#what-the-server-enforces).
 
-An annotated method's result is sent as `TextContent(result.toString)` unless it is a `String`, a `Content`, a `List[Content]`, an `Array[Byte]` (or a `ZIO` of one of those): a `Some(1)`, a case class or a `Map` arrives as Scala's `toString` text, not JSON. Return a `String`/`Content`, or use a typed `McpTool` (with `.withOutputSchema` for `structuredContent`) when clients need JSON.
+An annotated method's result is sent as it is when it is a `String`, a `Content`, a `List[Content]` or an `Array[Byte]` (or a `ZIO`, `Try` or `Either[Throwable, _]` of one of those). A result type with a `JsonEncoder` or `McpEncoder` that you defined (`case class Item(...) derives JsonEncoder`, also as `List[Item]` or `Option[Item]`) is encoded through it, as a typed `McpTool` would: JSON text, or the content your `McpEncoder` builds. Anything else is sent as `TextContent(result.toString)`: a `Some(1)`, a `List(1, b)`, or a case class without an encoder of its own arrives as Scala's `toString` text, not JSON, and a type nothing can encode is a compile-time warning. Use a typed `McpTool` with `.withOutputSchema` when clients need `structuredContent`. Details: [docs/custom-types.md](docs/custom-types.md#results-of-annotated-methods).
 
 Overloading is fine: only the annotated overload is registered, and its schema and handler come from that exact declaration; two annotated overloads must register distinct `name`s — duplicate names or resource URI patterns within one object are a compile-time error. Annotation arguments such as `name`, `description` and the hints must be literals (`Some("...")`, `Option("...")`, `None`, or a `final val` constant); anything else is a compile-time error.
 
 An annotated method has exactly one parameter list (no currying, no `using` clauses), no type parameters, and at most 22 parameters, and only members declared directly on the scanned object are registered (`private`/`protected` included — visibility does not gate exposure, so annotate only what you mean to publish). An annotated inherited member or `val`, like any other unsupported shape, is a compile-time error naming it and the fix; an annotated method inside a nested object is reported as well (an error when the scanned object declares nothing of its own, otherwise a warning, since the nested object may be scanned separately).
 
-Enums, nested case classes, `Option`, collections, and `java.time` values derive with no user-supplied givens; custom wire shapes go through `McpInputCodec`. See [docs/custom-types.md](docs/custom-types.md).
+Enums, nested case classes, sealed-trait hierarchies, `Option`, collections, and `java.time` values derive with no user-supplied givens; custom wire shapes go through `McpInputCodec`. See [docs/custom-types.md](docs/custom-types.md).
 
 ## Tool hints
 
@@ -322,8 +322,11 @@ For MCP 2026-07-28, `runHttp()` accepts one stateless JSON-RPC message per `POST
 | `port` | `8000` | Listen port |
 | `stateless` | `false` | Disable the legacy session adapter; modern requests are always stateless |
 | `allowedHosts` | `None` (automatic) | `Host` names accepted by the Host/Origin guard; on a loopback bind the loopback names are allowed automatically |
+| `httpRoutes` | `Nil` | Plain `GET` / `HEAD` routes next to the MCP endpoint, e.g. a health probe (since 1.1.0) |
 
 **Host / Origin validation.** The server above binds loopback, and binding loopback alone does not protect against browser-originated requests: a web page open on the same machine can still reach the port. So a loopback server checks every request with no configuration — a `Host` that is not `localhost` / `127.0.0.1` / `[::1]`, or an `Origin` that is not the server's own, is refused with 403. When you bind a non-loopback address (`host = "0.0.0.0"`) nothing can be inferred, so the guard is off and startup logs a warning: set `allowedHosts` (and `allowedOrigins` for browser front-ends on another origin) and put an authenticating proxy in front. A loopback listener behind a reverse proxy that forwards its own `Host` lists that name in `allowedHosts`; `dnsRebindingProtection = false` is the explicit opt-out. Details: [docs/transports.md](docs/transports.md#host--origin-validation).
+
+**A health endpoint on the same port.** `McpServerSettings(httpRoutes = List(HttpRoute.get("/health")(_ => ZIO.succeed(HttpRouteResponse.text("ok")))))` answers `GET /health` from the MCP listener on the JVM, Bun and Scala Native. Routes answer `GET` and `HEAD` on exact paths, sit behind the same Host/Origin guard, can never be the MCP endpoint, and are not authenticated. Details: [docs/transports.md](docs/transports.md#other-routes-on-the-listener-httproutes).
 
 All settings, required request headers, error-code mapping, the legacy adapter, and lower-level construction without the sugar trait: [docs/transports.md](docs/transports.md).
 

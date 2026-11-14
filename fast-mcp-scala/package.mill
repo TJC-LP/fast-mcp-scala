@@ -11,9 +11,9 @@ import mill.scalajslib._
 import mill.scalajslib.api._
 import mill.scalajslib.bun._
 import mill.scalanativelib._
-import build.{BinaryCompatTests, BuildConfig, CrossPlatformTests, FastMCPModule,
-  FastMCPPublishingBase, FastMCPTestModule, ScalaJSTestDepsFix, SharedTests, Versions,
-  scala3Version}
+import build.{BinaryCompatTests, BuildConfig, CoverageTestSources, CrossPlatformTests,
+  FastMCPModule, FastMCPPublishingBase, FastMCPTestModule, ScalaJSTestDepsFix, SharedTests,
+  Versions, scala3Version}
 
 // Namespace module. Aggregate tasks at this level fan out to all three platform children so
 // `./mill fast-mcp-scala.compile` and `./mill fast-mcp-scala.test` cover the whole project
@@ -134,6 +134,27 @@ object `package` extends Module {
     // BinaryCompatTests adds the classes of `compat.client`, which is compiled against a released
     // version: BinaryCompatibilityTest runs them on the current classes.
     object test extends ScalaTests with FastMCPTestModule with CrossPlatformTests
+        with BinaryCompatTests {
+      override def mvnDeps = Seq(
+        mvn"org.scalatest::scalatest:${Versions.scalaTest}",
+        mvn"org.scalacheck::scalacheck:${Versions.scalaCheck}"
+      )
+
+      override def binaryCompatClient = Task { compat.client.compile().classes }
+    }
+
+    // Statement coverage of the JVM suite (GH #121). The same test sources as `test`, run on the
+    // classes of `jvm.scoverage` (this module compiled with the compiler's coverage
+    // instrumentation), which is what `ScoverageTests` swaps into the run classpath. Not part of
+    // `fast-mcp-scala.test` and not a gate: the gated suite runs on the published classes.
+    //
+    //   ./mill fast-mcp-scala.jvm.coverage              # run the suite, write the measurements
+    //   ./mill fast-mcp-scala.jvm.scoverage.htmlReport  # then render them (also xmlReport,
+    //                                                   # consoleReport)
+    //
+    // Two invocations: the report tasks read the measurement files and do not depend on the test
+    // run, so one invocation naming both would not order them.
+    object coverage extends ScoverageTests with FastMCPTestModule with CoverageTestSources
         with BinaryCompatTests {
       override def mvnDeps = Seq(
         mvn"org.scalatest::scalatest:${Versions.scalaTest}",

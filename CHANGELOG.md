@@ -378,10 +378,57 @@ The `1.0.2` patch line was not cut; 1.1.0 follows 1.0.1.
     available on `@Tool` and `@Prompt` only. Before, a template reported that its URI parameters
     did not match and a static resource that it must not have parameters.
   - Two `McpContext` parameters on one method are a compile-time error.
+- **`McpServerSettings.sseRetryInterval: Option[java.time.Duration]`** (GH #121): the SSE `retry`
+  field on the legacy HTTP adapter (protocol versions before 2026-07-28), the time a client should
+  wait before it reconnects after a stream ends. Unset by default, and then nothing changes on the
+  wire. When set, every `text/event-stream` body the adapter writes begins with the line
+  `retry: <milliseconds>`: the standalone GET stream and a streamed POST reply open with an event
+  that is only that line, written before the first message and before any heartbeat, and a
+  fixed-length POST reply carries it as the first line of its one event. It is written the same
+  way on zio-http, the socket backend (JVM and Scala Native) and Bun; Bun serves no GET stream, so
+  there it reaches POST replies only. It is never sent on a 2026-07-28 reply, in legacy stateless mode
+  (JSON replies) or over stdio. A negative interval is refused at construction. Reference:
+  [docs/transports.md](docs/transports.md#sse-retry-sseretryinterval).
+  - This is the `retry` half of SEP-1699 only. The server still sends no event ids and no priming
+    event, and does not resume a stream from `Last-Event-ID`: a client reads an event id on a POST
+    stream as a promise that the reply can be fetched again over GET, and a request whose
+    connection breaks is stopped here, not kept. SSE resumability was removed from MCP in
+    2026-07-28. The conformance harness's unscored `server-sse-polling` scenario (2025-11-25
+    only) therefore reports `server-sse-retry-field` as passed for a server that sets the option
+    and keeps its priming-event recommendation as a warning; `ConformanceServer` does not set the
+    option and registers no `test_reconnection` tool.
+  - The new field is the last one of `McpServerSettings`; the 1.0.x constructors, `apply` and
+    `copy` forwarders give it its default or keep it, as for the other 1.1.0 fields.
 - **`McpServerSettings.stdioDrainTimeout`** (GH #113, TJC-2359): how long a stdio server waits at
   end of stdin for the replies to frames it has already read, before it interrupts what is still
   running. Default five seconds; zero interrupts without waiting; a negative value is refused when
   the settings are built. Ignored by the HTTP transports. See *Fixed*, "One stdio lifecycle".
+- **Plain HTTP routes next to the MCP endpoint: `McpServerSettings.httpRoutes`** (GH #120,
+  TJC-5434). A server can answer `GET /health`-style requests from its MCP listener, on the JVM
+  (zio-http and the socket backend), Bun and Scala Native:
+  `httpRoutes = List(HttpRoute.get("/health")(_ => ZIO.succeed(HttpRouteResponse.text("ok"))))`.
+  Before, every path but the endpoint was 404 and a probe needed a reverse proxy or a second
+  listener.
+  - New, all in the root import: `HttpRoute.get(path)(handler)` with
+    `handler: HttpRouteRequest => UIO[HttpRouteResponse]`; `HttpRouteRequest` (`path`,
+    `method`, `header(name)`); `HttpRouteResponse.text` / `.json` / `apply(status, body, contentType)` and
+    `.withHeader`.
+  - A route is a `GET` on an exact path (the query string is not part of it). A `HEAD` on it runs
+    the same handler and gets its status and headers, the `Content-Length` of the `GET`, and no
+    body, on every backend; `HttpRouteRequest.method` tells the two apart. Another method on that
+    path is 405 with `Allow: GET, HEAD`.
+  - A route can never be the MCP endpoint: `runHttp()` fails at startup for a route on
+    `httpEndpoint`, a path listed twice, one without a leading `/` and one no request can name.
+    Nothing about the endpoint changes, and no request can select a handler that was not listed.
+  - The Host/Origin guard applies to routes as to the endpoint (403 before the handler runs), so a
+    probe must send a `Host` the guard admits. The endpoint's other gates (`Content-Type`,
+    `Accept`, protocol headers, sessions, `limits`) do not apply, and nothing authenticates a
+    route.
+  - The request body is never read or handed to the handler. A handler that dies is answered with
+    the fixed 500; a reply with a line break in a header or a status that cannot carry a body is
+    refused where it is built.
+  - Empty by default: without routes every reply is what it was. There is still no CORS handling
+    on the MCP endpoint. Reference: `docs/transports.md` § "Other routes on the listener".
 - **Tasks wait for input: `input_required`** (TJC-2366, TJC-2367). A tool that asks its client
   for input from inside a 2026-07-28 task (`McpContext.elicit`, `createMessage`, `listRoots`,
   `sendRequest`) now puts the task in `input_required`. `tasks/get` returns the outstanding
@@ -505,9 +552,90 @@ The `1.0.2` patch line was not cut; 1.1.0 follows 1.0.1.
 - New production dependency `org.virtuslab::scala-yaml:0.3.3` (JVM, Scala.js, Scala Native) for
   `SKILL.md` frontmatter, driven at the event level (see `DEPENDENCY_POLICY.md` rationale in
   `docs/skills-conformance.md`).
+- **Sealed-trait hierarchies as arguments** (GH #119, C2.24). A sealed trait or sealed abstract
+  class is derived as a tool argument on both registration paths and on all three platforms: as
+  a field of a typed tool's `In` (it used to stop with `No given instance of type
+  zio.json.JsonDecoder[Shape]`), as an `@Tool` parameter whose cases have enum or case-class
+  fields, and inside `Option`, a collection or a `Map[String, V]`. No `McpInputCodec` is needed.
+  - The wire shape is zio-json's, and the derived schema describes it:
+    `{"Circle": {"radius": 1.5}}`, a `oneOf` of single-key wrapper objects, with `{}` as the
+    payload of a case object. A hierarchy of case objects only is the case name as a string
+    (`"Fast"`), a string `enum` in the schema. A sealed trait nested in another contributes its
+    cases and no level of its own.
+  - `@jsonDiscriminator("type")` and `@jsonHintNames(SnakeCase)` on the hierarchy and
+    `@jsonHint("name")` on a case are read by the schema derivation as they are by the codec:
+    `{"type": "Circle", "radius": 1.5}` is then what is advertised and enforced. The names may
+    be string literals or `final val` constants. A `@jsonHintNames(CustomCase(f))` function
+    cannot be applied when the schema is derived and is a compile-time error that names
+    `@jsonHint` and `McpInputCodec`.
+  - A given `JsonCodecConfiguration` does not reach the derived input decoder (as for case
+    classes: it is derived with zio-json's defaults), and the input schema describes exactly
+    that. It does reach the derived result encoder, so `.withOutputSchema` on a result with a
+    sealed-hierarchy field is a compile-time error while a configuration other than zio-json's
+    default is in scope where the tool is declared, unless you define the `JsonEncoder` (and
+    `McpSchema`) of the hierarchy yourself: its settings are not known when the schema is
+    derived.
+  - A codec you define for the hierarchy wins, as for every other type, and the derivation does
+    not look inside a hierarchy or a case class that has one: a case with a field no codec can
+    be derived for is fine behind a hand-written `JsonDecoder[Shape]`. Give the type an
+    `McpSchema` or make the instance an `McpInputCodec` when its shape differs from the one
+    above.
+  - Fields of a result case class may be sealed hierarchies too (`McpTool[In, Out]`, with or
+    without `.withOutputSchema`); a bare sealed trait as `Out` still needs a `JsonEncoder`.
+  - Still not derived, with a compile-time error that names the remedy: a recursive hierarchy, a
+    generic one (`sealed trait Box[T]`), a Scala 3 enum with parameterized cases, and a sealed
+    trait as the `In` of a typed tool itself (MCP `arguments` is always an object). `@Param` on a
+    field of a case is not carried into the schema.
+
 
 ### Changed
 
+- **An annotated `@Tool` method's result is encoded through the encoder you defined for its
+  type** (GH #119, C2.9). In 1.0.x only a typed contract (`McpTool`) used `McpEncoder`; an
+  annotated method that returned anything but a `String`, a `Content`, a `List[Content]` or an
+  `Array[Byte]` sent the value's `toString`, whatever instances existed.
+  - A result type with a `given zio.json.JsonEncoder[T]` of yours (`derives JsonEncoder` and
+    `derives JsonCodec` included) is now sent as JSON text, as `McpTool[In, T]` sends it, also
+    inside `List`, `Vector`, `Seq`, `Set`, `Option` and `Map[String, T]`. A result type with a
+    `given McpEncoder[T]`, in scope where `scanAnnotations` is called or in the companion of
+    `T` (not a `private` or `protected` one), is the content that encoder builds. The same holds for `ZIO[R, E, T]`, `Try[T]` and
+    `Either[Throwable, T]`.
+  - **This changes what such a server sends.** A method that returns `Item(1, "x")`, where
+    `Item derives JsonCodec`, sent the text `Item(1,x)` in 1.0.x and sends `{"a":1,"b":"x"}`
+    in 1.1.0. Return `item.toString` to keep the old text.
+  - Every other result is sent exactly as before, including the types for which only the
+    library could derive an encoder: a case class without a `JsonEncoder` is still `Item(1,x)`,
+    `Option[String]` is `Some(1)`, `List[String]` is `List(1, b)`, `Unit` is `()`. Return a
+    `String` / `Content`, define a `JsonEncoder`, or use a typed `McpTool` for those. There is
+    still no `structuredContent` and no `outputSchema` on the annotation path.
+  - A result type that nothing can encode now gets a compile-time **warning** where the method
+    is registered: a plain class or a sealed trait without a `JsonEncoder`, or a container whose
+    element is one (`List[Handle]`, `Option[Handle]`, `Map[String, Handle]`). It says that the
+    value is sent as its `toString` text and names the remedies. A build with `-Werror` has to
+    act on it: define the encoder, return a `String`, or silence it with
+    `-Wconf:msg=has no McpEncoder:s`. Not warned about: a declared result type of `Any` or
+    `AnyRef`; every type the library could encode by itself (a case class, `Option[String]`,
+    `Unit`, an enum); and a container of those (`List[Item]`, `Option[Item]`,
+    `Map[String, Item]` for a case class `Item` without a `JsonEncoder`), which is sent as its
+    `toString` like the bare `Item` is.
+- **`tools/list` sends each tool with the fields of the client's protocol revision** (GH #120,
+  D3.17). Every session used to get every field, so a 2024-11-05 client was sent `annotations`
+  (a 2025-03-26 field), `title` and `outputSchema` (2025-06-18) and `execution` (2025-11-25). Now
+  a field is sent from the revision that introduced it: `annotations` from 2025-03-26; `title`,
+  `outputSchema` and `_meta` from 2025-06-18; `icons` from 2025-11-25; `execution` on 2025-11-25
+  only (2026-07-28 removed it, as before). `name`, `description` and `inputSchema` go to everyone.
+  - The revision is the one `initialize` negotiated on a legacy session and 2026-07-28 on a
+    modern request. Replies to 2025-11-25 and 2026-07-28 clients are unchanged.
+  - A 2025-03-26 client keeps the display title as `annotations.title`.
+  - Only the list entry is projected. `tools/call` is unchanged: a tool with an `outputSchema`
+    still returns `structuredContent` to an older client.
+  - The legacy stateless adapter (`stateless = true`) has no `initialize`: there the revision is
+    the one the request's `MCP-Protocol-Version` header names, and 2025-03-26 for a request
+    without the header, as the specification says to assume. Such a header-less request used to
+    get every field and now gets `annotations` but not `title` or `outputSchema`; a client that
+    wants them sends the header.
+  - New: `WireMapping.toolForVersion(tool, version)`. Reference: `docs/spec-coverage.md` §
+    "Fields by revision on `tools/list`".
 - **BEHAVIOUR CHANGE — `tasks/cancel` no longer waits for a body that does not stop** (GH #115,
   D6.14 / C3.3). Affects servers with `TaskSettings(enabled = true)` whose task tools have a
   synchronous body: a plain method on the annotation path, a typed-contract handler that returns
@@ -519,10 +647,11 @@ The `1.0.2` patch line was not cut; 1.1.0 follows 1.0.1.
     cancel is answered, a parked legacy `tasks/result` gets `-32602` (`Task <id> was cancelled`),
     and a legacy session gets its `notifications/tasks/status`.
   - **The body is not stopped.** It runs until it returns, and what it returns or throws then is
-    dropped: the task stays `cancelled` and nothing more is sent. The entry no longer counts as
-    running and holds neither the fiber nor the request, so such a body runs outside the running
-    caps and byte budgets until it returns (as a synchronous body whose task is removed by its
-    TTL or with its session always has). Write long tools as effects that can be interrupted
+    dropped: the task stays `cancelled` and nothing more is sent. The entry holds neither the
+    fiber nor the request, but the body keeps its place under `maxConcurrentPerSession` and
+    `maxConcurrentTotal` until it returns, so cancelling synchronous tasks in turn cannot stack
+    up running bodies beyond the caps. The same now holds for a synchronous body whose task is
+    removed by its TTL or with its session; in 1.0.x those ran uncounted. Write long tools as effects that can be interrupted
     (`ZIO.sleep`, streams, `ZIO.attemptBlockingInterrupt` on the JVM). The library does not lift
     bodies with `attemptBlockingInterrupt` itself: that is JVM thread interruption, unsafe for
     arbitrary code and absent on Scala.js and Scala Native.
@@ -564,6 +693,9 @@ The `1.0.2` patch line was not cut; 1.1.0 follows 1.0.1.
   - A `JsonDecoder` you define for the tuple type, or for the case class that contains it
     (`derives JsonDecoder` included), is used as written and keeps zio-json's array shape. Results
     are unchanged: a tuple in an `Out` is still written as a JSON array.
+  - The same holds for a tuple inside a collection SUBTYPE that zio-json has a decoder for
+    (`IndexedSeq[(A, B)]`, `SortedSet[(A, B)]`): the tuple is read as the object its schema
+    advertises.
 - **`@Param(schema = ...)` keeps the `description` and `examples` of its `@Param`** (GH #116,
   TJC-2362; C2.19). The fragment still replaces the derived property, but the description and the
   examples written next to it are now added to the fragment where it does not state its own; what
@@ -741,6 +873,14 @@ The `1.0.2` patch line was not cut; 1.1.0 follows 1.0.1.
   - `conformance.yml` runs the mode for the JVM, Bun and Scala Native on every pull request, and
     `native.yml` runs it against the GraalVM image. The Antithesis workload runs it against a
     node once faults have stopped, as a third drawn mode (`antithesis/README.md`).
+- **CI: the workflows are checked by zizmor** (GH #121). A new workflow, `zizmor.yml`, runs
+  [zizmor](https://docs.zizmor.sh) 1.32.0 over the workflows, the `setup-build` composite action
+  and `dependabot.yml` on every pull request and push to `main`, and fails on a finding of
+  severity medium or high. It runs the offline audits only, so its result depends on the commit
+  and on nothing else; the action is pinned to a commit and installs zizmor from a hash-locked
+  wheel. Low findings are not reported: the known ones are `self-repository` on each
+  `uses: ./.github/actions/setup-build`, and moving those lines to the `uses: $/...` form is
+  left open until it has been tried on a runner.
 
 - **A parameter or input field with a Scala default is no longer advertised as `required`**
   (TJC-5117, #116 C2.6). Before, a default alone left the name in the `required` array of the
@@ -826,6 +966,13 @@ The `1.0.2` patch line was not cut; 1.1.0 follows 1.0.1.
 
 ### Fixed
 
+- **The schema of a sealed hierarchy matches zio-json's codec** (GH #119, C2.24). Two shapes
+  were advertised that the derived decoder refuses, so with input validation on no call could
+  pass: a hierarchy of case objects only was a `oneOf` of `{"Fast": {}}` wrappers (the codec
+  reads `"Fast"`), and a sealed trait nested in another was a level of its own
+  (`{"Sub": {"Leaf": ...}}`; the codec reads `{"Leaf": ...}`). Both are now derived as the codec
+  reads them. A hierarchy with `@jsonDiscriminator`, `@jsonHintNames` or `@jsonHint` was
+  advertised with wrapper objects and class names; it now follows the annotations. `outputSchema` follows the same rules.
 - **A request that races the end of its session is interrupted** (#117). A request's handler is
   started before it is registered as in flight, so a `DELETE` (or an idle or session-cap eviction)
   that ended the session in between missed it: the handler kept running and its reply stream
@@ -845,6 +992,16 @@ The `1.0.2` patch line was not cut; 1.1.0 follows 1.0.1.
 - **CI: the OSV job fails when classpath resolution fails** (#117): the resolve step now runs with
   `pipefail`, and advisory text is escaped before it is printed as a workflow annotation.
 - The JVM test module no longer depends on mockito and zio-test, which no test used.
+- **Build: the coverage reports are no longer empty** (GH #121). `ScoverageModule` was mixed into
+  the JVM module, but the tests ran on uninstrumented classes, so nothing was ever measured, and
+  the report tasks failed to resolve their own tooling (`scoverageVersion` named 2.3.1, which was
+  never published for Scala 3). `./mill fast-mcp-scala.jvm.coverage` now runs the JVM test sources
+  on the instrumented classes, and `./mill fast-mcp-scala.jvm.scoverage.htmlReport` (also
+  `xmlReport`, `consoleReport`) renders what it measured; the reporter is scoverage 2.5.2
+  (`Versions.scoverage`, a build tool on no published classpath). `fast-mcp-scala.jvm.test` is
+  unchanged and still runs on the classes that are published. CI: the `Coverage report (JVM)` job
+  of `ci.yml` uploads both reports as the `coverage-jvm` artifact and prints the totals in the job
+  summary; it compares nothing with a threshold. Scala.js and Scala Native are not measured.
 - **At the session cap, sessions last used in the same millisecond are evicted in the order they
   were used** (#117). They tied on `lastSeen`, and the map's iteration order then picked the
   victim. Legacy streamable HTTP on every backend.
@@ -910,7 +1067,12 @@ The `1.0.2` patch line was not cut; 1.1.0 follows 1.0.1.
   The 2026-07-28 discovery result is unchanged: it declares the extension and no `tasks` field.
   The stateless legacy adapter (`stateless = true`) refuses every legacy task method with
   `-32601`, and its `initialize` result now declares no `tasks` capability at all. It used to
-  declare `requests.tools.call` there too.
+  declare `requests.tools.call` there too. Its `tools/list` no longer carries
+  `execution.taskSupport` either, and a plain call of a `taskSupport = required` tool there is
+  refused (`-32601`) with a message that names the limitation — `requires task augmentation,
+  which is not available on the legacy stateless transport; call it with MCP 2026-07-28 task
+  requests or over a session-bearing transport` — instead of the bare `requires task
+  augmentation`, a remedy that transport refuses as well.
 - **`subscriptions/listen` refuses task notifications from a client without the Tasks extension**
   (GH #115, TJC-2361). A 2026-07-28 `subscriptions/listen` request that names `taskIds` but does
   not declare `io.modelcontextprotocol/tasks` in its capabilities is answered `-32021`, as
