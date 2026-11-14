@@ -191,6 +191,8 @@ terminate TLS and authentication at a reverse proxy in front of the MCP endpoint
 preflight is answered 405 like any other method the endpoint does not serve: a browser-hosted
 client on another origin needs a CORS-terminating proxy in front of the endpoint (and its origin
 listed in `allowedOrigins`; see [Host / Origin validation](#host--origin-validation)).
+[`httpRoutes`](#other-routes-on-the-listener-httproutes) does not change that: a route can never
+be the MCP endpoint, so it cannot add headers to an MCP reply or answer its preflight.
 
 ### The endpoint: path and methods
 
@@ -198,7 +200,8 @@ listed in `allowedOrigins`; see [Host / Origin validation](#host--origin-validat
 `/mcp`; a setting without the leading slash, `"mcp"`, means the same) — an exact, case-sensitive
 match on every backend. A trailing slash (`/mcp/`), another case (`/MCP`), a longer path
 (`/mcp/extra`) and a prefixed one (`/api/mcp`) are all **404** with an empty body, before any other
-check. The query string is not part of the path: `/mcp?x=1` is the endpoint, and the query is
+check — unless the path is one of [`httpRoutes`](#other-routes-on-the-listener-httproutes), which
+are empty by default. The query string is not part of the path: `/mcp?x=1` is the endpoint, and the query is
 ignored. Because the match is exact, `runHttp()` refuses at startup an `httpEndpoint` that no
 request path could equal: one containing `?`, `#`, `%`, whitespace or a control character, a
 `.` / `..` segment, or a character every client percent-encodes (non-ASCII, `"`, `<`, `>`, `^`,
@@ -264,7 +267,7 @@ joined string.
 | Condition | HTTP | JSON-RPC code |
 |---|---|---|
 | `Host`/`Origin` refused by the Host/Origin guard (automatic on a loopback bind, or `allowedHosts` / `allowedOrigins`) | 403 | `-32000` |
-| Path is not the endpoint | 404 | none (empty body) |
+| Path is not the endpoint (and not one of `httpRoutes`) | 404 | none (empty body) |
 | Method the endpoint does not serve (`Allow` lists the ones it does) | 405 | `-32000` |
 | Missing or wrong `Content-Type` (any POST; a non-utf-8 `charset` counts as wrong) | 415 | `-32000` |
 | `Accept` does not allow the reply types — legacy POST or GET | 406 | `-32000` |
@@ -279,7 +282,8 @@ joined string.
 | Unknown request method | 404 | `-32601` |
 
 The admission gates run in a fixed order on every backend, on headers first and before any session
-state is touched: unknown path 404 → Host/Origin guard 403 → method 405 → `Content-Type` 415 →
+state is touched: unknown path 404 (a path in `httpRoutes` takes its own, shorter way: Host/Origin
+guard 403 → 405 unless `GET` or `HEAD` → its handler) → Host/Origin guard 403 → method 405 → `Content-Type` 415 →
 declared `Content-Length` over `maxRequestBodyBytes` 413 → `Accept` 406 → body read (platform byte
 cap, then a first-party post-read check → 413) → frame limits (`-32700`, HTTP 400) → dispatch. A
 legacy GET or DELETE continues after the method check with: a 2026-07-28 version header 405 → (GET
@@ -295,6 +299,77 @@ alike — so keep secrets out of the exception messages your tools can throw.
 
 The complete wire-behavior and review matrix is in the
 [2026-07-28 upgrade guide](./2026-07-28-upgrade.md#wire-behavior).
+
+### Other routes on the listener (`httpRoutes`)
+
+A deployment often needs one or two plain HTTP answers next to the MCP endpoint: a health or
+readiness probe for the platform, a version page. `McpServerSettings.httpRoutes` (since 1.1.0)
+serves them from the same listener, on every HTTP backend:
+
+```scala
+import com.tjclp.fastmcp.{*, given}
+import zio.*
+
+val settings = McpServerSettings(
+  httpRoutes = List(
+    HttpRoute.get("/health")(_ => ZIO.succeed(HttpRouteResponse.text("ok"))),
+    HttpRoute.get("/ready") { request =>
+      databaseIsUp.map { up =>
+        if up then HttpRouteResponse.json("""{"ready":true}""")
+        else HttpRouteResponse.json("""{"ready":false}""", status = 503).withHeader("Retry-After", "5")
+      }
+    }
+  )
+)
+```
+
+The API is three small types, all in the root import:
+
+| | |
+|---|---|
+| `HttpRoute.get(path)(handler)` | A `GET` route, which also answers `HEAD`. `handler: HttpRouteRequest => UIO[HttpRouteResponse]` |
+| `HttpRouteRequest` | `path`, `method` (`GET` or `HEAD`), and `header(name): Option[String]` (case-insensitive; a header sent more than once is seen joined) |
+| `HttpRouteResponse.text(body, status = 200)` / `.json(body, status = 200)` / `HttpRouteResponse(status, body, contentType)` | The reply; `.withHeader(name, value)` adds a header |
+
+What a route is and is not:
+
+- **`GET` and `HEAD` on an exact path.** The path is compared as the endpoint's is: exactly,
+  case-sensitively, without the query string (`/health?x=1` is `/health`; `/health/` is 404).
+  A `HEAD` runs the same handler (`request.method` tells the two apart) and is answered with its
+  status and headers, the `Content-Length` the `GET` would carry, and no body — on zio-http, the
+  socket backend and Bun alike. Any other method on a route's path is **405** with
+  `Allow: GET, HEAD`. There are no prefixes, wildcards or path parameters.
+- **Never the MCP endpoint.** `runHttp()` refuses at startup a route whose path is `httpEndpoint`,
+  one listed twice, one that does not start with `/`, and one no request path can equal (the
+  rules `httpEndpoint` is held to, on every backend). A route therefore cannot answer, observe or
+  decorate an MCP request, and a request cannot choose a handler: only the paths you list exist.
+- **The Host/Origin guard applies.** A request to a route meets the same check as a request to
+  the endpoint — [Host / Origin validation](#host--origin-validation), 403 — before the handler
+  runs and before its method is judged. A probe must send a `Host` the guard admits: on a
+  loopback bind `localhost` / `127.0.0.1` / `[::1]`; with `allowedHosts`, a listed name. A
+  platform that probes by pod or container address needs that address (or the `Host` the probe
+  is configured to send) in `allowedHosts`.
+- **The endpoint's other gates do not apply**, because they describe MCP requests: no
+  `Content-Type` or `Accept` check, no protocol headers, no session, no `limits`. Nothing
+  authenticates a route either. It is as reachable as the listener is; say only what a stranger
+  may read.
+- **No request body.** The handler sees the path and the headers. A body sent to a route is never
+  read by the library or handed to the handler (the socket backend closes the connection after
+  the reply; netty and Bun still bound it at `maxRequestBodyBytes`).
+- **A reply is checked where it is built.** The status is 200–599 except 204, 205 and 304; the
+  content type and header values are printable ASCII (no line break can reach the head); and
+  `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection` are the server's. A
+  violation throws `IllegalArgumentException` in your handler.
+- **A handler that dies is a 500** with the fixed JSON-RPC body every backend uses
+  (`Internal server error`); the cause is logged and never sent. The handler returns `UIO`: turn
+  the failures of what it calls into a reply (`.catchAll(_ => ZIO.succeed(HttpRouteResponse.text("down", 503)))`).
+- **No time limit.** The server does not bound how long a handler runs; a probe handler should
+  bound its own checks. On Scala Native keep reply bodies under 8 KiB (see
+  [The socket backend](#the-socket-backend)).
+
+Order on a route's path: Host/Origin guard 403 → method 405 (unless `GET` or `HEAD`) → the handler. With no route listed
+(the default) nothing changes: every path but the endpoint is the empty 404 it was. CORS on the
+MCP endpoint, TLS and authentication stay with the proxy in front. Routes are ignored on stdio.
 
 ### Request headers in handlers (`contextHeaders`)
 
@@ -384,6 +459,42 @@ the stream "live" from the server's point of view: the OS only notices such a pe
 writes to the socket — that is, with `keepAliveInterval` set — and only after its own TCP
 retransmission budget (zio-http 3.11.4 exposes no accepted-socket option, so the server does not
 set TCP keepalive itself). The cap-time rules below bound the session store regardless.
+
+#### SSE `retry` (`sseRetryInterval`)
+
+`McpServerSettings.sseRetryInterval` (since 1.1.0, unset by default) makes the adapter announce
+the SSE `retry` field: the time a client should wait before it reconnects after a stream ends.
+With it unset nothing is sent and the wire is what it always was. A negative interval, or one
+above 2147483 seconds (about 24 days, the largest delay a browser's timer honours), is refused
+when the settings are built. With it set, every
+`text/event-stream` body the adapter writes **begins with the line `retry: <milliseconds>`**, on
+every backend:
+
+| Reply | Body |
+|---|---|
+| A stream: the standalone GET stream, or a POST reply that is streamed | opens with an event that is only that line (`retry: 3000`, blank line), written before the first message and before any heartbeat |
+| A fixed-length POST reply (complete at its first frame, `initialize` included) | the line is the first line of its one event: `retry: 3000`, `event: message`, `data: …` |
+
+A client stores the value and dispatches nothing for it. The official TypeScript client uses it as
+the delay before it reopens the GET stream, which the server ends when the session is evicted at
+the `maxSessions` cap, on DELETE, and at shutdown. The value is sent in
+whole milliseconds; zero means "reconnect at once"; a negative interval is refused when the
+settings are constructed.
+
+Where it is not sent: 2026-07-28 replies (that revision has no stream to reconnect to: a broken
+reply is re-issued as a new request), legacy stateless mode (it answers in JSON), and stdio. Bun
+serves no GET stream, so there the field reaches POST replies only.
+
+This is the `retry` half of SEP-1699 and nothing more. The server **sends no event ids, no priming
+event, and does not resume a stream from `Last-Event-ID`**: a request whose connection breaks is
+stopped (see above), and its reply is not kept for a later GET. A priming event (`id:` with empty
+`data:`) is deliberately not sent, because clients read an event id on a POST stream as a promise
+that the reply can be picked up again over GET — the TypeScript client reconnects with
+`Last-Event-ID` and waits — and this server would not keep it. SSE resumability was removed from
+MCP in 2026-07-28; on the legacy adapter, a client that needs to survive a broken connection
+should poll through [Tasks](./tasks.md). The conformance harness's `server-sse-polling` scenario
+(2025-11-25 only, unscored, removed in 2026-07-28) therefore still reports its priming-event
+recommendation as a warning, and `ConformanceServer` registers no `test_reconnection` tool.
 
 `stateless` controls **only** this adapter. Modern requests are stateless regardless of the flag.
 Leaving it `false` (the default) lets older clients fall back to the initialize/session/GET/DELETE
@@ -498,6 +609,7 @@ no reply (it fails with its timeout). A JVM client whose GET stream falls more t
 | `disallowDelete` | `false` | Legacy adapter: answer 405 to HTTP DELETE instead of terminating the session. |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity. Live legacy GET streams are exempt from the periodic sweep but become evictable at the `maxSessions` cap once idle this long; `None` disables both. |
 | `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. The legacy GET stream heartbeats from the first byte. The reply to a POST waits for the handler's first frame for at most one interval: a call that is still silent then gets its SSE response opened with a heartbeat (since 1.1.0; see "The modern path"). With `None`, a 2026-07-28 reply waits for the first frame however long that takes, and a legacy reply opens its stream after one second. Neither listener closes a quiet stream on its own: the JVM has no idle timeout and Bun runs with `idleTimeout: 0` (its 10 s default used to cut a slow tool's reply). Heartbeats are also what lets the OS detect a GET peer that vanished without closing its connection (the socket is only probed when the server writes to it, and the OS gives up after its retransmission budget); without them such a stream stays live until the cap-time eviction described under `maxSessions`. |
+| `sseRetryInterval` | `None` | Legacy adapter only (since 1.1.0): when set, every SSE body the adapter writes begins with `retry: <ms>`, the delay a client should wait before reconnecting (the standalone GET stream and streamed POST replies open with it as an event of its own; a fixed-length POST reply carries it in its one event). Never sent on 2026-07-28 replies. No event ids and no `Last-Event-ID` resumption. See [SSE `retry`](#sse-retry-sseretryinterval). |
 | `allowedHosts` | `None` (automatic) | The `Host` names of the DNS-rebinding/CSRF guard ([Host / Origin validation](#host--origin-validation)). `None` is **automatic**: on a loopback bind the guard is on for `localhost`, `127.0.0.1`, `[::1]` and the bound address; on any other bind it is off and startup warns. `Some(names)` uses exactly those names on any bind address (`Some(Set.empty)` reads as `None`). With the guard on: the `Host` value must parse as one `host[:port]` authority and its hostname (or the verbatim `host:port`) must be listed — the port itself is not compared; a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, a `Host` or `Origin` sent more than once (seen as its `", "`-joined value), and malformed `Host`/`Origin` ports are refused (403), with or without the other header. IPv6 entries are written bracketed, exactly as they appear in the `Host` header: `Set("[::1]")`, not `Set("::1")`. |
 | `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted in addition to the request's own authority **when `allowedHosts` is also set**; with `allowedOrigins` alone only the listed origins pass (the request's own authority is then refused 403 too), and the `Host` is held to the automatic loopback names on a loopback bind and not checked on any other bind. Malformed entries fail `runHttp()` at startup. |
 | `dnsRebindingProtection` | `true` | The explicit opt-out of the Host/Origin guard (since 1.1.0). `false` accepts every `Host` and `Origin` and silences the non-loopback startup warning; it must not be combined with `allowedHosts` / `allowedOrigins` (`runHttp()` fails at startup). Prefer listing the proxied name in `allowedHosts`. |
@@ -508,6 +620,7 @@ no reply (it fails with its timeout). A JVM client whose GET stream falls more t
 | `resourcesSubscribe` | `false` | Enable legacy `resources/subscribe`; modern clients use `subscriptions/listen`. |
 | `exposeTemplatesEndpoint` | `false` | List registered resource templates through `resources/templates/list`. `resources/list` never lists templates; with the default the templates endpoint answers an empty page (clients derive templates from `{}` URIs) and `resources/read` on a matching URI works either way. Applies on every transport. |
 | `contextHeaders` | `Set.empty` | HTTP request headers a handler may read through `McpContext.header` / `McpContext.headers`; nothing is exposed unless listed. See "Request headers in handlers". |
+| `httpRoutes` | `Nil` | Plain `GET` (and `HEAD`) routes served next to the MCP endpoint (since 1.1.0): `HttpRoute.get("/health")(...)`. Behind the Host/Origin guard; never the endpoint itself. See [Other routes on the listener](#other-routes-on-the-listener-httproutes). |
 | `tasks` | `TaskSettings()` | The Tasks extension, off by default (see [tasks.md](./tasks.md)). |
 | `limits` | `LimitSettings()` | Input bounds on every transport: `maxFrameChars` 4 MiB, `maxDepth` 64, `maxObjectFields` 1024, `maxArrayElements` 4096, `maxValues` 65536, `maxNumberDigits` 512, `maxNumberExponent` 512 (`-32700` / HTTP 400 before dispatch), `maxUriChars` 8192 and `maxSubscriptionsPerSession` 1024 (`-32602`); plus `maxOutboundMessages` 256, the per-session buffer for messages emitted outside a request. See [Input limits](#input-limits). |
 
@@ -713,7 +826,7 @@ ready is written as a single packet (head, SSE frames and the chunked terminator
 | `writeStallTimeout` (30 s) | a write that makes no progress for this long — the client stopped reading a large reply or an event stream — closes the connection. Replies go out in 16 KiB slices and the clock restarts with each, so a slow client that is still reading is never cut off. Blocking sockets have no write timeout, so the accept thread sweeps for stalled writes once a second |
 | Refused requests | a reply that leaves request bytes unread (a body over the cap, a refused `Host`, a malformed head) is followed by a lingering close: the write side is shut down and the rest of the request discarded for up to 5 s, so the client reads the error reply instead of a connection reset |
 | Accept failures | a failed `accept` (out of file descriptors or threads, a connection reset before it was accepted) never stops the listener: it is retried with a pause that grows to 1 s for as long as it lasts, with a warning in the log on the first failure of a run and about once a minute after |
-| SSE | chunked transfer-encoding; `keepAliveInterval` pings are written by the connection thread when the stream has been quiet that long |
+| SSE | chunked transfer-encoding; `keepAliveInterval` pings are written by the connection thread when the stream has been quiet that long; with `sseRetryInterval` the opening `retry` event leaves with the response head |
 | Vanished clients | while a reply or a GET stream is quiet, the read side is probed once a second; a closed peer interrupts the request and releases the session's GET slot. A request that finishes within a second is never probed. A reply that cannot be delivered is released without being streamed; the shared handler's 5-second bound on an unstarted reply covers whatever is left |
 | Shutdown | closing the server's scope closes the listener and every connection. ZIO signal handlers are no-ops on Scala Native, so SIGTERM there ends the process by the OS default |
 | Diagnostics | `FASTMCP_HTTP_DEBUG=1` prints per-connection failures to stderr |

@@ -7,7 +7,7 @@ import zio.stream.*
 
 import com.tjclp.fastmcp.core.{ErrorCodes, Protocol}
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError, RequestId}
-import com.tjclp.fastmcp.server.{McpServerSettings, ServerClock}
+import com.tjclp.fastmcp.server.{HttpRoute, McpServerSettings, ServerClock}
 import com.tjclp.fastmcp.server.router.{McpRouter, RequestContext, RequestHeaders, Session}
 import com.tjclp.fastmcp.server.transport.{
   HttpHeaderValidation,
@@ -55,6 +55,14 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
   /** SSE heartbeat interval handed to the backend with every stream (see [[HttpReply.Sse]]). */
   private val keepAlive: Option[Duration] = settings.keepAliveInterval.map(Duration.fromJava)
 
+  /** `settings.sseRetryInterval` as the event that opens a legacy SSE stream
+    * ([[HttpReply.Sse.opening]]); a fixed-length legacy reply carries the same field in its one
+    * event ([[withRetry]]). Either way the body of a legacy SSE response begins with the line
+    * `retry: <ms>`. `None` when the setting is unset (the default): nothing is added anywhere.
+    */
+  private val retryFrame: Option[SseFrame] =
+    settings.sseRetryInterval.map(interval => SseFrame.retry(interval.toMillis))
+
   /** `settings.contextHeaders` in matching form (lower-cased); empty for most servers. */
   private val contextHeaders: Set[String] = RequestHeaders.normalise(settings.contextHeaders)
 
@@ -65,7 +73,14 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     * can never disagree.
     */
   def admit(req: HttpRequest): Option[HttpReply] =
-    if !HttpRequestGuards.pathMatches(req.path, settings) then Some(HttpReply.Empty(404))
+    if !HttpRequestGuards.pathMatches(req.path, settings) then
+      HttpRequestGuards.routeFor(req.path, settings) match
+        case None => Some(HttpReply.Empty(404))
+        // A route of `httpRoutes`: refused on its head, or admitted to `handle` (GET or HEAD).
+        case Some(_) =>
+          HttpRequestGuards
+            .routeGate(req.method, req.gateHeader, settings)
+            .map(rejection => rejectFor(req.method, rejection))
     else
       req.method match
         case "POST" =>
@@ -75,12 +90,16 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         case _ => nonPostError(req)
 
   /** Full routing, behind the first-party error boundary: anything off the endpoint is `404` (an
-    * exact path match, see [[endpoint]]); on it, every method meets the Host/Origin guard first and
-    * a method the endpoint does not serve is then `405` with an `Allow` header.
+    * exact path match, see [[endpoint]]) unless `settings.httpRoutes` has a route for that path
+    * ([[routeReply]]); on it, every method meets the Host/Origin guard first and a method the
+    * endpoint does not serve is then `405` with an `Allow` header.
     */
   def handle(req: HttpRequest): URIO[R, HttpReply] =
     guarded {
-      if !HttpRequestGuards.pathMatches(req.path, settings) then ZIO.succeed(HttpReply.Empty(404))
+      if !HttpRequestGuards.pathMatches(req.path, settings) then
+        HttpRequestGuards.routeFor(req.path, settings) match
+          case None => ZIO.succeed(HttpReply.Empty(404))
+          case Some(route) => routeReply(route, req)
       else
         req.method match
           case "POST" => post(req)
@@ -89,6 +108,30 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
           // Never admitted: `nonPostGate` refuses every method but GET and DELETE.
           case _ => ZIO.succeed(nonPostError(req).getOrElse(HttpReply.Empty(405)))
     }
+
+  /** A request to a route of `settings.httpRoutes`: the Host/Origin guard and the method gate
+    * (`HttpRequestGuards.routeGate`), then the author's handler. It touches neither the router nor
+    * the session store. A handler that dies is a fixed 500, built here rather than at [[handle]]'s
+    * boundary so that it follows the method like every other reply to a route: no reply to a `HEAD`
+    * carries a body (one written after a `HEAD` would be read as the start of the next response on
+    * a kept-alive connection).
+    */
+  private def routeReply(route: HttpRoute, req: HttpRequest): UIO[HttpReply] =
+    HttpRequestGuards.routeGate(req.method, req.gateHeader, settings) match
+      case Some(rejection) => ZIO.succeed(rejectFor(req.method, rejection))
+      case None =>
+        StreamableHttpHandler.guardedWith[Any, HttpReply](
+          rejectFor(
+            req.method,
+            HttpRequestGuards.Rejection(500, HttpRequestGuards.InternalErrorMessage)
+          )
+        )(
+          HttpRequestGuards
+            .runRoute(route, req.method, req.path, req.gateHeader)
+            .map(r =>
+              HttpReply.Body(r.status, r.body, r.contentType, r.headers, req.method == "HEAD")
+            )
+        )
 
   /** The verdict of `HttpRequestGuards.nonPostGate` on a request that is not a POST, rendered: 403
     * Host/Origin, then 405 for a method this endpoint does not serve in this mode (GET and DELETE
@@ -151,7 +194,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
                       if modern then modernPost(req, message)
                       else
                         store match
-                          case None => legacyStatelessDispatch(message)
+                          case None => legacyStatelessDispatch(req, message)
                           case Some(sessions) => legacySessionDispatch(sessions, req, message)
                 }
         }
@@ -221,15 +264,20 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
   // Legacy stateless: request/response, no session state, no SSE.
   // ---------------------------------------------------------------------------
 
-  private def legacyStatelessDispatch(message: JsonRpcMessage): URIO[R, HttpReply] =
+  private def legacyStatelessDispatch(
+      req: HttpRequest,
+      message: JsonRpcMessage
+  ): URIO[R, HttpReply] =
     for
       session <- Session.makeRequestScoped(
         "stateless",
         supportsTasks = false,
         clock = router.clock
       )
-      // Legacy stateless compatibility mode starts ready without a handshake.
+      // Legacy stateless compatibility mode starts ready without a handshake, so the revision
+      // the reply is written for (`tools/list` field projection) comes from the request's header.
       _ <- session.markInitialized
+      _ <- session.setProtocolVersion(ModernHttpValidation.legacyRequestVersion(req.header))
       reply <- router.dispatch(session, message)
     yield (message, reply) match
       case (_: JsonRpcMessage.Invalid, Some(r)) => HttpReply.Json(400, r.toJson)
@@ -412,8 +460,14 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       headers: List[(String, String)]
   ): HttpReply =
     val frames = (sent ++ Chunk.fromIterable(answer)).map(SseFrame.message)
-    if frames.size == 1 then HttpReply.SseComplete(headers, frames(0))
-    else HttpReply.Sse(headers, ZStream.fromChunk(frames), keepAlive)(ZIO.unit)
+    if frames.size == 1 then HttpReply.SseComplete(headers, withRetry(frames(0)))
+    else HttpReply.Sse(headers, ZStream.fromChunk(frames), keepAlive)(ZIO.unit, retryFrame)
+
+  /** `sseRetryInterval` on a legacy reply that is one fixed-length event: the event's first line is
+    * `retry: <ms>`. Nothing is added when the setting is unset (the default).
+    */
+  private def withRetry(frame: SseFrame): SseFrame =
+    retryFrame.fold(frame)(opening => frame.copy(retry = opening.retry))
 
   /** Dispatch one streamable POST frame. A *request* gets an SSE response that streams the
     * notifications and sub-requests it emits (progress, sampling, elicitation) followed by its
@@ -528,14 +582,16 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     // (uninterruptibly, here) behind a fiber that has nothing left to do.
     val done = signalInterrupt(dispatchFiber) *> reqQueue.shutdown
     def sse(first: Option[JsonRpcMessage], openedByHeartbeat: Boolean): UIO[HttpReply] =
-      requestSse(reqQueue, reqId, headers, dispatchFiber, first, openedByHeartbeat)
+      requestSse(reqQueue, reqId, headers, dispatchFiber, first, openedByHeartbeat, modern)
     def shaped(first: JsonRpcMessage): UIO[HttpReply] =
       (if modern then ModernHttpValidation.errorStatus(first) else None) match
         // Both complete replies release the request's resources here; a streamed reply carries
         // them on (`ownedSse`).
         case Some(status) => done.as(HttpReply.Json(status, first.toJson))
         case None if isFinalReply(first, reqId) =>
-          done.as(HttpReply.SseComplete(headers, SseFrame.message(first)))
+          val frame = SseFrame.message(first)
+          // `retry` belongs to the legacy adapter: 2026-07-28 has no stream to reconnect to.
+          done.as(HttpReply.SseComplete(headers, if modern then frame else withRetry(frame)))
         case None => sse(Some(first), openedByHeartbeat = false)
     val bound: Option[Duration] =
       if modern then keepAlive
@@ -562,7 +618,8 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       headers: List[(String, String)],
       dispatchFiber: Fiber.Runtime[?, ?],
       first: Option[JsonRpcMessage],
-      openedByHeartbeat: Boolean
+      openedByHeartbeat: Boolean,
+      modern: Boolean
   ): UIO[HttpReply] =
     // `ZStream.succeed`, not `ZStream.fromIterable(List(first))`: the iterable form sizes its chunk
     // builder for a full default chunk (4096 slots, a 32 KiB array) to carry this one message — on
@@ -582,7 +639,13 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     // The release runs on the normal end of stream too, not just client abort. Task fibers are
     // safe: they are forked under Session.runWithoutSink (TaskRouting), so they never hold this
     // queue.
-    ownedSse(headers, frames, dispatchFiber.interrupt *> reqQueue.shutdown)
+    // `retry` belongs to the legacy adapter: 2026-07-28 has no stream to reconnect to.
+    ownedSse(
+      headers,
+      frames,
+      dispatchFiber.interrupt *> reqQueue.shutdown,
+      opening = if modern then None else retryFrame
+    )
 
   /** `400` with the header-mismatch error (`-32020`), addressed to the request when it has an id.
     */
@@ -669,7 +732,9 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
                 )
               case true =>
                 val frames = ZStream.fromQueue(session.outbound).map(SseFrame.message)
-                ownedSse(Nil, frames, session.releaseGet)
+                // The GET stream can stay silent for as long as it is open: the `retry`
+                // announcement must not wait for a first message.
+                ownedSse(Nil, frames, session.releaseGet, opening = retryFrame)
             }).uninterruptible
         }
 
@@ -693,7 +758,8 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
   private def ownedSse(
       headers: List[(String, String)],
       frames: ZStream[Any, Nothing, SseFrame],
-      release: UIO[Unit]
+      release: UIO[Unit],
+      opening: Option[SseFrame]
   ): UIO[HttpReply.Sse] =
     ZIO.suspendSucceed {
       val state = new java.util.concurrent.atomic.AtomicInteger(ReplyPending)
@@ -726,7 +792,8 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
           else ZIO.unit
         }
         HttpReply.Sse(headers, ZStream.fromChannel(started).ensuring(finish), keepAlive)(
-          giveUp *> stopWatchdog
+          giveUp *> stopWatchdog,
+          opening
         )
       }
     }

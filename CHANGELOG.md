@@ -376,10 +376,57 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     available on `@Tool` and `@Prompt` only. Before, a template reported that its URI parameters
     did not match and a static resource that it must not have parameters.
   - Two `McpContext` parameters on one method are a compile-time error.
+- **`McpServerSettings.sseRetryInterval: Option[java.time.Duration]`** (GH #121): the SSE `retry`
+  field on the legacy HTTP adapter (protocol versions before 2026-07-28), the time a client should
+  wait before it reconnects after a stream ends. Unset by default, and then nothing changes on the
+  wire. When set, every `text/event-stream` body the adapter writes begins with the line
+  `retry: <milliseconds>`: the standalone GET stream and a streamed POST reply open with an event
+  that is only that line, written before the first message and before any heartbeat, and a
+  fixed-length POST reply carries it as the first line of its one event. It is written the same
+  way on zio-http, the socket backend (JVM and Scala Native) and Bun; Bun serves no GET stream, so
+  there it reaches POST replies only. It is never sent on a 2026-07-28 reply, in legacy stateless mode
+  (JSON replies) or over stdio. A negative interval is refused at construction. Reference:
+  [docs/transports.md](docs/transports.md#sse-retry-sseretryinterval).
+  - This is the `retry` half of SEP-1699 only. The server still sends no event ids and no priming
+    event, and does not resume a stream from `Last-Event-ID`: a client reads an event id on a POST
+    stream as a promise that the reply can be fetched again over GET, and a request whose
+    connection breaks is stopped here, not kept. SSE resumability was removed from MCP in
+    2026-07-28. The conformance harness's unscored `server-sse-polling` scenario (2025-11-25
+    only) therefore reports `server-sse-retry-field` as passed for a server that sets the option
+    and keeps its priming-event recommendation as a warning; `ConformanceServer` does not set the
+    option and registers no `test_reconnection` tool.
+  - The new field is the last one of `McpServerSettings`; the 1.0.x constructors, `apply` and
+    `copy` forwarders give it its default or keep it, as for the other 1.1.0 fields.
 - **`McpServerSettings.stdioDrainTimeout`** (GH #113, TJC-2359): how long a stdio server waits at
   end of stdin for the replies to frames it has already read, before it interrupts what is still
   running. Default five seconds; zero interrupts without waiting; a negative value is refused when
   the settings are built. Ignored by the HTTP transports. See *Fixed*, "One stdio lifecycle".
+- **Plain HTTP routes next to the MCP endpoint: `McpServerSettings.httpRoutes`** (GH #120,
+  TJC-5434). A server can answer `GET /health`-style requests from its MCP listener, on the JVM
+  (zio-http and the socket backend), Bun and Scala Native:
+  `httpRoutes = List(HttpRoute.get("/health")(_ => ZIO.succeed(HttpRouteResponse.text("ok"))))`.
+  Before, every path but the endpoint was 404 and a probe needed a reverse proxy or a second
+  listener.
+  - New, all in the root import: `HttpRoute.get(path)(handler)` with
+    `handler: HttpRouteRequest => UIO[HttpRouteResponse]`; `HttpRouteRequest` (`path`,
+    `method`, `header(name)`); `HttpRouteResponse.text` / `.json` / `apply(status, body, contentType)` and
+    `.withHeader`.
+  - A route is a `GET` on an exact path (the query string is not part of it). A `HEAD` on it runs
+    the same handler and gets its status and headers, the `Content-Length` of the `GET`, and no
+    body, on every backend; `HttpRouteRequest.method` tells the two apart. Another method on that
+    path is 405 with `Allow: GET, HEAD`.
+  - A route can never be the MCP endpoint: `runHttp()` fails at startup for a route on
+    `httpEndpoint`, a path listed twice, one without a leading `/` and one no request can name.
+    Nothing about the endpoint changes, and no request can select a handler that was not listed.
+  - The Host/Origin guard applies to routes as to the endpoint (403 before the handler runs), so a
+    probe must send a `Host` the guard admits. The endpoint's other gates (`Content-Type`,
+    `Accept`, protocol headers, sessions, `limits`) do not apply, and nothing authenticates a
+    route.
+  - The request body is never read or handed to the handler. A handler that dies is answered with
+    the fixed 500; a reply with a line break in a header or a status that cannot carry a body is
+    refused where it is built.
+  - Empty by default: without routes every reply is what it was. There is still no CORS handling
+    on the MCP endpoint. Reference: `docs/transports.md` § "Other routes on the listener".
 - **Tasks wait for input: `input_required`** (TJC-2366, TJC-2367). A tool that asks its client
   for input from inside a 2026-07-28 task (`McpContext.elicit`, `createMessage`, `listRoots`,
   `sendRequest`) now puts the task in `input_required`. `tasks/get` returns the outstanding
@@ -569,6 +616,24 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     `Unit`, an enum); and a container of those (`List[Item]`, `Option[Item]`,
     `Map[String, Item]` for a case class `Item` without a `JsonEncoder`), which is sent as its
     `toString` like the bare `Item` is.
+- **`tools/list` sends each tool with the fields of the client's protocol revision** (GH #120,
+  D3.17). Every session used to get every field, so a 2024-11-05 client was sent `annotations`
+  (a 2025-03-26 field), `title` and `outputSchema` (2025-06-18) and `execution` (2025-11-25). Now
+  a field is sent from the revision that introduced it: `annotations` from 2025-03-26; `title`,
+  `outputSchema` and `_meta` from 2025-06-18; `icons` from 2025-11-25; `execution` on 2025-11-25
+  only (2026-07-28 removed it, as before). `name`, `description` and `inputSchema` go to everyone.
+  - The revision is the one `initialize` negotiated on a legacy session and 2026-07-28 on a
+    modern request. Replies to 2025-11-25 and 2026-07-28 clients are unchanged.
+  - A 2025-03-26 client keeps the display title as `annotations.title`.
+  - Only the list entry is projected. `tools/call` is unchanged: a tool with an `outputSchema`
+    still returns `structuredContent` to an older client.
+  - The legacy stateless adapter (`stateless = true`) has no `initialize`: there the revision is
+    the one the request's `MCP-Protocol-Version` header names, and 2025-03-26 for a request
+    without the header, as the specification says to assume. Such a header-less request used to
+    get every field and now gets `annotations` but not `title` or `outputSchema`; a client that
+    wants them sends the header.
+  - New: `WireMapping.toolForVersion(tool, version)`. Reference: `docs/spec-coverage.md` §
+    "Fields by revision on `tools/list`".
 - **BEHAVIOUR CHANGE — `tasks/cancel` no longer waits for a body that does not stop** (GH #115,
   D6.14 / C3.3). Affects servers with `TaskSettings(enabled = true)` whose task tools have a
   synchronous body: a plain method on the annotation path, a typed-contract handler that returns
@@ -806,6 +871,14 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - `conformance.yml` runs the mode for the JVM, Bun and Scala Native on every pull request, and
     `native.yml` runs it against the GraalVM image. The Antithesis workload runs it against a
     node once faults have stopped, as a third drawn mode (`antithesis/README.md`).
+- **CI: the workflows are checked by zizmor** (GH #121). A new workflow, `zizmor.yml`, runs
+  [zizmor](https://docs.zizmor.sh) 1.32.0 over the workflows, the `setup-build` composite action
+  and `dependabot.yml` on every pull request and push to `main`, and fails on a finding of
+  severity medium or high. It runs the offline audits only, so its result depends on the commit
+  and on nothing else; the action is pinned to a commit and installs zizmor from a hash-locked
+  wheel. Low findings are not reported: the known ones are `self-repository` on each
+  `uses: ./.github/actions/setup-build`, and moving those lines to the `uses: $/...` form is
+  left open until it has been tried on a runner.
 
 - **A parameter or input field with a Scala default is no longer advertised as `required`**
   (TJC-5117, #116 C2.6). Before, a default alone left the name in the `required` array of the
@@ -917,6 +990,16 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 - **CI: the OSV job fails when classpath resolution fails** (#117): the resolve step now runs with
   `pipefail`, and advisory text is escaped before it is printed as a workflow annotation.
 - The JVM test module no longer depends on mockito and zio-test, which no test used.
+- **Build: the coverage reports are no longer empty** (GH #121). `ScoverageModule` was mixed into
+  the JVM module, but the tests ran on uninstrumented classes, so nothing was ever measured, and
+  the report tasks failed to resolve their own tooling (`scoverageVersion` named 2.3.1, which was
+  never published for Scala 3). `./mill fast-mcp-scala.jvm.coverage` now runs the JVM test sources
+  on the instrumented classes, and `./mill fast-mcp-scala.jvm.scoverage.htmlReport` (also
+  `xmlReport`, `consoleReport`) renders what it measured; the reporter is scoverage 2.5.2
+  (`Versions.scoverage`, a build tool on no published classpath). `fast-mcp-scala.jvm.test` is
+  unchanged and still runs on the classes that are published. CI: the `Coverage report (JVM)` job
+  of `ci.yml` uploads both reports as the `coverage-jvm` artifact and prints the totals in the job
+  summary; it compares nothing with a threshold. Scala.js and Scala Native are not measured.
 - **At the session cap, sessions last used in the same millisecond are evicted in the order they
   were used** (#117). They tied on `lastSeen`, and the map's iteration order then picked the
   victim. Legacy streamable HTTP on every backend.
@@ -983,7 +1066,11 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   The stateless legacy adapter (`stateless = true`) refuses every legacy task method with
   `-32601`, and its `initialize` result now declares no `tasks` capability at all. It used to
   declare `requests.tools.call` there too. Its `tools/list` no longer carries
-  `execution.taskSupport` either.
+  `execution.taskSupport` either, and a plain call of a `taskSupport = required` tool there is
+  refused (`-32601`) with a message that names the limitation — `requires task augmentation,
+  which is not available on the legacy stateless transport; call it with MCP 2026-07-28 task
+  requests or over a session-bearing transport` — instead of the bare `requires task
+  augmentation`, a remedy that transport refuses as well.
 - **`subscriptions/listen` refuses task notifications from a client without the Tasks extension**
   (GH #115, TJC-2361). A 2026-07-28 `subscriptions/listen` request that names `taskIds` but does
   not declare `io.modelcontextprotocol/tasks` in its capabilities is answered `-32021`, as

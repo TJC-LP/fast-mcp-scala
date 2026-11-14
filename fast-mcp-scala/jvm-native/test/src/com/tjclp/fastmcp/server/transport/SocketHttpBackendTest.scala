@@ -498,6 +498,49 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     }
   }
 
+  test("sseRetryInterval: every legacy SSE body begins with the retry line; a 2026-07-28 body does not") {
+    val settings = baseSettings.copy(sseRetryInterval = Some(java.time.Duration.ofSeconds(3)))
+    withServer(settings) { port =>
+      // A fixed-length reply: the retry line is the first line of its one event, and it is
+      // counted in the Content-Length.
+      val init = request(port, post(initFrame))
+      init.status shouldBe 200
+      init.header("transfer-encoding") shouldBe None
+      init.header("content-length").map(_.toInt) shouldBe
+        Some(init.body.getBytes(StandardCharsets.UTF_8).length)
+      init.body should startWith("retry: 3000\nevent: message\ndata: ")
+      init.body.indexOf("\n\n") shouldBe init.body.length - 2
+      val sid = init.header("mcp-session-id").getOrElse(fail("initialize did not mint a session"))
+      request(port, post(initializedFrame, Some(sid))).status shouldBe 202
+
+      // A streamed reply: the stream opens with an event that is only the retry line.
+      val chatty =
+        """{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"chatty","arguments":{}}}"""
+      val streamed = request(port, post(chatty, Some(sid)))
+      streamed.header("transfer-encoding") shouldBe Some("chunked")
+      streamed.body should startWith("retry: 3000\n\nevent: message\ndata: ")
+      streamed.body should include("chatty done")
+      streamed.body.split("retry: ", -1).length shouldBe 2
+
+      // The GET stream: the retry event is its first chunk, before anything is pushed.
+      val stream = new RawClient(port)
+      try
+        stream.send(get(Some(sid)))
+        stream.readHead()._1 shouldBe 200
+        stream.readChunk() shouldBe Some("retry: 3000\n\n")
+      finally stream.close()
+
+      // 2026-07-28 has no stream to reconnect to: its reply is what it is without the setting.
+      val modern = request(
+        port,
+        post(modernAddFrame, extra = List(modernVersion, callMethod, "Mcp-Name" -> "add"))
+      )
+      modern.status shouldBe 200
+      modern.body should startWith("event: message\ndata: ")
+      modern.body should not include "retry"
+    }
+  }
+
   test("keep-alive: several requests on one connection, including an SSE reply in the middle") {
     withServer() { port =>
       val client = new RawClient(port)
@@ -905,6 +948,106 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
       put.header("allow") shouldBe Some("POST, GET, DELETE")
       put.header("content-type") shouldBe Some("application/json")
       put.body should include("Method PUT is not allowed on the MCP endpoint")
+    }
+  }
+
+  test("httpRoutes on the wire: a GET gets the route's reply and the connection stays usable for MCP") {
+    val routes = List(
+      HttpRoute.get("/health")(_ => ZIO.succeed(HttpRouteResponse.text("ok"))),
+      HttpRoute.get("/ready") { req =>
+        ZIO.succeed(
+          HttpRouteResponse
+            .json(s"""{"probe":"${req.header("x-probe").getOrElse("")}"}""", status = 503)
+            .withHeader("Retry-After", "5")
+        )
+      },
+      HttpRoute.get("/broken")(_ => ZIO.die(new RuntimeException("secret-cause")))
+    )
+    withServer(baseSettings.copy(httpRoutes = routes)) { port =>
+      val client = new RawClient(port)
+      try
+        client.send("GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        val health = client.readReply()
+        health.status shouldBe 200
+        health.header("content-type") shouldBe Some("text/plain; charset=utf-8")
+        health.header("content-length") shouldBe Some("2")
+        health.header("connection") shouldBe Some("keep-alive")
+        health.body shouldBe "ok"
+        // The query string is not part of the path.
+        client.send("GET /ready?verbose=1 HTTP/1.1\r\nHost: localhost\r\nX-Probe: kubelet\r\n\r\n")
+        val ready = client.readReply()
+        ready.status shouldBe 503
+        ready.header("content-type") shouldBe Some("application/json")
+        ready.header("retry-after") shouldBe Some("5")
+        ready.body shouldBe """{"probe":"kubelet"}"""
+        // The same connection then serves the MCP endpoint, and a route again.
+        client.send(post(initFrame))
+        client.readReply().status shouldBe 200
+        client.send("GET /broken HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        val broken = client.readReply()
+        broken.status shouldBe 500
+        broken.body should include("Internal server error")
+        broken.body should not include "secret"
+        client.send("GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        client.readReply().body shouldBe "ok"
+      finally client.close()
+      request(port, "GET /health/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").status shouldBe 404
+      request(port, "GET /other HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").status shouldBe 404
+    }
+  }
+
+  test("httpRoutes on the wire: Host guard 403, then 405 with Allow: GET, HEAD; HEAD has the GET's head and no body; a body sent to a route is never read") {
+    val routes = List(HttpRoute.get("/health")(_ => ZIO.succeed(HttpRouteResponse.text("ok"))))
+    withServer(baseSettings.copy(httpRoutes = routes)) { port =>
+      request(port, "GET /health HTTP/1.1\r\nHost: evil.example\r\n\r\n").status shouldBe 403
+      request(
+        port,
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://evil.example\r\n\r\n"
+      ).status shouldBe 403
+      for method <- List("POST", "PUT", "DELETE", "OPTIONS") do
+        withClue(s"$method: ") {
+          request(port, s"$method /health HTTP/1.1\r\nHost: evil.example\r\n\r\n").status shouldBe 403
+          val reply = request(port, s"$method /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+          reply.status shouldBe 405
+          reply.header("allow") shouldBe Some("GET, HEAD")
+          reply.body should include(s"Method $method is not allowed on this route")
+        }
+      val client = new RawClient(port)
+      try
+        // HEAD: the handler's status and headers and the GET's Content-Length, with no body
+        // bytes behind them — the next request on the connection is parsed from its first byte.
+        client.send("HEAD /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        val (status, headers) = client.readHead()
+        status shouldBe 200
+        headers.get("content-type") shouldBe Some("text/plain; charset=utf-8")
+        headers.get("content-length") shouldBe Some("2")
+        headers.get("transfer-encoding") shouldBe None
+        headers.get("connection") shouldBe Some("keep-alive")
+        client.send("HEAD /health HTTP/1.1\r\nHost: evil.example\r\n\r\n")
+        client.readHead()._1 shouldBe 403
+        client.send("GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        val afterHead = client.readReply()
+        afterHead.status shouldBe 200
+        afterHead.body shouldBe "ok"
+        // A GET that declares a body is answered, and the unread body closes the connection: its
+        // bytes are never parsed as a request.
+        client.send(
+          "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 34\r\n\r\n" +
+            "GET /mcp HTTP/1.1\r\nHost: evil\r\n\r\n"
+        )
+        val reply = client.readReply()
+        reply.status shouldBe 200
+        reply.body shouldBe "ok"
+        reply.header("connection") shouldBe Some("close")
+        client.atEof() shouldBe true
+      finally client.close()
+      // A POST to a route is refused on its head: a body over the cap is never waited for.
+      val big = request(
+        port,
+        "POST /health HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 999999999\r\n\r\n"
+      )
+      big.status shouldBe 405
+      big.header("connection") shouldBe Some("close")
     }
   }
 
