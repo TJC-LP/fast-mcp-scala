@@ -56,15 +56,22 @@ private[fastmcp] object EnumTypeCollector:
     * type is in scope when an outer type's derivation expands. Same walk as [[collectEnums]];
     * ordering and what is included differ:
     *   - Scala 3 enums and monomorphic case classes;
+    *   - monomorphic sealed hierarchies ([[isSealedHierarchy]]), after the cases they are made of,
+    *     so that a field of a sealed-trait type gets a decoder (GH #119);
     *   - Java enums ([[isJavaEnum]]), for which zio-json has no derivation at all;
     *   - tuples ([[isTuple]]), which the caller derives as products where the wire shape must be
     *     the `{"_1": ..., "_2": ...}` object the schema advertises.
+    *
+    * A `root` that is itself a sealed hierarchy contributes what its cases reach.
     */
   def collectDerivable(using q: Quotes)(root: q.reflect.TypeRepr): List[q.reflect.TypeRepr] =
     import q.reflect.*
 
     val visited = scala.collection.mutable.ListBuffer.empty[TypeRepr]
     val found = scala.collection.mutable.ListBuffer.empty[TypeRepr]
+
+    def walkCases(tpe: TypeRepr, depth: Int): Unit =
+      sealedCases(tpe).foreach(walk(_, depth + 1))
 
     def walk(raw: TypeRepr, depth: Int): Unit =
       if depth <= MaxDepth then
@@ -80,12 +87,14 @@ private[fastmcp] object EnumTypeCollector:
             )
           val isProduct = !isScalaEnum && !javaEnum && sym.isClassDef &&
             sym.flags.is(Flags.Case) && sym.caseFields.nonEmpty
+          val isSum = isSealedHierarchy(tpe)
           tpe match
             case AppliedType(_, args) => args.foreach(walk(_, depth + 1))
             case _ => ()
           if isProduct then sym.caseFields.foreach(f => walk(tpe.memberType(f), depth + 1))
+          if isSum then walkCases(tpe, depth)
           // Post-order: children recorded above, self after — dependency-safe local ordering.
-          if isScalaEnum || javaEnum || tuple || (isProduct && tpe.typeArgs.isEmpty) then
+          if isScalaEnum || javaEnum || tuple || isSum || (isProduct && tpe.typeArgs.isEmpty) then
             found += tpe
 
     val rootTpe = root.dealias.simplified
@@ -96,7 +105,37 @@ private[fastmcp] object EnumTypeCollector:
     val rootSym = rootTpe.typeSymbol
     if rootSym.isClassDef && rootSym.caseFields.nonEmpty then
       rootSym.caseFields.foreach(f => walk(rootTpe.memberType(f), 1))
+    if isSealedHierarchy(rootTpe) then walkCases(rootTpe, 0)
     found.toList
+
+  /** A monomorphic sealed trait or sealed abstract class with at least one case, declared outside
+    * the standard library: the sum types zio-json derives a decoder for and the schema macro
+    * describes as a `oneOf`. Scala 3 enums and Java enums are not included (they have their own
+    * paths), nor are `Option`, `Either` and the collections (zio-json's own instances).
+    */
+  def isSealedHierarchy(using q: Quotes)(raw: q.reflect.TypeRepr): Boolean =
+    import q.reflect.*
+    val tpe = raw.dealias.simplified
+    val sym = tpe.typeSymbol
+    sym.isClassDef && sym.flags.is(Flags.Sealed) && !sym.flags.is(Flags.Enum) &&
+    !sym.flags.is(Flags.Case) && !sym.flags.is(Flags.Module) && !sym.flags.is(Flags.JavaDefined) &&
+    tpe.typeArgs.isEmpty && sym.children.nonEmpty && !isStandardLibrary(sym)
+
+  /** The class types of the cases of the sealed hierarchy `tpe` that can be walked further: case
+    * objects have no fields, and a case with type parameters has no type to walk at this point.
+    */
+  private def sealedCases(using q: Quotes)(tpe: q.reflect.TypeRepr): List[q.reflect.TypeRepr] =
+    import q.reflect.*
+    tpe.typeSymbol.children.collect {
+      case child
+          if child.isClassDef && !child.flags.is(Flags.Module) &&
+            child.primaryConstructor.paramSymss.flatten.forall(!_.isTypeParam) =>
+        child.typeRef
+    }
+
+  private def isStandardLibrary(using q: Quotes)(sym: q.reflect.Symbol): Boolean =
+    val name = sym.fullName
+    name.startsWith("scala.") || name.startsWith("java.")
 
   /** A Java `enum` class (`java.util.concurrent.TimeUnit`, a user's own). The compiler gives it a
     * `Mirror.SumOf`, but zio-json's derivation does not terminate on it, so every derivation entry

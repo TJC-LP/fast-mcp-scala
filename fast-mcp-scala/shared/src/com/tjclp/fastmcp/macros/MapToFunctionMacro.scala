@@ -255,7 +255,8 @@ object MapToFunctionMacro:
                   s"Mirror-derivable JsonDecoder found for ${tpe.show}. Provide a given " +
                   s"JsonDecoder[${tpe.show}] or McpInputCodec[${tpe.show}] (decoder + schema in one " +
                   "value). Primitives, java.time values, Scala 3 and Java enums, case classes, " +
-                  "tuples, Option, Either, List, Vector, Set, Seq, Array and Map[String, V] derive " +
+                  "sealed-trait hierarchies, tuples, Option, Either, List, Vector, Set, Seq, Array " +
+                  "and Map[String, V] derive " +
                   "automatically."
               )
             )

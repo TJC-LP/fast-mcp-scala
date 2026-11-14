@@ -33,8 +33,9 @@ typed contracts.
   schema of the constant names and a codec that reads and writes exactly those names.
   `java.time.DayOfWeek` and `java.time.Month` advertise their names too (zio-json's decoders for
   the two also accept other letter cases, but input validation requires the listed spelling).
-- Sealed-trait hierarchies as a field type are not derived: provide a `given McpInputCodec[T]` for
-  them.
+- Sealed-trait hierarchies (a `sealed trait` or `sealed abstract class` and its cases) derive as
+  arguments since 1.1.0, as a parameter, as a field, and inside `Option`, a collection or a map:
+  see [Sealed-trait hierarchies](#sealed-trait-hierarchies).
 - A tuple on the input side is the object `{"_1": ..., "_2": ...}` its schema describes, wherever it
   appears: as a parameter, inside `Option`, a collection or a map, and as a field of a case class
   whose decoder is derived by the library. A `JsonDecoder` you define yourself for the tuple, or
@@ -56,6 +57,51 @@ typed contracts.
 - Derived schemas use the `format` keywords `date-time`, `date`, `time`, `duration`, `uuid` and
   `uri` for the matching `java.time` / `UUID` / `URI` types; validators running in strict mode
   (`ajv --strict`) need their formats plugin (`ajv-formats`) to accept them.
+
+## Sealed-trait hierarchies
+
+A sealed hierarchy is read and written in zio-json's shape, and the derived schema describes that
+shape:
+
+```scala 3 raw
+sealed trait Shape
+case class Circle(radius: Double) extends Shape
+case class Rect(w: Double, h: Double = 1.0) extends Shape
+case object Origin extends Shape
+
+sealed trait Mode
+case object Fast extends Mode
+case object Slow extends Mode
+
+case class DrawArgs(shape: Shape, mode: Mode)
+// {"shape": {"Circle": {"radius": 1.5}}, "mode": "Fast"}
+```
+
+| Hierarchy | On the wire | Schema |
+|---|---|---|
+| Cases with fields, or mixed | `{"Circle": {"radius": 1.5}}`, `{"Origin": {}}` | `oneOf` of single-key wrapper objects |
+| Case objects only | `"Fast"` | `{"type": "string", "enum": ["Fast", "Slow"]}` |
+| `@jsonDiscriminator("type")` on the trait | `{"type": "Circle", "radius": 1.5}`, `{"type": "Origin"}` | `oneOf` of the cases' objects, the case name as a `const` |
+
+- A case is called by its class name, or by its `@jsonHint("name")`.
+- A sealed trait nested in another one (`sealed trait Polygon extends Shape`) contributes its
+  cases; there is no `"Polygon"` level on the wire.
+- A case's fields derive like any case class: enums, nested case classes, defaults (a defaulted
+  field is not `required`), other hierarchies.
+- The decoder is derived where the hierarchy is used, unless you define one: a
+  `given JsonDecoder[Shape]` of yours wins. If its shape is not the one in the table, give the type
+  an `McpSchema`, or make the instance an `McpInputCodec`, so that the advertised (and enforced)
+  schema describes what it reads. A `JsonCodecConfiguration` of your own that changes the shape
+  (`enumValuesAsStrings = false`, a discriminator set in the configuration) is not visible to the
+  schema derivation either.
+- On the result side, a field of an `Out` case class may be a sealed hierarchy, with the same
+  shape and the same `outputSchema`. A bare sealed trait as `Out` needs a `JsonEncoder` of yours.
+- Not derived, each with a compile-time error that names the remedy: a recursive hierarchy
+  (`case class Node(children: List[Tree]) extends Tree`), a generic one (`sealed trait Box[T]`), a
+  Scala 3 enum with parameterized cases, and a sealed trait as the `In` of a typed tool itself. Use
+  an `McpInputCodec`.
+- `@Param` on a field of a case is not carried into the schema (as for the values of a `Map` and
+  the sides of an `Either`).
 
 ## What the server enforces
 

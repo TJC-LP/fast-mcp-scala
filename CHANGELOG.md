@@ -503,6 +503,28 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 - New production dependency `org.virtuslab::scala-yaml:0.3.3` (JVM, Scala.js, Scala Native) for
   `SKILL.md` frontmatter, driven at the event level (see `DEPENDENCY_POLICY.md` rationale in
   `docs/skills-conformance.md`).
+- **Sealed-trait hierarchies as arguments** (GH #119, C2.24). A sealed trait or sealed abstract
+  class is derived as a tool argument on both registration paths and on all three platforms: as
+  a field of a typed tool's `In` (it used to stop with `No given instance of type
+  zio.json.JsonDecoder[Shape]`), as an `@Tool` parameter whose cases have enum or case-class
+  fields, and inside `Option`, a collection or a `Map[String, V]`. No `McpInputCodec` is needed.
+  - The wire shape is zio-json's, and the derived schema describes it:
+    `{"Circle": {"radius": 1.5}}`, a `oneOf` of single-key wrapper objects, with `{}` as the
+    payload of a case object. A hierarchy of case objects only is the case name as a string
+    (`"Fast"`), a string `enum` in the schema. A sealed trait nested in another contributes its
+    cases and no level of its own.
+  - `@jsonDiscriminator("type")` on the hierarchy and `@jsonHint("name")` on a case are read by
+    the schema derivation as they are by the codec: `{"type": "Circle", "radius": 1.5}` is then
+    what is advertised and enforced.
+  - A decoder you define for the hierarchy wins, as for every other type. Give it an `McpSchema`
+    or make it an `McpInputCodec` when its shape differs from the one above.
+  - Fields of a result case class may be sealed hierarchies too (`McpTool[In, Out]`, with or
+    without `.withOutputSchema`); a bare sealed trait as `Out` still needs a `JsonEncoder`.
+  - Still not derived, with a compile-time error that names the remedy: a recursive hierarchy, a
+    generic one (`sealed trait Box[T]`), a Scala 3 enum with parameterized cases, and a sealed
+    trait as the `In` of a typed tool itself (MCP `arguments` is always an object). `@Param` on a
+    field of a case is not carried into the schema.
+
 
 ### Changed
 
@@ -824,6 +846,13 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Fixed
 
+- **The schema of a sealed hierarchy matches zio-json's codec** (GH #119, C2.24). Two shapes
+  were advertised that the derived decoder refuses, so with input validation on no call could
+  pass: a hierarchy of case objects only was a `oneOf` of `{"Fast": {}}` wrappers (the codec
+  reads `"Fast"`), and a sealed trait nested in another was a level of its own
+  (`{"Sub": {"Leaf": ...}}`; the codec reads `{"Leaf": ...}`). Both are now derived as the codec
+  reads them. A hierarchy with `@jsonDiscriminator` or `@jsonHint` was advertised with wrapper
+  objects and class names; it now follows the annotations. `outputSchema` follows the same rules.
 - **A request that races the end of its session is interrupted** (#117). A request's handler is
   started before it is registered as in flight, so a `DELETE` (or an idle or session-cap eviction)
   that ended the session in between missed it: the handler kept running and its reply stream
