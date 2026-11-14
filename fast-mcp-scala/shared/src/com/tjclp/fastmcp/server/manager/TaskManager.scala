@@ -130,7 +130,9 @@ private[fastmcp] final case class TaskStoreStats(
     sweeperActive: Boolean,
     perOwner: Map[Option[String], Counts],
     perPool: Map[PoolKind, Counts],
-    heldFibers: Int = 0
+    heldFibers: Int = 0,
+    /** Bodies still running although their task is no longer a running entry. */
+    lingering: Int = 0
 )
 
 /** The task store: entries plus O(1) per-owner and per-pool indices, and the sweeper claim flag.
@@ -141,8 +143,30 @@ private final case class TaskStore(
     owners: Map[Option[String], Counts],
     pools: Map[PoolKind, Counts],
     sweeperActive: Boolean,
-    nextSeq: Long
+    nextSeq: Long,
+    /** Task bodies that are still running although their entry stopped counting as running: the
+      * entry was recorded `Cancelled` by a cancel that stopped waiting (`cancelGraceMs`), or it was
+      * removed while running (TTL sweep, session release). Such a body is being interrupted, but a
+      * synchronous one runs until it returns. Keyed by task id, with the owner and pool whose
+      * running caps it still counts against; removed when the body's fiber ends.
+      */
+    lingering: Map[String, (Option[String], PoolKind)] = Map.empty
 ):
+
+  /** `entry`'s body goes on running without a running entry. */
+  def lingers(entry: TaskEntry): TaskStore =
+    if entry.fiber.isEmpty then this
+    else copy(lingering = lingering.updated(entry.taskId, (entry.ownerKey, entry.pool)))
+
+  /** The fiber of `taskId` has ended. */
+  def bodyEnded(taskId: String): TaskStore =
+    if lingering.contains(taskId) then copy(lingering = lingering.removed(taskId)) else this
+
+  def lingeringOf(owner: Option[String]): Int =
+    if lingering.isEmpty then 0 else lingering.valuesIterator.count(_._1 == owner)
+
+  def lingeringIn(pool: PoolKind): Int =
+    if lingering.isEmpty then 0 else lingering.valuesIterator.count(_._2 == pool)
 
   def insert(entry: TaskEntry): TaskStore =
     val e = entry.copy(seq = nextSeq)
@@ -181,7 +205,10 @@ private final case class TaskStore(
       if !s.entries.contains(e.taskId) then s
       else
         val dRunning = if e.status.isTerminal then 0 else -1
-        s.copy(
+        // A running entry is removed before its body has ended (the caller interrupts it): the
+        // body keeps its place under the running caps until its fiber is gone.
+        val left = if e.status.isTerminal then s else s.lingers(e)
+        left.copy(
           entries = s.entries.removed(e.taskId),
           owners =
             drop(s.owners, e.ownerKey, bump(s.owners.get(e.ownerKey), dRunning, -1, -e.bytes)),
@@ -264,7 +291,8 @@ private final case class TaskStore(
       sweeperActive,
       owners,
       pools,
-      entries.valuesIterator.count(_.fiber.isDefined)
+      entries.valuesIterator.count(_.fiber.isDefined),
+      lingering.size
     )
 
   private def bump(c: Option[Counts], dRunning: Int, dTotal: Int, dBytes: Long): Counts =
@@ -476,7 +504,7 @@ class TaskManager[R] private[manager] (
         // would never land at all.
         wrapped =
           ZIO.acquireReleaseExitWith(ZIO.unit)((_, exit: Exit[Throwable, Any]) =>
-            recordTerminal(taskId, exit, promise, onStatusChange)
+            recordTerminal(taskId, exit, promise, onStatusChange, fromBody = true)
           )(_ => start.await.flatMap(go => if go then run(taskId) else ZIO.interrupt).interruptible)
         fiber <- wrapped.forkDaemon
         result <- registerOrRollback(
@@ -586,10 +614,13 @@ class TaskManager[R] private[manager] (
     val cutoff = nowMono - settings.minResultRetentionMs
     if s.entries.contains(entry.taskId) then
       (Left(new IllegalStateException(s"duplicate task id ${entry.taskId}")), s)
-    else if oc.running >= perOwnerRunning then
+    // Bodies that outlived their entry (`TaskStore.lingering`) are still running work: they count,
+    // or a client could stack them up by cancelling synchronous tasks one after another.
+    else if oc.running + s.lingeringOf(owner) >= perOwnerRunning then
       // Never echo a derived client key: the session id is the only owner name on the wire.
       (Left(TaskConcurrencyLimitExceeded(entry.sessionId, perOwnerRunning)), s)
-    else if pc.running >= poolRunning then (Left(TaskCapacityExceeded("running", poolRunning)), s)
+    else if pc.running + s.lingeringIn(pool) >= poolRunning then
+      (Left(TaskCapacityExceeded("running", poolRunning)), s)
     else
       val ownerEvict =
         if oc.total >= perOwnerStored then s.evictable(pool, Some(owner), cutoff) else None
@@ -741,8 +772,8 @@ class TaskManager[R] private[manager] (
     * observes the interrupt only when it returns. When the grace passes first, the task is recorded
     * `Cancelled` here: its result promise fails with [[TaskCancelledError]], the status callback
     * fires, and the entry drops the fiber and the request's byte charge. The body itself cannot be
-    * stopped; it runs to its end as a fiber the store no longer counts, and [[recordTerminal]]
-    * drops whatever it returns.
+    * stopped; it runs to its end, still counted against the running caps (`TaskStore.lingering`),
+    * and [[recordTerminal]] drops whatever it returns.
     */
   def cancel(taskId: String, sessionId: Option[String]): UIO[Either[String, Task]] =
     storeRef.get.flatMap { s =>
@@ -768,7 +799,8 @@ class TaskManager[R] private[manager] (
                 taskId,
                 Exit.interrupt(FiberId.None),
                 entry.result,
-                entry.onStatus
+                entry.onStatus,
+                fromBody = false
               ).uninterruptible
             )
             latest <- storeRef.get
@@ -1048,13 +1080,17 @@ class TaskManager[R] private[manager] (
       taskId: String,
       exit: Exit[Throwable, Any],
       promise: Promise[Throwable, Any],
-      onStatusChange: Task => UIO[Unit]
+      onStatusChange: Task => UIO[Unit],
+      // `true` from the task's own fiber as it ends; `false` from a cancel that stopped waiting
+      // for it, in which case the body is still running and goes on counting as running.
+      fromBody: Boolean
   ): UIO[Unit] =
     val settled = settle(taskId, exit)
     val nowMs = System.currentTimeMillis()
     val nowMono = clock.monotonicMs()
     for
-      recorded <- storeRef.modify { s =>
+      recorded <- storeRef.modify { s0 =>
+        val s = if fromBody then s0.bodyEnded(taskId) else s0
         s.entries.get(taskId) match
           // Swept or released: no entry to update, but a `tasks/result` waiter still holds the
           // promise.
@@ -1083,7 +1119,8 @@ class TaskManager[R] private[manager] (
                 onStatus = TaskEntry.noNotify
               )
             val cutoff = nowMono - settings.minResultRetentionMs
-            val kept = s.markTerminal(entry, terminal(settled))
+            val kept =
+              (if fromBody then s else s.lingers(entry)).markTerminal(entry, terminal(settled))
             // The stored result must fit the owner's and the pool's byte budgets. Older results
             // past the retention grace make room; inside the grace nobody is evicted and it is
             // this result that is discarded.
@@ -1094,7 +1131,10 @@ class TaskManager[R] private[manager] (
                   new TaskResultDiscarded(taskId, budget.setting, budget.limitBytes)
                 )
                 val next = terminal(discarded)
-                ((Some(next), Some(discarded.outcome)), s.markTerminal(entry, next))
+                (
+                  (Some(next), Some(discarded.outcome)),
+                  (if fromBody then s else s.lingers(entry)).markTerminal(entry, next)
+                )
       }
       (updated, outcome) = recorded
       _ <- checkpoint("recorded")

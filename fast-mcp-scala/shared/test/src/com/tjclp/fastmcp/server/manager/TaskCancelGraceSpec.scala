@@ -126,6 +126,92 @@ class TaskCancelGraceSpec extends AsyncFunSuite:
     )
   }
 
+  test("a body that outlives its cancellation still counts against the running caps") {
+    // One running task per owner. The cancelled task's body has not returned, so it is still
+    // work this owner is running: a second task is refused until the body is gone. Otherwise a
+    // client could stack up bodies by starting and cancelling synchronous tasks in turn.
+    run(
+      for
+        settled <- Ref.make(0)
+        ids = new java.util.concurrent.atomic.AtomicLong
+        tm = TaskManager.makeUnsafe[Any](
+          TaskSettings(
+            enabled = true,
+            sweepIntervalMs = 250L,
+            cancelGraceMs = 0L,
+            maxConcurrentPerSession = 1
+          ),
+          ZIO.succeed(s"task-${ids.incrementAndGet()}"),
+          stage => ZIO.when(stage == "settled")(settled.update(_ + 1)).unit,
+          new ManualClock
+        )
+        started <- Promise.make[Nothing, Unit]
+        release <- Promise.make[Nothing, Unit]
+        scope = TaskScope.session("s1")
+        first <- tm.createSized(scope, None, 16L, synchronousBody(started, release, "late"), _ => ZIO.unit)
+        _ <- started.await
+        cancelled <- tm.cancel(first.task.taskId, Session)
+        lingering <- tm.stats
+        refused <- tm.createSized(scope, None, 16L, ZIO.never, _ => ZIO.unit).exit
+        // Another owner is not affected by this one's leftover body.
+        other <- tm.createSized(TaskScope.session("s2"), None, 16L, ZIO.never, _ => ZIO.unit).exit
+        _ <- release.succeed(())
+        // Not the "settled" count: the cancel's own record has already raised it. What the next
+        // create depends on is the body's fiber having reported its end.
+        after <- Eventually("the cancelled body's fiber has ended")(tm.stats)(_.lingering == 0)
+        admitted <- tm.createSized(scope, None, 16L, ZIO.never, _ => ZIO.unit).exit
+        _ <- tm.shutdown
+      yield
+        assert(cancelled.map(_.status) == Right(TaskStatus.Cancelled))
+        assert(lingering.running == 0 && lingering.lingering == 1, lingering)
+        assert(
+          refused.causeOption.flatMap(_.failureOption).exists(_.isInstanceOf[TaskConcurrencyLimitExceeded]),
+          s"a second task was admitted beside a body that is still running: $refused"
+        )
+        assert(other.isSuccess, other)
+        assert(after.lingering == 0, after)
+        assert(admitted.isSuccess, admitted)
+    )
+  }
+
+  test("a body removed by the TTL sweep while it runs counts until it has returned") {
+    run(
+      for
+        settled <- Ref.make(0)
+        ids = new java.util.concurrent.atomic.AtomicLong
+        clock = new ManualClock
+        tm = TaskManager.makeUnsafe[Any](
+          TaskSettings(enabled = true, sweepIntervalMs = 250L, maxConcurrentPerSession = 1),
+          ZIO.succeed(s"task-${ids.incrementAndGet()}"),
+          stage => ZIO.when(stage == "settled")(settled.update(_ + 1)).unit,
+          clock
+        )
+        started <- Promise.make[Nothing, Unit]
+        release <- Promise.make[Nothing, Unit]
+        scope = TaskScope.session("s1")
+        _ <- tm.createSized(scope, Some(1_000L), 16L, synchronousBody(started, release, "late"), _ => ZIO.unit)
+        _ <- started.await
+        // The sweeper must be parked on its interval before the clock moves, or it would park
+        // afterwards, 250 ms past the new reading, and never wake.
+        _ <- clock.awaitSleeping(250.millis)
+        _ <- clock.advance(2.seconds)
+        swept <- Eventually("the expired task was swept")(tm.stats)(_.total == 0)
+        refused <- tm.createSized(scope, None, 16L, ZIO.never, _ => ZIO.unit).exit
+        _ <- release.succeed(())
+        after <- Eventually("the swept body's fiber has ended")(tm.stats)(_.lingering == 0)
+        admitted <- tm.createSized(scope, None, 16L, ZIO.never, _ => ZIO.unit).exit
+        _ <- tm.shutdown
+      yield
+        assert(swept.lingering == 1, swept)
+        assert(
+          refused.causeOption.flatMap(_.failureOption).exists(_.isInstanceOf[TaskConcurrencyLimitExceeded]),
+          s"a second task was admitted beside a swept body that is still running: $refused"
+        )
+        assert(after.lingering == 0, after)
+        assert(admitted.isSuccess, admitted)
+    )
+  }
+
   test("a body that does not stop: the cancel is answered when the grace has passed, not before") {
     run(
       for
@@ -331,6 +417,9 @@ class TaskCancelGraceSpec extends AsyncFunSuite:
         _ <- started.await
         cancel <- f.tm.cancel(id, Session).forkDaemon
         _ <- f.clock.awaitSleeping(Duration.fromMillis(GraceMs))
+        // The sweeper too must be parked on its interval before the clock moves: parking after
+        // the advance, it would wait 250 ms past the new reading and never see the expiry.
+        _ <- f.clock.awaitSleeping(250.millis)
         // Past the TTL (the sweeper removes the entry), then to the end of the grace.
         _ <- f.clock.advance(1.second)
         _ <- Eventually("the sweeper removed the expired task")(f.tm.stats)(_.total == 0)
