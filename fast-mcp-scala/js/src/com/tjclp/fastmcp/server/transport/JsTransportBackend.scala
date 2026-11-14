@@ -664,7 +664,9 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             .flatMap {
               case None =>
                 // Nobody reads this reply; it carries no session id because none was stored.
-                session.terminate.as(initializeResponse(sent, answer, session, minted = false))
+                session.terminate.as(
+                  initializeResponse(sent, answer, session, minted = false, settings)
+                )
               case Some(Left(())) =>
                 session.terminate
                   .as(jsonRpcErrorResponse(503, HttpRequestGuards.SessionLimitMessage))
@@ -675,11 +677,11 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                       s"Legacy session cap ${settings.maxSessions.getOrElse(0)} reached; evicted session ${victim.sessionId}"
                     ) *> victim.terminate
                   }
-                  .as(initializeResponse(sent, answer, session, minted = true))
+                  .as(initializeResponse(sent, answer, session, minted = true, settings))
             }
             .uninterruptible
         case Exit.Success(answer) =>
-          session.terminate.as(initializeResponse(sent, answer, session, minted = false))
+          session.terminate.as(initializeResponse(sent, answer, session, minted = false, settings))
         // The client went away (or the handler chain died): `guarded` answers, as it does for a
         // request abandoned while it waited for its first frame.
         case Exit.Failure(cause) => session.terminate *> ZIO.failCause(cause)
@@ -692,12 +694,17 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       sent: Chunk[JsonRpcMessage],
       answer: Option[JsonRpcMessage],
       session: Session,
-      minted: Boolean
+      minted: Boolean,
+      settings: McpServerSettings
   ): js.Dynamic =
-    val body = (sent ++ Chunk.fromIterable(answer))
+    val events = (sent ++ Chunk.fromIterable(answer))
       .map(message => s"event: message\ndata: ${MessageLoop.encodeOutbound(message)}\n\n")
-      .mkString
-    webResponse(200, body, sseHeaders(session, isNew = minted, modern = false))
+    // `sseRetryInterval`, as the shared handler writes it: the first line of the one event, or an
+    // event of its own in front of several (the rare case of a middleware that sent something
+    // before the answer).
+    val retry = retryLine(settings, modern = false)
+    val opening = if retry.nonEmpty && events.size > 1 then retry + "\n" else retry
+    webResponse(200, opening + events.mkString, sseHeaders(session, isNew = minted, modern = false))
 
   /** Dispatch one streamable POST frame. A *request* gets a `text/event-stream` response that
     * streams the notifications and sub-requests it emits (progress, sampling, elicitation) followed
@@ -790,7 +797,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
           (StreamableHttpHandler.signalInterrupt(fiber) *> reqQueue.shutdown).as(
             webResponse(
               200,
-              s"event: message\ndata: ${MessageLoop.encodeOutbound(first)}\n\n",
+              retryLine(settings, modern) +
+                s"event: message\ndata: ${MessageLoop.encodeOutbound(first)}\n\n",
               sseHeaders(session, isNew, modern)
             )
           )
@@ -836,6 +844,16 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     Map("content-type" -> "text/event-stream", "cache-control" -> "no-cache") ++
       (if modern then Map("x-accel-buffering" -> "no") else Map.empty[String, String]) ++
       (if isNew then Map(SessionIdHeader -> session.sessionId) else Map.empty[String, String])
+
+  /** `settings.sseRetryInterval` as the line a legacy SSE body begins with, `retry: <ms>`; empty
+    * when the setting is unset or the reply is a 2026-07-28 one. A fixed-length reply puts it in
+    * front of its one event (the event's first line); a stream follows it with a blank line, which
+    * makes it an event of its own. The bytes are those of the shared handler (`SseFrame.encode`),
+    * so a legacy reply reads the same on every backend.
+    */
+  private def retryLine(settings: McpServerSettings, modern: Boolean): String =
+    if modern then ""
+    else settings.sseRetryInterval.fold("")(interval => s"retry: ${interval.toMillis}\n")
 
   /** Heartbeat marker the keepalive fiber offers into a request's `reqQueue`; the pull turns it
     * into an SSE comment frame (`: ping`). Shared with the JVM handler, which uses it to open a
@@ -884,7 +902,14 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             ZIO.succeed(message)
           case None => reqQueue.take
       }
+      // `sseRetryInterval`: a legacy stream opens with an event that is only `retry: <ms>`, queued
+      // before the first pull (the shared handler's opening frame on the other backends).
+      val opening = retryLine(settings, modern)
       val source = js.Dynamic.literal(
+        start = js.Any.fromFunction1((controller: js.Dynamic) =>
+          if opening.nonEmpty then
+            val _ = controller.enqueue(encoder.encode(opening + "\n"))
+        ),
         pull = js.Any.fromFunction1((controller: js.Dynamic) =>
           ZioJsPromise.zioToPromise(
             takeNext

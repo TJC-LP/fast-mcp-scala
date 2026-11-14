@@ -763,6 +763,9 @@ private[fastmcp] object SocketHttpServer:
             appendHead(200, sse.headers, closeAfter)
             buf.ascii("content-type: text/event-stream\r\ncache-control: no-cache\r\n")
             buf.ascii(if chunked then "transfer-encoding: chunked\r\n\r\n" else "\r\n")
+            // The stream's opening event (`sseRetryInterval`): right behind the head, ahead of the
+            // first frame and of any ping. `None` unless the option is set.
+            sse.opening.foreach(frame => appendFrame(frame, chunked))
             while !finished && !broken do
               val started = owner.runOrFork(pull.either)
               // About to wait: everything gathered so far (at least the head) goes out now.

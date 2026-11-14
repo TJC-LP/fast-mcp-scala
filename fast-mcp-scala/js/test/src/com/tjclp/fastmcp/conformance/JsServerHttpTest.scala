@@ -1891,6 +1891,99 @@ class JsServerHttpTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAl
       body should endWith("\n\n")
   }
 
+  // --- sseRetryInterval -------------------------------------------------------------------------
+  // The Bun twin of `SseRetryHandlerTest` / `SocketHttpBackendTest`: the same bytes, written by
+  // this backend's own SSE writer. Bun serves no GET stream, so POST replies are all there is.
+
+  "sseRetryInterval (Bun)" should "begin every legacy SSE body with the retry line, and no 2026-07-28 one" in {
+    val retryPort = 28946
+    val server = com.tjclp.fastmcp.server.McpServer(
+      "JsHttpRetryServer",
+      "0.1.0",
+      McpServerSettings(
+        host = "127.0.0.1",
+        port = retryPort,
+        httpEndpoint = "/mcp",
+        stateless = false,
+        sseRetryInterval = Some(java.time.Duration.ofSeconds(3))
+      )
+    )
+    def legacy(sid: String, body: String): Future[(js.Dynamic, String)] =
+      fetchAt(
+        retryPort,
+        js.Dynamic.literal(
+          method = "POST",
+          headers = jsonHeaders("mcp-session-id" -> sid),
+          body = body
+        )
+      ).flatMap(resp => text(resp).map(resp -> _))
+    val checked =
+      for
+        handle <- runZio(server.tool(pingTool) *> server.tool(sleepTool).unit)
+          .map(_ => server.startStatefulHttp())
+        result <- (for
+          init <- fetchAt(
+            retryPort,
+            js.Dynamic.literal(method = "POST", headers = jsonHeaders(), body = legacyInitBody)
+          )
+          initBody <- text(init)
+          sid = header(init, "mcp-session-id").getOrElse(fail("initialize did not mint a session"))
+          (ack, _) <- legacy(sid, """{"jsonrpc":"2.0","method":"notifications/initialized"}""")
+          // A reply that is complete at once: one fixed-length event.
+          (quick, quickBody) <- legacy(
+            sid,
+            """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ping","arguments":{"msg":"x"}}}"""
+          )
+          // Progress first, then the reply: a stream.
+          (streamed, streamedBody) <- legacy(
+            sid,
+            """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sleep","arguments":{"millis":0},"_meta":{"progressToken":"p3"}}}"""
+          )
+          modern <- fetchAt(
+            retryPort,
+            js.Dynamic.literal(
+              method = "POST",
+              headers = jsonHeaders(
+                "mcp-protocol-version" -> "2026-07-28",
+                "mcp-method" -> "tools/call",
+                "mcp-name" -> "ping"
+              ),
+              body =
+                """{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ping","arguments":{"msg":"x"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"""
+            )
+          )
+          modernBody <- text(modern)
+        yield
+          status(init) shouldBe 200
+          // The retry line is the first line of the one event, and is counted in Content-Length
+          // (ASCII, so chars == bytes).
+          initBody should startWith("retry: 3000\nevent: message\ndata: ")
+          initBody.indexOf("\n\n") shouldBe initBody.length - 2
+          header(init, "content-length").map(_.toInt) shouldBe Some(initBody.length)
+          status(ack) shouldBe 202
+
+          status(quick) shouldBe 200
+          quickBody should startWith("retry: 3000\nevent: message\ndata: ")
+          quickBody should include(""""id":2""")
+          header(quick, "content-length").map(_.toInt) shouldBe Some(quickBody.length)
+
+          // A stream opens with an event that is only the retry line.
+          status(streamed) shouldBe 200
+          header(streamed, "content-length") shouldBe None
+          streamedBody should startWith("retry: 3000\n\nevent: message\ndata: ")
+          streamedBody should include("notifications/progress")
+          streamedBody should include("slept 0")
+          streamedBody.split("retry: ", -1).length shouldBe 2
+
+          // 2026-07-28 has no stream to reconnect to.
+          status(modern) shouldBe 200
+          modernBody should startWith("event: message\ndata: ")
+          modernBody should not include "retry"
+        ).andThen { case _ => handle.stop() }
+      yield result
+    withTimeout(checked, 60000, "the sseRetryInterval round trip")
+  }
+
   // --- a client that goes away before the response exists ---------------------------------------
   // Until the first frame there is no ReadableStream whose cancel hook could report the
   // disconnect; the request's abort signal has to.

@@ -376,6 +376,27 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     available on `@Tool` and `@Prompt` only. Before, a template reported that its URI parameters
     did not match and a static resource that it must not have parameters.
   - Two `McpContext` parameters on one method are a compile-time error.
+- **`McpServerSettings.sseRetryInterval: Option[java.time.Duration]`** (GH #121): the SSE `retry`
+  field on the legacy HTTP adapter (protocol versions before 2026-07-28), the time a client should
+  wait before it reconnects after a stream ends. Unset by default, and then nothing changes on the
+  wire. When set, every `text/event-stream` body the adapter writes begins with the line
+  `retry: <milliseconds>`: the standalone GET stream and a streamed POST reply open with an event
+  that is only that line, written before the first message and before any heartbeat, and a
+  fixed-length POST reply carries it as the first line of its one event. It is written the same
+  way on zio-http, the socket backend (JVM and Scala Native) and Bun; Bun serves no GET stream, so
+  there it reaches POST replies only. It is never sent on a 2026-07-28 reply, in legacy stateless mode
+  (JSON replies) or over stdio. A negative interval is refused at construction. Reference:
+  [docs/transports.md](docs/transports.md#sse-retry-sseretryinterval).
+  - This is the `retry` half of SEP-1699 only. The server still sends no event ids and no priming
+    event, and does not resume a stream from `Last-Event-ID`: a client reads an event id on a POST
+    stream as a promise that the reply can be fetched again over GET, and a request whose
+    connection breaks is stopped here, not kept. SSE resumability was removed from MCP in
+    2026-07-28. The conformance harness's unscored `server-sse-polling` scenario (2025-11-25
+    only) therefore reports `server-sse-retry-field` as passed for a server that sets the option
+    and keeps its priming-event recommendation as a warning; `ConformanceServer` does not set the
+    option and registers no `test_reconnection` tool.
+  - The new field is the last one of `McpServerSettings`; the 1.0.x constructors, `apply` and
+    `copy` forwarders give it its default or keep it, as for the other 1.1.0 fields.
 - **`McpServerSettings.stdioDrainTimeout`** (GH #113, TJC-2359): how long a stdio server waits at
   end of stdin for the replies to frames it has already read, before it interrupts what is still
   running. Default five seconds; zero interrupts without waiting; a negative value is refused when
