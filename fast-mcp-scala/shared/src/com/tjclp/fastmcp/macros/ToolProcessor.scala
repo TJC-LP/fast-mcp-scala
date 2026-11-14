@@ -61,7 +61,9 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       case Some("required") => '{ Some(com.tjclp.fastmcp.core.TaskSupport.Required) }
       case Some(other) =>
         report.errorAndAbort(
-          s"@Tool taskSupport must be one of \"forbidden\" | \"optional\" | \"required\" — got \"$other\""
+          s"@Tool(taskSupport) on method '$methodName' must be one of \"forbidden\" | " +
+            s"\"optional\" | \"required\" — got \"$other\"",
+          methodPosition(methodSym)
         )
 
     val hasAnyAnnotation = List(
@@ -91,22 +93,23 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
 
     val methodRefExpr = methodRef(ownerSym, methodSym)
 
-    val ctxParamPresent = methodSym.paramSymss.headOption.exists(_.exists { p =>
-      p.name == "ctx" && p.termRef.widenTermRefByName <:< TypeRepr.of[McpContext]
-    })
-
-    val ctxParamPresentExpr = Expr(ctxParamPresent)
+    // The parameter that receives the request's McpContext, recognised by type (any name). It is
+    // left out of the schema and filled in by the handler below.
+    val ctxParamName: Option[String] = contextParameter("@Tool", methodSym)
 
     val effectShape = MacroUtils.detectEffectShape(methodSym)
 
     val rawSchema: Expr[zio.json.ast.Json] = '{
       JsonSchemaMacro.schemaForFunctionArgs(
         $methodRefExpr,
-        ${ Expr(if ctxParamPresent then List("ctx") else Nil) }
+        ${ Expr(ctxParamName.toList) }
       )
     }
 
-    val params = methodSym.paramSymss.headOption.getOrElse(Nil)
+    // The MCP arguments: every parameter except the injected context.
+    val params = methodSym.paramSymss.headOption.getOrElse(Nil).filterNot { p =>
+      ctxParamName.contains(p.name)
+    }
 
     // `HasDefault` is set on the annotated method's OWN parameter symbols (pickled, so it survives
     // separate compilation), so an overloaded sibling's `f$default$N` getters — which are name +
@@ -136,11 +139,28 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
               val hasDefault = paramsWithDefaults.contains(pSym.name)
 
               if !isOptionType && !hasDefault then
-                report.errorAndAbort(
-                  s"Parameter '${pSym.name}' in method '$methodName' is marked as required=false " +
-                    s"but is not an Option type and has no default value. " +
-                    s"Use Option[${pSym.termRef.widenTermRefByName.show}] or provide a default value."
-                )
+                val shownType = (tpe: TypeRepr) => tpe.show(using Printer.TypeReprShortCode)
+                repeatedElementType(pSym) match
+                  case Some(element) =>
+                    // A repeated parameter can be neither: there is no `Option[T*]` and it
+                    // cannot have a default. Its type used to be printed with the compiler's
+                    // internal `@Repeated` annotation.
+                    report.errorAndAbort(
+                      s"Parameter '${pSym.name}' in method '$methodName' is marked as " +
+                        s"required=false but is a repeated parameter (${shownType(element)}*), " +
+                        "which can be neither an Option nor have a default value. Remove " +
+                        s"required = false, or declare it as `${pSym.name}: " +
+                        s"List[${shownType(element)}] = Nil`.",
+                      methodPosition(methodSym)
+                    )
+                  case None =>
+                    report.errorAndAbort(
+                      s"Parameter '${pSym.name}' in method '$methodName' is marked as required=false " +
+                        s"but is not an Option type and has no default value. " +
+                        s"Use Option[${shownType(pSym.termRef.widenTermRefByName)}] or provide a " +
+                        "default value.",
+                      methodPosition(methodSym)
+                    )
 
             Some(pSym.name -> ParamMetadata(desc, examples, required, schema))
           case None if hasAppliedDefault && !isOptionType =>
@@ -180,15 +200,18 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       .getOrElse(TypeRepr.of[Any].asType)
 
     // Pre-flight R-check with a friendlier error than Scala's bound-violation message.
-    val rServerRepr = TypeRepr.of[R]
     val rMethodRepr = rMethodType match { case '[t] => TypeRepr.of[t] }
-    if !(rServerRepr <:< rMethodRepr) then
-      report.errorAndAbort(
-        s"@Tool '$methodName' requires ZIO environment '${rMethodRepr.show}' but the server's " +
-          s"environment type is '${rServerRepr.show}', which does not provide it. " +
-          s"Construct the server as McpServer.typed[${rServerRepr.show} & ${rMethodRepr.show}] " +
-          s"(or wider), or remove the environment requirement from the method body."
-      )
+    requireEnvironment[R]("@Tool", methodSym, rMethodRepr)
+
+    // The decoded-argument map the method is called with: the wire arguments, plus the context
+    // under the name of the parameter that takes it.
+    val withContext: Expr[(Map[String, Any], Option[McpContext]) => Map[String, Any]] =
+      ctxParamName match
+        case Some(name) =>
+          '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
+            args + (${ Expr(name) } -> ctxOpt.getOrElse(McpContext.empty))
+          }
+        case None => '{ (args: Map[String, Any], _: Option[McpContext]) => args }
 
     // Handler typed at the method's required environment. Scala's normal type-checker enforces
     // that the surrounding `server.tool[R1 >: R](handler: ContextualToolHandler[R1])` constraint
@@ -199,9 +222,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
           case MacroUtils.EffectShape.Pure =>
             '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
               ZIO.attempt {
-                val patchedArgs =
-                  if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
-                  else args
+                val patchedArgs = $withContext(args, ctxOpt)
                 MapToFunctionMacro
                   .callByMap($methodRefExpr)
                   .asInstanceOf[Map[String, Any] => Any](patchedArgs)
@@ -211,9 +232,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
           case MacroUtils.EffectShape.Zio =>
             '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
               ZIO.suspend {
-                val patchedArgs =
-                  if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
-                  else args
+                val patchedArgs = $withContext(args, ctxOpt)
                 MapToFunctionMacro
                   .callByMap($methodRefExpr)
                   .asInstanceOf[Map[String, Any] => Any](patchedArgs)
@@ -228,9 +247,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
           case MacroUtils.EffectShape.TryEffect =>
             '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
               ZIO.suspend {
-                val patchedArgs =
-                  if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
-                  else args
+                val patchedArgs = $withContext(args, ctxOpt)
                 val result = MapToFunctionMacro
                   .callByMap($methodRefExpr)
                   .asInstanceOf[Map[String, Any] => Any](patchedArgs)
@@ -242,9 +259,7 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
           case MacroUtils.EffectShape.EitherThrowable =>
             '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
               ZIO.suspend {
-                val patchedArgs =
-                  if $ctxParamPresentExpr then args + ("ctx" -> ctxOpt.getOrElse(McpContext.empty))
-                  else args
+                val patchedArgs = $withContext(args, ctxOpt)
                 val result = MapToFunctionMacro
                   .callByMap($methodRefExpr)
                   .asInstanceOf[Map[String, Any] => Any](patchedArgs)
@@ -274,6 +289,17 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
         }
 
     runAndReturnServer[R](server)(registration)
+
+  /** `Some(T)` when `param` is a repeated parameter `T*`. */
+  private def repeatedElementType(using Quotes)(
+      param: quotes.reflect.Symbol
+  ): Option[quotes.reflect.TypeRepr] =
+    import quotes.reflect.*
+    param.termRef.widenTermRefByName match
+      case AnnotatedType(underlying, annotation)
+          if annotation.tpe.typeSymbol == defn.RepeatedAnnot =>
+        underlying.typeArgs.headOption
+      case _ => None
 
   private def optionStringExpr(using Quotes)(opt: Option[String]): Expr[Option[String]] =
     opt match

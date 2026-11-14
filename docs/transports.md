@@ -62,6 +62,12 @@ Scala.js/Bun and Scala Native alike:
   Runtime.addLogger(StdioLogging.stderrLogger)`) as its ZIO `bootstrap`, and `McpServer.runStdio()`
   makes the same swap for a plain `ZIOAppDefault` as long as ZIO's stock logger is still installed.
   `ZIO.logInfo` inside a tool is therefore safe. Loggers you install yourself are never touched.
+  One case the second form cannot cover: a plain `ZIOAppDefault` that fails *before* it reaches
+  `runStdio()` (a registration that is refused, say an invalid resource template) is reported by
+  `ZIOAppDefault` itself, through ZIO's stock logger, on stdout. `McpServerApp[Stdio]` reports the
+  same failure on stderr. For a plain application, install the layer yourself:
+  `override val bootstrap = StdioLogging.bootstrap`
+  (`com.tjclp.fastmcp.server.transport.StdioLogging`).
 - **Frames are written atomically.** A reply and its newline go out in one `PrintStream` call, so
   anything else that prints to `System.out` can only add a whole stray line between frames, never
   split one. Still: never `println` from a stdio server — a stray line is a protocol error for
