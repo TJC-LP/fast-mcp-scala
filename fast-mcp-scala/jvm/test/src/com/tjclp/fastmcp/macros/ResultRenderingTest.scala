@@ -25,12 +25,16 @@ object ResultRenderingTools:
   def retListString(@Param("p") p: Int): List[String] = List(p.toString, "b")
 
 /** TJC-2331 (C2 rows `X_ret_unit`, `X_ret_option`, `X_ret_caseclass`, `X_ret_liststring`; row
-  * C2.9, DOCUMENTED as a 1.0 limit): on the annotation path a result that is not a `String`, an
-  * `Array[Byte]` or a `Content` reaches the wire as `TextContent(result.toString)` and never as
-  * `structuredContent` (WireMapping `case value => TextContent(value.toString)`). Typed contracts
-  * (`McpTool`, optionally `.withOutputSchema`) are the JSON path. These tests pin the documented
-  * rendering so a change to it is deliberate; 1.1.0 plans to route such results through
-  * `McpEncoder` / `JsonEncoder` when one is summonable, at which point they flip.
+  * C2.9): on the annotation path a result that is not a `String`, an `Array[Byte]` or a `Content`,
+  * and whose type has no encoder the user defined, reaches the wire as
+  * `TextContent(result.toString)` and never as `structuredContent` (WireMapping `case value =>
+  * TextContent(value.toString)`). Typed contracts (`McpTool`, optionally `.withOutputSchema`) are
+  * the JSON path. These tests pin that rendering so a change to it is deliberate.
+  *
+  * Since 1.1.0 (GH #119) a result type with a user-defined `JsonEncoder` / `McpEncoder` is encoded
+  * through it (`downstream.AnnotatedResultEncodingSpec`). The types below have none: `DxItem` is in
+  * this library's package, which the macro treats as the library's own, and the others would only
+  * get an instance the library derives. Their rendering is what 1.0 sent.
   */
 class ResultRenderingTest extends AnyFunSuite:
 

@@ -528,6 +528,30 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Changed
 
+- **An annotated `@Tool` method's result is encoded through the encoder you defined for its
+  type** (GH #119, C2.9). In 1.0.x only a typed contract (`McpTool`) used `McpEncoder`; an
+  annotated method that returned anything but a `String`, a `Content`, a `List[Content]` or an
+  `Array[Byte]` sent the value's `toString`, whatever instances existed.
+  - A result type with a `given zio.json.JsonEncoder[T]` of yours (`derives JsonEncoder` and
+    `derives JsonCodec` included) is now sent as JSON text, as `McpTool[In, T]` sends it, also
+    inside `List`, `Vector`, `Seq`, `Set`, `Option` and `Map[String, T]`. A result type with a
+    `given McpEncoder[T]`, in scope where `scanAnnotations` is called or in the companion of
+    `T`, is the content that encoder builds. The same holds for `ZIO[R, E, T]`, `Try[T]` and
+    `Either[Throwable, T]`.
+  - **This changes what such a server sends.** A method that returns `Item(1, "x")`, where
+    `Item derives JsonCodec`, sent the text `Item(1,x)` in 1.0.x and sends `{"a":1,"b":"x"}`
+    in 1.1.0. Return `item.toString` to keep the old text.
+  - Every other result is sent exactly as before, including the types for which only the
+    library could derive an encoder: a case class without a `JsonEncoder` is still `Item(1,x)`,
+    `Option[String]` is `Some(1)`, `List[String]` is `List(1, b)`, `Unit` is `()`. Return a
+    `String` / `Content`, define a `JsonEncoder`, or use a typed `McpTool` for those. There is
+    still no `structuredContent` and no `outputSchema` on the annotation path.
+  - A result type that has no `McpEncoder` at all (a plain class, a sealed trait without a
+    `JsonEncoder`) now gets a compile-time **warning** where the method is registered. It
+    says that the value is sent as its `toString` text and names the remedies. A build with
+    `-Werror` has to act on it: define the encoder, return a `String`, or silence it with
+    `-Wconf:msg=has no McpEncoder:s`. A declared result type of `Any` or `AnyRef` is not warned
+    about.
 - **BEHAVIOUR CHANGE — `tasks/cancel` no longer waits for a body that does not stop** (GH #115,
   D6.14 / C3.3). Affects servers with `TaskSettings(enabled = true)` whose task tools have a
   synchronous body: a plain method on the annotation path, a typed-contract handler that returns

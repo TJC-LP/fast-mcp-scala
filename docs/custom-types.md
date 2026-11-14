@@ -21,9 +21,10 @@ typed contracts.
 - A hand-written `given JsonDecoder` / `JsonEncoder` for a type always wins over the derived one,
   custom naming and all. Derivation is macro-side and summon-first; the library never exports
   givens that could shadow yours.
-- Result (`Out`) case classes need no hand-written `JsonEncoder`: `McpEncoder` falls back to
-  `JsonEncoder[A]`, and case classes without any `JsonEncoder` in scope derive one automatically
-  (Mirror-based, `NotGiven`-guarded).
+- Result (`Out`) case classes of a typed contract need no hand-written `JsonEncoder`: `McpEncoder`
+  falls back to `JsonEncoder[A]`, and case classes without any `JsonEncoder` in scope derive one
+  automatically (Mirror-based, `NotGiven`-guarded). The result of an annotated method follows
+  [its own rule](#results-of-annotated-methods).
 - Enums with parameterized cases keep zio-json's wrapper-object encoding. Provide an
   `McpInputCodec` for a custom shape.
 - Union types (`A | B`), literal types (`"asc" | "desc"`) and opaque types are **not** derived: the
@@ -102,6 +103,51 @@ case class DrawArgs(shape: Shape, mode: Mode)
   an `McpInputCodec`.
 - `@Param` on a field of a case is not carried into the schema (as for the values of a `Map` and
   the sides of an `Either`).
+
+## Results of annotated methods
+
+What an annotated `@Tool` method returns reaches the client in one of three ways, decided from the
+method's result type when the server is compiled (`A` for `ZIO[R, E, A]`, `Try[A]` and
+`Either[Throwable, A]`):
+
+1. **A `String`, a `Content`, a `List[Content]` or an `Array[Byte]`** is sent as it is: text, the
+   content, or a base64 image block.
+2. **A type with an encoder you defined** is encoded through it, exactly as `McpTool[In, T]`
+   encodes its `Out` (since 1.1.0):
+   - a `given zio.json.JsonEncoder[T]`, `derives JsonEncoder` or `derives JsonCodec`: the JSON
+     text of the value, also for `List[T]`, `Vector[T]`, `Seq[T]`, `Set[T]`, `Option[T]` and
+     `Map[String, T]`;
+   - a `given McpEncoder[T]`, in the companion of `T` or in scope where `scanAnnotations` is
+     called: the content it builds.
+3. **Anything else** is sent as `TextContent(value.toString)`.
+
+```scala 3 raw
+case class Item(name: String, qty: Int) derives JsonEncoder
+case class Raw(name: String, qty: Int)
+
+@Tool() def item(): Item = Item("x", 1)             // {"name":"x","qty":1}
+@Tool() def items(): List[Item] = List(Item("x", 1)) // [{"name":"x","qty":1}]
+@Tool() def raw(): Raw = Raw("x", 1)                 // Raw(x,1)
+@Tool() def maybe(): Option[String] = Some("x")      // Some(x)
+```
+
+The third rule includes the types for which the library could derive an encoder by itself: a case
+class without a `JsonEncoder`, `Option[String]`, `List[Int]`, `Unit` (sent as `()`), a Scala 3 enum
+(its case name, which is also its `toString`). They are sent as 1.0 sent them, so that upgrading
+does not change what an existing server puts on the wire. Add `derives JsonEncoder` to a case class
+to opt in, return a `String` / `Content`, or use a typed `McpTool`.
+
+A result type that has no `McpEncoder` at all (a plain class, a sealed trait without a
+`JsonEncoder`) is a compile-time warning at the method, because its `toString` is rarely what a
+client should read. It names the remedies; `-Wconf:msg=has no McpEncoder:s` silences it. A declared
+result type of `Any` is not warned about.
+
+The annotation path has no `outputSchema` and never sends `structuredContent`: that is
+`McpTool[...].withOutputSchema`.
+
+A user instance is recognised by where it is declared: an instance in a package of this library,
+of zio-json or of the standard library is not one. That is why `List[String]` (zio-json's encoder)
+keeps the third rule.
 
 ## What the server enforces
 
