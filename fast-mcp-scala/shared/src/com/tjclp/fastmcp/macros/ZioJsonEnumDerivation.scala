@@ -139,10 +139,13 @@ object ZioJsonEnumDerivation:
     val config = Expr.summon[JsonCodecConfiguration].getOrElse {
       report.errorAndAbort("No given JsonCodecConfiguration found (zio-json provides a default)")
     }
-    // Tuples are not planted here: zio-json's own tuple encoder is always summonable, and a
-    // result keeps the JSON array it has always been written as.
+    // Tuples are never planted here: a result keeps the JSON array zio-json's own tuple encoder
+    // writes. That encoder is resolved where `gen` expands, with the locals planted below for the
+    // tuple's element types in scope, so it is found even when an element (an enum, say) has no
+    // encoder that could be summoned from here.
     val missing = EnumTypeCollector
       .collectDerivable(TypeRepr.of[T])
+      .filterNot(EnumTypeCollector.isTuple)
       .filter { e =>
         e.asType match
           case '[et] => Expr.summon[JsonEncoder[et]].isEmpty

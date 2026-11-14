@@ -11,9 +11,10 @@ import com.tjclp.fastmcp.macros.schema.FunctionAnalyzer
 /** Native JSON Schema derivation for annotation parameters and typed contracts.
   *
   * The macro emits the small JSON Schema subset MCP tools need directly from Scala types. It
-  * supports primitives, options, collections, maps, Scala 3 enums, products, and tagged sums. A
-  * user-provided [[com.tjclp.fastmcp.core.McpInputCodec]] is the escape hatch for domain types
-  * whose wire representation cannot be inferred from their Scala shape.
+  * supports primitives, options, collections, maps, Scala 3 and Java enums, products (tuples
+  * included), and tagged sums. A user-provided [[com.tjclp.fastmcp.core.McpInputCodec]] is the
+  * escape hatch for domain types whose wire representation cannot be inferred from their Scala
+  * shape.
   *
   * ==`required` and Scala defaults==
   * A schema is derived for one of two directions, and the two treat a case-class field with a Scala

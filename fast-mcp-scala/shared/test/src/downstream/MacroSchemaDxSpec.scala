@@ -203,6 +203,17 @@ class MacroSchemaDxSpec extends AsyncFunSuite:
     run(program).map(out => assert(out == Right("DxPair((1,a),Some((b,LIGHT)))")))
   }
 
+  test("a tuple in a result is still written as a JSON array, derived elements included") {
+    val server = McpServer("tuple-out")
+    val program =
+      server.tool(
+        McpTool[DxPoint, DxPair](name = "pair_out")(p => DxPair((p.x, "a"), Some(("b", DxShade.DARK))))
+      ) *> call(server, "pair_out", """{"x":1,"y":2}""")
+    run(program).map { out =>
+      assert(out.map(json) == Right(json("""{"pair":[1,"a"],"maybe":["b","DARK"]}""")))
+    }
+  }
+
   // ---- C2.14: Java enums ----
 
   test("a Java enum parameter advertises its constant names and decodes them") {
