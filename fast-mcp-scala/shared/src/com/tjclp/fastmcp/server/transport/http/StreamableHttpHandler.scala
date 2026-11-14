@@ -103,18 +103,27 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
 
   /** A request to a route of `settings.httpRoutes`: the Host/Origin guard and the method gate
     * (`HttpRequestGuards.routeGate`), then the author's handler. It touches neither the router nor
-    * the session store, and it runs inside [[handle]]'s error boundary: a handler that dies is a
-    * fixed 500.
+    * the session store. A handler that dies is a fixed 500, built here rather than at [[handle]]'s
+    * boundary so that it follows the method like every other reply to a route: no reply to a `HEAD`
+    * carries a body (one written after a `HEAD` would be read as the start of the next response on
+    * a kept-alive connection).
     */
   private def routeReply(route: HttpRoute, req: HttpRequest): UIO[HttpReply] =
     HttpRequestGuards.routeGate(req.method, req.gateHeader, settings) match
       case Some(rejection) => ZIO.succeed(rejectFor(req.method, rejection))
       case None =>
-        HttpRequestGuards
-          .runRoute(route, req.method, req.path, req.gateHeader)
-          .map(r =>
-            HttpReply.Body(r.status, r.body, r.contentType, r.headers, req.method == "HEAD")
+        StreamableHttpHandler.guardedWith[Any, HttpReply](
+          rejectFor(
+            req.method,
+            HttpRequestGuards.Rejection(500, HttpRequestGuards.InternalErrorMessage)
           )
+        )(
+          HttpRequestGuards
+            .runRoute(route, req.method, req.path, req.gateHeader)
+            .map(r =>
+              HttpReply.Body(r.status, r.body, r.contentType, r.headers, req.method == "HEAD")
+            )
+        )
 
   /** The verdict of `HttpRequestGuards.nonPostGate` on a request that is not a POST, rendered: 403
     * Host/Origin, then 405 for a method this endpoint does not serve in this mode (GET and DELETE

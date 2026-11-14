@@ -228,6 +228,9 @@ class HttpRouteHandlerTest extends AnyFunSuite with Matchers:
             body should not include "secret"
             body should not include "Set-Cookie"
           case other => fail(s"expected the fixed 500, got $other")
+        // The same failure on a HEAD: the status, and no body at all. A body here would be read
+        // by the client as the start of its next response.
+        handle(handler, request("HEAD", path)) shouldBe HttpReply.Empty(500)
       }
     // The listener is unharmed.
     handle(handler, request("GET", "/health")).status shouldBe 200
