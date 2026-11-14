@@ -66,6 +66,12 @@ object WireShapeTools:
   @Tool(name = Some("tuple_list"))
   def tupleList(@Param("p") p: List[(Int, String)]): String = p.toString
 
+  // A container SUBTYPE with a tuple inside: no structural arm builds a decoder for it, so the
+  // macro keeps the in-scope zio-json decoder, as 1.0.x did. That this object compiles is the
+  // assertion (it stopped compiling when tuples got one wire shape; review of PR #149).
+  @Tool(name = Some("tuple_indexed_seq"))
+  def tupleIndexedSeq(@Param("p") p: IndexedSeq[(Int, String)]): String = p.toString
+
   @Tool(name = Some("tuple_map"))
   def tupleMap(@Param("p") p: Map[String, (Int, Color)]): String = p.toString
 
@@ -281,6 +287,11 @@ class SchemaDecoderConsistencyTest extends AnyFunSuite:
     for tool <- List("tuple_plain", "tuple_option") do
       val array = h.call(tool, """{"p":[1,"x"]}""")
       assert(array.isError, s"$tool accepted the array shape its schema does not describe: $array")
+  }
+
+  test("IndexedSeq[(Int, String)] still compiles and registers") {
+    val out = h.call("tuple_indexed_seq", """{"p":[]}""")
+    assert(!out.isError && out.text == "Vector()", s"tuple_indexed_seq reply: $out")
   }
 
   test("a tuple inside a collection or a case class is the same object") {

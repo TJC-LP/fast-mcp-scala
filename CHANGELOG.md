@@ -769,10 +769,10 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   templated read has the `mimeType` of its template: the one written on `@Resource(mimeType = ...)`
   or passed to `McpTemplateResource`. What changes on the wire: a typed `McpTemplateResource`
   that does not pass `mimeType` gets the contract's default, `text/plain`, on every read, as a
-  typed static resource always did. That includes a typed template whose handler returns bytes:
-  its blob was labelled `application/octet-stream` and is now labelled `text/plain` unless the
-  contract states the real type. Pass `mimeType = None` to send none (bytes are then
-  `application/octet-stream` again). An annotated template without `mimeType` is unchanged.
+  typed static resource always did. A template whose handler returns bytes is the exception:
+  `text/plain`, the default of the typed and programmatic template APIs, is not applied to a
+  binary body, which stays `application/octet-stream` unless the template states another type.
+  An annotated template without `mimeType` is unchanged.
 - **The `@Resource` Scaladoc no longer claims a `text/plain` default** (GH #116, TJC-2362; D1.24).
   An annotated resource that does not state `mimeType` advertises none on `resources/list` and
   sends none with a text body; a binary body is served as `application/octet-stream`. That is

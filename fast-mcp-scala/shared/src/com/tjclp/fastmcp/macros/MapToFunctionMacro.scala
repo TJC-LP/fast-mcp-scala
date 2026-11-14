@@ -297,7 +297,8 @@ object MapToFunctionMacro:
           // `List[(A, B)]`) that is zio-json's array-shaped tuple decoder, which contradicts the
           // advertised object schema, so the structural derivation below is used instead. A
           // user's own `McpDecoder` is never set aside.
-          val summoned = Expr.summon[McpDecoder[t]].filterNot { found =>
+          val inScope = Expr.summon[McpDecoder[t]]
+          val summoned = inScope.filterNot { found =>
             hasTupleArgument(tpe.dealias.simplified) && isLibraryZioJsonDecoder(found.asTerm)
           }
           summoned.getOrElse {
@@ -306,6 +307,13 @@ object MapToFunctionMacro:
             val derived = summonOrDeriveJsonDecoder(tpe, paramName)
             if derived.isExprOf[JsonDecoder[t]] then
               jsonDecoderToMcpDecoder[t](derived.asExprOf[JsonDecoder[t]])
+            else if inScope.isDefined then
+              // A container SUBTYPE with a tuple inside (`IndexedSeq[(A, B)]`, `SortedSet[(A, B)]`):
+              // the structural arms only build decoders for the supertypes, so the instance that
+              // was set aside above is the one that fits, as it was before tuples got one shape.
+              inScope.getOrElse(
+                report.errorAndAbort(s"unreachable: no McpDecoder for '$paramName'")
+              )
             else
               report.errorAndAbort(
                 s"Cannot decode parameter '$paramName' of type ${tpe.show}: derivation produced a " +

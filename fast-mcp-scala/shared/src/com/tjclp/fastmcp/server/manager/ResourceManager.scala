@@ -259,8 +259,16 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
                         s"Error accessing templated resource '$uri' with params $params",
                         Some(e)
                       ),
-                    // The template's declared mime type, like a static resource's (D1.23).
-                    body => (definition.mimeType, body)
+                    // The template's declared mime type, like a static resource's (D1.23) —
+                    // except `text/plain` on a binary body. That is the default of the typed
+                    // and programmatic template APIs, which cannot be told apart from an
+                    // explicit value here, and bytes are not text: such a body keeps the
+                    // `application/octet-stream` it has always been served with.
+                    body =>
+                      val declared = body match
+                        case _: Array[Byte] => definition.mimeType.filterNot(_ == "text/plain")
+                        case _ => definition.mimeType
+                      (declared, body)
                   )
               case None =>
                 ZIO.fail(new ResourceNotFoundError(uri))

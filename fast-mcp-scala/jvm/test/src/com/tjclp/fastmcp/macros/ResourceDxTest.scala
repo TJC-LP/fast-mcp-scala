@@ -73,6 +73,11 @@ class ResourceDxTest extends AnyFunSuite:
         )(_.id)
       ) *> server.resource(
         McpTemplateResource[MimeArgs](
+          uriPattern = "typed://bytes/{id}",
+          arguments = List(ResourceArgument("id", None))
+        )(args => args.id.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+      ) *> server.resource(
+        McpTemplateResource[MimeArgs](
           uriPattern = "typed://none/{id}",
           mimeType = None,
           arguments = List(ResourceArgument("id", None))
@@ -112,6 +117,9 @@ class ResourceDxTest extends AnyFunSuite:
     assert(mimeOf("typed://csv/1").contains("text/csv"))
     assert(mimeOf("typed://default/1").contains("text/plain"))
     assert(mimeOf("typed://none/1").isEmpty)
+    // The default is `text/plain`, and bytes are not text: a binary body keeps octet-stream.
+    assert(mimeOf("typed://bytes/1").contains("application/octet-stream"))
+    assert(read("typed://bytes/1").contains("blob"))
   }
 
   // ---- D1.24 ----
