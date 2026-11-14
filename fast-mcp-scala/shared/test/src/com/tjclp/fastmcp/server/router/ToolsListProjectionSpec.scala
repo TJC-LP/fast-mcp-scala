@@ -106,7 +106,7 @@ class ToolsListProjectionSpec extends AsyncFunSuite:
     ).map(seen => assert(seen == base ++ Set("annotations", "title", "outputSchema")))
   }
 
-  test("a session that negotiated no version (the legacy stateless adapter) is not projected") {
+  test("a session that has no version at all is not projected") {
     run(
       for
         r <- router

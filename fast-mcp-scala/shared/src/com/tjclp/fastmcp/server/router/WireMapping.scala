@@ -56,8 +56,9 @@ object WireMapping:
     *
     * `name`, `description` and `inputSchema` are in every revision. A 2025-03-26 client still gets
     * the display title: `annotations.title` has been there since `annotations` has. Revisions are
-    * ISO dates, so they order as strings. A session that has negotiated no version (the legacy
-    * stateless adapter, which has no `initialize`) is not projected.
+    * ISO dates, so they order as strings. A session that has no version (one driven without
+    * `initialize`) is not projected; the legacy stateless adapter, which has no `initialize`, takes
+    * the version from the request's `mcp-protocol-version` header.
     */
   def toolForVersion(tool: Tool, version: String): Tool =
     if version.isEmpty then tool

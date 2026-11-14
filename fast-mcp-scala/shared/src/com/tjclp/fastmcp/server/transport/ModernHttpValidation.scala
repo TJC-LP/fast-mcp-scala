@@ -46,6 +46,17 @@ private[fastmcp] object ModernHttpValidation:
         !Protocol.LegacyProtocolVersions.contains(version)
       )
 
+  /** The legacy revision a request on the stateless legacy adapter speaks. That adapter has no
+    * `initialize` to negotiate one, so the `mcp-protocol-version` header is the client's statement;
+    * a request without it speaks [[Protocol.DefaultNegotiatedProtocolVersion]], the specification's
+    * rule for a missing header. Only called for a request [[isModern]] left on the legacy path,
+    * whose header is therefore absent or one of [[Protocol.LegacyProtocolVersions]].
+    */
+  def legacyRequestVersion(header: String => Option[String]): String =
+    header("mcp-protocol-version")
+      .filter(Protocol.LegacyProtocolVersions.contains)
+      .getOrElse(Protocol.DefaultNegotiatedProtocolVersion)
+
   /** The version the client asked for: header first, else the body's `_meta` declaration. */
   def requestedVersion(
       header: String => Option[String],

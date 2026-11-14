@@ -543,8 +543,11 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - A 2025-03-26 client keeps the display title as `annotations.title`.
   - Only the list entry is projected. `tools/call` is unchanged: a tool with an `outputSchema`
     still returns `structuredContent` to an older client.
-  - The legacy stateless adapter (`stateless = true`) has no `initialize`, so no revision is
-    known there and it sends every legacy field, as before.
+  - The legacy stateless adapter (`stateless = true`) has no `initialize`: there the revision is
+    the one the request's `MCP-Protocol-Version` header names, and 2025-03-26 for a request
+    without the header, as the specification says to assume. Such a header-less request used to
+    get every field and now gets `annotations` but not `title` or `outputSchema`; a client that
+    wants them sends the header.
   - New: `WireMapping.toolForVersion(tool, version)`. Reference: `docs/spec-coverage.md` §
     "Fields by revision on `tools/list`".
 - **BEHAVIOUR CHANGE — `tasks/cancel` no longer waits for a body that does not stop** (GH #115,
@@ -954,7 +957,11 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   The stateless legacy adapter (`stateless = true`) refuses every legacy task method with
   `-32601`, and its `initialize` result now declares no `tasks` capability at all. It used to
   declare `requests.tools.call` there too. Its `tools/list` no longer carries
-  `execution.taskSupport` either.
+  `execution.taskSupport` either, and a plain call of a `taskSupport = required` tool there is
+  refused (`-32601`) with a message that names the limitation — `requires task augmentation,
+  which is not available on the legacy stateless transport; call it with MCP 2026-07-28 task
+  requests or over a session-bearing transport` — instead of the bare `requires task
+  augmentation`, a remedy that transport refuses as well.
 - **`subscriptions/listen` refuses task notifications from a client without the Tasks extension**
   (GH #115, TJC-2361). A 2026-07-28 `subscriptions/listen` request that names `taskIds` but does
   not declare `io.modelcontextprotocol/tasks` in its capabilities is answered `-32021`, as

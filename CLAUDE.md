@@ -285,7 +285,7 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   .withTaskSupport(TaskSupport.Optional)
 ```
 
-`taskSupport` values: `"forbidden"` (default — always synchronous), `"optional"` (may return a task when the client supports the extension), `"required"` (requires task augmentation: a modern client without the tasks extension gets `-32021`; a bare legacy `tools/call` without `params.task` gets `-32601`). `tools/list` is projected per revision (`WireMapping.toolForVersion`, `ToolsListProjectionSpec`): `annotations` from 2025-03-26, `title`/`outputSchema`/`_meta` from 2025-06-18, `icons` from 2025-11-25, `execution.taskSupport` on 2025-11-25 only (not on 2026-07-28); a session with no negotiated version (legacy stateless) gets every legacy field.
+`taskSupport` values: `"forbidden"` (default — always synchronous), `"optional"` (may return a task when the client supports the extension), `"required"` (requires task augmentation: a modern client without the tasks extension gets `-32021`; a bare legacy `tools/call` without `params.task` gets `-32601`). `tools/list` is projected per revision (`WireMapping.toolForVersion`, `ToolsListProjectionSpec`): `annotations` from 2025-03-26, `title`/`outputSchema`/`_meta` from 2025-06-18, `icons` from 2025-11-25, `execution.taskSupport` on 2025-11-25 only (not on 2026-07-28); the legacy stateless adapter, which has no `initialize`, takes the revision from the request's `mcp-protocol-version` header (`ModernHttpValidation.legacyRequestVersion`, 2025-03-26 when absent; `LegacyStatelessRevisionTest`, `JsStatelessRevisionTest`).
 
 **Transport policy** (all platforms):
 

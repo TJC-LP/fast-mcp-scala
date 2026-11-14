@@ -40,9 +40,6 @@ final class HttpRoute private (
 
 object HttpRoute:
 
-  /** The one method a route answers. */
-  private[fastmcp] val Method: String = "GET"
-
   /** What a route's path serves, in `Allow` order: `GET`, and `HEAD` answered from it. */
   private[fastmcp] val Methods: List[String] = List("GET", "HEAD")
 

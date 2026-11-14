@@ -177,7 +177,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
                       if modern then modernPost(req, message)
                       else
                         store match
-                          case None => legacyStatelessDispatch(message)
+                          case None => legacyStatelessDispatch(req, message)
                           case Some(sessions) => legacySessionDispatch(sessions, req, message)
                 }
         }
@@ -247,15 +247,20 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
   // Legacy stateless: request/response, no session state, no SSE.
   // ---------------------------------------------------------------------------
 
-  private def legacyStatelessDispatch(message: JsonRpcMessage): URIO[R, HttpReply] =
+  private def legacyStatelessDispatch(
+      req: HttpRequest,
+      message: JsonRpcMessage
+  ): URIO[R, HttpReply] =
     for
       session <- Session.makeRequestScoped(
         "stateless",
         supportsTasks = false,
         clock = router.clock
       )
-      // Legacy stateless compatibility mode starts ready without a handshake.
+      // Legacy stateless compatibility mode starts ready without a handshake, so the revision
+      // the reply is written for (`tools/list` field projection) comes from the request's header.
       _ <- session.markInitialized
+      _ <- session.setProtocolVersion(ModernHttpValidation.legacyRequestVersion(req.header))
       reply <- router.dispatch(session, message)
     yield (message, reply) match
       case (_: JsonRpcMessage.Invalid, Some(r)) => HttpReply.Json(400, r.toJson)

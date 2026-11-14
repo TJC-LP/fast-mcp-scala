@@ -28,7 +28,9 @@ So a 2024-11-05 or 2024-10-07 client gets `name`, `description` and `inputSchema
 client still sees a tool's display title, as `annotations.title`. The projection is on the list
 entry only: `tools/call` results are unchanged, and a tool with an `outputSchema` still returns
 `structuredContent` to an older client, which ignores it. The legacy **stateless** adapter has no
-`initialize` and so no negotiated revision; it sends every legacy field.
+`initialize` and so nothing negotiated: there the revision is the one the request's
+`MCP-Protocol-Version` header names, and 2025-03-26 for a request without the header (the
+specification's rule for a missing header).
 
 ## Coverage matrix (MCP 2026-07-28)
 

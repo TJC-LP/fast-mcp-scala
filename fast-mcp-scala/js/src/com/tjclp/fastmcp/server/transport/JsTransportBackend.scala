@@ -514,8 +514,13 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                       supportsTasks = false,
                       clock = router.clock
                     )
-                    // Legacy stateless compatibility mode starts ready without a handshake.
+                    // Legacy stateless compatibility mode starts ready without a handshake, so
+                    // the revision the reply is written for comes from the request's header
+                    // (JVM twin: `StreamableHttpHandler.legacyStatelessDispatch`).
                     _ <- session.markInitialized
+                    _ <- session.setProtocolVersion(
+                      ModernHttpValidation.legacyRequestVersion(headerOf(req))
+                    )
                     reply <- router.dispatch(session, message)
                   yield (message, reply) match
                     case (_: JsonRpcMessage.Invalid, Some(r)) =>

@@ -400,7 +400,9 @@ That surface works on any transport whose session
 outlives a single request: the legacy streamable-HTTP adapter and stdio (one durable session per
 process). On the **stateless** legacy adapter all clients share one session identity, so legacy
 task requests there are rejected with `-32601`, and its `initialize` result declares no `tasks`
-capability. Bearer tasks are invisible to legacy sessions and
+capability. A tool whose task support is `required` cannot be called there at all: a plain call is
+refused with `-32601` and a message that says so and points to 2026-07-28 task requests or a
+session-bearing transport. Bearer tasks are invisible to legacy sessions and
 vice versa. `tasks/result` is always answered: for a task that was cancelled (`tasks/cancel`, TTL
 sweep, session release) — whether already terminal or cancelled while the waiter was parked — it
 fails with `-32602` (`Task <id> was cancelled`); once the TTL has swept the entry, with `-32602`
