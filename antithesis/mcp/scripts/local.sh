@@ -35,10 +35,10 @@ mkdir -p "${out}"
 # may take: 300 s for its own checks (up to 120 s for the nodes to serve again, then the session
 # and stream checks on each), and 300 s for every harness run the driver plans, which is the
 # deadline the driver gives one run (DEADLINE in driver/src/conformance.rs). The plan is one run
-# for each node and suite named. An empty node is one drawn node; an empty suite is all three
-# suites (the driver runs every suite against the node, the drawn one first).
+# for each node and suite named. An empty node is every node (the drawn one first); an empty suite
+# is all three suites (the drawn one first).
 nodes=3 # mcp-netty, mcp-socket, mcp-bun
-case "${DRIVER_CONFORMANCE_NODE-all}" in all) node_runs=${nodes} ;; *) node_runs=1 ;; esac
+case "${DRIVER_CONFORMANCE_NODE-all}" in all | "") node_runs=${nodes} ;; *) node_runs=1 ;; esac
 case "${DRIVER_CONFORMANCE_SUITE-all}" in all | "") suite_runs=3 ;; off) suite_runs=0 ;; *) suite_runs=1 ;; esac
 harness_runs=$(( node_runs * suite_runs ))
 wait_s=$(( DRIVER_EVENTUALLY_AFTER_S + 300 + harness_runs * 300 ))
