@@ -63,7 +63,7 @@ object Versions {
   // stated. Append each new 1.x release and drop none before 2.0: the forwarders kept for an older
   // release are `private[fastmcp]`, and MiMa ignores a member that is package-private in the
   // baseline, so only the comparison against the release where the signature was public guards it.
-  val binaryCompatBaselines = Seq("1.0.0", "1.0.1")
+  val binaryCompatBaselines = Seq("1.0.0", "1.0.1", "1.1.0")
   // The baseline `fast-mcp-scala.compat.client` is compiled against (it must be one of the above).
   // It stays where it is when a release is appended: the client is what links the 1.0.1 signatures.
   val binaryCompatClient = "1.0.1"
@@ -162,7 +162,7 @@ trait FastMCPPublishingBase extends PublishModule {
     * running daemon never serves the version of an earlier invocation.
     */
   override def publishVersion: T[String] = Task.Input {
-    Task.env.getOrElse("PUBLISH_VERSION", "1.1.0")
+    Task.env.getOrElse("PUBLISH_VERSION", "1.2.0-SNAPSHOT")
   }
 
   override def pomSettings: T[PomSettings] = PomSettings(
