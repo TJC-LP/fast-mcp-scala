@@ -18,7 +18,7 @@ import com.tjclp.fastmcp.server.transport.{BunHttpHandle, startStatefulHttp, sta
   * the two suites assert the same statuses, codes and messages. The one deliberate difference is
   * GET: Bun has no standalone server→client stream, so GET is never an allowed method here.
   *
-  * Ports 38970–38979: no other Scala.js suite uses them.
+  * Ports 28970–28979: no other Scala.js suite uses them.
   */
 class JsHttpParityTest extends AsyncFlatSpec with Matchers:
 
@@ -88,7 +88,7 @@ class JsHttpParityTest extends AsyncFlatSpec with Matchers:
     Future.sequence(checks).map(_ => succeed)
 
   "the endpoint path (Bun)" should "be exact: a query string is allowed; a trailing slash, another case or a longer path is 404" in {
-    val port = 38970
+    val port = 28970
     withServer(port) {
       val served = List("/mcp", "/mcp?x=1", "/mcp?").map { path =>
         send(port, "POST", postHeaders, Some(initBody), path)
@@ -114,7 +114,7 @@ class JsHttpParityTest extends AsyncFlatSpec with Matchers:
   }
 
   it should "be matched with or without the leading slash in the setting" in {
-    val port = 38971
+    val port = 28971
     withServer(port, _.copy(httpEndpoint = "api/v1/mcp")) {
       for
         ok <- send(port, "POST", postHeaders, Some(initBody), "/api/v1/mcp")
@@ -128,7 +128,7 @@ class JsHttpParityTest extends AsyncFlatSpec with Matchers:
   }
 
   "methods other than POST (Bun)" should "be 405 with Allow and a message that names the method" in {
-    val port = 38972
+    val port = 28972
     withServer(port) {
       val refused = List("PUT", "PATCH", "OPTIONS").map { method =>
         send(port, method).map { reply =>
@@ -159,7 +159,7 @@ class JsHttpParityTest extends AsyncFlatSpec with Matchers:
   }
 
   it should "meet the Host/Origin guard before the method is judged: 403, not 405" in {
-    val port = 38973
+    val port = 28973
     val guard = (s: McpServerSettings) => s.copy(allowedHosts = Some(Set("127.0.0.1")))
     val foreign = Map("origin" -> "http://evil.example.com")
     def checks(port: Int) =
@@ -191,7 +191,7 @@ class JsHttpParityTest extends AsyncFlatSpec with Matchers:
   }
 
   "mcp-session-id (Bun)" should "be required on DELETE (400), unknown ids be 404, and an empty one count as absent" in {
-    val port = 38975
+    val port = 28975
     withServer(port) {
       for
         init <- send(port, "POST", postHeaders, Some(initBody))
@@ -223,7 +223,7 @@ class JsHttpParityTest extends AsyncFlatSpec with Matchers:
   }
 
   it should "leave DELETE out of Allow and answer it 405 with disallowDelete" in {
-    val port = 38976
+    val port = 28976
     withServer(port, _.copy(disallowDelete = true)) {
       for
         delete <- send(port, "DELETE", Map("mcp-session-id" -> "whatever"))
@@ -237,7 +237,7 @@ class JsHttpParityTest extends AsyncFlatSpec with Matchers:
   }
 
   "Accept (Bun)" should "be parsed, not searched: q=0 refuses, and a 2026-07-28 POST has one 406 shape" in {
-    val port = 38977
+    val port = 28977
     withServer(port) {
       def legacy(accept: String) =
         send(port, "POST", postHeaders + ("accept" -> accept), Some(initBody))
@@ -277,7 +277,7 @@ class JsHttpParityTest extends AsyncFlatSpec with Matchers:
   }
 
   "-32022 (Bun)" should "list every supported version for an unknown one, and 2026-07-28 alone for a legacy version in the modern shape" in {
-    val port = 38978
+    val port = 28978
     withServer(port) {
       val unknownHeaders =
         postHeaders ++ Map("mcp-protocol-version" -> "2099-01-01", "mcp-method" -> "tools/list")
@@ -313,7 +313,7 @@ class JsHttpParityTest extends AsyncFlatSpec with Matchers:
   "startup validation (Bun)" should "refuse an httpEndpoint no request path can equal" in {
     for bad <- List("/mcp?x=1", "/mcp#frag", "/m%63p", "/my mcp", "/a/../mcp") do
       val thrown = intercept[IllegalArgumentException] {
-        start(38979, _.copy(httpEndpoint = bad)).stop()
+        start(28979, _.copy(httpEndpoint = bad)).stop()
       }
       withClue(s"'$bad': ")(thrown.getMessage should include("httpEndpoint"))
     Future.successful(succeed)

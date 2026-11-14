@@ -58,7 +58,7 @@ class JsDefaultHostValidationTest extends AsyncFlatSpec with Matchers:
 
   "A Bun server with default Host/Origin settings on a loopback bind" should
     "refuse a non-loopback Host and a foreign or cross-port Origin with 403" in {
-      val port = 38987
+      val port = 28987
       // Nothing but the port and the reply shape: host, allowedHosts and allowedOrigins are defaults.
       val handle = start("JsDefaultGuardServer", McpServerSettings(port = port, stateless = true))
       val checked = for
@@ -87,7 +87,7 @@ class JsDefaultHostValidationTest extends AsyncFlatSpec with Matchers:
     }
 
   it should "serve any Host and Origin once dnsRebindingProtection = false opts out" in {
-    val port = 38988
+    val port = 28988
     val handle = start(
       "JsOptOutGuardServer",
       McpServerSettings(port = port, stateless = true, dnsRebindingProtection = false)
@@ -106,7 +106,7 @@ class JsDefaultHostValidationTest extends AsyncFlatSpec with Matchers:
       "JsContradictoryGuardServer",
       "0.1.0",
       McpServerSettings(
-        port = 38989,
+        port = 28989,
         stateless = true,
         allowedHosts = Some(Set("localhost")),
         dnsRebindingProtection = false
@@ -118,7 +118,7 @@ class JsDefaultHostValidationTest extends AsyncFlatSpec with Matchers:
   }
 
   "The HttpServerJs example" should "answer 403 to a non-loopback Host and a foreign Origin" in {
-    val port = 38990
+    val port = 28990
     // The example's own settings, moved off its port and onto the handshake-free reply shape.
     val settings = HttpServerJs.settings.copy(port = port, stateless = true)
     settings.host shouldBe "127.0.0.1"

@@ -145,7 +145,7 @@ class SkillsJsTest extends AsyncFlatSpec with Matchers with BeforeAndAfterAll:
     }
   }
 
-  private val port = 38941
+  private val port = 28941
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private var bunServer: BunHttpHandle = scala.compiletime.uninitialized
 
