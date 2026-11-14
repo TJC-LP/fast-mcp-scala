@@ -498,6 +498,17 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   lifetime, which is what the `maxTtlMs` clamp does, but a server that turns "no lifetime" into
   one of its own choosing hides a client bug. A positive `ttl`, an absent one and `null` behave
   as before. `TaskManager.create` fails with the new `TaskTtlNotPositive` for direct callers.
+- **A typed contract's decode failure names the argument, not the tool** (GH #115, D6.23). A
+  typed contract decodes the whole `arguments` object as one value, and a failure inside it was
+  reported under the tool's name: `Failed to decode parameter 'report' from JSON: .id(Invalid job
+  id 'nope'). Value: {"id":"nope"}`. It now reads `Failed to decode parameter 'id' from JSON:
+  (Invalid job id 'nope'). Value: "nope"`, the text the annotation path gives for a parameter of
+  that name. A failure deeper in an argument keeps the rest of the path (`parameter 'window' from
+  JSON: .job(...)`). The same applies to typed prompts and resource templates. Only the message
+  text changes: it is still an `isError` tool result, a custom `McpDecoder`'s own exceptions pass
+  through as they are, and a failure about the arguments as a whole keeps its message. Since
+  1.1.0 validates arguments against the `inputSchema` first, the decoder is reached mostly by
+  what the schema cannot express: a custom decoder's own check, a `pattern` or a `format`.
 - **HTTP refusals are the same on every backend** (GH #114, TJC-2360). zio-http, the socket
   backend and Bun disagreed on a handful of requests that are refused either way; they now take
   the same decisions from the shared `HttpRequestGuards`. Requests that were served before are

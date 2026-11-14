@@ -159,7 +159,10 @@ case class LookupArgs(id: UserId)
 
 The `pattern` above tells clients what a valid id looks like, but the server does not evaluate
 patterns ([What the server enforces](#what-the-server-enforces)): the decode function is what
-rejects a bad id, so make it check everything the pattern promises.
+rejects a bad id, so make it check everything the pattern promises. The call then fails as a tool
+error (`isError`) that names the argument, on both registration paths:
+`Failed to decode parameter 'id' from JSON: (Invalid user id 'nope'). Value: "nope"` (until 1.1.0
+a typed contract named the tool there instead of the argument).
 
 ## Per-field override: `@Param(schema = ...)`
 

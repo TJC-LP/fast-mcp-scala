@@ -5,6 +5,7 @@ import scala.annotation.unused
 
 import zio.*
 
+import com.tjclp.fastmcp.codec.ArgumentDecodeFailure
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.skills.McpSkill
 import com.tjclp.fastmcp.server.skills.SkillProvider
@@ -101,7 +102,10 @@ trait McpServerCore[R]:
       definition = contract.definition,
       handler = (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
         ZIO
-          .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
+          .attempt(
+            McpServerCore
+              .decodeArguments(contract.decoder, contract.definition.name, args, decodeContext)
+          )
           .flatMap(input => contract.handler(input, ctxOpt))
           // Carry both renderings while `Out` is still known; the wire layer emits
           // structuredContent from it only when the tool declares an outputSchema.
@@ -128,7 +132,10 @@ trait McpServerCore[R]:
       definition = contract.definition,
       handler = (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
         ZIO
-          .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
+          .attempt(
+            McpServerCore
+              .decodeArguments(contract.decoder, contract.definition.name, args, decodeContext)
+          )
           .flatMap(input => contract.handler(input, ctxOpt))
           // Carry both renderings while `Out` is still known; the wire layer emits
           // structuredContent from it only when the tool declares an outputSchema.
@@ -229,7 +236,10 @@ trait McpServerCore[R]:
       definition = contract.definition,
       handler = (params: Map[String, String]) =>
         ZIO
-          .attempt(contract.decoder.decode(contract.definition.uri, params, decodeContext))
+          .attempt(
+            McpServerCore
+              .decodeArguments(contract.decoder, contract.definition.uri, params, decodeContext)
+          )
           .flatMap(contract.handler)
     )
 
@@ -240,7 +250,10 @@ trait McpServerCore[R]:
       definition = contract.definition,
       handler = (params: Map[String, String]) =>
         ZIO
-          .attempt(contract.decoder.decode(contract.definition.uri, params, decodeContext))
+          .attempt(
+            McpServerCore
+              .decodeArguments(contract.decoder, contract.definition.uri, params, decodeContext)
+          )
           .flatMap(contract.handler)
     )
 
@@ -277,7 +290,10 @@ trait McpServerCore[R]:
       definition = contract.definition,
       handler = (args: Map[String, Any], ctx: Option[McpContext]) =>
         ZIO
-          .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
+          .attempt(
+            McpServerCore
+              .decodeArguments(contract.decoder, contract.definition.name, args, decodeContext)
+          )
           .flatMap(in => contract.handler(in, ctx))
     )
 
@@ -288,7 +304,10 @@ trait McpServerCore[R]:
       definition = contract.definition,
       handler = (args: Map[String, Any], ctx: Option[McpContext]) =>
         ZIO
-          .attempt(contract.decoder.decode(contract.definition.name, args, decodeContext))
+          .attempt(
+            McpServerCore
+              .decodeArguments(contract.decoder, contract.definition.name, args, decodeContext)
+          )
           .flatMap(in => contract.handler(in, ctx))
     )
 
@@ -352,6 +371,23 @@ trait McpServerCore[R]:
   def runHttp()(using transport.HttpTransportBackend): ZIO[R, Throwable, Unit]
 
 object McpServerCore:
+
+  /** Decode the whole argument object of a typed contract (`owner` is the tool or prompt name, or
+    * the template URI). A failure of the default decode path that zio-json located inside the
+    * object is re-thrown named after the argument it is about, as the annotation path names it,
+    * instead of after `owner` (GH #115, D6.23). Anything else passes through unchanged: a custom
+    * `McpDecoder`'s own exceptions, and failures about the arguments as a whole.
+    */
+  private[fastmcp] def decodeArguments[A](
+      decoder: McpDecoder[A],
+      owner: String,
+      arguments: Any,
+      context: McpDecodeContext
+  ): A =
+    try decoder.decode(owner, arguments, context)
+    catch
+      case failure: ArgumentDecodeFailure if failure.parameter == owner =>
+        throw failure.forField.getOrElse(failure)
 
   /** The failure the default `skills` / `removeSkills` / `skillProvider` return on an
     * implementation that does not override them.

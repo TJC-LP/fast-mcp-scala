@@ -181,10 +181,7 @@ object DefaultDecodeContext:
                 .decodedNumberViolation(value, default.bounds)
                 .foreach(rejectNumber(name, _))
             value
-          case Left(err) =>
-            throw new RuntimeException(
-              s"Failed to decode parameter '$name' from JSON: $err. Value: ${preview(ast)}"
-            )
+          case Left(err) => throw new ArgumentDecodeFailure(name, err, ast)
       case other =>
         // A custom context's encoder is user code; a JVM StackOverflowError there still becomes
         // an IllegalArgumentException (-32602) instead of a fatal Error.
@@ -195,6 +192,11 @@ object DefaultDecodeContext:
             throw new RuntimeException(
               s"Failed to decode parameter '$name' from JSON: $err. Value: $json"
             )
+
+  /** The message of a failed decode: the parameter, zio-json's reason, a preview of the value. */
+  private[codec] def decodeFailureMessage(name: String, reason: String, value: Option[Json]) =
+    s"Failed to decode parameter '$name' from JSON: $reason" +
+      value.fold("")(v => s". Value: ${preview(v)}")
 
   private def rejectNumber(name: String, violation: JsonLimits.Violation): Nothing =
     throw new IllegalArgumentException(s"Parameter '$name' rejected: ${violation.message}")
@@ -262,3 +264,40 @@ object DefaultDecodeContext:
       case Json.Arr(elems) => elems.toList.map(fromJsonAst)
       case Json.Obj(fields) =>
         fields.iterator.map((k, v) => k -> fromJsonAst(v)).toMap
+
+/** [[DefaultDecodeContext.decodeRaw]] could not decode `value` as the parameter `parameter`;
+  * `reason` is zio-json's error. A `RuntimeException` with the message decode failures have always
+  * had, so nothing that catches or maps one changes. It carries its parts so that the
+  * typed-contract path can say which FIELD failed ([[forField]]).
+  */
+private[fastmcp] final class ArgumentDecodeFailure(
+    val parameter: String,
+    val reason: String,
+    val value: Json
+) extends RuntimeException(
+      DefaultDecodeContext.decodeFailureMessage(parameter, reason, Some(value))
+    ):
+
+  /** The same failure, named after the member of `value` that zio-json's error path starts with.
+    *
+    * A typed contract decodes the whole `arguments` object as one value, under the name of the
+    * tool, prompt or resource template. zio-json puts the path to the failing value in front of its
+    * message: `.id(Invalid job id 'nope')`, `.filter.ids[2](expected a number)`. The first step of
+    * that path is the argument the client got wrong, which is what the annotation path names:
+    * `Failed to decode parameter 'id' from JSON: (Invalid job id 'nope'). Value: "nope"`.
+    *
+    * `None` when the error names no member (the value is not an object, say): the failure is about
+    * the arguments as a whole and keeps its message.
+    */
+  def forField: Option[RuntimeException] =
+    if !reason.startsWith(".") then None
+    else
+      val end = reason.indexWhere(c => c == '.' || c == '[' || c == '(', 1)
+      val field = if end < 0 then reason.drop(1) else reason.substring(1, end)
+      val rest = if end < 0 then "" else reason.substring(end)
+      val member = value match
+        case Json.Obj(fields) => fields.collectFirst { case (key, v) if key == field => v }
+        case _ => None
+      Option.when(field.nonEmpty)(
+        new RuntimeException(DefaultDecodeContext.decodeFailureMessage(field, rest, member))
+      )
