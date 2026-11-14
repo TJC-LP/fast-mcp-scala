@@ -60,7 +60,9 @@ npx @modelcontextprotocol/inspector scala-cli scripts/quickstart.sc
 The first run downloads the compiler and dependencies (about 60 MB) and compiles the script, which
 can exceed the Inspector's 15 s connect timeout (it then reports only `Connection closed`). Run
 `scala-cli compile scripts/quickstart.sc` once beforehand, or pass `--connect-timeout <ms>` to the
-Inspector.
+Inspector. On the machine used for the 1.0.0 review a cold start took 12.6 s and a warm one under
+4 s. On JDK 24 and newer every start also prints a few harmless `WARNING:` lines to stderr; see
+[JVM notes](docs/platforms.md#jvm-notes).
 
 ## Choosing a registration path
 
@@ -354,15 +356,28 @@ Add to `claude_desktop_config.json`:
       "command": "scala-cli",
       "args": [
         "-e",
-        "//> using scala 3.9.0",
-        "-e",
-        "//> using dep com.tjclp::fast-mcp-scala:1.0.1",
+        "//> using scala 3.9.0\n//> using dep com.tjclp::fast-mcp-scala:1.0.1",
         "--main-class",
         "com.tjclp.fastmcp.examples.AnnotatedServer"
       ]
     }
   }
 }
+```
+
+Both directives are in one `-e` snippet on purpose. With one `-e` per directive, scala-cli 1.14
+prints `Using directives detected in multiple files` to stderr on every start.
+
+To try the same command from a shell with the Inspector CLI, put `--` between the server command
+and the Inspector's own options. The Inspector has an `-e` option of its own (`KEY=VALUE`
+environment variables). Without the separator it takes the server's `-e` and fails with
+`Invalid parameter format: ... Use key=value format.` (Inspector 2.5.0):
+
+```bash
+npx @modelcontextprotocol/inspector --cli scala-cli \
+  -e $'//> using scala 3.9.0\n//> using dep com.tjclp::fast-mcp-scala:1.0.1' \
+  --main-class com.tjclp.fastmcp.examples.AnnotatedServer \
+  -- --method tools/list
 ```
 
 > fast-mcp-scala example servers are for demo purposes only. They don't do anything useful, but they make it easy to see MCP in action.

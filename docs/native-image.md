@@ -102,7 +102,12 @@ must print `0` (it does for 1.0.0: nothing but zio-http brings netty in).
 - **stderr noise on start**: on JDK 25 the image prints four
   `sun.misc.Unsafe::objectFieldOffset ... scala.runtime.LazyVals$` warnings to stderr on every
   start (a plain JVM prints them too; Scala Native prints nothing). stdout stays clean, so MCP
-  hosts are unaffected.
+  hosts are unaffected. The run-time flag that silences a JVM
+  (`--sun-misc-unsafe-memory-access=allow`, see [platforms.md](./platforms.md#jvm-notes)) does
+  nothing when given to the binary. Give it to the image builder instead: add
+  `"-J--sun-misc-unsafe-memory-access=allow"` to `nativeImageOptions`, and the binary starts with
+  an empty stderr (checked with GraalVM CE 25.0.2 on a stdio image). `native-image` rejects the
+  flag without the `-J` prefix.
 - **`MissingRegistrationError` at runtime**: a dependency started using reflection. Reproduce on
   the JVM under the tracing agent (below), and add only the missing entries.
 - **Linker errors on self-hosted runners**: `native-image` needs a C toolchain (`gcc`,

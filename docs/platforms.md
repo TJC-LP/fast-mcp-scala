@@ -48,9 +48,32 @@ Bun-specific today.
 
 JDK 17 or newer (CI tests 17, 21 and 25). On JDK 24+ the HTTP transport's netty prints
 `WARNING: A restricted method in java.lang.System has been called` once at startup (native-transport
-probing); it is harmless, and `--enable-native-access=ALL-UNNAMED` silences it. Scala 3.9's
-`LazyVals` trigger a similar one-time `sun.misc.Unsafe` deprecation warning on JDK 25. Both go to
-stderr and never touch the stdio protocol channel.
+probing); it is harmless, and `--enable-native-access=ALL-UNNAMED` silences it. Both go to stderr
+and never touch the stdio protocol channel.
+
+The second warning comes from the Scala 3.9.0 standard library, on every transport. On JDK 24 and
+newer (seen on 25.0.2) each start prints four lines:
+
+```
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by scala.runtime.LazyVals$ (file:.../scala-library-3.9.0.jar)
+WARNING: Please consider reporting this to the maintainers of class scala.runtime.LazyVals$
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+```
+
+They are harmless, but an MCP host that keeps a per-server log collects them on every launch.
+`--sun-misc-unsafe-memory-access=allow` silences them:
+
+```bash
+java --sun-misc-unsafe-memory-access=allow --enable-native-access=ALL-UNNAMED -cp ... com.example.MyServer
+scala-cli run --java-opt --sun-misc-unsafe-memory-access=allow MyServer.scala
+```
+
+Pass that flag only where the JDK is 23 or newer: JDK 21 does not know it and refuses to start
+(`Unrecognized option`). JDK 17 and 21 accept `--enable-native-access`. Setting either flag through
+`JAVA_TOOL_OPTIONS` trades the warning for a `Picked up JAVA_TOOL_OPTIONS: ...` line on stderr.
+Bun, Node and Scala Native print nothing. For a GraalVM image see
+[native-image.md](./native-image.md#notes-and-troubleshooting).
 
 ## Scala.js on Bun
 

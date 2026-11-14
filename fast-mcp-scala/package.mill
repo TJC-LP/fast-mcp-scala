@@ -466,7 +466,10 @@ object `package` extends Module {
 
       override def nativeImageOptions = Task {
         super.nativeImageOptions() ++ Seq(
-          // SIGINT/SIGTERM must terminate a long-running server binary.
+          // SIGINT/SIGTERM must terminate a long-running server binary. GraalVM 25 installs the
+          // exit handlers for executables by default and reports this flag as deprecated at build
+          // time ("enabled by default for executables and it can likely be removed"). It is kept
+          // only so that the module still builds a correct image on an older GraalVM.
           "--install-exit-handlers",
           // netty-codec-http ships a blanket `--initialize-at-build-time=io.netty`, which is
           // incompatible with GraalVM on JDK 25: buffer/handler <clinit>s allocate native memory
