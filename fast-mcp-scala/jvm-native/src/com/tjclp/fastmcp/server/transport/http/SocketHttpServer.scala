@@ -711,6 +711,7 @@ private[fastmcp] object SocketHttpServer:
           flush()
           !close
         case json: HttpReply.Json => writeJson(json, close)
+        case body: HttpReply.Body => writeBody(body, close)
         case done: HttpReply.SseComplete => writeSseComplete(done, close)
         case sse: HttpReply.Sse => streamSse(sse, version, close)
 
@@ -721,6 +722,23 @@ private[fastmcp] object SocketHttpServer:
       buf.ascii(Integer.toString(body.length))
       buf.ascii("\r\n\r\n")
       buf.append(body)
+      flush()
+      !close
+
+    /** The reply of an `httpRoutes` route. Its content type and headers were checked to be
+      * printable ASCII when the reply was built (`HttpRouteResponse`), so neither can break the
+      * head.
+      */
+    private def writeBody(reply: HttpReply.Body, close: Boolean): Boolean =
+      val body = reply.body.getBytes(StandardCharsets.UTF_8)
+      appendHead(reply.status, reply.headers, close)
+      buf.ascii("content-type: ")
+      buf.ascii(reply.contentType)
+      buf.ascii("\r\ncontent-length: ")
+      buf.ascii(Integer.toString(body.length))
+      buf.ascii("\r\n\r\n")
+      // The reply to a HEAD ends with its head: the length above is the GET's.
+      if !reply.headOnly then buf.append(body)
       flush()
       !close
 

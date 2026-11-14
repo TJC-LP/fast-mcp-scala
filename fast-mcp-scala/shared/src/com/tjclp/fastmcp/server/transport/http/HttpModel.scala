@@ -116,6 +116,21 @@ private[fastmcp] object HttpReply:
   final case class Json(status: Int, body: String, headers: List[(String, String)] = Nil)
       extends HttpReply
 
+  /** The reply of a route the server author registered (`McpServerSettings.httpRoutes`): a text
+    * body with the content type its handler chose. Never an MCP reply.
+    *
+    * `headOnly` marks the reply to a `HEAD`: the backend sends the status, the headers and the
+    * `Content-Length` of `body` — what the `GET` would have sent (RFC 9110 §9.3.2) — and not the
+    * body itself.
+    */
+  final case class Body(
+      status: Int,
+      body: String,
+      contentType: String,
+      headers: List[(String, String)] = Nil,
+      headOnly: Boolean = false
+  ) extends HttpReply
+
   /** A `200 text/event-stream` response whose body is the frame stream; the response ends when the
     * stream does (or the client disconnects, which runs the stream's finalizers).
     *

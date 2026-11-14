@@ -140,6 +140,16 @@ final class TaskMiddleware[R](
                   created => created.toJsonAST.getOrElse(Json.Obj())
                 )
             }
+          // The remedy "ask for a task" is one this transport refuses (first arm), so say what
+          // does work instead of sending the client into that refusal.
+          case (false, TaskSupport.Required) if !session.supportsTasks =>
+            ZIO.fail(
+              McpError.methodNotFound(
+                s"Tool '$name' requires task augmentation, which is not available on the legacy " +
+                  "stateless transport; call it with MCP 2026-07-28 task requests or over a " +
+                  "session-bearing transport"
+              )
+            )
           case (false, TaskSupport.Required) =>
             ZIO.fail(McpError.methodNotFound(s"Tool '$name' requires task augmentation"))
           case (true, TaskSupport.Forbidden) =>

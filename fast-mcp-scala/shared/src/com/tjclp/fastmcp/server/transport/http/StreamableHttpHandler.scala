@@ -7,7 +7,7 @@ import zio.stream.*
 
 import com.tjclp.fastmcp.core.{ErrorCodes, Protocol}
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError, RequestId}
-import com.tjclp.fastmcp.server.{McpServerSettings, ServerClock}
+import com.tjclp.fastmcp.server.{HttpRoute, McpServerSettings, ServerClock}
 import com.tjclp.fastmcp.server.router.{McpRouter, RequestContext, RequestHeaders, Session}
 import com.tjclp.fastmcp.server.transport.{
   HttpHeaderValidation,
@@ -73,7 +73,14 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     * can never disagree.
     */
   def admit(req: HttpRequest): Option[HttpReply] =
-    if !HttpRequestGuards.pathMatches(req.path, settings) then Some(HttpReply.Empty(404))
+    if !HttpRequestGuards.pathMatches(req.path, settings) then
+      HttpRequestGuards.routeFor(req.path, settings) match
+        case None => Some(HttpReply.Empty(404))
+        // A route of `httpRoutes`: refused on its head, or admitted to `handle` (GET or HEAD).
+        case Some(_) =>
+          HttpRequestGuards
+            .routeGate(req.method, req.gateHeader, settings)
+            .map(rejection => rejectFor(req.method, rejection))
     else
       req.method match
         case "POST" =>
@@ -83,12 +90,16 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         case _ => nonPostError(req)
 
   /** Full routing, behind the first-party error boundary: anything off the endpoint is `404` (an
-    * exact path match, see [[endpoint]]); on it, every method meets the Host/Origin guard first and
-    * a method the endpoint does not serve is then `405` with an `Allow` header.
+    * exact path match, see [[endpoint]]) unless `settings.httpRoutes` has a route for that path
+    * ([[routeReply]]); on it, every method meets the Host/Origin guard first and a method the
+    * endpoint does not serve is then `405` with an `Allow` header.
     */
   def handle(req: HttpRequest): URIO[R, HttpReply] =
     guarded {
-      if !HttpRequestGuards.pathMatches(req.path, settings) then ZIO.succeed(HttpReply.Empty(404))
+      if !HttpRequestGuards.pathMatches(req.path, settings) then
+        HttpRequestGuards.routeFor(req.path, settings) match
+          case None => ZIO.succeed(HttpReply.Empty(404))
+          case Some(route) => routeReply(route, req)
       else
         req.method match
           case "POST" => post(req)
@@ -97,6 +108,30 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
           // Never admitted: `nonPostGate` refuses every method but GET and DELETE.
           case _ => ZIO.succeed(nonPostError(req).getOrElse(HttpReply.Empty(405)))
     }
+
+  /** A request to a route of `settings.httpRoutes`: the Host/Origin guard and the method gate
+    * (`HttpRequestGuards.routeGate`), then the author's handler. It touches neither the router nor
+    * the session store. A handler that dies is a fixed 500, built here rather than at [[handle]]'s
+    * boundary so that it follows the method like every other reply to a route: no reply to a `HEAD`
+    * carries a body (one written after a `HEAD` would be read as the start of the next response on
+    * a kept-alive connection).
+    */
+  private def routeReply(route: HttpRoute, req: HttpRequest): UIO[HttpReply] =
+    HttpRequestGuards.routeGate(req.method, req.gateHeader, settings) match
+      case Some(rejection) => ZIO.succeed(rejectFor(req.method, rejection))
+      case None =>
+        StreamableHttpHandler.guardedWith[Any, HttpReply](
+          rejectFor(
+            req.method,
+            HttpRequestGuards.Rejection(500, HttpRequestGuards.InternalErrorMessage)
+          )
+        )(
+          HttpRequestGuards
+            .runRoute(route, req.method, req.path, req.gateHeader)
+            .map(r =>
+              HttpReply.Body(r.status, r.body, r.contentType, r.headers, req.method == "HEAD")
+            )
+        )
 
   /** The verdict of `HttpRequestGuards.nonPostGate` on a request that is not a POST, rendered: 403
     * Host/Origin, then 405 for a method this endpoint does not serve in this mode (GET and DELETE
@@ -159,7 +194,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
                       if modern then modernPost(req, message)
                       else
                         store match
-                          case None => legacyStatelessDispatch(message)
+                          case None => legacyStatelessDispatch(req, message)
                           case Some(sessions) => legacySessionDispatch(sessions, req, message)
                 }
         }
@@ -229,15 +264,20 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
   // Legacy stateless: request/response, no session state, no SSE.
   // ---------------------------------------------------------------------------
 
-  private def legacyStatelessDispatch(message: JsonRpcMessage): URIO[R, HttpReply] =
+  private def legacyStatelessDispatch(
+      req: HttpRequest,
+      message: JsonRpcMessage
+  ): URIO[R, HttpReply] =
     for
       session <- Session.makeRequestScoped(
         "stateless",
         supportsTasks = false,
         clock = router.clock
       )
-      // Legacy stateless compatibility mode starts ready without a handshake.
+      // Legacy stateless compatibility mode starts ready without a handshake, so the revision
+      // the reply is written for (`tools/list` field projection) comes from the request's header.
       _ <- session.markInitialized
+      _ <- session.setProtocolVersion(ModernHttpValidation.legacyRequestVersion(req.header))
       reply <- router.dispatch(session, message)
     yield (message, reply) match
       case (_: JsonRpcMessage.Invalid, Some(r)) => HttpReply.Json(400, r.toJson)

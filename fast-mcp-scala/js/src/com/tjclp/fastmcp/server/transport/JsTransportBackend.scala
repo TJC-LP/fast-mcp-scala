@@ -442,7 +442,20 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     // The endpoint is an exact path match, as on the JVM backends (`HttpRequestGuards.pathMatches`;
     // `URL.pathname` carries no query string). Anything else is an empty 404, before any gate.
     else if !path.exists(HttpRequestGuards.pathMatches(_, settings)) then
-      ZIO.succeed(emptyResponse(404))
+      // ... unless `settings.httpRoutes` has a route for that path: the Host/Origin guard, 405 for
+      // any method but GET and HEAD, then the author's handler (JVM twin: `StreamableHttpHandler.handle`).
+      // The request body is never read, and neither the router nor the session store is touched.
+      path.flatMap(p => HttpRequestGuards.routeFor(p, settings).map(p -> _)) match
+        case None => ZIO.succeed(emptyResponse(404))
+        case Some((routePath, route)) =>
+          HttpRequestGuards.routeGate(method, headerOf(req), settings) match
+            case Some(rejection) => ZIO.succeed(reject(rejection))
+            case None =>
+              // To a HEAD, Bun sends the head of this response — the body's Content-Length
+              // included — and drops the body itself.
+              HttpRequestGuards.runRoute(route, method, routePath, headerOf(req)).map { r =>
+                webResponse(r.status, r.body, r.headers.toMap + ("content-type" -> r.contentType))
+              }
     else
       // POST: the header gates. Anything else: Host/Origin, then 405 for a method this endpoint
       // does not serve — every method but DELETE here, since Bun has no standalone GET stream
@@ -501,8 +514,13 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                       supportsTasks = false,
                       clock = router.clock
                     )
-                    // Legacy stateless compatibility mode starts ready without a handshake.
+                    // Legacy stateless compatibility mode starts ready without a handshake, so
+                    // the revision the reply is written for comes from the request's header
+                    // (JVM twin: `StreamableHttpHandler.legacyStatelessDispatch`).
                     _ <- session.markInitialized
+                    _ <- session.setProtocolVersion(
+                      ModernHttpValidation.legacyRequestVersion(headerOf(req))
+                    )
                     reply <- router.dispatch(session, message)
                   yield (message, reply) match
                     case (_: JsonRpcMessage.Invalid, Some(r)) =>

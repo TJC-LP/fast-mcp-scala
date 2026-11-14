@@ -401,6 +401,32 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   end of stdin for the replies to frames it has already read, before it interrupts what is still
   running. Default five seconds; zero interrupts without waiting; a negative value is refused when
   the settings are built. Ignored by the HTTP transports. See *Fixed*, "One stdio lifecycle".
+- **Plain HTTP routes next to the MCP endpoint: `McpServerSettings.httpRoutes`** (GH #120,
+  TJC-5434). A server can answer `GET /health`-style requests from its MCP listener, on the JVM
+  (zio-http and the socket backend), Bun and Scala Native:
+  `httpRoutes = List(HttpRoute.get("/health")(_ => ZIO.succeed(HttpRouteResponse.text("ok"))))`.
+  Before, every path but the endpoint was 404 and a probe needed a reverse proxy or a second
+  listener.
+  - New, all in the root import: `HttpRoute.get(path)(handler)` with
+    `handler: HttpRouteRequest => UIO[HttpRouteResponse]`; `HttpRouteRequest` (`path`,
+    `method`, `header(name)`); `HttpRouteResponse.text` / `.json` / `apply(status, body, contentType)` and
+    `.withHeader`.
+  - A route is a `GET` on an exact path (the query string is not part of it). A `HEAD` on it runs
+    the same handler and gets its status and headers, the `Content-Length` of the `GET`, and no
+    body, on every backend; `HttpRouteRequest.method` tells the two apart. Another method on that
+    path is 405 with `Allow: GET, HEAD`.
+  - A route can never be the MCP endpoint: `runHttp()` fails at startup for a route on
+    `httpEndpoint`, a path listed twice, one without a leading `/` and one no request can name.
+    Nothing about the endpoint changes, and no request can select a handler that was not listed.
+  - The Host/Origin guard applies to routes as to the endpoint (403 before the handler runs), so a
+    probe must send a `Host` the guard admits. The endpoint's other gates (`Content-Type`,
+    `Accept`, protocol headers, sessions, `limits`) do not apply, and nothing authenticates a
+    route.
+  - The request body is never read or handed to the handler. A handler that dies is answered with
+    the fixed 500; a reply with a line break in a header or a status that cannot carry a body is
+    refused where it is built.
+  - Empty by default: without routes every reply is what it was. There is still no CORS handling
+    on the MCP endpoint. Reference: `docs/transports.md` § "Other routes on the listener".
 - **Tasks wait for input: `input_required`** (TJC-2366, TJC-2367). A tool that asks its client
   for input from inside a 2026-07-28 task (`McpContext.elicit`, `createMessage`, `listRoots`,
   `sendRequest`) now puts the task in `input_required`. `tasks/get` returns the outstanding
@@ -527,6 +553,24 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Changed
 
+- **`tools/list` sends each tool with the fields of the client's protocol revision** (GH #120,
+  D3.17). Every session used to get every field, so a 2024-11-05 client was sent `annotations`
+  (a 2025-03-26 field), `title` and `outputSchema` (2025-06-18) and `execution` (2025-11-25). Now
+  a field is sent from the revision that introduced it: `annotations` from 2025-03-26; `title`,
+  `outputSchema` and `_meta` from 2025-06-18; `icons` from 2025-11-25; `execution` on 2025-11-25
+  only (2026-07-28 removed it, as before). `name`, `description` and `inputSchema` go to everyone.
+  - The revision is the one `initialize` negotiated on a legacy session and 2026-07-28 on a
+    modern request. Replies to 2025-11-25 and 2026-07-28 clients are unchanged.
+  - A 2025-03-26 client keeps the display title as `annotations.title`.
+  - Only the list entry is projected. `tools/call` is unchanged: a tool with an `outputSchema`
+    still returns `structuredContent` to an older client.
+  - The legacy stateless adapter (`stateless = true`) has no `initialize`: there the revision is
+    the one the request's `MCP-Protocol-Version` header names, and 2025-03-26 for a request
+    without the header, as the specification says to assume. Such a header-less request used to
+    get every field and now gets `annotations` but not `title` or `outputSchema`; a client that
+    wants them sends the header.
+  - New: `WireMapping.toolForVersion(tool, version)`. Reference: `docs/spec-coverage.md` §
+    "Fields by revision on `tools/list`".
 - **BEHAVIOUR CHANGE — `tasks/cancel` no longer waits for a body that does not stop** (GH #115,
   D6.14 / C3.3). Affects servers with `TaskSettings(enabled = true)` whose task tools have a
   synchronous body: a plain method on the annotation path, a typed-contract handler that returns
@@ -952,7 +996,11 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   The stateless legacy adapter (`stateless = true`) refuses every legacy task method with
   `-32601`, and its `initialize` result now declares no `tasks` capability at all. It used to
   declare `requests.tools.call` there too. Its `tools/list` no longer carries
-  `execution.taskSupport` either.
+  `execution.taskSupport` either, and a plain call of a `taskSupport = required` tool there is
+  refused (`-32601`) with a message that names the limitation — `requires task augmentation,
+  which is not available on the legacy stateless transport; call it with MCP 2026-07-28 task
+  requests or over a session-bearing transport` — instead of the bare `requires task
+  augmentation`, a remedy that transport refuses as well.
 - **`subscriptions/listen` refuses task notifications from a client without the Tasks extension**
   (GH #115, TJC-2361). A 2026-07-28 `subscriptions/listen` request that names `taskIds` but does
   not declare `io.modelcontextprotocol/tasks` in its capabilities is answered `-32021`, as

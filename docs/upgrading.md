@@ -400,8 +400,11 @@ the same placeholder shape (`users://{id}` vs `users://{userId}`) log a warning.
   `Bun.serve(fetch = ...)` around the SDK transport — adding CORS headers, an `OPTIONS` 204
   preflight, a `/health` route — cannot reproduce that shape: `runHttp()` owns the listener,
   non-endpoint paths answer 404, and the library adds no CORS or preflight handling. The 1.0
-  stance is to put those concerns on a reverse proxy in front of the server. A composable
-  fetch handler / route hook is tracked for 1.1.0.
+  stance is to put those concerns on a reverse proxy in front of the server. Since 1.1.0
+  `McpServerSettings.httpRoutes` serves plain `GET` routes (a `/health` probe) from the same
+  listener on every backend — see
+  [transports.md](./transports.md#other-routes-on-the-listener-httproutes). CORS headers and the
+  `OPTIONS` preflight of the MCP endpoint stay with the proxy: a route can never be the endpoint.
 - Large `sampling/createMessage` or elicitation results over HTTP meet `maxRequestBodyBytes`
   (1 MiB) before `limits.maxFrameChars`; raise both together (`maxRequestBodyBytes` must stay
   ≤ `maxFrameChars`; checked at startup). See [transports.md](transports.md).
