@@ -533,7 +533,8 @@ object JsonSchemaMacro:
           val format = argument match
             case NamedArg(_, value) => value
             case value => value
-          MacroUtils.stripTerm(format).tpe.termSymbol.fullName match
+          // A member of an object is spelled with the module class's `$` (`ziojson_03$.SnakeCase`).
+          MacroUtils.stripTerm(format).tpe.termSymbol.fullName.replace("$.", ".") match
             case "zio.json.SnakeCase" => zio.json.SnakeCase
             case "zio.json.CamelCase" => zio.json.CamelCase
             case "zio.json.PascalCase" => zio.json.PascalCase

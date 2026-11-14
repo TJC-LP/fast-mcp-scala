@@ -83,6 +83,12 @@ case object AdtWait extends AdtCommand
 
 case class AdtNamedArgs(signal: AdtSignal, gear: AdtGear, command: AdtCommand)
 
+// One of zio-json's legacy formats, which live in an object (`ziojson_03`).
+@jsonHintNames(zio.json.ziojson_03.SnakeCase) sealed trait AdtLegacy
+case object AdtOldStyle extends AdtLegacy
+case object AdtNewStyle extends AdtLegacy
+case class AdtLegacyArgs(legacy: AdtLegacy)
+
 /** A type no codec can be derived for. */
 final class AdtHandle(val id: Int)
 
@@ -407,6 +413,26 @@ class SealedHierarchySpec extends AsyncFunSuite:
       assert(free == Right(List("free/List()")))
       assert(typed == Right(List("""{"owned":4,"crate":9}""")))
       assert(refused == Left("Invalid arguments for tool 'typed_owned': 'owned' must be integer, got an object"))
+    }
+  }
+
+  test("@jsonHintNames with a legacy zio-json format (ziojson_03) is read like the others") {
+    val server = McpServer("adt-legacy")
+    val tool = McpTool[AdtLegacyArgs, String](name = "style")(args => args.legacy.toString)
+    val program =
+      for
+        _ <- server.tool(tool)
+        ok <- call(server, "style", """{"legacy":"adt_old_style"}""")
+        className <- call(server, "style", """{"legacy":"AdtOldStyle"}""")
+      yield (ok, className)
+    run(program).map { (ok, className) =>
+      assert(
+        at(inputSchema(server, "style"), "properties", "legacy") == json(
+          """{"type":"string","enum":["adt_old_style","adt_new_style"]}"""
+        )
+      )
+      assert(ok == Right(List("AdtOldStyle")))
+      assert(className.isLeft, s"the class name was accepted: $className")
     }
   }
 
