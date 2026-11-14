@@ -1,7 +1,7 @@
 package com.tjclp.fastmcp.server.transport
 
 import com.tjclp.fastmcp.core.{ErrorCodes, Protocol}
-import com.tjclp.fastmcp.server.McpServerSettings
+import com.tjclp.fastmcp.server.{HttpRoute, HttpRouteRequest, HttpRouteResponse, McpServerSettings}
 import com.tjclp.fastmcp.server.router.RequestHeaders
 
 /** Every transport-level admission decision of the HTTP backends, as pure functions over the
@@ -11,7 +11,8 @@ import com.tjclp.fastmcp.server.router.RequestHeaders
   *
   * Request order on every backend:
   * {{{
-  * path 404 (pathMatches) → hostGate 403 → method 405 (nonPostGate) →
+  * path 404 (pathMatches; a path in `httpRoutes` instead: hostGate 403 → 405 unless GET → its
+  *   handler, see routeGate) → hostGate 403 → method 405 (nonPostGate) →
   *   POST: Content-Type 415 → declared Content-Length 413 → Accept 406 →
   *     body read (platform byte cap → 413) → bodyTooLarge 413 → parseFrame → dispatch →
   *     any defect → JSON-RPC 500 (guarded)
@@ -116,7 +117,67 @@ private[fastmcp] object HttpRequestGuards:
     else
       invalidEndpoint(settings.httpEndpoint)
         .filterNot(_ => decodedPaths && structuralProblem(settings.httpEndpoint).isEmpty)
+        .orElse(invalidRoutes(settings))
         .toLeft(())
+
+  /** Why `settings.httpRoutes` cannot be served, if so: a path that does not start with `/`, that
+    * is the MCP endpoint (no route may answer for it), that is listed twice, or that no request
+    * path can equal — the rule `httpEndpoint` is held to ([[invalidEndpoint]]), on every backend.
+    */
+  def invalidRoutes(settings: McpServerSettings): Option[String] =
+    val paths = settings.httpRoutes.map(_.path)
+    val endpoint = endpointPath(settings)
+    paths.iterator
+      .flatMap { path =>
+        if !path.startsWith("/") then Some(s"httpRoutes path '$path' must start with '/'")
+        else if path == endpoint then
+          Some(s"httpRoutes path '$path' is the MCP endpoint: a route cannot replace it")
+        else
+          structuralProblem(path).orElse(encodedChar(path)).map { what =>
+            s"httpRoutes path '$path' can never match a request path: it contains $what"
+          }
+      }
+      .nextOption()
+      .orElse(
+        paths.diff(paths.distinct).headOption.map(p => s"httpRoutes path '$p' is listed twice")
+      )
+
+  /** The route registered on this exact path (query string already removed), if any. The MCP
+    * endpoint is never one: [[invalidRoutes]] refuses such settings, and every backend looks a
+    * route up only for a path that is not the endpoint.
+    */
+  def routeFor(path: String, settings: McpServerSettings): Option[HttpRoute] =
+    if settings.httpRoutes.isEmpty then None else settings.httpRouteIndex.get(path)
+
+  /** The gate of a request to a route, on headers only: 403 Host/Origin — the same guard as on the
+    * MCP endpoint — then 405 for any method but `GET` (`Allow: GET`). `None` runs the handler.
+    * Nothing else is checked: the content-type, `Accept`, body and session gates are the
+    * endpoint's.
+    */
+  def routeGate(
+      method: String,
+      header: String => Option[String],
+      settings: McpServerSettings
+  ): Option[Rejection] =
+    hostGate(header, settings).orElse {
+      if method == HttpRoute.Method then None
+      else
+        Some(
+          Rejection(
+            405,
+            s"Method $method is not allowed on this route (allowed: ${HttpRoute.Method})",
+            allow = List(HttpRoute.Method)
+          )
+        )
+    }
+
+  /** Run a route's handler for an admitted request. `header` is the gates' joined lookup. */
+  def runRoute(
+      route: HttpRoute,
+      path: String,
+      header: String => Option[String]
+  ): zio.UIO[HttpRouteResponse] =
+    zio.ZIO.suspendSucceed(route.handler(new HttpRouteRequest(path, header)))
 
   /** The path requests are matched against: `httpEndpoint` with a leading slash (`/mcp` for both
     * `"/mcp"` and `"mcp"`).

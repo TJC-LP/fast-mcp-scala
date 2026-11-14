@@ -10,6 +10,26 @@ adapter for the older revisions listed in `Protocol.LegacyProtocolVersions`
 2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05, and 2024-10-07. `server/discover` advertises all
 of them, newest first.
 
+### Fields by revision on `tools/list`
+
+A `tools/list` entry carries the fields of the revision the client speaks — the one `initialize`
+negotiated on a legacy session, 2026-07-28 on a modern request — and no field that revision does
+not define (since 1.1.0; before, every session was sent every field):
+
+| `Tool` field | Sent to |
+|---|---|
+| `name`, `description`, `inputSchema` | every revision |
+| `annotations` | 2025-03-26 and later |
+| `title`, `outputSchema`, `_meta` | 2025-06-18 and later |
+| `icons` | 2025-11-25 and later |
+| `execution` (`taskSupport`) | 2025-11-25 only (2026-07-28 removed it) |
+
+So a 2024-11-05 or 2024-10-07 client gets `name`, `description` and `inputSchema`. A 2025-03-26
+client still sees a tool's display title, as `annotations.title`. The projection is on the list
+entry only: `tools/call` results are unchanged, and a tool with an `outputSchema` still returns
+`structuredContent` to an older client, which ignores it. The legacy **stateless** adapter has no
+`initialize` and so no negotiated revision; it sends every legacy field.
+
 ## Coverage matrix (MCP 2026-07-28)
 
 | Capability | Status |

@@ -24,8 +24,9 @@ import com.tjclp.fastmcp.core.wire.*
   */
 object WireMapping:
 
-  /** [[ToolDefinition]] → wire [[Tool]]. `execution.taskSupport` is emitted only when the server is
-    * task-enabled and the tool opts in (≠ Forbidden).
+  /** [[ToolDefinition]] → wire [[Tool]], with every field any revision has. `execution.taskSupport`
+    * is set only when the server is task-enabled and the tool opts in (≠ Forbidden).
+    * [[toolForVersion]] then keeps what the client's revision defines.
     */
   def toolToWire(d: ToolDefinition, tasksEnabled: Boolean): Tool =
     val exec =
@@ -41,6 +42,36 @@ object WireMapping:
       annotations = d.annotations,
       execution = exec
     )
+
+  /** A `tools/list` entry as protocol revision `version` defines `Tool`: a field that revision does
+    * not have is left out. The revisions that introduced (and, for one, removed) each optional
+    * field, from the published schemas:
+    *
+    * | field                            | from       | until      |
+    * |:---------------------------------|:-----------|:-----------|
+    * | `annotations`                    | 2025-03-26 |            |
+    * | `title`, `outputSchema`, `_meta` | 2025-06-18 |            |
+    * | `icons`                          | 2025-11-25 |            |
+    * | `execution`                      | 2025-11-25 | 2025-11-25 |
+    *
+    * `name`, `description` and `inputSchema` are in every revision. A 2025-03-26 client still gets
+    * the display title: `annotations.title` has been there since `annotations` has. Revisions are
+    * ISO dates, so they order as strings. A session that has negotiated no version (the legacy
+    * stateless adapter, which has no `initialize`) is not projected.
+    */
+  def toolForVersion(tool: Tool, version: String): Tool =
+    if version.isEmpty then tool
+    else
+      def since[A](revision: String, field: Option[A]): Option[A] =
+        if version >= revision then field else None
+      tool.copy(
+        annotations = since("2025-03-26", tool.annotations),
+        title = since("2025-06-18", tool.title),
+        outputSchema = since("2025-06-18", tool.outputSchema),
+        _meta = since("2025-06-18", tool._meta),
+        icons = since("2025-11-25", tool.icons),
+        execution = if version == "2025-11-25" then tool.execution else None
+      )
 
   /** [[ResourceDefinition]] → wire [[Resource]] (static) — used for `resources/list`. */
   def resourceToWire(d: ResourceDefinition): Resource =

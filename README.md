@@ -322,8 +322,11 @@ For MCP 2026-07-28, `runHttp()` accepts one stateless JSON-RPC message per `POST
 | `port` | `8000` | Listen port |
 | `stateless` | `false` | Disable the legacy session adapter; modern requests are always stateless |
 | `allowedHosts` | `None` (automatic) | `Host` names accepted by the Host/Origin guard; on a loopback bind the loopback names are allowed automatically |
+| `httpRoutes` | `Nil` | Plain `GET` routes next to the MCP endpoint, e.g. a health probe (since 1.1.0) |
 
 **Host / Origin validation.** The server above binds loopback, and binding loopback alone does not protect against browser-originated requests: a web page open on the same machine can still reach the port. So a loopback server checks every request with no configuration — a `Host` that is not `localhost` / `127.0.0.1` / `[::1]`, or an `Origin` that is not the server's own, is refused with 403. When you bind a non-loopback address (`host = "0.0.0.0"`) nothing can be inferred, so the guard is off and startup logs a warning: set `allowedHosts` (and `allowedOrigins` for browser front-ends on another origin) and put an authenticating proxy in front. A loopback listener behind a reverse proxy that forwards its own `Host` lists that name in `allowedHosts`; `dnsRebindingProtection = false` is the explicit opt-out. Details: [docs/transports.md](docs/transports.md#host--origin-validation).
+
+**A health endpoint on the same port.** `McpServerSettings(httpRoutes = List(HttpRoute.get("/health")(_ => ZIO.succeed(HttpRouteResponse.text("ok")))))` answers `GET /health` from the MCP listener on the JVM, Bun and Scala Native. Routes are `GET`-only on exact paths, sit behind the same Host/Origin guard, can never be the MCP endpoint, and are not authenticated. Details: [docs/transports.md](docs/transports.md#other-routes-on-the-listener-httproutes).
 
 All settings, required request headers, error-code mapping, the legacy adapter, and lower-level construction without the sugar trait: [docs/transports.md](docs/transports.md).
 

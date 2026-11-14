@@ -45,7 +45,9 @@ class BinaryCompatibilityTest extends AnyFunSuite with Matchers:
     skills = SkillSettings(enabled = true),
     contextHeaders = Set("x-user"),
     validateToolInput = false,
-    dnsRebindingProtection = false
+    dnsRebindingProtection = false,
+    stdioDrainTimeout = java.time.Duration.ofSeconds(9),
+    httpRoutes = List(HttpRoute.get("/health")(_ => ZIO.succeed(HttpRouteResponse.text("ok"))))
   )
 
   private val tasksWithNewFields = TaskSettings(
@@ -100,6 +102,8 @@ class BinaryCompatibilityTest extends AnyFunSuite with Matchers:
     copied.contextHeaders shouldBe Set("x-user")
     copied.validateToolInput shouldBe false
     copied.dnsRebindingProtection shouldBe false
+    copied.stdioDrainTimeout shouldBe java.time.Duration.ofSeconds(9)
+    copied.httpRoutes.map(_.path) shouldBe List("/health")
   }
 
   test("1.0.1 client: a 17-pattern McpServerSettings extractor still reads its positions") {

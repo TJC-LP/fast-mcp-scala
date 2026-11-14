@@ -99,6 +99,16 @@ private[fastmcp] object HttpReply:
   final case class Json(status: Int, body: String, headers: List[(String, String)] = Nil)
       extends HttpReply
 
+  /** The reply of a route the server author registered (`McpServerSettings.httpRoutes`): a text
+    * body with the content type its handler chose. Never an MCP reply.
+    */
+  final case class Body(
+      status: Int,
+      body: String,
+      contentType: String,
+      headers: List[(String, String)] = Nil
+  ) extends HttpReply
+
   /** A `200 text/event-stream` response whose body is the frame stream; the response ends when the
     * stream does (or the client disconnects, which runs the stream's finalizers).
     *

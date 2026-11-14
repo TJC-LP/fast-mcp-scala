@@ -47,6 +47,23 @@ class RootImportExportsTest extends AnyFunSuite:
     """))
   }
 
+  test("docs/transports.md: an HTTP route needs only the root import (HttpRoute)") {
+    assertCompiles(typeCheckErrors("""
+      val settings = McpServerSettings(
+        httpRoutes = List(
+          HttpRoute.get("/health")(_ => zio.ZIO.succeed(HttpRouteResponse.text("ok"))),
+          HttpRoute.get("/ready") { (request: HttpRouteRequest) =>
+            zio.ZIO.succeed(
+              HttpRouteResponse
+                .json("{}", status = 503)
+                .withHeader("Retry-After", request.header("x-retry").getOrElse("5"))
+            )
+          }
+        )
+      )
+    """))
+  }
+
   test("docs/tasks.md: the typed-contract opt-in needs only the root import (TaskSupport)") {
     assertCompiles(typeCheckErrors("""
       val tool = McpTool[ExpensiveArgs, String](name = "expensive-op")(args => args.x)

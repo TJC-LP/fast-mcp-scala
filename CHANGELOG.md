@@ -380,6 +380,30 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   end of stdin for the replies to frames it has already read, before it interrupts what is still
   running. Default five seconds; zero interrupts without waiting; a negative value is refused when
   the settings are built. Ignored by the HTTP transports. See *Fixed*, "One stdio lifecycle".
+- **Plain HTTP routes next to the MCP endpoint: `McpServerSettings.httpRoutes`** (GH #120,
+  TJC-5434). A server can answer `GET /health`-style requests from its MCP listener, on the JVM
+  (zio-http and the socket backend), Bun and Scala Native:
+  `httpRoutes = List(HttpRoute.get("/health")(_ => ZIO.succeed(HttpRouteResponse.text("ok"))))`.
+  Before, every path but the endpoint was 404 and a probe needed a reverse proxy or a second
+  listener.
+  - New, all in the root import: `HttpRoute.get(path)(handler)` with
+    `handler: HttpRouteRequest => UIO[HttpRouteResponse]`; `HttpRouteRequest` (`path`,
+    `header(name)`); `HttpRouteResponse.text` / `.json` / `apply(status, body, contentType)` and
+    `.withHeader`.
+  - A route is a `GET` on an exact path (the query string is not part of it). Another method on
+    that path is 405 with `Allow: GET`.
+  - A route can never be the MCP endpoint: `runHttp()` fails at startup for a route on
+    `httpEndpoint`, a path listed twice, one without a leading `/` and one no request can name.
+    Nothing about the endpoint changes, and no request can select a handler that was not listed.
+  - The Host/Origin guard applies to routes as to the endpoint (403 before the handler runs), so a
+    probe must send a `Host` the guard admits. The endpoint's other gates (`Content-Type`,
+    `Accept`, protocol headers, sessions, `limits`) do not apply, and nothing authenticates a
+    route.
+  - The request body is never read or handed to the handler. A handler that dies is answered with
+    the fixed 500; a reply with a line break in a header or a status that cannot carry a body is
+    refused where it is built.
+  - Empty by default: without routes every reply is what it was. There is still no CORS handling
+    on the MCP endpoint. Reference: `docs/transports.md` § "Other routes on the listener".
 - **Tasks wait for input: `input_required`** (TJC-2366, TJC-2367). A tool that asks its client
   for input from inside a 2026-07-28 task (`McpContext.elicit`, `createMessage`, `listRoots`,
   `sendRequest`) now puts the task in `input_required`. `tasks/get` returns the outstanding
@@ -506,6 +530,21 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Changed
 
+- **`tools/list` sends each tool with the fields of the client's protocol revision** (GH #120,
+  D3.17). Every session used to get every field, so a 2024-11-05 client was sent `annotations`
+  (a 2025-03-26 field), `title` and `outputSchema` (2025-06-18) and `execution` (2025-11-25). Now
+  a field is sent from the revision that introduced it: `annotations` from 2025-03-26; `title`,
+  `outputSchema` and `_meta` from 2025-06-18; `icons` from 2025-11-25; `execution` on 2025-11-25
+  only (2026-07-28 removed it, as before). `name`, `description` and `inputSchema` go to everyone.
+  - The revision is the one `initialize` negotiated on a legacy session and 2026-07-28 on a
+    modern request. Replies to 2025-11-25 and 2026-07-28 clients are unchanged.
+  - A 2025-03-26 client keeps the display title as `annotations.title`.
+  - Only the list entry is projected. `tools/call` is unchanged: a tool with an `outputSchema`
+    still returns `structuredContent` to an older client.
+  - The legacy stateless adapter (`stateless = true`) has no `initialize`, so no revision is
+    known there and it sends every legacy field, as before.
+  - New: `WireMapping.toolForVersion(tool, version)`. Reference: `docs/spec-coverage.md` §
+    "Fields by revision on `tools/list`".
 - **BEHAVIOUR CHANGE — `tasks/cancel` no longer waits for a body that does not stop** (GH #115,
   D6.14 / C3.3). Affects servers with `TaskSettings(enabled = true)` whose task tools have a
   synchronous body: a plain method on the annotation path, a typed-contract handler that returns
