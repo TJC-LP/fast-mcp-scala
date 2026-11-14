@@ -64,6 +64,64 @@ case object AdtNothing extends AdtWrapped
 
 case class AdtAnnotatedArgs(event: AdtEvent, level: AdtLevel, wrapped: AdtWrapped)
 
+/** Review of PR #158: case names through `@jsonHintNames`, and constants as annotation arguments. */
+@jsonHintNames(SnakeCase) sealed trait AdtSignal
+case class AdtTurnLeft(degrees: Int) extends AdtSignal
+@jsonHint("halt") case object AdtFullStop extends AdtSignal
+
+@jsonHintNames(KebabCase) sealed trait AdtGear
+case object AdtLowGear extends AdtGear
+case object AdtHighGear extends AdtGear
+
+object AdtKeys:
+  final val Kind = "kind"
+  final val Go = "go"
+
+@jsonDiscriminator(AdtKeys.Kind) sealed trait AdtCommand
+@jsonHint(name = AdtKeys.Go) case class AdtGo(speed: Int) extends AdtCommand
+case object AdtWait extends AdtCommand
+
+case class AdtNamedArgs(signal: AdtSignal, gear: AdtGear, command: AdtCommand)
+
+/** A type no codec can be derived for. */
+final class AdtHandle(val id: Int)
+
+/** A hierarchy with hand-written codecs, one of whose cases has a field without any codec. */
+sealed trait AdtOwned
+case class AdtHeld(handle: AdtHandle) extends AdtOwned
+case object AdtFree extends AdtOwned
+
+object AdtOwned:
+
+  given JsonDecoder[AdtOwned] =
+    JsonDecoder.int.map(id => if id == 0 then AdtFree else AdtHeld(new AdtHandle(id)))
+
+  given JsonEncoder[AdtOwned] = JsonEncoder.int.contramap {
+    case AdtFree => 0
+    case AdtHeld(handle) => handle.id
+  }
+  given McpSchema[AdtOwned] = McpSchema.instance("""{"type":"integer"}""")
+
+/** The same gap one level down in a case class: `AdtCrate` has codecs, `AdtSlot` cannot have one. */
+case class AdtSlot(handle: AdtHandle)
+case class AdtCrate(slot: AdtSlot)
+
+object AdtCrate:
+  given JsonDecoder[AdtCrate] = JsonDecoder.int.map(id => AdtCrate(AdtSlot(new AdtHandle(id))))
+  given JsonEncoder[AdtCrate] = JsonEncoder.int.contramap(_.slot.handle.id)
+  given McpSchema[AdtCrate] = McpSchema.instance("""{"type":"integer"}""")
+
+case class AdtOwnedArgs(owned: AdtOwned, more: List[AdtOwned], crate: Option[AdtCrate])
+case class AdtOwnedOut(owned: AdtOwned, crate: AdtCrate)
+
+object AdtOwnedAnnotated:
+
+  @Tool(name = Some("owned"))
+  def owned(owned: AdtOwned, crates: List[AdtCrate]): String =
+    owned match
+      case AdtFree => s"free/${crates.map(_.slot.handle.id)}"
+      case AdtHeld(handle) => s"held ${handle.id}/${crates.map(_.slot.handle.id)}"
+
 object AdtAnnotated:
 
   @Tool(name = Some("area"))
@@ -324,5 +382,129 @@ class SealedHierarchySpec extends AsyncFunSuite:
         .getOrElse(fail("no outputSchema"))
       assert(at(outputSchema, "properties", "shape", "oneOf").asArray.map(_.size).contains(3))
       assert(at(outputSchema, "properties", "mode") == modeEnum)
+    }
+  }
+
+  // ---- review of PR #158 ----
+
+  test("a hierarchy or case class with hand-written codecs is not looked into (uncodable fields inside)") {
+    val server = scan(_.scanAnnotations[AdtOwnedAnnotated.type])
+    val tool = McpTool[AdtOwnedArgs, AdtOwnedOut](name = "typed_owned") { args =>
+      AdtOwnedOut(args.more.lastOption.getOrElse(args.owned), args.crate.getOrElse(AdtCrate(AdtSlot(new AdtHandle(-1)))))
+    }
+    val program =
+      for
+        _ <- server.tool(tool)
+        annotated <- call(server, "owned", """{"owned":7,"crates":[1,2]}""")
+        free <- call(server, "owned", """{"owned":0,"crates":[]}""")
+        typed <- call(server, "typed_owned", """{"owned":0,"more":[3,4],"crate":9}""")
+        refused <- call(server, "typed_owned", """{"owned":{"AdtFree":{}},"more":[]}""")
+      yield (annotated, free, typed, refused)
+    run(program).map { (annotated, free, typed, refused) =>
+      assert(at(inputSchema(server, "owned"), "properties", "owned") == json("""{"type":"integer"}"""))
+      // The user's decoder read the arguments, the user's encoder wrote the result.
+      assert(annotated == Right(List("held 7/List(1, 2)")))
+      assert(free == Right(List("free/List()")))
+      assert(typed == Right(List("""{"owned":4,"crate":9}""")))
+      assert(refused == Left("Invalid arguments for tool 'typed_owned': 'owned' must be integer, got an object"))
+    }
+  }
+
+  test("@jsonHintNames names the cases in the schema as it does in the codec; constants are read") {
+    val server = McpServer("adt-named")
+    val tool = McpTool[AdtNamedArgs, String](name = "drive") { args =>
+      s"${args.signal}|${args.gear}|${args.command}"
+    }
+    def args(signal: String, gear: String, command: String) =
+      s"""{"signal":$signal,"gear":$gear,"command":$command}"""
+    val program =
+      for
+        _ <- server.tool(tool)
+        ok <- call(
+          server,
+          "drive",
+          args("""{"adt_turn_left":{"degrees":3}}""", "\"adt-low-gear\"", """{"kind":"go","speed":5}""")
+        )
+        hinted <- call(server, "drive", args("""{"halt":{}}""", "\"adt-high-gear\"", """{"kind":"AdtWait"}"""))
+        className <- call(
+          server,
+          "drive",
+          args("""{"AdtTurnLeft":{"degrees":3}}""", "\"adt-low-gear\"", """{"kind":"AdtWait"}""")
+        )
+        gearName <- call(server, "drive", args("""{"halt":{}}""", "\"AdtLowGear\"", """{"kind":"AdtWait"}"""))
+      yield (ok, hinted, className, gearName)
+    run(program).map { (ok, hinted, className, gearName) =>
+      val schema = inputSchema(server, "drive")
+      assert(
+        at(schema, "properties", "gear") == json("""{"type":"string","enum":["adt-low-gear","adt-high-gear"]}""")
+      )
+      assert(
+        at(schema, "properties", "command") == json(
+          """{"oneOf":[
+            |{"type":"object","properties":{"kind":{"const":"go"},"speed":{"type":"integer"}},"required":["kind","speed"]},
+            |{"type":"object","properties":{"kind":{"const":"AdtWait"}},"required":["kind"]}
+            |]}""".stripMargin
+        )
+      )
+      assert(ok == Right(List("AdtTurnLeft(3)|AdtLowGear|AdtGo(5)")))
+      assert(hinted == Right(List("AdtFullStop|AdtHighGear|AdtWait")))
+      assert(
+        className == Left(
+          "Invalid arguments for tool 'drive': 'signal' does not match any of the 2 allowed alternatives"
+        )
+      )
+      assert(
+        gearName == Left(
+          "Invalid arguments for tool 'drive': 'gear' must be one of: adt-low-gear, adt-high-gear"
+        )
+      )
+    }
+  }
+
+  test("a given JsonCodecConfiguration does not reach the derived decoder, and the input schema says so") {
+    given JsonCodecConfiguration = JsonCodecConfiguration(
+      sumTypeHandling = JsonCodecConfiguration.SumTypeHandling.DiscriminatorField("kind"),
+      sumTypeMapping = SnakeCase,
+      enumValuesAsStrings = false
+    )
+    val server = McpServer("adt-configured")
+    val tool = McpTool[AdtArgs, String](name = "draw")(args => s"${args.shape}|${args.mode}")
+    val program =
+      for
+        _ <- server.tool(tool)
+        defaults <- call(
+          server,
+          "draw",
+          """{"shape":{"AdtCircle":{"radius":2.5}},"mode":"AdtFast","nodes":[]}"""
+        )
+        configured <- call(
+          server,
+          "draw",
+          """{"shape":{"kind":"adt_circle","radius":2.5},"mode":{"kind":"adt_fast"},"nodes":[]}"""
+        )
+      yield (defaults, configured)
+    run(program).map { (defaults, configured) =>
+      val schema = inputSchema(server, "draw")
+      assert(at(schema, "properties", "shape") == circleOrRect)
+      assert(at(schema, "properties", "mode") == modeEnum)
+      assert(defaults == Right(List("AdtCircle(2.5)|AdtFast")))
+      assert(configured.isLeft, s"the configured shape is neither advertised nor decoded: $configured")
+    }
+  }
+
+  test("a given JsonCodecConfiguration does reach the derived encoder (why its outputSchema is refused)") {
+    given JsonCodecConfiguration = JsonCodecConfiguration(
+      sumTypeHandling = JsonCodecConfiguration.SumTypeHandling.DiscriminatorField("kind")
+    )
+    val server = McpServer("adt-configured-out")
+    val tool = McpTool[AdtPoint, AdtOut](name = "describe") { point =>
+      AdtOut(AdtCircle(point.x + 0.5), AdtSlow, AdtText(point.y.toString))
+    }
+    val program = server.tool(tool) *> call(server, "describe", """{"x":1,"y":2}""")
+    run(program).map { result =>
+      val expected = json(
+        """{"shape":{"kind":"AdtCircle","radius":1.5},"mode":{"kind":"AdtSlow"},"node":{"kind":"AdtText","value":"2"}}"""
+      )
+      assert(result.map(_.map(json)) == Right(List(expected)))
     }
   }

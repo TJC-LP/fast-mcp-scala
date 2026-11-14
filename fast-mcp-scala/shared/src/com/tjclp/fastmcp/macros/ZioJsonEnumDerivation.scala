@@ -105,7 +105,9 @@ object ZioJsonEnumDerivation:
       mirror: Expr[Mirror.Of[T]]
   )(using Quotes): Expr[JsonDecoder[T]] =
     import quotes.reflect.*
-    val missing = EnumTypeCollector.collectDerivable(TypeRepr.of[T]).filter(needsDerivedDecoder)
+    val missing = EnumTypeCollector
+      .collectDerivable(TypeRepr.of[T], tpe => !needsDerivedDecoder(tpe))
+      .filter(needsDerivedDecoder)
     def withLocals(remaining: List[TypeRepr]): Expr[JsonDecoder[T]] =
       remaining match
         case Nil =>
@@ -143,13 +145,13 @@ object ZioJsonEnumDerivation:
     // writes. That encoder is resolved where `gen` expands, with the locals planted below for the
     // tuple's element types in scope, so it is found even when an element (an enum, say) has no
     // encoder that could be summoned from here.
+    def hasEncoder(tpe: TypeRepr): Boolean =
+      tpe.asType match
+        case '[et] => Expr.summon[JsonEncoder[et]].isDefined
     val missing = EnumTypeCollector
-      .collectDerivable(TypeRepr.of[T])
+      .collectDerivable(TypeRepr.of[T], hasEncoder)
       .filterNot(EnumTypeCollector.isTuple)
-      .filter { e =>
-        e.asType match
-          case '[et] => Expr.summon[JsonEncoder[et]].isEmpty
-      }
+      .filterNot(hasEncoder)
     def withLocals(remaining: List[TypeRepr]): Expr[JsonEncoder[T]] =
       remaining match
         case Nil =>

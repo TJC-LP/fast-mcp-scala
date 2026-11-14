@@ -84,17 +84,32 @@ case class DrawArgs(shape: Shape, mode: Mode)
 | Case objects only | `"Fast"` | `{"type": "string", "enum": ["Fast", "Slow"]}` |
 | `@jsonDiscriminator("type")` on the trait | `{"type": "Circle", "radius": 1.5}`, `{"type": "Origin"}` | `oneOf` of the cases' objects, the case name as a `const` |
 
-- A case is called by its class name, or by its `@jsonHint("name")`.
+- A case is called by its `@jsonHint("name")`, or else by its class name, passed through the
+  hierarchy's `@jsonHintNames(SnakeCase)` format when it has one (`CamelCase`, `PascalCase`,
+  `KebabCase` likewise; a `CustomCase(f)` function cannot be applied at compile time and is an
+  error). The names in `@jsonDiscriminator` and `@jsonHint` may be literals or `final val`
+  constants.
 - A sealed trait nested in another one (`sealed trait Polygon extends Shape`) contributes its
   cases; there is no `"Polygon"` level on the wire.
 - A case's fields derive like any case class: enums, nested case classes, defaults (a defaulted
   field is not `required`), other hierarchies.
 - The decoder is derived where the hierarchy is used, unless you define one: a
-  `given JsonDecoder[Shape]` of yours wins. If its shape is not the one in the table, give the type
+  `given JsonDecoder[Shape]` of yours wins, and the derivation then does not look inside the
+  hierarchy (a case may have a field no codec can be derived for). The same holds for a case class
+  with a codec of its own. If the shape of your codec is not the one in the table, give the type
   an `McpSchema`, or make the instance an `McpInputCodec`, so that the advertised (and enforced)
-  schema describes what it reads. A `JsonCodecConfiguration` of your own that changes the shape
-  (`enumValuesAsStrings = false`, a discriminator set in the configuration) is not visible to the
-  schema derivation either.
+  schema describes what it reads.
+- A given `JsonCodecConfiguration` (`sumTypeHandling`, `sumTypeMapping`, `enumValuesAsStrings`):
+  - does not reach a decoder the library derives, which always uses zio-json's defaults, as for
+    case classes. Arguments have the shape in the table whatever configuration is in scope, and
+    the input schema says so. Use the annotations to change the shape.
+  - does reach an encoder the library derives for a result. Its settings are run-time values the
+    schema derivation cannot read, so `.withOutputSchema` on a result with a sealed-hierarchy
+    field is a compile-time error while such a configuration is in scope where the tool is
+    declared. Use the annotations instead, or define the `JsonEncoder` and an `McpSchema` for the
+    hierarchy.
+  - a codec you derive yourself (`derives JsonDecoder`) under such a configuration has a shape the
+    schema derivation does not see: give the type an `McpSchema` / `McpInputCodec`.
 - On the result side, a field of an `Out` case class may be a sealed hierarchy, with the same
   shape and the same `outputSchema`. A bare sealed trait as `Out` needs a `JsonEncoder` of yours.
 - Not derived, each with a compile-time error that names the remedy: a recursive hierarchy
@@ -117,8 +132,8 @@ method's result type when the server is compiled (`A` for `ZIO[R, E, A]`, `Try[A
    - a `given zio.json.JsonEncoder[T]`, `derives JsonEncoder` or `derives JsonCodec`: the JSON
      text of the value, also for `List[T]`, `Vector[T]`, `Seq[T]`, `Set[T]`, `Option[T]` and
      `Map[String, T]`;
-   - a `given McpEncoder[T]`, in the companion of `T` or in scope where `scanAnnotations` is
-     called: the content it builds.
+   - a `given McpEncoder[T]`, in the companion of `T` (a `private` or `protected` one does not
+     count) or in scope where `scanAnnotations` is called: the content it builds.
 3. **Anything else** is sent as `TextContent(value.toString)`.
 
 ```scala 3 raw
@@ -137,10 +152,12 @@ class without a `JsonEncoder`, `Option[String]`, `List[Int]`, `Unit` (sent as `(
 does not change what an existing server puts on the wire. Add `derives JsonEncoder` to a case class
 to opt in, return a `String` / `Content`, or use a typed `McpTool`.
 
-A result type that has no `McpEncoder` at all (a plain class, a sealed trait without a
-`JsonEncoder`) is a compile-time warning at the method, because its `toString` is rarely what a
-client should read. It names the remedies; `-Wconf:msg=has no McpEncoder:s` silences it. A declared
-result type of `Any` is not warned about.
+A result type that nothing can encode is a compile-time warning at the method, because its
+`toString` is rarely what a client should read: a plain class or a sealed trait without a
+`JsonEncoder`, or a container whose element is one (`List[Handle]`, `Option[Handle]`). It names the
+remedies; `-Wconf:msg=has no McpEncoder:s` silences it. Not warned about: a declared result type of
+`Any` or `AnyRef`, the types of the paragraph above, and a container of those (`List[Raw]`,
+`Option[Raw]`, `Map[String, Raw]`), which is sent as its `toString` like `Raw` itself.
 
 The annotation path has no `outputSchema` and never sends `structuredContent`: that is
 `McpTool[...].withOutputSchema`.

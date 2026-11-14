@@ -26,6 +26,26 @@ case class DiagBoxArgs(box: DiagBox[Int])
 sealed trait DiagRoot
 case class DiagOnly(n: Int) extends DiagRoot
 
+sealed trait DiagConfigured
+case class DiagLeft(n: Int) extends DiagConfigured
+case object DiagRight extends DiagConfigured
+
+case class DiagConfiguredOut(value: DiagConfigured)
+case class DiagIn(n: Int)
+
+@zio.json.jsonHintNames(zio.json.CustomCase(_.toUpperCase)) sealed trait DiagCustomNames
+case class DiagNamed(n: Int) extends DiagCustomNames
+
+case class DiagCustomNamesArgs(value: DiagCustomNames)
+
+object DiagNames:
+  val notConstant: String = "computed".reverse
+
+@zio.json.jsonDiscriminator(DiagNames.notConstant) sealed trait DiagComputed
+case class DiagComputedCase(n: Int) extends DiagComputed
+
+case class DiagComputedArgs(value: DiagComputed)
+
 object DiagParamEnumTools:
   @Tool() def f(shape: DiagParamEnum): String = shape.toString
 
@@ -83,4 +103,58 @@ class AdtArgumentDiagnosticsTest extends AnyFunSuite:
   test("a sealed trait as the In of a typed tool is refused: arguments is always an object") {
     val errors = typeCheckErrors("""McpTool[DiagRoot, String](name = "t")(_.toString)""")
     assert(errors.nonEmpty)
+  }
+
+  // ---- review of PR #158: a setting of the codec that cannot be read is refused ----
+
+  test("outputSchema of a hierarchy under a given JsonCodecConfiguration is refused, naming the remedy") {
+    val refused = typeCheckErrors(
+      """
+      given zio.json.JsonCodecConfiguration = zio.json.JsonCodecConfiguration(
+        sumTypeHandling = zio.json.JsonCodecConfiguration.SumTypeHandling.DiscriminatorField("kind")
+      )
+      McpTool[DiagIn, DiagConfiguredOut](name = "t")(in => DiagConfiguredOut(DiagLeft(in.n))).withOutputSchema
+      """
+    )
+    assertNamed(
+      refused,
+      "Cannot derive an MCP JSON Schema for the sealed hierarchy downstream.DiagConfigured",
+      "a given zio.json.JsonCodecConfiguration is in scope",
+      "McpSchema[downstream.DiagConfigured]",
+      "McpInputCodec[downstream.DiagConfigured]"
+    )
+    // Without the configuration, and without .withOutputSchema under it, the same tool compiles.
+    assert(
+      typeCheckErrors(
+        """McpTool[DiagIn, DiagConfiguredOut](name = "t")(in => DiagConfiguredOut(DiagLeft(in.n))).withOutputSchema"""
+      ).isEmpty
+    )
+    assert(
+      typeCheckErrors(
+        """
+        given zio.json.JsonCodecConfiguration = zio.json.JsonCodecConfiguration(
+          sumTypeHandling = zio.json.JsonCodecConfiguration.SumTypeHandling.DiscriminatorField("kind")
+        )
+        McpTool[DiagIn, DiagConfiguredOut](name = "t")(in => DiagConfiguredOut(DiagLeft(in.n)))
+        """
+      ).isEmpty
+    )
+  }
+
+  test("@jsonHintNames with a CustomCase function is refused, naming @jsonHint and McpInputCodec") {
+    assertNamed(
+      typeCheckErrors("""McpTool[DiagCustomNamesArgs, String](name = "t")(_.toString)"""),
+      "the format of @jsonHintNames",
+      "Name the cases with @jsonHint",
+      "McpInputCodec[downstream.DiagCustomNames]"
+    )
+  }
+
+  test("an annotation argument that is not a constant is refused; a final val is not") {
+    assertNamed(
+      typeCheckErrors("""McpTool[DiagComputedArgs, String](name = "t")(_.toString)"""),
+      "the argument of @jsonDiscriminator is not a compile-time constant",
+      "`final val` constant",
+      "McpInputCodec"
+    )
   }

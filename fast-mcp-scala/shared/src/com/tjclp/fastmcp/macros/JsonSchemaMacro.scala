@@ -400,16 +400,21 @@ object JsonSchemaMacro:
 
   /** The schema of a sealed hierarchy, in the shape zio-json's derived codec reads and writes.
     *
-    * The cases are the LEAVES of the hierarchy: zio-json looks through a sealed trait nested in
-    * another one, so `sealed trait Sub extends Shape` contributes its own cases and no `"Sub"`
-    * level. A case is called by its `@jsonHint`, or else by its name.
-    *   - A hierarchy made of case objects only is a string enumeration of the case names (zio-json
-    *     writes `"Fast"`, as for a Scala 3 enum).
-    *   - Any other hierarchy is a `oneOf` of single-key wrapper objects, `{"Circle": {...}}`, with
+    * It is built from the inputs zio-json's derivation takes (`JsonDecoderDerivation.split` /
+    * `JsonEncoderDerivation.split`), read by [[sumCodecSettings]]:
+    *   - the cases are the LEAVES of the hierarchy: zio-json looks through a sealed trait nested in
+    *     another one, so `sealed trait Sub extends Shape` contributes its own cases and no `"Sub"`
+    *     level;
+    *   - a case is called by its `@jsonHint`, or else by its class name passed through the
+    *     hierarchy's `@jsonHintNames` format (or the configuration's `sumTypeMapping`);
+    *   - with a discriminator field (`@jsonDiscriminator("type")`, or the configuration's
+    *     `sumTypeHandling`): a `oneOf` of the cases' own objects, each with the case name as the
+    *     constant value of that field, `{"type": "Circle", "radius": 1}`, and `{"type": "Origin"}`
+    *     for a case object;
+    *   - without one, a hierarchy of case objects only is a string enumeration of the case names
+    *     (`"Fast"`), unless the configuration sets `enumValuesAsStrings = false`;
+    *   - any other hierarchy is a `oneOf` of single-key wrapper objects, `{"Circle": {...}}`, with
     *     `{}` as the payload of a case object.
-    *   - With `@jsonDiscriminator("type")` on the hierarchy, a `oneOf` of the cases' own objects,
-    *     each with the case name as the constant value of the discriminator field: `{"type":
-    *     "Circle", "radius": 1}`, and `{"type": "Origin"}` for a case object.
     */
   private def sumSchema(using Quotes)(
       tpe: quotes.reflect.TypeRepr,
@@ -426,16 +431,18 @@ object JsonSchemaMacro:
         if nestedHierarchy then leaves(child) else List(child)
       }.distinct
 
+    val settings = sumCodecSettings(tpe, input)
+
     // A case object is listed by its term symbol; the annotation is on its module class.
     def caseName(child: Symbol): String =
       val annotated =
         if child.flags.is(Flags.Module) && !child.isClassDef then child.moduleClass else child
-      zioJsonAnnotation(annotated, "jsonHint")
-        .orElse(zioJsonAnnotation(child, "jsonHint"))
-        .getOrElse(enumCaseName(child))
+      zioJsonStringAnnotation(annotated, "jsonHint")
+        .orElse(zioJsonStringAnnotation(child, "jsonHint"))
+        .getOrElse(settings.caseNames(enumCaseName(child)))
 
     val cases = leaves(tpe.typeSymbol)
-    zioJsonAnnotation(tpe.typeSymbol, "jsonDiscriminator") match
+    settings.discriminator match
       case Some(discriminator) =>
         val variants = cases.map { child =>
           val tag = discriminator -> '{ Json.Obj("const" -> Json.Str(${ Expr(caseName(child)) })) }
@@ -451,7 +458,7 @@ object JsonSchemaMacro:
           else schemaFor(child.typeRef, tpe :: seenProducts, input)
         }
         oneOfSchema(variants)
-      case None if cases.forall(_.flags.is(Flags.Module)) =>
+      case None if settings.enumValuesAsStrings && cases.forall(_.flags.is(Flags.Module)) =>
         stringEnumSchema(cases.map(caseName))
       case None =>
         val variants = cases.map { child =>
@@ -463,23 +470,121 @@ object JsonSchemaMacro:
         }
         oneOfSchema(variants)
 
-  /** The string argument of the zio-json annotation `name` (`jsonDiscriminator`, `jsonHint`) on
-    * `symbol`, when it carries one. An argument that is not a constant is a compile-time error: the
-    * schema could not state the name the codec uses.
+  /** What decides the wire shape of a derived sum codec, as far as the schema needs it. */
+  private final case class SumCodecSettings(
+      discriminator: Option[String],
+      caseNames: String => String,
+      enumValuesAsStrings: Boolean
+  )
+
+  /** The settings the codec of the sealed hierarchy `tpe` is derived with.
+    *
+    * zio-json takes them from the annotations of the hierarchy and, where an annotation is absent,
+    * from a `JsonCodecConfiguration`. Which configuration applies depends on who derives the codec:
+    *   - Input, decoder derived by this library ([[ZioJsonEnumDerivation.deriveDecoderImpl]]): it
+    *     calls `DeriveJsonDecoder.gen[T](using mirror)`, the overload that is bound to
+    *     `JsonCodecConfiguration.default`. A configuration given at the call site does not reach
+    *     it, so the defaults are the truth.
+    *   - Output, encoder derived by this library ([[ZioJsonEnumDerivation.deriveEncoderImpl]]): it
+    *     passes the `JsonCodecConfiguration` given where the tool is declared. That is a run-time
+    *     value: unless it is zio-json's own default, its settings cannot be read here, and the
+    *     derivation is refused instead of describing a shape the encoder may not write.
+    *   - A codec the user defined: its shape is the user's. The annotations and zio-json's defaults
+    *     are the best description available (what `derives JsonDecoder` produces without a
+    *     configuration); anything else needs an `McpSchema`, as for every other custom codec.
+    *
+    * `@jsonHintNames` takes a `JsonMemberFormat`. zio-json's own formats are applied here, at
+    * expansion time; a `CustomCase` function cannot be, and is refused.
     */
-  private def zioJsonAnnotation(using Quotes)(
+  private def sumCodecSettings(using Quotes)(
+      tpe: quotes.reflect.TypeRepr,
+      input: Boolean
+  ): SumCodecSettings =
+    import quotes.reflect.*
+
+    val symbol = tpe.typeSymbol
+    val shown = tpe.show
+
+    if !input then
+      val userEncoder = tpe.asType match
+        case '[t] => Expr.summon[JsonEncoder[t]].isDefined
+      // Anything but zio-json's own `JsonCodecConfiguration.default`.
+      val customConfiguration = Expr.summon[JsonCodecConfiguration].exists { found =>
+        val instance = MacroUtils.stripTerm(found.asTerm).symbol
+        !(instance.name == "default" &&
+          instance.maybeOwner.fullName.stripSuffix("$") == "zio.json.JsonCodecConfiguration")
+      }
+      if !userEncoder && customConfiguration then
+        report.errorAndAbort(
+          s"Cannot derive an MCP JSON Schema for the sealed hierarchy $shown: a given " +
+            "zio.json.JsonCodecConfiguration is in scope, and the encoder derived for the " +
+            "hierarchy follows it (sumTypeHandling, sumTypeMapping, enumValuesAsStrings), but its " +
+            "settings are not known when the schema is derived. Define a given " +
+            s"zio.json.JsonEncoder[$shown] together with a given McpSchema[$shown] (or a given " +
+            s"McpInputCodec[$shown], decoder + schema, when the type is also an argument), or " +
+            "state the shape with @jsonDiscriminator / @jsonHintNames on the hierarchy and keep " +
+            "the configuration out of scope where the tool is declared."
+        )
+
+    val caseNames: String => String =
+      symbol.annotations.find(_.tpe.typeSymbol.fullName == "zio.json.jsonHintNames") match
+        case None => identity
+        case Some(Apply(_, List(argument))) =>
+          val format = argument match
+            case NamedArg(_, value) => value
+            case value => value
+          MacroUtils.stripTerm(format).tpe.termSymbol.fullName match
+            case "zio.json.SnakeCase" => zio.json.SnakeCase
+            case "zio.json.CamelCase" => zio.json.CamelCase
+            case "zio.json.PascalCase" => zio.json.PascalCase
+            case "zio.json.KebabCase" => zio.json.KebabCase
+            case "zio.json.IdentityFormat" => zio.json.IdentityFormat
+            case "zio.json.ziojson_03.SnakeCase" => zio.json.ziojson_03.SnakeCase
+            case "zio.json.ziojson_03.KebabCase" => zio.json.ziojson_03.KebabCase
+            case _ =>
+              report.errorAndAbort(
+                s"Cannot derive an MCP JSON Schema for the sealed hierarchy $shown: the format of " +
+                  s"@jsonHintNames (${format.show}) is not one of zio-json's own (SnakeCase, " +
+                  "CamelCase, PascalCase, KebabCase, IdentityFormat), so the case names the codec " +
+                  "uses are not known when the schema is derived. Name the cases with @jsonHint, " +
+                  s"or provide a given McpInputCodec[$shown] (decoder + schema)."
+              )
+        case Some(other) =>
+          report.errorAndAbort(
+            s"Cannot derive an MCP JSON Schema for the sealed hierarchy $shown: unexpected " +
+              s"@jsonHintNames annotation ${other.show}. Provide a given McpInputCodec[$shown]."
+          )
+
+    SumCodecSettings(
+      discriminator = zioJsonStringAnnotation(symbol, "jsonDiscriminator"),
+      caseNames = caseNames,
+      enumValuesAsStrings = true
+    )
+
+  /** The string argument of the zio-json annotation `name` (`jsonDiscriminator`, `jsonHint`) on
+    * `symbol`, when it carries one: a literal or a `final val` constant, positional or named. An
+    * argument that is not a compile-time constant is an error: the schema could not state the name
+    * the codec uses.
+    */
+  private def zioJsonStringAnnotation(using Quotes)(
       symbol: quotes.reflect.Symbol,
       name: String
   ): Option[String] =
     import quotes.reflect.*
-    symbol.annotations.find(_.tpe.typeSymbol.fullName == s"zio.json.$name").map {
-      case Apply(_, List(Literal(StringConstant(value)))) => value
-      case Apply(_, List(NamedArg(_, Literal(StringConstant(value))))) => value
-      case other =>
-        report.errorAndAbort(
-          s"Cannot derive an MCP JSON Schema for ${symbol.fullName}: the argument of @$name is not " +
-            s"a string literal (${other.show}). Use a literal, or provide a given McpInputCodec " +
-            "(decoder + schema) for the type."
+    symbol.annotations.find(_.tpe.typeSymbol.fullName == s"zio.json.$name").map { annotation =>
+      val argument = annotation match
+        case Apply(_, List(NamedArg(_, value))) => Some(value)
+        case Apply(_, List(value)) => Some(value)
+        case _ => None
+      argument
+        .flatMap(value => MacroUtils.constantOf(value) { case StringConstant(text) => text })
+        .getOrElse(
+          report.errorAndAbort(
+            s"Cannot derive an MCP JSON Schema for ${symbol.fullName}: the argument of @$name is " +
+              s"not a compile-time constant (${annotation.show}). Use a string literal or a " +
+              "`final val` constant, or provide a given McpInputCodec (decoder + schema) for the " +
+              "type."
+          )
         )
     }
 

@@ -77,7 +77,30 @@ object ScopedResults:
   @Tool(name = Some("scoped"))
   def scoped(): EncScoped = new EncScoped(9)
 
+/** A case class whose companion keeps its `McpEncoder` to itself. */
+case class EncPrivate(a: Int)
+
+object EncPrivate:
+
+  private given McpEncoder[EncPrivate] =
+    McpEncoder.instance(value => List(TextContent(s"private ${value.a}")))
+
+  /** Inside the companion the instance is the one in scope. */
+  def encoded(value: EncPrivate): List[Content] = summon[McpEncoder[EncPrivate]].encode(value)
+
 object UnchangedResults:
+
+  @Tool(name = Some("private_companion"))
+  def privateCompanion(): EncPrivate = EncPrivate(1)
+
+  @Tool(name = Some("plain_list"))
+  def plainList(): List[EncPlain] = List(EncPlain(1, "x"))
+
+  @Tool(name = Some("plain_option"))
+  def plainOption(): Option[EncPlain] = Some(EncPlain(1, "x"))
+
+  @Tool(name = Some("plain_map"))
+  def plainMap(): Map[String, EncPlain] = Map("k" -> EncPlain(1, "x"))
 
   @Tool(name = Some("plain"))
   def plain(): EncPlain = EncPlain(1, "x")
@@ -220,7 +243,11 @@ class AnnotatedResultEncodingSpec extends AsyncFunSuite:
       "text",
       "content",
       "contents",
-      "dynamic"
+      "dynamic",
+      "private_companion",
+      "plain_list",
+      "plain_option",
+      "plain_map"
     )
     run(callAll(server, tools)).map { results =>
       assert(results("plain") == List("EncPlain(1,x)"))
@@ -235,6 +262,12 @@ class AnnotatedResultEncodingSpec extends AsyncFunSuite:
       assert(results("content") == List("content"))
       assert(results("contents") == List("one", "two"))
       assert(results("dynamic") == List("decided at run time"))
+      // A `private given` in the companion is not the macro's to use: the 1.0 rendering.
+      assert(results("private_companion") == List("EncPrivate(1)"))
+      assert(EncPrivate.encoded(EncPrivate(1)) == List(TextContent("private 1")))
+      assert(results("plain_list") == List("List(EncPlain(1,x))"))
+      assert(results("plain_option") == List("Some(EncPlain(1,x))"))
+      assert(results("plain_map") == List("Map(k -> EncPlain(1,x))"))
     }
   }
 
@@ -267,5 +300,17 @@ class AnnotatedResultEncodingSpec extends AsyncFunSuite:
       assert(ResultEncoderResolution.describe[EncScoped] == "no-encoder")
       assert(ResultEncoderResolution.describe[AdtShape] == "no-encoder")
       assert(ResultEncoderResolution.describe[List[EncOpaque]] == "no-encoder")
+      assert(ResultEncoderResolution.describe[Map[String, Option[EncOpaque]]] == "no-encoder")
+      assert(ResultEncoderResolution.describe[Either[String, EncOpaque]] == "no-encoder")
+
+      // A container of a type the library can encode is sent, and treated, like that type: the
+      // 1.0 rendering, no warning (a build with -Werror keeps compiling).
+      assert(ResultEncoderResolution.describe[List[EncPlain]] == "runtime")
+      assert(ResultEncoderResolution.describe[Vector[EncPlain]] == "runtime")
+      assert(ResultEncoderResolution.describe[Option[EncPlain]] == "runtime")
+      assert(ResultEncoderResolution.describe[Map[String, EncPlain]] == "runtime")
+      assert(ResultEncoderResolution.describe[Either[String, List[EncPlain]]] == "runtime")
+      assert(ResultEncoderResolution.describe[(Int, EncPlain)] == "runtime")
+      assert(ResultEncoderResolution.describe[EncPrivate] == "runtime")
     }
   }

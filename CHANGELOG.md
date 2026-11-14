@@ -513,11 +513,24 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     payload of a case object. A hierarchy of case objects only is the case name as a string
     (`"Fast"`), a string `enum` in the schema. A sealed trait nested in another contributes its
     cases and no level of its own.
-  - `@jsonDiscriminator("type")` on the hierarchy and `@jsonHint("name")` on a case are read by
-    the schema derivation as they are by the codec: `{"type": "Circle", "radius": 1.5}` is then
-    what is advertised and enforced.
-  - A decoder you define for the hierarchy wins, as for every other type. Give it an `McpSchema`
-    or make it an `McpInputCodec` when its shape differs from the one above.
+  - `@jsonDiscriminator("type")` and `@jsonHintNames(SnakeCase)` on the hierarchy and
+    `@jsonHint("name")` on a case are read by the schema derivation as they are by the codec:
+    `{"type": "Circle", "radius": 1.5}` is then what is advertised and enforced. The names may
+    be string literals or `final val` constants. A `@jsonHintNames(CustomCase(f))` function
+    cannot be applied when the schema is derived and is a compile-time error that names
+    `@jsonHint` and `McpInputCodec`.
+  - A given `JsonCodecConfiguration` does not reach the derived input decoder (as for case
+    classes: it is derived with zio-json's defaults), and the input schema describes exactly
+    that. It does reach the derived result encoder, so `.withOutputSchema` on a result with a
+    sealed-hierarchy field is a compile-time error while a configuration other than zio-json's
+    default is in scope where the tool is declared, unless you define the `JsonEncoder` (and
+    `McpSchema`) of the hierarchy yourself: its settings are not known when the schema is
+    derived.
+  - A codec you define for the hierarchy wins, as for every other type, and the derivation does
+    not look inside a hierarchy or a case class that has one: a case with a field no codec can
+    be derived for is fine behind a hand-written `JsonDecoder[Shape]`. Give the type an
+    `McpSchema` or make the instance an `McpInputCodec` when its shape differs from the one
+    above.
   - Fields of a result case class may be sealed hierarchies too (`McpTool[In, Out]`, with or
     without `.withOutputSchema`); a bare sealed trait as `Out` still needs a `JsonEncoder`.
   - Still not derived, with a compile-time error that names the remedy: a recursive hierarchy, a
@@ -536,7 +549,7 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     `derives JsonCodec` included) is now sent as JSON text, as `McpTool[In, T]` sends it, also
     inside `List`, `Vector`, `Seq`, `Set`, `Option` and `Map[String, T]`. A result type with a
     `given McpEncoder[T]`, in scope where `scanAnnotations` is called or in the companion of
-    `T`, is the content that encoder builds. The same holds for `ZIO[R, E, T]`, `Try[T]` and
+    `T` (not a `private` or `protected` one), is the content that encoder builds. The same holds for `ZIO[R, E, T]`, `Try[T]` and
     `Either[Throwable, T]`.
   - **This changes what such a server sends.** A method that returns `Item(1, "x")`, where
     `Item derives JsonCodec`, sent the text `Item(1,x)` in 1.0.x and sends `{"a":1,"b":"x"}`
@@ -546,12 +559,16 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     `Option[String]` is `Some(1)`, `List[String]` is `List(1, b)`, `Unit` is `()`. Return a
     `String` / `Content`, define a `JsonEncoder`, or use a typed `McpTool` for those. There is
     still no `structuredContent` and no `outputSchema` on the annotation path.
-  - A result type that has no `McpEncoder` at all (a plain class, a sealed trait without a
-    `JsonEncoder`) now gets a compile-time **warning** where the method is registered. It
-    says that the value is sent as its `toString` text and names the remedies. A build with
-    `-Werror` has to act on it: define the encoder, return a `String`, or silence it with
-    `-Wconf:msg=has no McpEncoder:s`. A declared result type of `Any` or `AnyRef` is not warned
-    about.
+  - A result type that nothing can encode now gets a compile-time **warning** where the method
+    is registered: a plain class or a sealed trait without a `JsonEncoder`, or a container whose
+    element is one (`List[Handle]`, `Option[Handle]`, `Map[String, Handle]`). It says that the
+    value is sent as its `toString` text and names the remedies. A build with `-Werror` has to
+    act on it: define the encoder, return a `String`, or silence it with
+    `-Wconf:msg=has no McpEncoder:s`. Not warned about: a declared result type of `Any` or
+    `AnyRef`; every type the library could encode by itself (a case class, `Option[String]`,
+    `Unit`, an enum); and a container of those (`List[Item]`, `Option[Item]`,
+    `Map[String, Item]` for a case class `Item` without a `JsonEncoder`), which is sent as its
+    `toString` like the bare `Item` is.
 - **BEHAVIOUR CHANGE — `tasks/cancel` no longer waits for a body that does not stop** (GH #115,
   D6.14 / C3.3). Affects servers with `TaskSettings(enabled = true)` whose task tools have a
   synchronous body: a plain method on the annotation path, a typed-contract handler that returns
@@ -878,8 +895,8 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   pass: a hierarchy of case objects only was a `oneOf` of `{"Fast": {}}` wrappers (the codec
   reads `"Fast"`), and a sealed trait nested in another was a level of its own
   (`{"Sub": {"Leaf": ...}}`; the codec reads `{"Leaf": ...}`). Both are now derived as the codec
-  reads them. A hierarchy with `@jsonDiscriminator` or `@jsonHint` was advertised with wrapper
-  objects and class names; it now follows the annotations. `outputSchema` follows the same rules.
+  reads them. A hierarchy with `@jsonDiscriminator`, `@jsonHintNames` or `@jsonHint` was
+  advertised with wrapper objects and class names; it now follows the annotations. `outputSchema` follows the same rules.
 - **A request that races the end of its session is interrupted** (#117). A request's handler is
   started before it is registered as in flight, so a `DELETE` (or an idle or session-cap eviction)
   that ended the session in between missed it: the handler kept running and its reply stream

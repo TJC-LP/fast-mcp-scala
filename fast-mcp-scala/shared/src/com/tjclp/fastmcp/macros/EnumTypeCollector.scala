@@ -63,8 +63,20 @@ private[fastmcp] object EnumTypeCollector:
     *     the `{"_1": ..., "_2": ...}` object the schema advertises.
     *
     * A `root` that is itself a sealed hierarchy contributes what its cases reach.
+    *
+    * `hasCodec` says whether the codec of the direction being derived (a `JsonDecoder` or a
+    * `JsonEncoder`) can already be summoned for a type. A case class or a sealed hierarchy that has
+    * one is a leaf of the walk: it is not collected, and neither its fields nor its cases are
+    * visited. Whoever wrote that codec decided how the inside of the type is read or written, and
+    * the types in there may have no derivable codec at all (`case class Circle(center:
+    * java.awt.Point)` behind a hand-written `JsonDecoder[Shape]`); planting a derivation for them
+    * would turn a program that compiles into one that does not. Tuples are exempt: zio-json has an
+    * instance for every tuple, and the caller decides whether to replace it.
     */
-  def collectDerivable(using q: Quotes)(root: q.reflect.TypeRepr): List[q.reflect.TypeRepr] =
+  def collectDerivable(using q: Quotes)(
+      root: q.reflect.TypeRepr,
+      hasCodec: q.reflect.TypeRepr => Boolean
+  ): List[q.reflect.TypeRepr] =
     import q.reflect.*
 
     val visited = scala.collection.mutable.ListBuffer.empty[TypeRepr]
@@ -88,14 +100,17 @@ private[fastmcp] object EnumTypeCollector:
           val isProduct = !isScalaEnum && !javaEnum && sym.isClassDef &&
             sym.flags.is(Flags.Case) && sym.caseFields.nonEmpty
           val isSum = isSealedHierarchy(tpe)
-          tpe match
-            case AppliedType(_, args) => args.foreach(walk(_, depth + 1))
-            case _ => ()
-          if isProduct then sym.caseFields.foreach(f => walk(tpe.memberType(f), depth + 1))
-          if isSum then walkCases(tpe, depth)
-          // Post-order: children recorded above, self after — dependency-safe local ordering.
-          if isScalaEnum || javaEnum || tuple || isSum || (isProduct && tpe.typeArgs.isEmpty) then
-            found += tpe
+          // A case class or sealed hierarchy with a codec of its own: a leaf (see the Scaladoc).
+          val provided = (isProduct || isSum) && !tuple && hasCodec(tpe)
+          if !provided then
+            tpe match
+              case AppliedType(_, args) => args.foreach(walk(_, depth + 1))
+              case _ => ()
+            if isProduct then sym.caseFields.foreach(f => walk(tpe.memberType(f), depth + 1))
+            if isSum then walkCases(tpe, depth)
+            // Post-order: children recorded above, self after — dependency-safe local ordering.
+            if isScalaEnum || javaEnum || tuple || isSum || (isProduct && tpe.typeArgs.isEmpty) then
+              found += tpe
 
     val rootTpe = root.dealias.simplified
     visited += rootTpe

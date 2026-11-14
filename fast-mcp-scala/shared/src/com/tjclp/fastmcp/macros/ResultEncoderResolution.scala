@@ -115,7 +115,30 @@ object ResultEncoderResolution:
                     // Nothing matches. (Not only `NoMatchingImplicits`: a candidate whose own
                     // macro gives up, as zio-json's string-enumeration instance does for a class
                     // that is not one, is reported as a plain failure.)
-                    case _ => Resolution.NoEncoder
+                    case _ =>
+                      if containerOfEncodable(tpe) then Resolution.Runtime
+                      else Resolution.NoEncoder
+
+  /** Whether `tpe` is a standard-library container (`List[Item]`, `Option[Item]`, `Map[String,
+    * Item]`, `Either[A, B]`, a tuple) whose type arguments all have an encoder.
+    *
+    * Such a type has no `McpEncoder` when an argument is a case class without a `JsonEncoder`: the
+    * library derives an encoder for the bare case class, but zio-json's container instances ask for
+    * a `JsonEncoder` of the element. It is sent as its `toString` like the bare case class is, and
+    * like it, it is not warned about: the warning is for a type nothing can encode.
+    */
+  private def containerOfEncodable(using Quotes)(tpe: quotes.reflect.TypeRepr): Boolean =
+    import quotes.reflect.*
+    tpe match
+      case AppliedType(constructor, arguments) if arguments.nonEmpty =>
+        val name = constructor.typeSymbol.fullName
+        (name.startsWith("scala.") || name.startsWith("java.")) &&
+        arguments.forall { argument =>
+          resolve(argument) match
+            case Resolution.NoEncoder => false
+            case _ => true
+        }
+      case _ => false
 
   /** A `given McpEncoder` declared in the companion of the result type's class.
     *
@@ -123,7 +146,8 @@ object ResultEncoderResolution:
     * com.tjclp.fastmcp.{*, given}` the library's derivation for case classes is found in the
     * lexical scope, which is searched before any companion, so for a case class the companion's
     * `McpEncoder` is never consulted. An instance the user wrote for the type must win over a
-    * derived one, so it is looked up here.
+    * derived one, so it is looked up here. Only a member any call site could use counts
+    * ([[isAccessibleEverywhere]]).
     */
   private def companionEncoder(using Quotes)(
       tpe: quotes.reflect.TypeRepr
@@ -142,10 +166,20 @@ object ResultEncoderResolution:
       val members = companion.declaredFields ++ companion.declaredMethods
       members.collectFirst {
         case member
-            if isInstance(member) && member.paramSymss.isEmpty &&
+            if isInstance(member) && isAccessibleEverywhere(member) && member.paramSymss.isEmpty &&
               Ref(companion).select(member).tpe.widen <:< wanted =>
           Ref(companion).select(member)
       }
+
+  /** A member the implicit search of any call site could select: not `private`, `protected` or
+    * qualified-private. A given the user kept private is not offered to other code, and a select of
+    * it spliced where the annotations are scanned would not compile.
+    */
+  private def isAccessibleEverywhere(using Quotes)(member: quotes.reflect.Symbol): Boolean =
+    import quotes.reflect.*
+    !member.flags.is(Flags.Private) && !member.flags.is(Flags.Protected) &&
+    !member.flags.is(Flags.PrivateLocal) && member.privateWithin.isEmpty &&
+    member.protectedWithin.isEmpty
 
   private def isInstance(using Quotes)(sym: quotes.reflect.Symbol): Boolean =
     import quotes.reflect.*
