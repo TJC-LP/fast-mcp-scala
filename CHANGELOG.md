@@ -843,6 +843,16 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 - **CI: the OSV job fails when classpath resolution fails** (#117): the resolve step now runs with
   `pipefail`, and advisory text is escaped before it is printed as a workflow annotation.
 - The JVM test module no longer depends on mockito and zio-test, which no test used.
+- **Build: the coverage reports are no longer empty** (GH #121). `ScoverageModule` was mixed into
+  the JVM module, but the tests ran on uninstrumented classes, so nothing was ever measured, and
+  the report tasks failed to resolve their own tooling (`scoverageVersion` named 2.3.1, which was
+  never published for Scala 3). `./mill fast-mcp-scala.jvm.coverage` now runs the JVM test sources
+  on the instrumented classes, and `./mill fast-mcp-scala.jvm.scoverage.htmlReport` (also
+  `xmlReport`, `consoleReport`) renders what it measured; the reporter is scoverage 2.5.2
+  (`Versions.scoverage`, a build tool on no published classpath). `fast-mcp-scala.jvm.test` is
+  unchanged and still runs on the classes that are published. CI: the `Coverage report (JVM)` job
+  of `ci.yml` uploads both reports as the `coverage-jvm` artifact and prints the totals in the job
+  summary; it compares nothing with a threshold. Scala.js and Scala Native are not measured.
 - **At the session cap, sessions last used in the same millisecond are evicted in the order they
   were used** (#117). They tied on `lastSeen`, and the map's iteration order then picked the
   victim. Legacy streamable HTTP on every backend.

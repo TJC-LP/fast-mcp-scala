@@ -74,6 +74,61 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
 
+  # Statement and branch coverage of the JVM suite (GH #121). `fast-mcp-scala.jvm.coverage` runs
+  # the same test sources as `jvm.test` on the classes compiled with the compiler's coverage
+  # instrumentation; the report tasks then read the measurements. The numbers are published as an
+  # artifact and in the job summary, and nothing is compared with a threshold: the job fails only
+  # when a test fails on the instrumented classes or a report cannot be written. The gated suite
+  # is the build job's, on the classes that are published. One JDK is enough. No tool is installed
+  # for this: Mill resolves the scoverage reporter (`Versions.scoverage`) through coursier,
+  # checksums included, like every other build dependency.
+  coverage:
+    name: Coverage report (JVM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Restore-only, for the reason given on the binary-compat job: this job compiles one
+      # platform, and a second copy of it.
+      - name: Set up build
+        uses: ./.github/actions/setup-build
+        with:
+          cache-write: "false"
+
+      - name: Test on the instrumented classes (JVM)
+        run: ./mill -i fast-mcp-scala.jvm.coverage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
+
+      # A separate invocation: the report tasks read the measurement files and do not depend on
+      # the test run, so naming them next to it would not order them after it.
+      - name: Coverage reports
+        run: |
+          ./mill fast-mcp-scala.jvm.scoverage.htmlReport
+          ./mill fast-mcp-scala.jvm.scoverage.xmlReport
+          ./mill fast-mcp-scala.jvm.scoverage.consoleReport 2>&1 | tee coverage-console.txt
+          {
+            echo '### Coverage of the JVM suite'
+            echo
+            echo '```'
+            grep -oE '(Statement|Branch) coverage.*' coverage-console.txt || echo 'no coverage lines in the console report'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # coursier JVM-index provisioning by Mill; scoped to the Mill steps (not the setup actions)
+
+      - name: Upload the coverage reports
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-jvm
+          path: |
+            out/fast-mcp-scala/jvm/scoverage/htmlReport.dest
+            out/fast-mcp-scala/jvm/scoverage/xmlReport.dest
+          if-no-files-found: error
+          retention-days: 14
+
   scala-native:
     name: Scala Native (linux-x64)
     runs-on: ubuntu-latest # clang + jq preinstalled; SN 0.5 recommends LLVM >= 17

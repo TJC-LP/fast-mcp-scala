@@ -47,6 +47,10 @@ cd fast-mcp-scala
 # "Total number of tests run" line. A file with chained `package a` / `package b.c` clauses has
 # the FQCN a.b.c.<Class>.
 
+# Coverage of the JVM suite (two invocations: the reports read what the run wrote)
+./mill fast-mcp-scala.jvm.coverage                  # the JVM tests on instrumented classes
+./mill fast-mcp-scala.jvm.scoverage.htmlReport      # also xmlReport, consoleReport
+
 # Scala.js / Bun housekeeping
 ./mill fast-mcp-scala.js.bunLock                    # regenerate js/bun.lock after changing bunDevDeps
 
@@ -167,6 +171,16 @@ Every pull request must pass:
   compares the JVM jar with every released 1.x version and fails on any finding that
   `.github/mima-exclusions` does not list with a reason. See
   [Binary compatibility](#binary-compatibility).
+- **Coverage report** (`ci.yml`, job `coverage`) — not a gate on a number.
+  `fast-mcp-scala.jvm.coverage` is a second JVM test module: the sources of `jvm.test`, run on the
+  classes of `jvm.scoverage`
+  (the JVM module compiled with the compiler's coverage instrumentation). The job uploads the HTML
+  and XML reports as the `coverage-jvm` artifact and prints statement and branch coverage in its
+  summary; it fails only when a test fails on the instrumented classes or a report cannot be
+  written. `jvm.test` itself stays uninstrumented, so the gated suite runs what is published.
+  Locally the HTML report is under `out/fast-mcp-scala/jvm/scoverage/htmlReport.dest/`. The
+  compiler skips initializers above 3000 tree nodes (the derived JSON codecs, the conformance
+  fixture's tool lists) and says so in a warning; those lines count as not covered.
 - **OSV advisories** (`osv.yml`) — weekly, and on pull requests that change `build.mill` or
   `fast-mcp-scala/package.mill`: `scripts/osv-scan.sh` queries OSV.dev for the production classpath
   of the three published modules and fails on any advisory rated MODERATE or higher (or of unknown
