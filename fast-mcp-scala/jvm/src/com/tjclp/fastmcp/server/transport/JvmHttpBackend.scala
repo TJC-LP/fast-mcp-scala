@@ -8,7 +8,12 @@ import zio.stream.*
 
 import com.tjclp.fastmcp.server.McpServerSettings
 import com.tjclp.fastmcp.server.router.McpRouter
-import com.tjclp.fastmcp.server.transport.http.{HttpReply, HttpRequest, StreamableHttpHandler}
+import com.tjclp.fastmcp.server.transport.http.{
+  HttpReply,
+  HttpRequest,
+  SseFrame,
+  StreamableHttpHandler
+}
 
 /** JVM [[HttpTransportBackend]] — ZIO HTTP (Netty). Pure ZIO: the native router is ZIO, so `R`
   * flows straight through `Server.serve` and the user's `.provide(...)`. No `Unsafe`, no runtime
@@ -201,13 +206,38 @@ object JvmHttpBackend extends HttpTransportBackend:
           Headers(Header.ContentType(MediaType.text.`event-stream`)),
           Body.fromString(frame.encode)
         )
-      case HttpReply.Sse(_, frames, keepAlive) =>
-        Response.fromServerSentEvents(
+      case sse @ HttpReply.Sse(_, frames, keepAlive) =>
+        val events =
           withKeepAlive(frames.map(f => ServerSentEvent(f.data, eventType = f.event)), keepAlive)
-        )
+        sse.opening match
+          case None => Response.fromServerSentEvents(events)
+          case Some(opening) => openedStream(opening, events)
     reply.headers.foldLeft(base) { case (resp, (name, value)) =>
       resp.addHeader(Header.Custom(name, value))
     }
+
+  /** A streamed reply that starts with an opening event (`HttpReply.Sse.opening`: the `retry`
+    * announcement of a legacy stream when `McpServerSettings.sseRetryInterval` is set). It is the
+    * response `Response.fromServerSentEvents(events)` builds — same status, same content type, the
+    * events and the heartbeat encoded by the same zio-http codec — with the opening event written
+    * ahead of them:
+    *   - ahead of the heartbeat merge, whose first ping is due the moment the stream starts, so the
+    *     body always begins with the opening event;
+    *   - by [[SseFrame.encode]], as on the socket backend and on Bun: `retry: <ms>` and a blank
+    *     line. zio-http's `ServerSentEvent` cannot produce those bytes: it writes an event without
+    *     payload as an empty `data:` line (followed by the `retry` line), and a client that reads
+    *     an empty `data:` line dispatches an empty event.
+    * A reply without an opening event never comes here.
+    */
+  private def openedStream(
+      opening: SseFrame,
+      events: ZStream[Any, Nothing, ServerSentEvent[String]]
+  ): Response =
+    val codec = ServerSentEvent.defaultBinaryCodec[String]
+    val body = ZStream.succeed(opening.encode) ++ events.map(codec.encode(_).asString)
+    Response
+      .fromServerSentEvents(ZStream.empty: ZStream[Any, Nothing, ServerSentEvent[String]])
+      .copy(body = Body.fromCharSequenceStreamChunked(body))
 
   /** Merge a heartbeat into an SSE stream so proxies / idle timeouts don't kill long-quiet
     * connections. The `ping` event type is ignored by conforming clients (the TS SDK only parses

@@ -283,9 +283,9 @@ case class SkillSettings(
 
 /** Settings for an MCP server. HTTP-specific fields (`host`, `port`, `httpEndpoint`, `stateless`,
   * `keepAliveInterval`, `sessionIdleTimeout`, `disallowDelete`, `allowedHosts`, `allowedOrigins`,
-  * `maxRequestBodyBytes`, `maxSessions`, `contextHeaders`, `dnsRebindingProtection`) are ignored
-  * under stdio transports; `stdioDrainTimeout` applies to stdio only. `limits`, `tasks` and
-  * `validateToolInput` apply on every transport.
+  * `maxRequestBodyBytes`, `maxSessions`, `contextHeaders`, `dnsRebindingProtection`,
+  * `sseRetryInterval`) are ignored under stdio transports; `stdioDrainTimeout` applies to stdio
+  * only. `limits`, `tasks` and `validateToolInput` apply on every transport.
   */
 case class McpServerSettings(
     // Spec: HTTP servers SHOULD bind to localhost by default (DNS-rebinding surface). Deployments
@@ -426,9 +426,31 @@ case class McpServerSettings(
     // a handler still running when this time is up is interrupted, so one that never finishes
     // cannot keep the process alive. Background task bodies (the Tasks extension) are not waited
     // for. Zero interrupts in-flight handlers at EOF without waiting. Must not be negative.
-    stdioDrainTimeout: java.time.Duration = McpServerSettings.DefaultStdioDrainTimeout
+    stdioDrainTimeout: java.time.Duration = McpServerSettings.DefaultStdioDrainTimeout,
+    // Legacy HTTP adapter only (protocol versions before 2026-07-28): the SSE `retry` field, the
+    // time a client should wait before it reconnects after a stream ends. `None` (default) sends
+    // nothing and the wire is as it always was. When set, every `text/event-stream` body the
+    // adapter writes begins with the line `retry: <milliseconds>`: a stream (the standalone GET
+    // stream, a streamed POST reply) opens with an event that is only that line, and a
+    // fixed-length POST reply carries it as the first line of its one event. Clients keep the value
+    // and dispatch nothing for it; the official TypeScript client uses it as the delay before it
+    // reopens the GET stream. It is not sent on 2026-07-28 replies, which have no stream to
+    // reconnect to, nor in legacy stateless mode, which answers in JSON. Bun serves no GET stream,
+    // so there it reaches POST replies only. The value is sent in whole milliseconds; zero means
+    // "reconnect at once"; a negative one is refused. This is the `retry` half of SEP-1699 only:
+    // the server sends no event ids and does not resume a stream from `Last-Event-ID`.
+    sseRetryInterval: Option[java.time.Duration] = None
 ):
   require(!stdioDrainTimeout.isNegative, "McpServerSettings.stdioDrainTimeout must be >= 0")
+  // The upper bound is what the field can carry: it is written as whole milliseconds, a larger
+  // `Duration` overflows `toMillis`, and a browser's timer treats a delay above `Int.MaxValue` ms
+  // as 1 ms. Compared in seconds, which cannot overflow.
+  require(
+    sseRetryInterval.forall(interval =>
+      !interval.isNegative && interval.getSeconds <= Int.MaxValue / 1000L
+    ),
+    "McpServerSettings.sseRetryInterval must be between 0 and 2147483 seconds (about 24 days)"
+  )
 
   /** The Host/Origin guard these settings resolve to (`transport.HostGuard`), computed once per
     * settings value so that no request re-derives it.

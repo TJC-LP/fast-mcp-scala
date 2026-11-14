@@ -385,6 +385,42 @@ writes to the socket — that is, with `keepAliveInterval` set — and only afte
 retransmission budget (zio-http 3.11.4 exposes no accepted-socket option, so the server does not
 set TCP keepalive itself). The cap-time rules below bound the session store regardless.
 
+#### SSE `retry` (`sseRetryInterval`)
+
+`McpServerSettings.sseRetryInterval` (since 1.1.0, unset by default) makes the adapter announce
+the SSE `retry` field: the time a client should wait before it reconnects after a stream ends.
+With it unset nothing is sent and the wire is what it always was. A negative interval, or one
+above 2147483 seconds (about 24 days, the largest delay a browser's timer honours), is refused
+when the settings are built. With it set, every
+`text/event-stream` body the adapter writes **begins with the line `retry: <milliseconds>`**, on
+every backend:
+
+| Reply | Body |
+|---|---|
+| A stream: the standalone GET stream, or a POST reply that is streamed | opens with an event that is only that line (`retry: 3000`, blank line), written before the first message and before any heartbeat |
+| A fixed-length POST reply (complete at its first frame, `initialize` included) | the line is the first line of its one event: `retry: 3000`, `event: message`, `data: …` |
+
+A client stores the value and dispatches nothing for it. The official TypeScript client uses it as
+the delay before it reopens the GET stream, which the server ends when the session is evicted at
+the `maxSessions` cap, on DELETE, and at shutdown. The value is sent in
+whole milliseconds; zero means "reconnect at once"; a negative interval is refused when the
+settings are constructed.
+
+Where it is not sent: 2026-07-28 replies (that revision has no stream to reconnect to: a broken
+reply is re-issued as a new request), legacy stateless mode (it answers in JSON), and stdio. Bun
+serves no GET stream, so there the field reaches POST replies only.
+
+This is the `retry` half of SEP-1699 and nothing more. The server **sends no event ids, no priming
+event, and does not resume a stream from `Last-Event-ID`**: a request whose connection breaks is
+stopped (see above), and its reply is not kept for a later GET. A priming event (`id:` with empty
+`data:`) is deliberately not sent, because clients read an event id on a POST stream as a promise
+that the reply can be picked up again over GET — the TypeScript client reconnects with
+`Last-Event-ID` and waits — and this server would not keep it. SSE resumability was removed from
+MCP in 2026-07-28; on the legacy adapter, a client that needs to survive a broken connection
+should poll through [Tasks](./tasks.md). The conformance harness's `server-sse-polling` scenario
+(2025-11-25 only, unscored, removed in 2026-07-28) therefore still reports its priming-event
+recommendation as a warning, and `ConformanceServer` registers no `test_reconnection` tool.
+
 `stateless` controls **only** this adapter. Modern requests are stateless regardless of the flag.
 Leaving it `false` (the default) lets older clients fall back to the initialize/session/GET/DELETE
 flow; setting it `true` disables that legacy session store. On the stateless legacy adapter all
@@ -498,6 +534,7 @@ no reply (it fails with its timeout). A JVM client whose GET stream falls more t
 | `disallowDelete` | `false` | Legacy adapter: answer 405 to HTTP DELETE instead of terminating the session. |
 | `sessionIdleTimeout` | `30 minutes` | Evict legacy sessions with no client activity. Live legacy GET streams are exempt from the periodic sweep but become evictable at the `maxSessions` cap once idle this long; `None` disables both. |
 | `keepAliveInterval` | `None` | When set, emit SSE heartbeats on quiet streams so proxies do not kill long calls. The legacy GET stream heartbeats from the first byte. The reply to a POST waits for the handler's first frame for at most one interval: a call that is still silent then gets its SSE response opened with a heartbeat (since 1.1.0; see "The modern path"). With `None`, a 2026-07-28 reply waits for the first frame however long that takes, and a legacy reply opens its stream after one second. Neither listener closes a quiet stream on its own: the JVM has no idle timeout and Bun runs with `idleTimeout: 0` (its 10 s default used to cut a slow tool's reply). Heartbeats are also what lets the OS detect a GET peer that vanished without closing its connection (the socket is only probed when the server writes to it, and the OS gives up after its retransmission budget); without them such a stream stays live until the cap-time eviction described under `maxSessions`. |
+| `sseRetryInterval` | `None` | Legacy adapter only (since 1.1.0): when set, every SSE body the adapter writes begins with `retry: <ms>`, the delay a client should wait before reconnecting (the standalone GET stream and streamed POST replies open with it as an event of its own; a fixed-length POST reply carries it in its one event). Never sent on 2026-07-28 replies. No event ids and no `Last-Event-ID` resumption. See [SSE `retry`](#sse-retry-sseretryinterval). |
 | `allowedHosts` | `None` (automatic) | The `Host` names of the DNS-rebinding/CSRF guard ([Host / Origin validation](#host--origin-validation)). `None` is **automatic**: on a loopback bind the guard is on for `localhost`, `127.0.0.1`, `[::1]` and the bound address; on any other bind it is off and startup warns. `Some(names)` uses exactly those names on any bind address (`Some(Set.empty)` reads as `None`). With the guard on: the `Host` value must parse as one `host[:port]` authority and its hostname (or the verbatim `host:port`) must be listed — the port itself is not compared; a present `Origin` must be the same origin as the request `Host` (`scheme://host:port`; scheme not compared; a port-less `Host` admits `http://h` and `https://h`) or appear in `allowedOrigins`; cross-port loopback origins, `null`, a `Host` or `Origin` sent more than once (seen as its `", "`-joined value), and malformed `Host`/`Origin` ports are refused (403), with or without the other header. IPv6 entries are written bracketed, exactly as they appear in the `Host` header: `Set("[::1]")`, not `Set("::1")`. |
 | `allowedOrigins` | `None` | Extra browser origins (`https://app.example.com`, `http://localhost:5173`) admitted in addition to the request's own authority **when `allowedHosts` is also set**; with `allowedOrigins` alone only the listed origins pass (the request's own authority is then refused 403 too), and the `Host` is held to the automatic loopback names on a loopback bind and not checked on any other bind. Malformed entries fail `runHttp()` at startup. |
 | `dnsRebindingProtection` | `true` | The explicit opt-out of the Host/Origin guard (since 1.1.0). `false` accepts every `Host` and `Origin` and silences the non-loopback startup warning; it must not be combined with `allowedHosts` / `allowedOrigins` (`runHttp()` fails at startup). Prefer listing the proxied name in `allowedHosts`. |
@@ -713,7 +750,7 @@ ready is written as a single packet (head, SSE frames and the chunked terminator
 | `writeStallTimeout` (30 s) | a write that makes no progress for this long — the client stopped reading a large reply or an event stream — closes the connection. Replies go out in 16 KiB slices and the clock restarts with each, so a slow client that is still reading is never cut off. Blocking sockets have no write timeout, so the accept thread sweeps for stalled writes once a second |
 | Refused requests | a reply that leaves request bytes unread (a body over the cap, a refused `Host`, a malformed head) is followed by a lingering close: the write side is shut down and the rest of the request discarded for up to 5 s, so the client reads the error reply instead of a connection reset |
 | Accept failures | a failed `accept` (out of file descriptors or threads, a connection reset before it was accepted) never stops the listener: it is retried with a pause that grows to 1 s for as long as it lasts, with a warning in the log on the first failure of a run and about once a minute after |
-| SSE | chunked transfer-encoding; `keepAliveInterval` pings are written by the connection thread when the stream has been quiet that long |
+| SSE | chunked transfer-encoding; `keepAliveInterval` pings are written by the connection thread when the stream has been quiet that long; with `sseRetryInterval` the opening `retry` event leaves with the response head |
 | Vanished clients | while a reply or a GET stream is quiet, the read side is probed once a second; a closed peer interrupts the request and releases the session's GET slot. A request that finishes within a second is never probed. A reply that cannot be delivered is released without being streamed; the shared handler's 5-second bound on an unstarted reply covers whatever is left |
 | Shutdown | closing the server's scope closes the listener and every connection. ZIO signal handlers are no-ops on Scala Native, so SIGTERM there ends the process by the OS default |
 | Diagnostics | `FASTMCP_HTTP_DEBUG=1` prints per-connection failures to stderr |

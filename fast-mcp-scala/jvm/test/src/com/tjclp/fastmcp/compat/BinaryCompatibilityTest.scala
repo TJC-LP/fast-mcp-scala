@@ -45,7 +45,8 @@ class BinaryCompatibilityTest extends AnyFunSuite with Matchers:
     skills = SkillSettings(enabled = true),
     contextHeaders = Set("x-user"),
     validateToolInput = false,
-    dnsRebindingProtection = false
+    dnsRebindingProtection = false,
+    sseRetryInterval = Some(java.time.Duration.ofSeconds(3))
   )
 
   private val tasksWithNewFields = TaskSettings(
@@ -100,6 +101,7 @@ class BinaryCompatibilityTest extends AnyFunSuite with Matchers:
     copied.contextHeaders shouldBe Set("x-user")
     copied.validateToolInput shouldBe false
     copied.dnsRebindingProtection shouldBe false
+    copied.sseRetryInterval shouldBe Some(java.time.Duration.ofSeconds(3))
   }
 
   test("1.0.1 client: a 17-pattern McpServerSettings extractor still reads its positions") {

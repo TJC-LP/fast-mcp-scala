@@ -69,6 +69,11 @@ object Versions {
   val binaryCompatClient = "1.0.1"
   // MiMa runs as a build tool only (`fast-mcp-scala.compat.mima`); it is on no published classpath.
   val mimaCore = "1.2.1"
+  // scoverage's report tooling (`fast-mcp-scala.jvm.scoverage.htmlReport` and friends). A build
+  // tool only: Scala 3 instruments in the compiler itself (`-coverage-out`), so this version selects
+  // the reporter that reads the measurements and nothing on a published classpath. It must be a
+  // version published for Scala 3 (`org.scoverage:scalac-scoverage-reporter_3`).
+  val scoverage = "2.5.2"
 }
 
 /** Shared build configuration constants */
@@ -116,7 +121,14 @@ object BuildConfig {
   )
 }
 
-/** Base trait for FastMCP modules - shared compiler settings, formatting, and coverage */
+/** Base trait for FastMCP modules - shared compiler settings, formatting, and coverage.
+  *
+  * `ScoverageModule` gives the module a `scoverage` child that compiles the same sources with the
+  * compiler's coverage instrumentation, and the report tasks (`scoverage.htmlReport`,
+  * `xmlReport`, `consoleReport`). The reports read what a run of `fast-mcp-scala.jvm.coverage`
+  * (the JVM tests on the instrumented classes, see `package.mill`) wrote; the ordinary `test`
+  * module runs on uninstrumented classes and writes nothing there.
+  */
 trait FastMCPModuleBase extends ScalaModule with ScalafmtModule with ScoverageModule {
   override def scalaVersion: T[String] = scala3Version
 
@@ -131,7 +143,7 @@ trait FastMCPModuleBase extends ScalaModule with ScalafmtModule with ScoverageMo
   override def scalacOptions = BuildConfig.crossScalacOptions ++ BuildConfig.wartRemoverOptions
 
   // Coverage settings
-  override def scoverageVersion = "2.3.1"
+  override def scoverageVersion = Versions.scoverage
 }
 
 /** Shared POM / publish config. `jvm`, `js`, and `scalaNative` mix this in so they publish under
@@ -188,6 +200,20 @@ trait FastMCPTestModule extends TestModule.ScalaTest {
 trait CrossPlatformTests extends JavaModule {
   override def sources = Task.Sources(
     moduleDir / "src",
+    moduleDir / os.up / os.up / "jvm-native" / "test" / "src",
+    moduleDir / os.up / os.up / "shared" / "test" / "src"
+  )
+}
+
+/** The sources of `fast-mcp-scala.jvm.coverage`: exactly what `fast-mcp-scala.jvm.test` compiles
+  * ([[CrossPlatformTests]], seen from a sibling of the `test` directory). The coverage module is a
+  * second test module rather than a flag on the first one, so the suite CI gates on keeps running
+  * on the classes that are published, not on instrumented ones. A top-level trait for the reason
+  * given on [[CrossPlatformTests]].
+  */
+trait CoverageTestSources extends JavaModule {
+  override def sources = Task.Sources(
+    moduleDir / os.up / "test" / "src",
     moduleDir / os.up / os.up / "jvm-native" / "test" / "src",
     moduleDir / os.up / os.up / "shared" / "test" / "src"
   )
