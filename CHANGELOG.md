@@ -530,6 +530,21 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Changed
 
+- **`tools/list` sends each tool with the fields of the client's protocol revision** (GH #120,
+  D3.17). Every session used to get every field, so a 2024-11-05 client was sent `annotations`
+  (a 2025-03-26 field), `title` and `outputSchema` (2025-06-18) and `execution` (2025-11-25). Now
+  a field is sent from the revision that introduced it: `annotations` from 2025-03-26; `title`,
+  `outputSchema` and `_meta` from 2025-06-18; `icons` from 2025-11-25; `execution` on 2025-11-25
+  only (2026-07-28 removed it, as before). `name`, `description` and `inputSchema` go to everyone.
+  - The revision is the one `initialize` negotiated on a legacy session and 2026-07-28 on a
+    modern request. Replies to 2025-11-25 and 2026-07-28 clients are unchanged.
+  - A 2025-03-26 client keeps the display title as `annotations.title`.
+  - Only the list entry is projected. `tools/call` is unchanged: a tool with an `outputSchema`
+    still returns `structuredContent` to an older client.
+  - The legacy stateless adapter (`stateless = true`) has no `initialize`, so no revision is
+    known there and it sends every legacy field, as before.
+  - New: `WireMapping.toolForVersion(tool, version)`. Reference: `docs/spec-coverage.md` §
+    "Fields by revision on `tools/list`".
 - **BEHAVIOUR CHANGE — `tasks/cancel` no longer waits for a body that does not stop** (GH #115,
   D6.14 / C3.3). Affects servers with `TaskSettings(enabled = true)` whose task tools have a
   synchronous body: a plain method on the annotation path, a typed-contract handler that returns

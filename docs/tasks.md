@@ -117,8 +117,9 @@ val tool = McpTool[Args, Result](name = "expensive-op")(args => work(args))
   `extensions['io.modelcontextprotocol/tasks']`); a legacy (2025-11-25) client that sends a
   bare `tools/call` without `params.task` gets `-32601`.
 
-Modern `tools/list` does not expose the removed `execution.taskSupport` field; legacy clients still
-see and use it.
+`tools/list` shows `execution.taskSupport` to 2025-11-25 sessions only, the one revision that
+defines the field: 2026-07-28 removed it, and earlier revisions never had it (since 1.1.0 they are
+no longer sent it — see [spec coverage](./spec-coverage.md#fields-by-revision-on-toolslist)).
 
 A tool with `optional` or `required` support becomes a task before its handler runs. A typed
 contract can instead start as a request and hand off later: see

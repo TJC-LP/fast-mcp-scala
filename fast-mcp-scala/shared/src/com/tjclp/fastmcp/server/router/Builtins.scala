@@ -154,13 +154,20 @@ final class Builtins[R](
   // ---- tools ----
 
   val toolsList: RequestHandler[R] = (session, _) =>
-    session.currentRequestContext.flatMap { modern =>
-      val tools = toolManager
+    for
+      modern <- session.currentRequestContext
+      // The revision this reply is written for: the request's own on the 2026-07-28 path, the
+      // one `initialize` negotiated on a legacy session. Each tool carries only that revision's
+      // fields (`WireMapping.toolForVersion`).
+      version <- modern match
+        case Some(context) => ZIO.succeed(context.protocolVersion)
+        case None => session.protocolVersion
+      tools = toolManager
         .listDefinitions()
         .sortBy(_.name)
-        .map(WireMapping.toolToWire(_, tasksEnabled && modern.isEmpty))
-      ok(ListToolsResult(tools = tools))
-    }
+        .map(d => WireMapping.toolForVersion(WireMapping.toolToWire(d, tasksEnabled), version))
+      json <- ok(ListToolsResult(tools = tools))
+    yield json
 
   val toolsCall: RequestHandler[R] = (session, params) =>
     for
