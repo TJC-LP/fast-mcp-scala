@@ -287,6 +287,31 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     extractTaskId(created) should not be empty
   }
 
+  test("params.task.ttl of zero or less is refused with -32602 and creates nothing (D6.20)") {
+    val routes = buildRoutes()
+    val sid = initSession(routes)
+    for (ttl, id) <- List("0" -> 30, "-1" -> 31) do
+      val call =
+        s"""{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"slow","arguments":{},"task":{"ttl":$ttl}}}"""
+      val refused = bodyOf(post(routes, call, Some(sid)))
+      refused should include(""""code":-32602""")
+      refused should include(s"params.task.ttl must be greater than 0 (milliseconds), got $ttl")
+      refused should not include "taskId"
+    // No handle was handed out, and none exists.
+    val listed =
+      bodyOf(post(routes, """{"jsonrpc":"2.0","id":32,"method":"tasks/list"}""", Some(sid)))
+    listed should include(""""tasks":[]""")
+    // `null` is the 2025-11-25 spelling of "no preference": the server's default applies.
+    val defaulted = bodyOf(
+      post(
+        routes,
+        """{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"slow","arguments":{},"task":{"ttl":null}}}""",
+        Some(sid)
+      )
+    )
+    defaulted should include(""""status":"working"""")
+  }
+
   test("bare call on a required-task tool is rejected -32601") {
     val routes = buildRoutes()
     val sid = initSession(routes)

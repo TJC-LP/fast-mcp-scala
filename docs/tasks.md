@@ -32,7 +32,7 @@ val server = McpServer(
 |---|---|---|
 | `enabled` | `false` | Master switch. When false the `tasks` capability is not advertised and `params.task` is ignored. |
 | `defaultTtlMs` | 1 hour | TTL applied when the requestor does not supply one. |
-| `maxTtlMs` | 24 hours | Upper bound; requestor-supplied TTLs above this are clamped. |
+| `maxTtlMs` | 24 hours | Upper bound; requestor-supplied TTLs above this are clamped. A requested TTL of zero or less is refused with `-32602` (since 1.1.0). |
 | `pollIntervalMs` | `Tasks.DefaultPollIntervalMs` | `pollInterval` advertised back to clients in `tasks/get` responses. |
 | `maxConcurrentPerSession` | `64` | Running (non-terminal) tasks per **owner**: the legacy protocol session id, or the modern client key derived by `ownerKey` (keyless modern requests share one anonymous bucket). Creations beyond it are rejected with `-32602`. |
 | `maxConcurrentTotal` | `1024` | Running-task ceiling per **pool** (legacy-session tasks and modern bearer tasks are counted separately, so neither can starve the other). `-32003` when exceeded; must be ≥ `maxConcurrentPerSession`. |
@@ -386,7 +386,15 @@ On the compatibility adapter, clients send `params.task: {ttl}` and poll `tasks/
 `tasks/result` / `tasks/list` / `tasks/cancel`. The `initialize` result declares all of it that
 the 2025-11-25 revision has a flag for: `capabilities.tasks` is
 `{"list": {}, "cancel": {}, "requests": {"tools": {"call": {}}}}` (until 1.1.0 it carried
-`requests.tools.call` only, although `tasks/list` and `tasks/cancel` were served). That surface works on any transport whose session
+`requests.tools.call` only, although `tasks/list` and `tasks/cancel` were served).
+
+`params.task.ttl` is the lifetime the client asks for, in milliseconds from creation. The server
+may shorten it, as the revision allows: a value above `maxTtlMs` is clamped, and the `ttl` in the
+reply is the one that applies. An absent or `null` `ttl` gets `defaultTtlMs`. Zero or a negative
+value is not a lifetime and is refused with `-32602`; no task is created. (Until 1.1.0 it was
+accepted, and the client got a `working` handle that was gone a second later.)
+
+That surface works on any transport whose session
 outlives a single request: the legacy streamable-HTTP adapter and stdio (one durable session per
 process). On the **stateless** legacy adapter all clients share one session identity, so legacy
 task requests there are rejected with `-32601`. Bearer tasks are invisible to legacy sessions and

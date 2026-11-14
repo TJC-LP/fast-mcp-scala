@@ -379,7 +379,8 @@ class TaskManager[R] private[manager] (
     *   Visibility scope + accounting owner ([[TaskScope.session]] / [[TaskScope.bearer]]).
     * @param requestedTtlMs
     *   Requestor-supplied TTL in millis. Clamped to `settings.maxTtlMs`; defaulted to
-    *   `settings.defaultTtlMs` if `None`.
+    *   `settings.defaultTtlMs` if `None`. Zero or a negative value is refused with
+    *   [[TaskTtlNotPositive]] (`-32602`) and nothing is created.
     * @param run
     *   Effect producing the underlying request result (typed as `Any` because TaskManager is
     *   type-erased on result type — the dispatch layer narrows on retrieval).
@@ -421,21 +422,24 @@ class TaskManager[R] private[manager] (
       run: TaskInput => ZIO[R, Throwable, Any],
       onStatusChange: Task => UIO[Unit]
   ): ZIO[R, Throwable, CreateTaskResult] =
-    if requestBytes > settings.maxRequestBytes then
-      ZIO.fail(new TaskRequestTooLarge(settings.maxRequestBytes))
-    else
-      createAdmitted(
-        scope,
-        requestedTtlMs,
-        math.max(requestBytes, 0L),
-        taskId =>
-          run(
-            new TaskInput:
-              def await(requests: List[(String, Json)]): IO[Throwable, Map[String, Json]] =
-                awaitInput(taskId, requests)
-          ),
-        onStatusChange
-      )
+    requestedTtlMs.filter(_ <= 0L) match
+      // A lifetime of nothing: the handle would be dead as soon as the sweeper next ran.
+      case Some(ttl) => ZIO.fail(new TaskTtlNotPositive(ttl))
+      case None if requestBytes > settings.maxRequestBytes =>
+        ZIO.fail(new TaskRequestTooLarge(settings.maxRequestBytes))
+      case None =>
+        createAdmitted(
+          scope,
+          requestedTtlMs,
+          math.max(requestBytes, 0L),
+          taskId =>
+            run(
+              new TaskInput:
+                def await(requests: List[(String, Json)]): IO[Throwable, Map[String, Json]] =
+                  awaitInput(taskId, requests)
+            ),
+          onStatusChange
+        )
 
   private def createAdmitted(
       scope: TaskScope,
@@ -1128,6 +1132,17 @@ final class TaskByteBudgetExceeded(val setting: String, val limitBytes: Long)
     )
     with McpErrorCarrier:
   def toMcpError: McpError = McpError(ErrorCodes.CapacityExceeded, getMessage)
+
+/** A requested task TTL (2025-11-25 `params.task.ttl`) of zero or less. The request's own fault, so
+  * `-32602`; nothing is forked or stored. Until 1.1.0 such a TTL was accepted (as `ttl: 0`): the
+  * client got a `working` handle that the sweeper removed within `sweepIntervalMs`.
+  */
+final class TaskTtlNotPositive(val ttlMs: Long)
+    extends RuntimeException(
+      s"tools/call: params.task.ttl must be greater than 0 (milliseconds), got $ttlMs"
+    )
+    with McpErrorCarrier:
+  def toMcpError: McpError = McpError.invalidParams(getMessage)
 
 /** The request is too large to be kept for the lifetime of a task (`TaskSettings.maxRequestBytes`).
   * The request's own fault, so `-32602`; nothing is forked or stored.

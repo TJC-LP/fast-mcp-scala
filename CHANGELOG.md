@@ -489,6 +489,15 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
     channel, never on the reply stream of the request that happened to trigger it.
   - `TaskSettings` gains the field at the end; the 11-field 1.0.x forwarders give it its default
     (`copy` keeps it). Reference: `docs/tasks.md` § "Cancelling a task".
+- **A `params.task.ttl` of zero or less is refused** (GH #115, D6.20). A 2025-11-25
+  task-augmented `tools/call` with `"task": {"ttl": 0}` or a negative `ttl` is answered `-32602`
+  (`params.task.ttl must be greater than 0 (milliseconds), got 0`) and creates nothing. It used to
+  be accepted: the reply showed `ttl: 0` and `status: working`, and the TTL sweeper removed the
+  task within a second, so the client held a handle that answered `Unknown task`. Refusing was
+  chosen over raising the value to a minimum: the revision lets a server shorten a requested
+  lifetime, which is what the `maxTtlMs` clamp does, but a server that turns "no lifetime" into
+  one of its own choosing hides a client bug. A positive `ttl`, an absent one and `null` behave
+  as before. `TaskManager.create` fails with the new `TaskTtlNotPositive` for direct callers.
 - **HTTP refusals are the same on every backend** (GH #114, TJC-2360). zio-http, the socket
   backend and Bun disagreed on a handful of requests that are refused either way; they now take
   the same decisions from the shared `HttpRequestGuards`. Requests that were served before are
