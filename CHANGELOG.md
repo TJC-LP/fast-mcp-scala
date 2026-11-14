@@ -640,6 +640,11 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Fixed
 
+- **A request that races the end of its session is interrupted** (#117). A request's handler is
+  started before it is registered as in flight, so a `DELETE` (or an idle or session-cap eviction)
+  that ended the session in between missed it: the handler kept running and its reply stream
+  never ended. A request registered on a session that is already terminated is now interrupted at
+  registration.
 - **A cancellation that overtakes its request is no longer dropped** (#117). Frames are dispatched
   concurrently, so a `notifications/cancelled` sent right after its request could be processed
   before the request was registered, and was then ignored: the handler ran to completion. A

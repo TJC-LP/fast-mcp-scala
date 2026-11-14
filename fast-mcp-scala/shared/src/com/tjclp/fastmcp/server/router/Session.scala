@@ -321,7 +321,12 @@ final class Session private (
         // honour it now. `initialize` stays exempt, as in `cancelInflight`.
         if takeEarlyCancel(id) && method != Methods.Initialize then fiber.interruptFork
         else ZIO.unit
-      }
+      } *>
+      // The dispatcher forks the handler before it registers it, so `terminate` can sweep the
+      // registry in between. It latches the terminated flag before sweeping: a registration that
+      // finds the latch set was missed by the sweep and interrupts the fiber itself, or the
+      // request would outlive its session.
+      isTerminated.flatMap(gone => (clearInflight(id) *> fiber.interruptFork).when(gone).unit)
 
   // Ids cancelled while no request with that id was registered, oldest first, each with the
   // monotonic time of the cancellation. Frames are dispatched concurrently, so a cancellation sent
