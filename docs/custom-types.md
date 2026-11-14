@@ -174,10 +174,15 @@ rejects a bad id, so make it check everything the pattern promises.
 ## Per-field override: `@Param(schema = ...)`
 
 For a one-off field, `@Param(schema = Some("..."))` replaces that field's generated schema with a
-raw JSON Schema fragment — the whole property, `description` and `examples` included, so repeat
-the description inside the fragment. This is the right tool for enum constraints, length limits
-or numeric bounds that Scala types cannot express, and the fragment is enforced on `tools/call`
-(a `pattern` or `format` in it is advertised only — check those in the method):
+raw JSON Schema fragment. The `description` and `examples` of the same `@Param` are added to the
+fragment, unless the fragment states its own `description` / `examples`, which then win. This is
+the right tool for enum constraints, length limits or numeric bounds that Scala types cannot
+express, and the fragment is enforced on `tools/call` (a `pattern` or `format` in it is advertised
+only — check those in the method). The literal is parsed when the server is compiled: one that is
+not JSON, or not a JSON object (or `true` / `false`), is a compile-time error.
+
+The parameter below is advertised as
+`{"type":"string","enum":["relevance","date"],"description":"Sort order"}`:
 
 ```scala 3 raw
 @Param(

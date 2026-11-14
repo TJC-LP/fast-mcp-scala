@@ -8,8 +8,9 @@ import scala.annotation.StaticAnnotation
   * automatically registers the method as an MCP tool.
   *
   * The tool's description will be taken from the `description` parameter if provided. If
-  * `description` is `None` or omitted, the macro will attempt to use the method's Scaladoc comment
-  * as the description.
+  * `description` is `None` or omitted, the macro uses the first paragraph of the method's Scaladoc
+  * comment, as one line of plain text: the comment markers are removed and the text stops at the
+  * first blank line, `@tag` or code block. The same holds for `@Prompt` and `@Resource`.
   *
   * The `Option` arguments the macro reads (`name`, `description`, `title`, `taskSupport` and the
   * boolean hints) must be literals — `Some("...")`, `Option("...")`, `None`, or a `final val`
@@ -25,7 +26,7 @@ import scala.annotation.StaticAnnotation
   *   error), so overloaded annotated methods need explicit names. When omitted, the method name is
   *   used (a description-only annotation still registers under the method name).
   * @param description
-  *   Optional description for the tool. If None, Scaladoc will be used.
+  *   Optional description for the tool. If None, the first paragraph of the Scaladoc is used.
   * @param examples
   *   Deprecated since 1.0.0 — metadata only, never read or emitted; removed in 2.0.0.
   * @param version
@@ -111,8 +112,10 @@ class Tool(
   *   [[com.tjclp.fastmcp.core.JsonSchemaValidator]]) — those are advertised only, so check them in
   *   the method. The override replaces the whole derived property, including the `null` alternative
   *   of an `Option` parameter: write `"type": ["string", "null"]` (and `null` in an `enum`) if
-  *   clients may send an explicit `null`. Only tools have an input schema, so this applies to
-  *   `@Tool` parameters and typed-tool fields.
+  *   clients may send an explicit `null`. The `description` and `examples` of the same `@Param` are
+  *   added to the fragment unless the fragment states its own. A literal that is not JSON, or is
+  *   not a JSON object (or `true` / `false`), is a compile-time error. Only tools have an input
+  *   schema, so this applies to `@Tool` parameters and typed-tool fields.
   * @since 0.2.1
   */
 class Param(
@@ -137,7 +140,8 @@ class Param(
   * @param name
   *   Optional name for the resource (defaults to method name). Literal values only.
   * @param description
-  *   Optional description for the resource (defaults to Scaladoc). Literal values only.
+  *   Optional description for the resource (defaults to the first paragraph of the Scaladoc).
+  *   Literal values only.
   * @param mimeType
   *   Optional MIME type for the resource (defaults to "text/plain"). Literal values only.
   */
@@ -156,7 +160,8 @@ class Resource(
   *   overloaded annotated methods need explicit names. When omitted, the method name is used (a
   *   description-only annotation still registers under the method name).
   * @param description
-  *   Optional description for the prompt (defaults to Scaladoc). Literal values only.
+  *   Optional description for the prompt (defaults to the first paragraph of the Scaladoc). Literal
+  *   values only.
   */
 class Prompt(
     val name: Option[String] = None,

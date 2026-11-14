@@ -113,7 +113,7 @@ def search(
 - `examples` populates the JSON Schema `examples` array (clients can show suggestions)
 - `required` is derived from the parameter: an `Option[...]` parameter and a parameter with a default value are optional, every other parameter is required. A client may omit an optional argument; the method then gets `None` or the default. The same holds for the fields of a case class used as an argument, at any depth. Write `required = true` to require an `Option` or defaulted parameter anyway. `required = false` is accepted only on an `Option` or defaulted parameter, where it states what is already the case
 - `required` lists the parameters in declaration order, the order of `properties`
-- `schema` is a raw JSON Schema fragment that overrides the derived schema entirely — repeat the `description` inside the fragment, since the derived property (description and examples included) is replaced wholesale
+- `schema` is a raw JSON Schema fragment that replaces the derived property. The `description` and `examples` of the same `@Param` are added to the fragment unless it states its own. A literal that is not a JSON object (or `true` / `false`) is a compile-time error
 
 The advertised `inputSchema` is enforced: a `tools/call` whose arguments do not conform (a value outside an `enum`, a number outside its bounds, a missing `required` member, a wrong type) is answered with an `isError` result before the method runs. `pattern` and `format` are among the keywords that are advertised but not evaluated; the full list, the opt-outs (`McpServerSettings(validateToolInput = false)`, per-tool `ToolRegistrationOptions(validateInputSchema = false)`) and `server.toolInputValidation` are in [docs/custom-types.md](docs/custom-types.md#what-the-server-enforces).
 

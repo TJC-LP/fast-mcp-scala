@@ -502,6 +502,28 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - A `JsonDecoder` you define for the tuple type, or for the case class that contains it
     (`derives JsonDecoder` included), is used as written and keeps zio-json's array shape. Results
     are unchanged: a tuple in an `Out` is still written as a JSON array.
+- **`@Param(schema = ...)` keeps the `description` and `examples` of its `@Param`** (GH #116,
+  TJC-2362; C2.19). The fragment still replaces the derived property, but the description and the
+  examples written next to it are now added to the fragment where it does not state its own; what
+  the fragment says wins, and an empty description adds nothing. Before, both were dropped from
+  the advertised schema, so `@Param(description = "Sort order", schema = Some("""{"type":
+  "string", "enum": [...]}"""))` was advertised without a description. What changes on the wire:
+  such a property gains `description` and `examples` in `tools/list`. The merge is done by the
+  library when the tool is registered, so a server compiled against 1.0.x gets it without a
+  recompile. Validation is unaffected (both keywords are annotations).
+- **A malformed `@Param(schema = ...)` literal is a compile-time error** (GH #116, TJC-2362;
+  C2.21): `@Param(schema) is not valid JSON: ...`, or `@Param(schema) must be a JSON Schema ...`
+  for JSON that is not an object (or `true` / `false`), reported at the argument, on `@Tool`
+  parameters and on the fields of a typed tool's `In`. Before, such a literal compiled, was
+  dropped without a word, and the derived property was advertised (and enforced) in its place.
+  Code that compiled only because the mistake went unnoticed now has to be corrected. A server
+  compiled against 1.0.x with such a literal keeps starting as it did.
+- **A Scaladoc comment used as a description is cleaned up** (GH #116, TJC-2362; C2.20). When
+  `@Tool`, `@Prompt` or `@Resource` has no `description`, the method's Scaladoc is the fallback.
+  The whole raw comment used to go on the wire, `/**`, `*/` and the leading asterisks included.
+  Now it is the first paragraph as one line: the markers are removed, and the text stops at the
+  first blank line, `@tag` or code block. A comment with no text gives no description. Inline
+  markup (`[[links]]`, backticks) is left as written.
 - **`java.time.DayOfWeek` and `java.time.Month` advertise `enum`** (GH #116, TJC-2362; C2.14):
   `{"type":"string","enum":["MONDAY", ...]}` in place of `{"type":"string"}`. zio-json's decoders
   for the two also accept other letter cases (`"monday"`); with input validation on, only the

@@ -35,6 +35,17 @@ object DxAnnotated:
   @Tool(name = Some("day"))
   def day(day: java.time.DayOfWeek, month: java.time.Month): String = s"$day/$month"
 
+object DxFragment:
+
+  @Tool(name = Some("sorted"))
+  def sorted(
+      @Param(
+        description = "Sort order",
+        examples = List("date"),
+        schema = Some("""{"type": "string", "enum": ["relevance", "date"]}""")
+      ) sortBy: String
+  ): String = sortBy
+
 object DxContextual:
 
   @Tool(name = Some("who"))
@@ -255,5 +266,26 @@ class MacroSchemaDxSpec extends AsyncFunSuite:
       assert(promptArguments == List("name"))
       assert(tool == "nobody:3")
       assert(prompt.map(_.content) == List(TextContent("Hello Ada from nobody")))
+    }
+  }
+
+  // ---- C2.19: @Param(schema) keeps the description and examples ----
+
+  test("@Param(schema): description and examples are merged into the fragment, which is enforced") {
+    val server = McpServer("fragment")
+    val _ = server.scanAnnotations[DxFragment.type]
+    val program =
+      for
+        ok <- call(server, "sorted", """{"sortBy":"date"}""")
+        bad <- call(server, "sorted", """{"sortBy":"size"}""")
+      yield (ok, bad)
+    run(program).map { (ok, bad) =>
+      assert(
+        at(inputSchema(server, "sorted"), "properties", "sortBy") == json(
+          """{"type":"string","enum":["relevance","date"],"description":"Sort order","examples":["date"]}"""
+        )
+      )
+      assert(ok == Right("date"))
+      assert(bad.left.exists(_.contains("must be one of: relevance, date")), s"got $bad")
     }
   }

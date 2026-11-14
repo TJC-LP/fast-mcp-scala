@@ -57,7 +57,7 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
 
     val (uri, nameOpt, descOpt, mimeTypeOpt) = MacroUtils.parseResourceParams(resourceAnnot)
     val finalName = nameOpt.orElse(Some(methodName))
-    val finalDesc = descOpt.orElse(methodSym.docstring)
+    val finalDesc = descOpt.orElse(MacroUtils.docDescription(methodSym))
 
     contextParameter("@Resource", methodSym).foreach { name =>
       report.errorAndAbort(
@@ -104,8 +104,8 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
                       case _ => ()
                     }
                   case _ => ()
-                (d.orElse(pSym.docstring), req)
-              case None => (pSym.docstring, true)
+                (d.orElse(MacroUtils.docDescription(pSym)), req)
+              case None => (MacroUtils.docDescription(pSym), true)
 
           '{ ResourceArgument(${ Expr(pSym.name) }, ${ Expr(descOpt) }, ${ Expr(required) }) }
         }

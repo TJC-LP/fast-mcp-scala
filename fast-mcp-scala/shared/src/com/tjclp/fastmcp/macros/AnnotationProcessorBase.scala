@@ -27,7 +27,7 @@ private[macros] trait AnnotationProcessorBase:
     * taken as the registered name (a description-only annotation registers under the method name).
     * A present but non-literal `name` / `description` is a compile-time error (see
     * [[MacroUtils.parseOptionStringLiteral]]) rather than a silent fallback. Falls back to the
-    * method name and its Scaladoc.
+    * method name and to the first paragraph of its Scaladoc ([[MacroUtils.cookDocstring]]).
     */
   protected def nameAndDescription(using Quotes)(
       annot: quotes.reflect.Term,
@@ -51,7 +51,7 @@ private[macros] trait AnnotationProcessorBase:
         }
       case _ => (None, None)
 
-    (maybeName.getOrElse(methodSym.name), maybeDesc.orElse(methodSym.docstring))
+    (maybeName.getOrElse(methodSym.name), maybeDesc.orElse(MacroUtils.docDescription(methodSym)))
 
   /** `FunctionN` / `RefResolver.invokeFunctionWithArgs` ceiling on the number of parameters. */
   protected val MaxParameters: Int = 22
