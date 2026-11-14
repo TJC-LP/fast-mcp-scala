@@ -147,7 +147,8 @@ class JsServerLimitsTest extends AsyncFlatSpec with Matchers:
         bad.status.asInstanceOf[Int] shouldBe 400
         badText should include("-32700")
         badText should include("maxObjectFields")
-        elapsed should be < 2000.0 // generous: a real Bun round trip on a loaded CI runner; the quadratic case takes seconds
+        // Generous: a real Bun round trip on a loaded CI runner; the quadratic case takes seconds.
+        withClue(s"elapsed=$elapsed ms: ") { elapsed should be < 2000.0 }
         deep.status.asInstanceOf[Int] shouldBe 400
         deepText should include("-32700")
         deepText should include("maxDepth")
@@ -175,7 +176,7 @@ class JsServerLimitsTest extends AsyncFlatSpec with Matchers:
       yield
         resp.status.asInstanceOf[Int] shouldBe 200
         text should include("\"20\"")
-        elapsed should be < 5000.0
+        withClue(s"elapsed=$elapsed ms: ") { elapsed should be < 5000.0 }
     }
   }
 

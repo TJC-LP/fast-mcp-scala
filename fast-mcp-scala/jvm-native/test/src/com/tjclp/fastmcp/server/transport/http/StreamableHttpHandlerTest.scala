@@ -9,7 +9,9 @@ import zio.json.*
 import com.tjclp.fastmcp.{*, given}
 import com.tjclp.fastmcp.core.ProgressToken
 import com.tjclp.fastmcp.jsonrpc.JsonRpcMessage
+import com.tjclp.fastmcp.server.ServerClock
 import com.tjclp.fastmcp.server.transport.TransportBackend
+import com.tjclp.fastmcp.testkit.{Eventually, ManualClock}
 
 /** Contracts of the shared streamable-HTTP handler that the socket backend leans on, run on both
   * the JVM and Scala Native (`jvm-native/test`). Drives the handler directly through the neutral
@@ -28,12 +30,13 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
     */
   private def makeHandler(
       grace: Duration = StreamableHttpHandler.UnstartedReplyGrace,
-      register: McpServer[Any] => ZIO[Any, Throwable, Any] = _ => ZIO.unit
+      register: McpServer[Any] => ZIO[Any, Throwable, Any] = _ => ZIO.unit,
+      clock: ServerClock = ServerClock.system
   ): StreamableHttpHandler[Any] =
     val server = McpServer.typed[Any]("HandlerT", "0.1.0", McpServerSettings())
     val _ = runUnsafe(register(server))
     runUnsafe(
-      server.buildRouter.flatMap { router =>
+      server.buildRouterOn(clock).flatMap { router =>
         StreamableHttpHandler.make(
           router,
           server.settings,
@@ -58,23 +61,35 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
   private def storedSession(handler: StreamableHttpHandler[Any], sid: String) =
     runUnsafe(handler.session(sid)).getOrElse(fail(s"session $sid is not stored"))
 
-  /** Poll until `check` holds; fails after ten seconds. */
-  private def eventually(what: String)(check: UIO[Boolean]): Unit =
+  /** Let the unstarted-reply grace of the one reply waiting on `clock` pass: its watchdog counts
+    * the grace in `UnstartedReplyTicks` ticks, each of which it has to be parked in to be woken.
+    * The watchdog is named by the length of its tick: an earlier request's head timer may still
+    * be on the clock, on its way out.
+    */
+  private def passGrace(clock: ManualClock, grace: Duration, ticks: Int = UnstartedReplyTicks): Unit =
+    val tick = tickOf(grace)
     runUnsafe(
-      (ZIO.sleep(20.millis) *> check)
-        .repeatUntil(identity)
-        .timeoutFail(new RuntimeException(s"timed out waiting until $what"))(10.seconds)
-        .unit
+      ZIO
+        .foreachDiscard(1 to ticks)(_ => clock.awaitSleeping(tick) *> clock.advance(tick))
+        .timeoutFail(new RuntimeException("no watchdog was waiting out the grace"))(60.seconds)
     )
+
+  private val UnstartedReplyTicks = StreamableHttpHandler.UnstartedReplyTicks
+
+  private def tickOf(grace: Duration): Duration = grace.dividedBy(UnstartedReplyTicks.toLong)
+
+  /** Is the watchdog of a reply with this `grace` waiting on `clock`? */
+  private def watchdogWaiting(clock: ManualClock, grace: Duration): UIO[Boolean] =
+    ZIO.succeed(clock.sleeping.contains(tickOf(grace).toMillis))
 
   case class HoldArgs(note: Option[String] = None)
   given JsonDecoder[HoldArgs] = DeriveJsonDecoder.gen[HoldArgs]
 
   /** A tool that reports when it started and when it was interrupted. With `progressFirst` it
     * emits a progress notification before it parks, so its reply is a stream; `finishAfter` makes
-    * it return instead of parking for good.
+    * it return, once that effect has completed, instead of parking for good.
     */
-  private final class Held(progressFirst: Boolean, finishAfter: Option[Duration] = None):
+  private final class Held(progressFirst: Boolean, finishAfter: Option[UIO[Unit]] = None):
     val started: Promise[Nothing, Unit] = runUnsafe(Promise.make[Nothing, Unit])
     val stopped: Promise[Nothing, Unit] = runUnsafe(Promise.make[Nothing, Unit])
 
@@ -89,7 +104,7 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
         val progress =
           if progressFirst then ctx.get.sendProgress(ProgressToken.StringToken("t"), 0.5)
           else ZIO.unit
-        val rest = finishAfter.fold[UIO[String]](ZIO.never)(ZIO.sleep(_).as("held done"))
+        val rest = finishAfter.fold[UIO[String]](ZIO.never)(_.as("held done"))
         (progress *> started.succeed(()) *> rest).onInterrupt(stopped.succeed(()))
       }
 
@@ -107,7 +122,8 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
       case other => fail(s"expected an SSE reply, got $other")
 
   test("a reply stream halted before its first pull frees the GET slot, at once or by the grace") {
-    val handler = makeHandler(grace = 300.millis)
+    val clock = new ManualClock
+    val handler = makeHandler(grace = 300.millis, clock = clock)
     val init = runUnsafe(
       handler.post(
         request(
@@ -141,12 +157,14 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
       }
     )
 
+    // Each attempt moves the server's clock on by one tick of the grace, so a watchdog that is
+    // still counting gets there however the halt and the finalizer interleaved.
     val second = runUnsafe(
-      (handler.get(request("GET", getHeaders)) <* ZIO.sleep(20.millis))
-        .repeatUntil(_.status == 200)
-        .timeout(5.seconds)
+      Eventually("a later GET is admitted")(
+        clock.advance(30.millis) *> handler.get(request("GET", getHeaders))
+      )(_.status == 200)
     )
-    second.map(_.status) shouldBe Some(200)
+    second.status shouldBe 200
   }
 
   test("a POST whose header names show a repeated routing header is a header mismatch (400, -32020)") {
@@ -224,89 +242,108 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
   // --- request resources when a reply is never streamed ------------------------------------------
 
   test("a GET reply that is never streamed gives the session's GET slot back") {
-    val handler = makeHandler(grace = 100.millis)
+    val clock = new ManualClock
+    val grace = 100.millis
+    val handler = makeHandler(grace = grace, clock = clock)
     val sid = openSession(handler)
     val getHeaders = Map("accept" -> "text/event-stream", "mcp-session-id" -> sid)
+    def released(what: String): Unit =
+      runUnsafe(Eventually.holds(what)(storedSession(handler, sid).hasActiveGet.map(!_)))
 
     // The handler returns the reply; nothing ever runs its stream (the client left as the
     // response head went out, or the request was interrupted on the way to the backend).
     val first = runUnsafe(handler.get(request("GET", getHeaders)))
     first.status shouldBe 200
-    eventually("the unstarted GET released its slot") {
-      storedSession(handler, sid).hasActiveGet.map(!_)
-    }
+    // One tick short of the grace the slot is still held...
+    passGrace(clock, grace, ticks = UnstartedReplyTicks - 1)
+    runUnsafe(clock.awaitSleeping(tickOf(grace)))
+    runUnsafe(storedSession(handler, sid).hasActiveGet) shouldBe true
+    // ...and the last tick gives it back.
+    passGrace(clock, grace, ticks = 1)
+    released("the unstarted GET released its slot")
 
     // The slot is usable again, and a second reply left unstarted is released the same way.
     runUnsafe(handler.get(request("GET", getHeaders))).status shouldBe 200
-    eventually("the second unstarted GET released its slot") {
-      storedSession(handler, sid).hasActiveGet.map(!_)
-    }
+    passGrace(clock, grace)
+    released("the second unstarted GET released its slot")
 
     // A reply that was given up on must not come back to life: run late, its stream ends at once
     // instead of draining the session's messages without holding the slot.
     val late = runUnsafe(
       framesOf(first).runCollect
-        .timeoutFail(new RuntimeException("a given-up GET stream still ran"))(5.seconds)
+        .timeoutFail(new RuntimeException("a given-up GET stream still ran"))(60.seconds)
     )
     late shouldBe empty
     runUnsafe(storedSession(handler, sid).hasActiveGet) shouldBe false
   }
 
-  /** A clock whose first `sleep` returns at once and whose later ones are real. That is what a
-    * timer sees after the process was frozen for longer than its delay (a stop-the-world pause, a
-    * suspended VM, a paused container): the deadline it was waiting for has already passed when it
-    * runs again, while everything it schedules afterwards takes its normal time.
+  /** A clock whose next `sleep` after [[freezeNext]] returns at once and whose others wait for the
+    * test to move `clock`. That is what a timer sees after the process was frozen for longer than its delay (a
+    * stop-the-world pause, a suspended VM, a paused container): the deadline it was waiting for has
+    * already passed when it runs again, while everything it schedules afterwards takes its normal
+    * time.
     */
-  private final class FrozenOnceClock extends Clock:
-    private val first = new java.util.concurrent.atomic.AtomicBoolean(true)
-    private val live = Clock.ClockLive
-    def currentTime(unit: => java.util.concurrent.TimeUnit)(implicit trace: Trace): UIO[Long] =
-      live.currentTime(unit)
-    def currentTime(unit: => java.time.temporal.ChronoUnit)(implicit
-        trace: Trace,
-        d: DummyImplicit
-    ): UIO[Long] = live.currentTime(unit)
-    def currentDateTime(implicit trace: Trace): UIO[java.time.OffsetDateTime] =
-      live.currentDateTime
-    def instant(implicit trace: Trace): UIO[java.time.Instant] = live.instant
-    def javaClock(implicit trace: Trace): UIO[java.time.Clock] = live.javaClock
-    def localDateTime(implicit trace: Trace): UIO[java.time.LocalDateTime] = live.localDateTime
-    def nanoTime(implicit trace: Trace): UIO[Long] = live.nanoTime
-    def scheduler(implicit trace: Trace): UIO[Scheduler] = live.scheduler
-    def sleep(duration: => Duration)(implicit trace: Trace): UIO[Unit] =
-      if first.compareAndSet(true, false) then ZIO.unit else live.sleep(duration)
+  private final class FrozenOnceClock(clock: ManualClock) extends ServerClock:
+    private val frozen = new java.util.concurrent.atomic.AtomicBoolean(false)
+    def freezeNext(): Unit = frozen.set(true)
+    def monotonicMs(): Long = clock.monotonicMs()
+    // Decided each time the sleep runs, not when the effect is built: a caller may run one
+    // `sleep` value several times.
+    def sleep(duration: Duration): UIO[Unit] =
+      ZIO.suspendSucceed {
+        if frozen.compareAndSet(true, false) then ZIO.unit else clock.sleep(duration)
+      }
 
   test("a process frozen past the grace does not make a reply that is then streamed come back empty") {
     // Antithesis found this by pausing a node for nine seconds just after a reply was built (run
     // 138b4b66187ffc9deaf28072fff5b5d9-66-21): the reply's watchdog saw its whole grace gone when
     // the process ran again, released the reply, and the backend then streamed an empty 200.
-    val handler = makeHandler(grace = 2.seconds)
+    val clock = new ManualClock
+    val freezing = new FrozenOnceClock(clock)
+    val handler = makeHandler(grace = 2.seconds, clock = freezing)
     val sid = openSession(handler)
     val getHeaders = Map("accept" -> "text/event-stream", "mcp-session-id" -> sid)
 
-    val reply = runUnsafe(ZIO.withClock(new FrozenOnceClock)(handler.get(request("GET", getHeaders))))
+    // The freeze hits the watchdog of the GET reply built next.
+    freezing.freezeNext()
+    val reply = runUnsafe(handler.get(request("GET", getHeaders)))
     reply.status shouldBe 200
-    // The backend starts the stream a moment after the freeze ends, as it would after a real one.
-    val outcome = runUnsafe(
-      ZIO.sleep(100.millis) *> framesOf(reply).runCollect.timeout(400.millis)
+    // The freeze used up one tick of the grace and no more: the watchdog is waiting out the next.
+    runUnsafe(
+      clock
+        .awaitSleeping(tickOf(2.seconds))
+        .timeoutFail(new RuntimeException("the watchdog gave the reply up after the freeze"))(
+          60.seconds
+        )
     )
-    // A live GET stream stays open; a reply that was given up on ends at once, empty.
-    outcome shouldBe None
-    runUnsafe(storedSession(handler, sid).hasActiveGet) shouldBe false // the timeout ended the run
+    // The backend starts the stream now, as it would after a real freeze.
+    val streaming = runUnsafe(framesOf(reply).runCollect.forkDaemon)
+    // The stream claimed the reply: its first pull stops the watchdog.
+    runUnsafe(Eventually.holds("the stream has started")(watchdogWaiting(clock, 2.seconds).map(!_)))
+    // A live GET stream stays open; a reply that was given up on would have ended at once, empty.
+    runUnsafe(streaming.poll) shouldBe None
+    runUnsafe(storedSession(handler, sid).hasActiveGet) shouldBe true
+    runUnsafe(streaming.interrupt.unit)
+    runUnsafe(storedSession(handler, sid).hasActiveGet) shouldBe false
     runUnsafe(handler.get(request("GET", getHeaders))).status shouldBe 200
   }
 
   test("a GET stream that was started keeps the slot for as long as it runs") {
-    val handler = makeHandler(grace = 500.millis)
+    val clock = new ManualClock
+    val handler = makeHandler(grace = 500.millis, clock = clock)
     val sid = openSession(handler)
     val getHeaders = Map("accept" -> "text/event-stream", "mcp-session-id" -> sid)
     val first = runUnsafe(handler.get(request("GET", getHeaders)))
     first.status shouldBe 200
+    runUnsafe(clock.awaitSleeping(tickOf(500.millis))) // the reply's watchdog
 
     // A daemon: a plain fork would be interrupted as soon as this `runUnsafe` returned.
     val streaming = runUnsafe(framesOf(first).runDrain.forkDaemon)
+    runUnsafe(
+      Eventually.holds("the stream has started")(watchdogWaiting(clock, 500.millis).map(!_))
+    )
     // Well past the grace: a stream that is being read is never mistaken for an unstarted one.
-    runUnsafe(ZIO.sleep(1500.millis))
+    clock.advanceMs(5_000L)
     runUnsafe(storedSession(handler, sid).hasActiveGet) shouldBe true
     runUnsafe(handler.get(request("GET", getHeaders))).status shouldBe 409
 
@@ -342,7 +379,7 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
     runUnsafe(
       storedSession(handler, sid).outbound
         .offer(JsonRpcMessage.Notification("notifications/tools/list_changed", None)) *>
-        delivered.await.timeoutFail(new RuntimeException("the GET stream never ran"))(10.seconds)
+        delivered.await.timeoutFail(new RuntimeException("the GET stream never ran"))(60.seconds)
     )
     runUnsafe(abandonOf(live))
     runUnsafe(storedSession(handler, sid).hasActiveGet) shouldBe true
@@ -361,24 +398,38 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
       handler.post(request("POST", postHeaders + ("mcp-session-id" -> sid), holdFrame))
     )
     reply shouldBe a[HttpReply.Sse]
-    runUnsafe(held.started.await.timeoutFail(new RuntimeException("tool never started"))(10.seconds))
+    runUnsafe(held.started.await.timeoutFail(new RuntimeException("tool never started"))(60.seconds))
 
     // Nothing runs the stream. The dispatch must not go on for ever with nobody to answer.
     runUnsafe(
       held.stopped.await
-        .timeoutFail(new RuntimeException("the dispatch outlived its unstreamed reply"))(10.seconds)
+        .timeoutFail(new RuntimeException("the dispatch outlived its unstreamed reply"))(60.seconds)
     )
   }
 
   test("a streamed POST reply that is being read is not cut short by the unstarted-reply grace") {
-    val held = new Held(progressFirst = true, finishAfter = Some(1500.millis))
-    val handler = makeHandler(grace = 500.millis, register = _.tool(held.tool))
+    val clock = new ManualClock
+    val finish = runUnsafe(Promise.make[Nothing, Unit])
+    val held = new Held(progressFirst = true, finishAfter = Some(finish.await))
+    val handler = makeHandler(grace = 500.millis, register = _.tool(held.tool), clock = clock)
     val sid = openSession(handler)
     val reply = runUnsafe(
       handler.post(request("POST", postHeaders + ("mcp-session-id" -> sid), holdFrame))
     )
-    // Read at once; the call outlasts the grace several times over and must still be answered.
-    val frames = runUnsafe(framesOf(reply).runCollect).map(_.data).mkString("\n")
+    // The watchdog of the reply nobody has run yet is waiting on the clock.
+    runUnsafe(clock.awaitSleeping(tickOf(500.millis)))
+    // Read it; the first pull stops the watchdog.
+    val reading = runUnsafe(framesOf(reply).runCollect.forkDaemon)
+    runUnsafe(
+      Eventually.holds("the stream has started")(watchdogWaiting(clock, 500.millis).map(!_))
+    )
+    // The call outlasts the grace several times over and must still be answered.
+    clock.advanceMs(5_000L)
+    runUnsafe(reading.poll) shouldBe None
+    val _ = runUnsafe(finish.succeed(()))
+    val frames = runUnsafe(
+      reading.join.timeoutFail(new RuntimeException("the reply never ended"))(60.seconds)
+    ).map(_.data).mkString("\n")
     frames should include("notifications/progress")
     frames should include("held done")
   }
@@ -392,13 +443,13 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
         .post(request("POST", postHeaders + ("mcp-session-id" -> sid), holdFrame))
         .forkDaemon
     )
-    runUnsafe(held.started.await.timeoutFail(new RuntimeException("tool never started"))(10.seconds))
+    runUnsafe(held.started.await.timeoutFail(new RuntimeException("tool never started"))(60.seconds))
     // The client disconnects: the backend interrupts the handler.
     runUnsafe(waiting.interrupt.unit)
     runUnsafe(
       held.stopped.await
         .timeoutFail(new RuntimeException("the dispatch outlived its interrupted request"))(
-          10.seconds
+          60.seconds
         )
     )
   }
@@ -410,11 +461,12 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
     * stay held for as long as the test looks at it.
     */
   private def storeHandler(
-      settings: McpServerSettings = McpServerSettings()
+      settings: McpServerSettings = McpServerSettings(),
+      clock: ServerClock = ServerClock.system
   ): StreamableHttpHandler[Any] =
     val server = McpServer.typed[Any]("StoreT", "0.1.0", settings)
     runUnsafe(
-      server.buildRouter.flatMap { router =>
+      server.buildRouterOn(clock).flatMap { router =>
         StreamableHttpHandler.make(
           router,
           server.settings,
@@ -585,16 +637,37 @@ class StreamableHttpHandlerTest extends AnyFunSuite with Matchers:
   }
 
   test("a peer that already holds the most sessions replaces its own at the cap, not an idle session of another peer") {
-    val handler = storeHandler(McpServerSettings(maxSessions = Some(3)))
+    val clock = new ManualClock
+    val handler = storeHandler(McpServerSettings(maxSessions = Some(3)), clock)
     val small = initialize(handler, Some("198.51.100.20")) // the longest-idle session, no GET
-    Thread.sleep(5)
+    clock.advanceMs(5L)
     val big = List.fill(2)(initialize(handler, Some("203.0.113.7")))
-    Thread.sleep(5)
+    clock.advanceMs(5L)
 
     val next = initialize(handler, Some("203.0.113.7"))
     alive(handler, small) shouldBe true
     alive(handler, next) shouldBe true
     big.count(alive(handler, _)) shouldBe 1
+  }
+
+  test("sessions last seen in the same millisecond: the one used longest ago makes room at the cap") {
+    // The clock never moves, so every session ties on `lastSeen`. The store hands its sessions to
+    // the policy least recently used first, which keeps "the longest idle" one definite session
+    // whatever order the map iterates in. Enough sessions to make an accidental pass unlikely.
+    val cap = 12
+    val handler = storeHandler(McpServerSettings(maxSessions = Some(cap)), new ManualClock)
+    val sids = List.fill(cap)(initialize(handler))
+    // Use them again in an order of the test's choosing: the reverse of their creation.
+    val used = sids.reverse
+    used.foreach(sid => post(handler, pingFrame, Some(sid)).status should not be 404)
+
+    // Each newcomer displaces the session whose last use is the oldest: `used`, in order. (The
+    // stored sessions are looked at through the store, which is not a use.)
+    def stored: Set[String] = sids.filter(sid => runUnsafe(handler.session(sid)).isDefined).toSet
+    used.take(5).zipWithIndex.foreach { (victim, i) =>
+      val _ = initialize(handler)
+      withClue(s"newcomer ${i + 1}: ") { stored shouldBe used.drop(i + 1).toSet }
+    }
   }
 
   test("without a peer address the cap keeps its rules: live GET holders are exempt and the newcomer gets 503") {

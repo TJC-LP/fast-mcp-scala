@@ -7,6 +7,7 @@ import zio.json.ast.Json
 import com.tjclp.fastmcp.core.{Fnv1a, LoggingLevel}
 import com.tjclp.fastmcp.core.wire.{ClientCapabilities, Implementation}
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcErrorObject, JsonRpcMessage, McpError, RequestId}
+import com.tjclp.fastmcp.server.ServerClock
 
 /** Mutable request/connection state owned by a transport.
   *
@@ -68,7 +69,9 @@ final class Session private (
     private val lastSeenRef: java.util.concurrent.atomic.AtomicLong,
     private val activeGetRef: java.util.concurrent.atomic.AtomicBoolean,
     /** `Some(finalizers)` while live; `None` once [[terminate]] has run (the terminated latch). */
-    private val finalizersRef: Ref[Option[Map[String, UIO[Unit]]]]
+    private val finalizersRef: Ref[Option[Map[String, UIO[Unit]]]],
+    /** The clock of [[lastSeen]] and of the early-cancellation window. */
+    private val clock: ServerClock
 ):
 
   /** Set once the transport's reader of [[outbound]] is gone for good ([[closeOutbound]]). A plain
@@ -107,7 +110,24 @@ final class Session private (
     (lastSeenRef.get(), activeGetRef.get())
 
   def touch: UIO[Unit] =
-    ZIO.succeed(lastSeenRef.set(Session.monotonicMs()))
+    ZIO.succeed {
+      lastSeenRef.set(clock.monotonicMs())
+      touchOrderValue = Session.nextTouchOrder()
+    }
+
+  // Not for a request-scoped session (one is built on every 2026-07-28 request and is never
+  // stored, so it has no place in an eviction order and should not pay for the shared counter).
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  @volatile private var touchOrderValue: Long =
+    if isProtocolSession || outboundCapacity > 0 then Session.nextTouchOrder() else 0L
+
+  /** Where this session's last activity (its creation, or its latest [[touch]]) falls among the
+    * activity of all sessions of this process: a larger number is more recent. [[lastSeen]] has
+    * millisecond resolution, so two sessions used within the same millisecond tie on it; the
+    * session stores hand their sessions to the eviction policy in this order, which makes "the
+    * longest idle" one definite session even then (`HttpRequestGuards.pickVictim`).
+    */
+  private[fastmcp] def touchOrder: Long = touchOrderValue
 
   /** At most one standalone GET SSE stream may drain `outbound` — two would round-robin-steal
     * messages. `tryAcquireGet` is an atomic test-and-set (false = a stream is already live, answer
@@ -314,13 +334,13 @@ final class Session private (
     new java.util.concurrent.atomic.AtomicReference(Vector.empty[(RequestId, Long)])
 
   private def rememberEarlyCancel(id: RequestId): Unit =
-    val now = Session.monotonicMs()
+    val now = clock.monotonicMs()
     val _ = earlyCancelled.updateAndGet(entries =>
       (entries.filterNot(_._1 == id) :+ (id -> now)).takeRight(Session.MaxEarlyCancels)
     )
 
   private def takeEarlyCancel(id: RequestId): Boolean =
-    val now = Session.monotonicMs()
+    val now = clock.monotonicMs()
     earlyCancelled
       .getAndUpdate(_.filterNot(_._1 == id))
       .exists((cancelled, at) => cancelled == id && now - at <= Session.EarlyCancelWindowMs)
@@ -410,6 +430,10 @@ object Session:
   private def inboundClosedError(method: String): McpError =
     McpError.internalError(s"Server $method failed: the client closed its input stream")
 
+  private val touchCounter = new java.util.concurrent.atomic.AtomicLong(0L)
+
+  private def nextTouchOrder(): Long = touchCounter.incrementAndGet()
+
   /** How many cancellations of not-yet-registered request ids a session remembers. */
   private[fastmcp] val MaxEarlyCancels: Int = 64
 
@@ -422,7 +446,7 @@ object Session:
     * Scala Native): the clock of [[Session.lastSeen]] and of every "how long idle" comparison in
     * the session stores. Its origin is arbitrary; only differences mean anything.
     */
-  private[fastmcp] def monotonicMs(): Long = java.lang.System.nanoTime() / 1_000_000L
+  private[fastmcp] def monotonicMs(): Long = ServerClock.system.monotonicMs()
 
   /** What [[Session.outbound]] does with a message offered to a full buffer. */
   private enum AtBound:
@@ -447,7 +471,22 @@ object Session:
       clientKey,
       isProtocolSession = false,
       DefaultOutboundCapacity,
-      AtBound.DropOldest
+      AtBound.DropOldest,
+      ServerClock.system
+    )
+
+  /** [[make]] on `clock` instead of the system clock: a test that asserts on idle time or on the
+    * early-cancellation window moves the clock itself.
+    */
+  private[fastmcp] def makeOn(clock: ServerClock, sessionId: String): UIO[Session] =
+    build(
+      sessionId,
+      supportsTasks = true,
+      clientKey = None,
+      isProtocolSession = false,
+      DefaultOutboundCapacity,
+      AtBound.DropOldest,
+      clock
     )
 
   /** The session of a transport that drains [[Session.outbound]] for its whole life (stdio). The
@@ -455,14 +494,19 @@ object Session:
     * the bound: an emitter waits for the writer rather than lose a message. The transport calls
     * [[Session.closeOutbound]] when its writer stops for good.
     */
-  private[fastmcp] def makeDrained(sessionId: String, outboundCapacity: Int): UIO[Session] =
+  private[fastmcp] def makeDrained(
+      sessionId: String,
+      outboundCapacity: Int,
+      clock: ServerClock = ServerClock.system
+  ): UIO[Session] =
     build(
       sessionId,
       supportsTasks = true,
       clientKey = None,
       isProtocolSession = false,
       outboundCapacity,
-      AtBound.BackPressure
+      AtBound.BackPressure,
+      clock
     )
 
   /** A session nothing will ever read [[Session.outbound]] of: one 2026-07-28 HTTP request, a
@@ -472,7 +516,8 @@ object Session:
   private[fastmcp] def makeRequestScoped(
       sessionId: String,
       supportsTasks: Boolean = true,
-      clientKey: Option[String] = None
+      clientKey: Option[String] = None,
+      clock: ServerClock = ServerClock.system
   ): UIO[Session] =
     build(
       sessionId,
@@ -480,7 +525,8 @@ object Session:
       clientKey,
       isProtocolSession = false,
       outboundCapacity = 0,
-      AtBound.DropOldest
+      AtBound.DropOldest,
+      clock
     )
 
   /** A durable legacy streamable-HTTP session, whose id is the client's `Mcp-Session-Id`.
@@ -493,7 +539,8 @@ object Session:
   private[fastmcp] def makeProtocolSession(
       sessionId: String,
       clientKey: Option[String] = None,
-      outboundCapacity: Int = DefaultOutboundCapacity
+      outboundCapacity: Int = DefaultOutboundCapacity,
+      clock: ServerClock = ServerClock.system
   ): UIO[Session] =
     build(
       sessionId,
@@ -501,7 +548,8 @@ object Session:
       clientKey,
       isProtocolSession = true,
       outboundCapacity,
-      AtBound.DropOldest
+      AtBound.DropOldest,
+      clock
     )
 
   private def build(
@@ -510,7 +558,8 @@ object Session:
       clientKey: Option[String],
       isProtocolSession: Boolean,
       outboundCapacity: Int,
-      atBound: AtBound
+      atBound: AtBound,
+      clock: ServerClock
   ): UIO[Session] =
     // One effect for the queue, then a single synchronous step for everything else: a 2026-07-28
     // request builds a Session of its own, so a dozen chained `Ref.make`s here are a dozen
@@ -549,9 +598,10 @@ object Session:
           FiberRef.unsafe.make(Option.empty[RequestContext]),
           FiberRef.unsafe.make(Option.empty[RequestId]),
           FiberRef.unsafe.make(Option.empty[Ref[Map[String, Int]]]),
-          new java.util.concurrent.atomic.AtomicLong(monotonicMs()),
+          new java.util.concurrent.atomic.AtomicLong(clock.monotonicMs()),
           new java.util.concurrent.atomic.AtomicBoolean(false),
-          Ref.unsafe.make(Option(Map.empty[String, UIO[Unit]]))
+          Ref.unsafe.make(Option(Map.empty[String, UIO[Unit]])),
+          clock
         )
       }
     }

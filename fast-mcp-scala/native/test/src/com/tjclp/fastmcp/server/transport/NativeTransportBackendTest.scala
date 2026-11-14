@@ -52,13 +52,15 @@ class NativeTransportBackendTest extends AnyFunSuite with Matchers:
         )
         _ <- outQ.take // the initialize reply was emitted before EOF completed the loop
         // The drainer is interrupted at EOF: an outbound push after loop end must NOT be emitted.
+        // No wait is needed to see that: the loop closed the outbound channel before it returned
+        // (`Session.closeOutbound`), so this message is discarded when it is sent, and everything
+        // queued earlier was written before the close.
         _ <- session.send(com.tjclp.fastmcp.jsonrpc.JsonRpcMessage.Notification("post/eof", None))
-        _ <- ZIO.sleep(200.millis)
         leaked <- outQ.poll
       yield leaked
 
     val leaked = runUnsafe(
-      program.timeoutFail(new RuntimeException("stdio loop did not terminate on EOF"))(10.seconds)
+      program.timeoutFail(new RuntimeException("stdio loop did not terminate on EOF"))(60.seconds)
     )
     leaked shouldBe None
   }
@@ -70,17 +72,19 @@ class NativeTransportBackendTest extends AnyFunSuite with Matchers:
         router <- server.buildRouter
         session <- Session.make("stdio-shutdown")
         inQ <- Queue.unbounded[String] // never closed — the loop would run forever
+        answered <- Promise.make[Nothing, Unit]
         loop <- StdioLoop
-          .run(router, session, ZStream.fromQueue(inQ), _ => ZIO.unit)
+          .run(router, session, ZStream.fromQueue(inQ), _ => answered.succeed(()).unit)
           .fork
         _ <- inQ.offer(initFrame)
-        _ <- ZIO.sleep(100.millis)
+        // The loop is up and reading: it has answered `initialize`.
+        _ <- answered.await
         exit <- loop.interrupt
       yield exit
 
     val exit = runUnsafe(
       program.timeoutFail(new RuntimeException("stdio loop did not stop on interruption"))(
-        10.seconds
+        60.seconds
       )
     )
     exit.isInterrupted shouldBe true

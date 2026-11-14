@@ -6,6 +6,7 @@ import zio.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.testkit.Eventually
 import com.tjclp.fastmcp.core.{TaskSupport, Tasks}
 import com.tjclp.fastmcp.core.wire.Implementation
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, RequestId}
@@ -143,18 +144,16 @@ class TaskTransportGuardTest extends AnyFunSuite with Matchers:
   test("notifications/cancelled racing a task-augmented legacy call leaves no task behind") {
     val gate = runUnsafe(Promise.make[Nothing, Unit])
     val latch = runUnsafe(Promise.make[Nothing, Unit])
-    // Hold the create after admission until the creating fiber has a pending interrupt (bounded
-    // by ~5 s so a broken cancel path fails the test instead of hanging it).
-    def awaitPendingInterrupt(n: Int): UIO[Unit] =
-      if n <= 0 then ZIO.unit
-      else
-        ZIO.descriptorWith(d =>
-          if d.interrupters.nonEmpty then ZIO.unit
-          else ZIO.sleep(5.millis) *> awaitPendingInterrupt(n - 1)
+    // Hold the create after admission until the creating fiber has a pending interrupt (bounded,
+    // so a broken cancel path fails the test instead of hanging it).
+    val awaitPendingInterrupt: UIO[Unit] =
+      Eventually
+        .holds("the creating fiber has a pending interrupt")(
+          ZIO.descriptorWith(d => ZIO.succeed(d.interrupters.nonEmpty))
         )
+        .ignore
     val hook: String => UIO[Unit] =
-      stage =>
-        if stage == "registered" then latch.succeed(()) *> awaitPendingInterrupt(1000) else ZIO.unit
+      stage => if stage == "registered" then latch.succeed(()) *> awaitPendingInterrupt else ZIO.unit
     val (router, tm) = build(TaskSettings(enabled = true), gate, hook)
     try
       val session = initialized(router, "cancel-race")
@@ -180,9 +179,7 @@ class TaskTransportGuardTest extends AnyFunSuite with Matchers:
           _ <- latch.await
           // The dispatcher forks the pipeline BEFORE tracking it: wait until the id is tracked so
           // the cancellation cannot outrun `trackInflight`.
-          _ <- (ZIO.sleep(5.millis) *> session.inflightIds.map(_.contains(id)))
-            .repeatUntil(identity)
-            .timeoutFail(new RuntimeException("request never tracked"))(10.seconds)
+          _ <- Eventually.holds("the request is tracked")(session.inflightIds.map(_.contains(id)))
           // cancelInflight awaits the pipeline fiber, which is parked in the hook until it sees
           // the interrupt — so the cancel must run concurrently with the create.
           cancel <- router.dispatch(session, cancelled).fork
@@ -235,9 +232,7 @@ class TaskTransportGuardTest extends AnyFunSuite with Matchers:
       // The released task no longer exists for anyone, and exactly its fiber was interrupted.
       runUnsafe(tm.get(taskId, Some("terminating"))) shouldBe None
       runUnsafe(
-        (ZIO.sleep(10.millis) *> interrupted.get)
-          .repeatUntil(_ >= 1)
-          .timeoutFail(new RuntimeException("released task was not interrupted"))(10.seconds)
+        Eventually("the released task is interrupted")(interrupted.get)(_ >= 1)
       ) shouldBe 1
       // Finalizers ran exactly once: terminating again is a harmless no-op.
       runUnsafe(session.terminate)
@@ -292,9 +287,7 @@ class TaskTransportGuardTest extends AnyFunSuite with Matchers:
         for
           fiber <- router.dispatch(session, call).fork
           _ <- latch.await
-          _ <- (ZIO.sleep(5.millis) *> session.inflightIds.map(_.contains(id)))
-            .repeatUntil(identity)
-            .timeoutFail(new RuntimeException("request never tracked"))(10.seconds)
+          _ <- Eventually.holds("the request is tracked")(session.inflightIds.map(_.contains(id)))
           registered <- tm.stats
           _ <- ZIO.succeed(registered.total shouldBe 1)
           // terminate: latches, interrupts the in-flight pipeline fiber, runs the release hook

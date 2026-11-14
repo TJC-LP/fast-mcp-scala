@@ -31,7 +31,7 @@ class SkillsStdioTranscriptTest extends AnyFunSuite with Matchers:
         _ <- inQ.shutdown
         _ <- fiber.interrupt
       yield ()
-    runUnsafe(program.timeoutFail(new RuntimeException("stdio transcript timed out"))(30.seconds))
+    runUnsafe(program.timeoutFail(new RuntimeException("stdio transcript timed out"))(60.seconds))
 
   test("legacy transcript: initialize → skills/list → skills/get → resources/read → resources/directory/read") {
     val server = McpServer("StdioSkills")

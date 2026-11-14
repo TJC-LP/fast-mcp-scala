@@ -8,7 +8,7 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.wire.{CompleteRequestParams, Completion, Implementation}
 import com.tjclp.fastmcp.core.skills.{McpSkill, SkillError}
 import com.tjclp.fastmcp.server.manager.*
-import com.tjclp.fastmcp.server.router.{McpRouter, RouterBuilder}
+import com.tjclp.fastmcp.server.router.{McpRouter, RouterBuilder, SchemaValidator, ServerHooks}
 import com.tjclp.fastmcp.server.skills.{SkillProvider, SkillRegistry}
 import com.tjclp.fastmcp.server.transport.{HttpTransportBackend, StdioLogging, TransportBackend}
 
@@ -176,12 +176,24 @@ final class McpServer[R](
     * and interrupt running tasks on shutdown.
     */
   private[fastmcp] def buildRouterWithTasks: IO[Throwable, (McpRouter[R], Option[TaskManager[R]])] =
+    buildRouterWithTasksOn(ServerClock.system)
+
+  /** [[buildRouter]] on `clock`: the router, the sessions its transports build and the task manager
+    * all read it. For tests that move time themselves (CONTRIBUTING.md, "Tests and time").
+    */
+  private[fastmcp] def buildRouterOn(clock: ServerClock): IO[Throwable, McpRouter[R]] =
+    buildRouterWithTasksOn(clock).map(_._1)
+
+  private[fastmcp] def buildRouterWithTasksOn(
+      clock: ServerClock
+  ): IO[Throwable, (McpRouter[R], Option[TaskManager[R]])] =
     val taskMgr: UIO[Option[TaskManager[R]]] =
       if settings.tasks.enabled then
-        TaskManager.make[R](settings.tasks, backend.randomId()).map(Some(_))
+        TaskManager.make[R](settings.tasks, backend.randomId(), clock).map(Some(_))
       else ZIO.none
     taskMgr.map { tm =>
-      val router = RouterBuilder.build[R](
+      val router = RouterBuilder.buildOn[R](
+        clock = clock,
         serverInfo = Implementation(name = name, version = version),
         instructions = settings.instructions,
         toolManager = toolManager,
@@ -190,6 +202,9 @@ final class McpServer[R](
         settings = settings,
         taskManager = tm,
         completionHandler = completionRef.get(),
+        validator = SchemaValidator.permissive,
+        extraMiddlewares = Nil,
+        hooks = ServerHooks.noop[R],
         skillRegistry = Some(skillRegistry)
       )
       (router, tm)

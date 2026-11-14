@@ -12,6 +12,7 @@ import com.tjclp.fastmcp.core.{TaskSupport, Tasks, ToolInputSchema}
 import com.tjclp.fastmcp.jsonrpc.JsonRpcMessage
 import com.tjclp.fastmcp.server.TaskSettings
 import com.tjclp.fastmcp.server.router.Session
+import com.tjclp.fastmcp.testkit.Eventually
 import com.tjclp.fastmcp.server.transport.JsTransportBackend.given
 
 /** Bun answers a legacy session's standalone GET with 405, so nothing ever reads the session's
@@ -57,9 +58,9 @@ class JsSessionOutboundTest extends AsyncFlatSpec with Matchers:
       replies <- ZIO.foreach((1 to calls).toList)(i =>
         MessageLoop.handleFrame(router, session, call(i + 1)).map(_.getOrElse(""))
       )
-      _ <- (ZIO.sleep(10.millis) *> tm.stats)
-        .repeatUntil(stats => stats.total == calls && stats.running == 0)
-        .timeoutFail(new RuntimeException("tasks never completed"))(15.seconds)
+      _ <- Eventually(s"all $calls tasks are terminal")(tm.stats)(stats =>
+        stats.total == calls && stats.running == 0
+      )
     yield replies
 
   "A Bun legacy HTTP session" should "keep none of the messages its tasks emit outside a request" in {
@@ -84,9 +85,7 @@ class JsSessionOutboundTest extends AsyncFlatSpec with Matchers:
         seen <- Ref.make(List.empty[JsonRpcMessage])
         drainer <- (ZIO.sleep(2.millis) *> session.outbound.take.flatMap(m => seen.update(m :: _))).forever.fork
         _ <- completedTasks(session, calls = 20)
-        received <- (ZIO.sleep(10.millis) *> seen.get)
-          .repeatUntil(_.size >= 20)
-          .timeoutFail(new RuntimeException("task status notifications were lost"))(15.seconds)
+        received <- Eventually("all 20 task status notifications are read")(seen.get)(_.size >= 20)
         _ <- drainer.interrupt
       yield received
     ).map { received =>

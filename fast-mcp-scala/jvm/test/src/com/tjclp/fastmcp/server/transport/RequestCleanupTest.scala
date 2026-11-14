@@ -9,6 +9,7 @@ import zio.*
 import zio.http.{Header, Path, Request, Status, URL}
 
 import com.tjclp.fastmcp.server.*
+import com.tjclp.fastmcp.testkit.Eventually
 import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 import com.tjclp.fastmcp.server.transport.http.{HttpReply, HttpRequest, StreamableHttpHandler}
 
@@ -68,13 +69,11 @@ class RequestCleanupTest extends AnyFunSuite with Matchers:
   /** Poll rather than sleep-then-assert: cleanup settles at its own pace. */
   private def awaitRootsSettle(before: Int, tolerance: Int = 5): Int =
     runUnsafe(
-      (ZIO.sleep(25.millis) *> Fiber.roots.map(_.size))
-        .repeatUntil(_ - before <= tolerance)
-        .timeout(10.seconds)
-        .flatMap {
-          case Some(settled) => ZIO.succeed(settled)
-          case None => Fiber.roots.map(_.size)
-        }
+      Eventually(s"root fibers settle within $tolerance of $before", 10.seconds)(
+        Fiber.roots.map(_.size)
+      )(_ - before <= tolerance)
+        // Not settled: hand the count back, the caller's assertion reports it.
+        .catchAll(_ => Fiber.roots.map(_.size))
     )
 
   test("subscriptions/listen: no fiber survives a handler interrupted along the way or a reply that is never streamed") {

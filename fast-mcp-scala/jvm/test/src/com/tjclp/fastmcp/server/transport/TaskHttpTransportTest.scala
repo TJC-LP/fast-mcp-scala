@@ -10,7 +10,11 @@ import zio.json.ast.Json
 
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.*
+import com.tjclp.fastmcp.core.wire.Implementation
 import com.tjclp.fastmcp.server.*
+import com.tjclp.fastmcp.server.manager.TaskManager
+import com.tjclp.fastmcp.server.router.{RouterBuilder, SchemaValidator, ServerHooks}
+import com.tjclp.fastmcp.testkit.{Await, ManualClock}
 import com.tjclp.fastmcp.server.transport.JvmTransportBackend.given
 
 /** The task lifecycle over streamable HTTP, end to end through the in-memory routes harness —
@@ -25,10 +29,10 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
 
     @Tool(
       name = Some("slow"),
-      description = Some("Completes after a beat"),
+      description = Some("Completes by itself, after its task handle was returned"),
       taskSupport = Some("optional")
     )
-    def slow(): ZIO[Any, Throwable, String] = ZIO.sleep(200.millis).as("slow done")
+    def slow(): ZIO[Any, Throwable, String] = ZIO.yieldNow.as("slow done")
 
     @Tool(
       name = Some("must-task"),
@@ -55,7 +59,7 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     def brokenTask(): String = throw new RuntimeException("task boom")
 
     @Tool(name = Some("blocky"), description = Some("Long-running"), taskSupport = Some("optional"))
-    def blocky(): ZIO[Any, Throwable, String] = ZIO.sleep(2.seconds).as("blocky")
+    def blocky(): ZIO[Any, Throwable, String] = ZIO.never.as("blocky")
 
   case class ChattyArgs(msg: Option[String] = None)
   given JsonDecoder[ChattyArgs] = DeriveJsonDecoder.gen[ChattyArgs]
@@ -63,6 +67,9 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
   /** Sends progress + a log AFTER its creating POST's SSE stream has closed — the regression net
     * for the per-request queue shutdown interrupting task fibers that inherited it as their sink.
     */
+  private val chattyMaySpeak: Promise[Nothing, Unit] =
+    Unsafe.unsafe(implicit u => Promise.unsafe.make[Nothing, Unit](FiberId.None))
+
   private val chattyTool = McpTool
     .withSchema[ChattyArgs, String](
       name = "chatty",
@@ -70,7 +77,7 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
       description = Some("Emits progress and a log mid-task")
     )
     .contextual { (_, ctx) =>
-      ZIO.sleep(400.millis) *>
+      chattyMaySpeak.await *>
         ctx.get.sendProgress(ProgressToken.StringToken("t"), 0.5) *>
         ctx.get.sendLogMessage(LoggingLevel.Info, Json.Str("mid-task")).as("chatty done")
     }
@@ -89,7 +96,9 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
       stateless: Boolean = false,
       maxConcurrentTotal: Int = 1024,
       maxStoredPerOwner: Int = 256,
-      minResultRetentionMs: Long = 30_000L
+      minResultRetentionMs: Long = 30_000L,
+      clock: ServerClock = ServerClock.system,
+      checkpoint: String => UIO[Unit] = _ => ZIO.unit
   ): Routes[Any, Response] =
     val server = McpServer.typed[Any](
       "TaskT",
@@ -107,11 +116,35 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
       )
     )
     val _ = server.scanAnnotations[TaskServer.type]
+    // The router `McpServer.buildRouterOn(clock)` builds, with a task manager that also reports
+    // the checkpoints a test waits on.
+    val tasks = TaskManager.makeUnsafe[Any](
+      server.settings.tasks,
+      JvmTransportBackend.randomId(),
+      checkpoint,
+      clock
+    )
     runUnsafe(
       server.tool(chattyTool) *>
-        server.buildRouter.flatMap(r =>
-          JvmHttpBackend.httpRoutes(r, server.settings, ZEnvironment.empty)
-        )
+        ZIO
+          .succeed(
+            RouterBuilder.buildOn[Any](
+              clock = clock,
+              serverInfo = Implementation(name = server.name, version = server.version),
+              instructions = server.settings.instructions,
+              toolManager = server.toolManager,
+              promptManager = server.promptManager,
+              resourceManager = server.resourceManager,
+              settings = server.settings,
+              taskManager = Some(tasks),
+              completionHandler = None,
+              validator = SchemaValidator.permissive,
+              extraMiddlewares = Nil,
+              hooks = ServerHooks.noop[Any],
+              skillRegistry = Some(server.skillRegistry)
+            )
+          )
+          .flatMap(r => JvmHttpBackend.httpRoutes(r, server.settings, ZEnvironment.empty))
     )
 
   private def run(routes: Routes[Any, Response], req: Request): Response =
@@ -185,11 +218,9 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
       taskId: String,
       status: String
   ): String =
-    runUnsafe(
-      (ZIO.sleep(50.millis) *> ZIO.attempt(bodyOf(post(routes, tasksGet(90, taskId), Some(sid)))))
-        .repeatUntil(_.contains(s""""status":"$status""""))
-        .timeoutFail(new RuntimeException(s"task $taskId never reached $status"))(15.seconds)
-    )
+    Await.until(s"task $taskId reaches $status")(
+      bodyOf(post(routes, tasksGet(90, taskId), Some(sid)))
+    )(_.contains(s""""status":"$status""""))
 
   test("initialize advertises the tasks capability when enabled") {
     val routes = buildRoutes()
@@ -339,9 +370,12 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     val routes = buildRoutes()
     val sid = initSession(routes)
     // bodyOf drains the SSE response, which ends the stream and fires its finalizer
-    // (dispatch interrupt + request-queue shutdown) while the task is still sleeping.
+    // (dispatch interrupt + request-queue shutdown) while the task is still waiting to speak.
     val created = bodyOf(post(routes, augmentedCall(50, "chatty"), Some(sid)))
     val taskId = extractTaskId(created)
+    bodyOf(post(routes, tasksGet(90, taskId), Some(sid))) should include(""""status":"working"""")
+    // Only now, with its POST stream closed for certain, does the task emit.
+    val _ = runUnsafe(chattyMaySpeak.succeed(()))
     pollUntil(routes, sid, taskId, "completed")
     val result = bodyOf(post(routes, tasksResult(51, taskId), Some(sid)))
     result should include("chatty done")
@@ -450,18 +484,23 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
   }
 
   test("a parked tasks/result waiter is answered when the task is cancelled") {
-    val routes = buildRoutes()
+    val waiting = runUnsafe(Promise.make[Nothing, Unit])
+    val routes = buildRoutes(checkpoint =
+      stage => if stage == "result-waiting" then waiting.succeed(()).unit else ZIO.unit
+    )
     val sid = initSession(routes)
     val taskId = extractTaskId(bodyOf(post(routes, augmentedCall(73, "blocky"), Some(sid))))
     val result = runUnsafe(
       for
         waiter <- ZIO.attemptBlocking(bodyOf(post(routes, tasksResult(74, taskId), Some(sid)))).fork
-        _ <- ZIO.sleep(300.millis) // let the waiter park on the task promise
+        // The request has found its task and waits for an outcome only the cancel below can give
+        // it (`blocky` never finishes).
+        _ <- waiting.await
         cancelled <- ZIO.attemptBlocking(bodyOf(post(routes, tasksCancel(75, taskId), Some(sid))))
         _ = cancelled should include(""""status":"cancelled"""")
         body <- waiter.join.timeoutFail(
           new RuntimeException("parked tasks/result was never answered after tasks/cancel")
-        )(10.seconds)
+        )(60.seconds)
       yield body
     )
     withClue(s"parked tasks/result body: <$result> ") {
@@ -472,19 +511,28 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
   }
 
   test("a parked tasks/result waiter is answered when the task's TTL expires") {
-    val routes = buildRoutes()
+    val clock = new ManualClock
+    val waiting = runUnsafe(Promise.make[Nothing, Unit])
+    val routes = buildRoutes(
+      clock = clock,
+      checkpoint = stage => if stage == "result-waiting" then waiting.succeed(()).unit else ZIO.unit
+    )
     val sid = initSession(routes)
-    // ttl 300 ms on a 2 s tool: the sweeper removes the entry and interrupts the fiber while the
-    // waiter is parked. The waiter must get a frame, not an EOF.
+    // ttl 300 ms on a tool that never finishes: the sweeper removes the entry and interrupts the
+    // fiber while the waiter is parked. The waiter must get a frame, not an EOF.
     val created = bodyOf(post(routes, augmentedCallTtl(76, "blocky", 300L), Some(sid)))
     created should include(""""ttl":300""")
     val taskId = extractTaskId(created)
     val result = runUnsafe(
-      ZIO
-        .attemptBlocking(bodyOf(post(routes, tasksResult(77, taskId), Some(sid))))
-        .timeoutFail(
+      for
+        waiter <- ZIO.attemptBlocking(bodyOf(post(routes, tasksResult(77, taskId), Some(sid)))).fork
+        _ <- waiting.await
+        // The TTL passes on the server's clock, with the waiter in place.
+        _ <- clock.advance(300.millis)
+        body <- waiter.join.timeoutFail(
           new RuntimeException("parked tasks/result was never answered after TTL expiry")
-        )(10.seconds)
+        )(60.seconds)
+      yield body
     )
     withClue(s"tasks/result body during TTL expiry: <$result> ") {
       result should include(""""id":77""")

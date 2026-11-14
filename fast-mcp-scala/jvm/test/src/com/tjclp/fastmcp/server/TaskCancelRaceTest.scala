@@ -5,6 +5,7 @@ import org.scalatest.matchers.should.Matchers
 import zio.*
 
 import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.testkit.Eventually
 import com.tjclp.fastmcp.core.TaskStatus
 import com.tjclp.fastmcp.server.manager.{TaskCancelledError, TaskManager, TaskScope}
 
@@ -34,10 +35,10 @@ class TaskCancelRaceTest extends AnyFunSuite with Matchers:
       created <- tm.create(scope, None, ZIO.never, _ => ZIO.unit).orDie
       id = created.task.taskId
       _ <- tm.cancel(id, None)
-      settled <- (ZIO.sleep(2.millis) *> tm.get(id, None))
-        .repeatUntil(_.forall(_.status == TaskStatus.Cancelled))
-        .timeout(5.seconds)
-      result <- tm.result(id, None).either.timeout(5.seconds)
+      settled <- Eventually("the task shows as cancelled")(tm.get(id, None))(
+        _.forall(_.status == TaskStatus.Cancelled)
+      ).option
+      result <- tm.result(id, None).either.timeout(60.seconds)
       stats <- tm.stats
     yield (settled, result) match
       case (Some(_), Some(Left(_: TaskCancelledError))) => None

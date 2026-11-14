@@ -7,7 +7,7 @@ import zio.stream.*
 
 import com.tjclp.fastmcp.core.{ErrorCodes, Protocol}
 import com.tjclp.fastmcp.jsonrpc.{JsonRpcMessage, McpError, RequestId}
-import com.tjclp.fastmcp.server.McpServerSettings
+import com.tjclp.fastmcp.server.{McpServerSettings, ServerClock}
 import com.tjclp.fastmcp.server.router.{McpRouter, RequestContext, RequestHeaders, Session}
 import com.tjclp.fastmcp.server.transport.{
   HttpHeaderValidation,
@@ -208,7 +208,8 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
   def evictIdleSessions: UIO[Unit] =
     store match
       case None => ZIO.unit
-      case Some(sessions) => StreamableHttpHandler.evictIdleSessions(sessions, settings)
+      case Some(sessions) =>
+        StreamableHttpHandler.evictIdleSessions(sessions, settings, router.clock)
 
   /** The stored legacy session with this id, if any (test seam). */
   private[fastmcp] def session(id: String): UIO[Option[Session]] =
@@ -222,7 +223,11 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
 
   private def legacyStatelessDispatch(message: JsonRpcMessage): URIO[R, HttpReply] =
     for
-      session <- Session.makeRequestScoped("stateless", supportsTasks = false)
+      session <- Session.makeRequestScoped(
+        "stateless",
+        supportsTasks = false,
+        clock = router.clock
+      )
       // Legacy stateless compatibility mode starts ready without a handshake.
       _ <- session.markInitialized
       reply <- router.dispatch(session, message)
@@ -299,7 +304,8 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       session <- Session.makeProtocolSession(
         id,
         req.clientKey,
-        settings.limits.maxOutboundMessages
+        settings.limits.maxOutboundMessages,
+        router.clock
       )
       // A client that goes away before the reply is built never learns the id: drop the session.
       reply <- ZIO.uninterruptibleMask { restore =>
@@ -376,13 +382,15 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         ZIO.succeed((Right(None), m + (id -> session)))
       else
         ZIO
-          .foreach(m.values.toList) { s =>
+          // Least recently used first: sessions that tie on `lastSeen` (one millisecond) are
+          // then told apart by the order they were used in, not by the map's iteration order.
+          .foreach(m.values.toList.sortBy(_.touchOrder)) { s =>
             (s.lastSeen zip s.hasActiveGet).map { (seen, live) =>
               HttpRequestGuards.StoredSession(s.sessionId, seen, live, s.clientKey)
             }
           }
           .map { snapshot =>
-            val now = Session.monotonicMs()
+            val now = router.clock.monotonicMs()
             val idleMs = settings.sessionIdleTimeout.map(_.toMillis)
             HttpRequestGuards.pickVictim(snapshot, session.clientKey, now, idleMs) match
               case Some(victim) => (Right(Some(m(victim))), (m - victim) + (id -> session))
@@ -538,7 +546,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         for
           // An offer into a queue that was shut down meanwhile interrupts this fiber by itself.
           // `interruptible` for the same reason as the dispatch fiber: the timer must be stoppable.
-          timer <- (ZIO.sleep(interval) *> reqQueue.offer(
+          timer <- (router.clock.sleep(interval) *> reqQueue.offer(
             MessageLoop.KeepAliveSentinel
           )).interruptible.forkDaemon
           first <- restore(reqQueue.take).onInterrupt(signalInterrupt(timer))
@@ -599,7 +607,11 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
             // Peer address of the request — the default owner key for bearer-task buckets
             // (`TaskOwnerKey.Transport`); behind a reverse proxy use `TaskOwnerKey.Custom`.
             Session
-              .makeRequestScoped(s"request-${rpc.id.toString}", clientKey = req.clientKey)
+              .makeRequestScoped(
+                s"request-${rpc.id.toString}",
+                clientKey = req.clientKey,
+                clock = router.clock
+              )
               .flatMap(session => streamRequest(session, rpc, isNew = false, Some(context)))
       case _: JsonRpcMessage.Invalid =>
         val failure: JsonRpcMessage = JsonRpcMessage.Failure(
@@ -614,7 +626,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
             ZIO.succeed(HttpReply.Json(status, failure.toJson))
           case Right(_) =>
             Session
-              .makeRequestScoped("notification")
+              .makeRequestScoped("notification", clock = router.clock)
               .flatMap(session => router.dispatch(session, notification))
               .as(HttpReply.Empty(202))
       case _ =>
@@ -697,7 +709,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       // more than a backend needs to start the stream.
       // Interruptible only while it sleeps: once it has claimed the reply it finishes the release.
       val tick = unstartedReplyGrace.dividedBy(UnstartedReplyTicks.toLong).max(1.millis)
-      val grace = ZIO.sleep(tick).repeatN(UnstartedReplyTicks - 1)
+      val grace = router.clock.sleep(tick).repeatN(UnstartedReplyTicks - 1)
       (grace.interruptible *> giveUp).uninterruptible.forkDaemon.map { watchdog =>
         val stopWatchdog = signalInterrupt(watchdog)
         // Decided at the first pull: this run owns the reply, or the reply is gone.
@@ -839,13 +851,21 @@ private[fastmcp] object StreamableHttpHandler:
       store: Ref[Map[String, Session]],
       settings: McpServerSettings
   ): UIO[Unit] =
+    evictIdleSessions(store, settings, ServerClock.system)
+
+  /** As above, on `clock`: the one the sessions in `store` were built on ([[McpRouter.clock]]). */
+  private[fastmcp] def evictIdleSessions(
+      store: Ref[Map[String, Session]],
+      settings: McpServerSettings,
+      clock: ServerClock
+  ): UIO[Unit] =
     settings.sessionIdleTimeout match
       case None => ZIO.unit
       case Some(timeout) =>
         val timeoutMs = timeout.toMillis
         val sweep =
           for
-            now <- ZIO.succeed(Session.monotonicMs())
+            now <- ZIO.succeed(clock.monotonicMs())
             all <- store.get
             expired <- ZIO.filter(all.values.toList) { s =>
               (s.lastSeen zip s.hasActiveGet).map((seen, live) => !live && now - seen > timeoutMs)
@@ -856,7 +876,9 @@ private[fastmcp] object StreamableHttpHandler:
               ZIO.foreachDiscard(expired)(_.terminate)).uninterruptible
           yield ()
         val interval = Duration.fromMillis(math.max(timeoutMs / 4, 1000L))
-        sweep.repeat(Schedule.spaced(interval)).unit
+        // One sweep, then one after each `interval` on `clock`: what `repeat(Schedule.spaced(_))`
+        // did, with the wait on the injected clock.
+        sweep *> (clock.sleep(interval) *> sweep).forever
 
   /** First-party error boundary: any non-interrupt Cause (a defect, or a failure no handler mapped)
     * becomes `onFailure` — a JSON-RPC 500 with a fixed message — and the full cause is logged

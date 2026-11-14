@@ -51,7 +51,7 @@ private[fastmcp] object StdioLoop:
       drainTimeout: Duration
   ): ZIO[R, Throwable, Unit] =
     for
-      session <- Session.makeDrained("stdio", router.limits.maxOutboundMessages)
+      session <- Session.makeDrained("stdio", router.limits.maxOutboundMessages, router.clock)
       // One writer owns stdout; both replies and server-pushed outbound go through it so lines
       // never interleave.
       outLock <- Semaphore.make(1)

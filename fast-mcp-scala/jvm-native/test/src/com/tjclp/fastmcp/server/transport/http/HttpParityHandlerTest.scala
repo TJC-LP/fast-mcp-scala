@@ -468,7 +468,7 @@ class HttpParityHandlerTest extends AnyFunSuite with Matchers:
       }
       .provideLayer(Runtime.addLogger(captured.logger))
     val fiber = runUnsafe(call.forkDaemon)
-    runUnsafe(held.started.await.timeoutFail(new RuntimeException("hold never started"))(10.seconds))
+    runUnsafe(held.started.await.timeoutFail(new RuntimeException("hold never started"))(60.seconds))
     (sid, fiber)
 
   test("a request whose session is deleted mid-flight gets no reply, and the server says so at WARN") {
@@ -478,7 +478,7 @@ class HttpParityHandlerTest extends AnyFunSuite with Matchers:
     val (sid, call) = startHeldCall(handler, held, captured)
     handle(handler, request("DELETE", Map("mcp-session-id" -> sid))).status shouldBe 200
     val body = runUnsafe(
-      call.join.timeoutFail(new RuntimeException("the reply stream never ended"))(10.seconds)
+      call.join.timeoutFail(new RuntimeException("the reply stream never ended"))(60.seconds)
     )
     // The stream ended without the call's result or an error for it.
     body should not include "client-chosen-id-7"
@@ -505,7 +505,7 @@ class HttpParityHandlerTest extends AnyFunSuite with Matchers:
     )
     cancel.status shouldBe 202
     val body = runUnsafe(
-      call.join.timeoutFail(new RuntimeException("the reply stream never ended"))(10.seconds)
+      call.join.timeoutFail(new RuntimeException("the reply stream never ended"))(60.seconds)
     )
     body should not include "client-chosen-id-7"
     captured.warnings shouldBe Nil

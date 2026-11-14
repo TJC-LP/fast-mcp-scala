@@ -8,7 +8,7 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.core.wire.*
 import com.tjclp.fastmcp.jsonrpc.*
 import com.tjclp.fastmcp.jsonrpc.JsonRpcMessage.*
-import com.tjclp.fastmcp.server.LimitSettings
+import com.tjclp.fastmcp.server.{LimitSettings, ServerClock}
 import com.tjclp.fastmcp.server.transport.HttpHeaderValidation
 
 /** Canonical MCP request method names. */
@@ -63,7 +63,7 @@ object Methods:
   *   inbound input limits; transports read `router.limits` and hand it to `MessageLoop.parseFrame`
   *   so every frame on every transport is bounded by the server's settings
   */
-final class McpRouter[R](
+final class McpRouter[R] private[fastmcp] (
     serverInfo: Implementation,
     requestHandlers: Map[String, RequestHandler[R]],
     notificationHandlers: Map[String, NotificationHandler[R]],
@@ -73,8 +73,40 @@ final class McpRouter[R](
     tasksEnabled: Boolean,
     resourcesSubscribe: Boolean,
     listChanged: Boolean,
-    val limits: LimitSettings = LimitSettings()
+    val limits: LimitSettings,
+    /** The clock of everything a transport builds for this router: its sessions (`lastSeen`, the
+      * early-cancellation window), the idle sweep and cap eviction of the session stores, the
+      * heartbeat and watchdog timers of the HTTP handler. [[ServerClock.system]] in production.
+      */
+    private[fastmcp] val clock: ServerClock
 ):
+
+  /** The public constructor: a router on the system clock. */
+  def this(
+      serverInfo: Implementation,
+      requestHandlers: Map[String, RequestHandler[R]],
+      notificationHandlers: Map[String, NotificationHandler[R]],
+      middlewares: List[Middleware[R]],
+      hooks: ServerHooks[R],
+      toolInputSchemas: Map[String, Json],
+      tasksEnabled: Boolean,
+      resourcesSubscribe: Boolean,
+      listChanged: Boolean,
+      limits: LimitSettings = LimitSettings()
+  ) =
+    this(
+      serverInfo,
+      requestHandlers,
+      notificationHandlers,
+      middlewares,
+      hooks,
+      toolInputSchemas,
+      tasksEnabled,
+      resourcesSubscribe,
+      listChanged,
+      limits,
+      ServerClock.system
+    )
 
   /** Capabilities derived from the registered handler set. Issue #56 dies here: a capability is
     * present only when its handler is wired.

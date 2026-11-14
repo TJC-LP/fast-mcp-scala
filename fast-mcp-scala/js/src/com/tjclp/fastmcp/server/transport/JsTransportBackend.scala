@@ -18,7 +18,7 @@ import com.tjclp.fastmcp.facades.runtime.{
   WebResponseInit
 }
 import com.tjclp.fastmcp.interop.ZioJsPromise
-import com.tjclp.fastmcp.server.McpServerSettings
+import com.tjclp.fastmcp.server.{McpServerSettings, ServerClock}
 import com.tjclp.fastmcp.server.router.{McpRouter, RequestContext, RequestHeaders, Session}
 import com.tjclp.fastmcp.server.transport.http.StreamableHttpHandler
 
@@ -51,7 +51,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
   ): ZIO[R, Throwable, Unit] =
     for
       rt <- ZIO.runtime[R]
-      session <- Session.makeDrained("stdio", router.limits.maxOutboundMessages)
+      session <- Session.makeDrained("stdio", router.limits.maxOutboundMessages, router.clock)
       // Drain server-initiated messages (log/progress notifications) to stdout. The channel is
       // bounded and back-pressured: an emitter waits for this writer rather than lose a message.
       // The writer stops at the close sentinel, offered below after the last reply at stdin EOF.
@@ -271,7 +271,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     */
   private[fastmcp] def evictIdleSessions(
       store: js.Dictionary[Session],
-      settings: McpServerSettings
+      settings: McpServerSettings,
+      clock: ServerClock = ServerClock.system
   ): UIO[Unit] =
     settings.sessionIdleTimeout match
       case None => ZIO.unit
@@ -279,7 +280,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
         val timeoutMs = timeout.toMillis
         val sweep =
           for
-            now <- ZIO.succeed(Session.monotonicMs())
+            now <- ZIO.succeed(clock.monotonicMs())
             expired <- ZIO.filter(store.toList) { case (_, s) =>
               (s.lastSeen zip s.hasActiveGet).map((seen, live) => !live && now - seen > timeoutMs)
             }
@@ -289,7 +290,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
           yield ()
         val interval = Duration.fromMillis(math.max(timeoutMs / 4, 1000L))
         (sweep.catchAllCause(cause => ZIO.logWarningCause("Idle-session sweep failed", cause)) *>
-          ZIO.sleep(interval)).forever
+          clock.sleep(interval)).forever
 
   /** Last-resort `Bun.serve` `error` callback: whatever Bun still sees (nothing should reach it —
     * `guarded` catches every Cause) is answered as a fixed JSON-RPC 500, never the debug page.
@@ -410,7 +411,9 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     // `unsafe.fork`, never `unsafe.run`: Runtime.unsafe.run throws on Scala.js when the effect
     // suspends ("Cannot block for result to be set in JavaScript").
     val sweeper =
-      Unsafe.unsafe(implicit u => runtime.unsafe.fork(evictIdleSessions(store, settings)))
+      Unsafe.unsafe(implicit u =>
+        runtime.unsafe.fork(evictIdleSessions(store, settings, router.clock))
+      )
     new BunHttpHandle(
       server,
       () =>
@@ -493,7 +496,11 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                   modernPost(router, req, message, settings, clientKey)
                 else
                   for
-                    session <- Session.makeRequestScoped("stateless", supportsTasks = false)
+                    session <- Session.makeRequestScoped(
+                      "stateless",
+                      supportsTasks = false,
+                      clock = router.clock
+                    )
                     // Legacy stateless compatibility mode starts ready without a handshake.
                     _ <- session.markInitialized
                     reply <- router.dispatch(session, message)
@@ -620,7 +627,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       sid <- randomId()
       // Bun has no standalone GET stream (405), so nothing would ever read this session's
       // out-of-request channel: it buffers nothing (see `Session.outboundCapacity`).
-      session <- Session.makeProtocolSession(sid, peer, outboundCapacity = 0)
+      session <- Session.makeProtocolSession(sid, peer, outboundCapacity = 0, router.clock)
       // Anything the handler chain sends while it runs rides this reply, ahead of the result.
       sink <- Queue.unbounded[JsonRpcMessage]
       dispatch <- session.runWithSink(sink)(router.dispatch(session, message)).fork
@@ -637,13 +644,15 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                 store(sid) = session
                 Some(Right(None))
               else
+                // Least recently used first: sessions that tie on `lastSeen` (one
+                // millisecond) are then told apart by the order they were used in.
                 val snapshot = Unsafe.unsafe { implicit u =>
-                  store.toList.map { case (id, s) =>
+                  store.toList.sortBy(_._2.touchOrder).map { case (id, s) =>
                     val (seen, live) = s.idleStateUnsafe
                     HttpRequestGuards.StoredSession(id, seen, live, s.clientKey)
                   }
                 }
-                val now = Session.monotonicMs()
+                val now = router.clock.monotonicMs()
                 val idleMs = settings.sessionIdleTimeout.map(_.toMillis)
                 HttpRequestGuards.pickVictim(snapshot, peer, now, idleMs).flatMap(store.get) match
                   case Some(victim) =>
@@ -768,7 +777,8 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       timer <- bound match
         case None => ZIO.none
         case Some(interval) =>
-          (ZIO.sleep(interval) *> reqQueue.offer(KeepAliveSentinel)).forkDaemon.map(Some(_))
+          (router.clock.sleep(interval) *> reqQueue.offer(KeepAliveSentinel)).forkDaemon
+            .map(Some(_))
       stopTimer = timer.fold(ZIO.unit)(StreamableHttpHandler.signalInterrupt)
       first <- reqQueue.take.onInterrupt(stopTimer *> fiber.interrupt *> reqQueue.shutdown)
       _ <- stopTimer
@@ -785,7 +795,17 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             )
           )
         case None =>
-          sseResponse(reqQueue, req.id, session, isNew, fiber, settings, modern, Some(first))
+          sseResponse(
+            reqQueue,
+            req.id,
+            session,
+            isNew,
+            fiber,
+            settings,
+            modern,
+            Some(first),
+            router.clock
+          )
     yield response
 
   /** Run `cleanup` if the client goes away (Bun aborts `request.signal` when the connection
@@ -844,14 +864,15 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
       dispatchFiber: Fiber.Runtime[?, ?],
       settings: McpServerSettings,
       modern: Boolean,
-      initial: Option[JsonRpcMessage]
+      initial: Option[JsonRpcMessage],
+      clock: ServerClock
   ): UIO[js.Dynamic] =
     val heartbeat: UIO[Option[Fiber.Runtime[Nothing, Nothing]]] =
       settings.keepAliveInterval match
         case None => ZIO.none
         case Some(interval) =>
           val tick = Duration.fromJava(interval)
-          (ZIO.sleep(tick) *> reqQueue.offer(KeepAliveSentinel)).forever.forkDaemon.map(Some(_))
+          (clock.sleep(tick) *> reqQueue.offer(KeepAliveSentinel)).forever.forkDaemon.map(Some(_))
     heartbeat.map { hb =>
       val stopHeartbeat: UIO[Unit] = hb.fold(ZIO.unit)(_.interrupt.unit)
       val encoder = js.Dynamic.newInstance(js.Dynamic.global.TextEncoder)()
@@ -937,7 +958,11 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             ZIO.succeed(jsonResponse(failure.toJson, Map.empty, status))
           case Right(context) =>
             Session
-              .makeRequestScoped(s"request-${rpc.id.toString}", clientKey = clientKey)
+              .makeRequestScoped(
+                s"request-${rpc.id.toString}",
+                clientKey = clientKey,
+                clock = router.clock
+              )
               .flatMap(session =>
                 requestResponse(router, session, rpc, isNew = false, settings, Some(context), req)
               )
@@ -952,7 +977,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
             ZIO.succeed(jsonResponse(failure.toJson, Map.empty, status))
           case Right(_) =>
             Session
-              .makeRequestScoped("notification")
+              .makeRequestScoped("notification", clock = router.clock)
               .flatMap(session => router.dispatch(session, notification))
               .as(webResponse(202, ""))
       case _ =>
@@ -1099,8 +1124,14 @@ extension (server: McpServer[Any])
   def startStatefulHttp(): BunHttpHandle = startHttpHandle(server)
 
 private def startHttpHandle(server: McpServer[Any]): BunHttpHandle =
+  startHttpHandleOn(server, ServerClock.system)
+
+/** [[startStatefulHttp]] with the server's clock stated: a test that asserts on idle time, task
+  * expiry or heartbeats moves the clock itself (CONTRIBUTING.md, "Tests and time").
+  */
+private[fastmcp] def startHttpHandleOn(server: McpServer[Any], clock: ServerClock): BunHttpHandle =
   val (router, taskManager) = Unsafe.unsafe(implicit u =>
-    Runtime.default.unsafe.run(server.buildRouterWithTasks).getOrThrowFiberFailure()
+    Runtime.default.unsafe.run(server.buildRouterWithTasksOn(clock)).getOrThrowFiberFailure()
   )
   JsTransportBackend.startBun(
     router,

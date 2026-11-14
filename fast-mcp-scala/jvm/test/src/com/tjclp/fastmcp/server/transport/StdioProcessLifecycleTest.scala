@@ -13,6 +13,8 @@ import org.scalatest.matchers.should.Matchers
 import zio.json.*
 import zio.json.ast.Json
 
+import com.tjclp.fastmcp.testkit.Await
+
 /** The stdio lifecycle contract observed from outside a real JVM stdio server (GH #113): replies
   * owed at stdin EOF, the final frame without a newline, and SIGTERM / SIGINT while stdin is still
   * open — with nothing but JSON-RPC frames on stdout throughout. The in-process contract tests are
@@ -67,8 +69,9 @@ class StdioProcessLifecycleTest extends AnyFunSuite with Matchers:
       */
     def await(lines: CopyOnWriteArrayList[String], what: String)(found: String => Boolean): Unit =
       val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60)
-      while !lines.asScala.exists(found) && System.nanoTime() < deadline && process.isAlive do
-        Thread.sleep(10)
+      Await.holds(s"$what, the deadline, or the server's exit", 120_000L) {
+        lines.asScala.exists(found) || System.nanoTime() >= deadline || !process.isAlive
+      }
       assert(lines.asScala.exists(found), s"$what never arrived; stderr:\n${stderr.asScala.mkString("\n")}")
 
     def signal(name: String): Unit =

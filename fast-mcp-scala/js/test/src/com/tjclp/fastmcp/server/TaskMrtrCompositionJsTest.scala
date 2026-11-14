@@ -10,6 +10,7 @@ import zio.json.*
 import zio.json.ast.Json
 
 import com.tjclp.fastmcp.{*, given}
+import com.tjclp.fastmcp.testkit.Eventually
 import com.tjclp.fastmcp.core.{TaskSupport, Tasks}
 import com.tjclp.fastmcp.core.wire.{ElicitRequestParams, ElicitResult}
 import com.tjclp.fastmcp.server.router.Session
@@ -131,9 +132,9 @@ class TaskMrtrCompositionJsTest extends AsyncFlatSpec with Matchers:
           .map(reply => member(reply, "result").getOrElse(Json.Obj()))
       stored = ZIO.foreach(manager)(_.stats).map(_.map(_.total).getOrElse(-1))
       until = (taskId: String, status: String) =>
-        (ZIO.sleep(5.millis) *> result("tasks/get", s""""taskId":"$taskId""""))
-          .repeatUntil(task => text(task, "status") == status)
-          .timeoutFail(new RuntimeException(s"task never became $status"))(10.seconds)
+        Eventually(s"the task becomes $status")(
+            result("tasks/get", s""""taskId":"$taskId"""")
+          )(task => text(task, "status") == status)
 
       // Round 1 asks on the request: no task. Round 2 reaches the hand-off: a task.
       asked <- call("compose", "", Declaring)

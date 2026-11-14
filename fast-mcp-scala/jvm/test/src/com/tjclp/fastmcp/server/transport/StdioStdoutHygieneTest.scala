@@ -16,6 +16,8 @@ import zio.*
 import zio.json.*
 import zio.json.ast.Json
 
+import com.tjclp.fastmcp.testkit.Await
+
 /** stdout hygiene of the stdio transport: on stdio, `System.out` IS the wire, so
   *
   *   1. nothing but JSON-RPC frames may ever be written to it — in particular ZIO log lines from
@@ -126,20 +128,25 @@ class StdioStdoutHygieneTest extends AnyFunSuite with Matchers:
     /** Poll until every id in `expected` has been answered, or `timeout` elapses. */
     def awaitIds(expected: Set[Int], timeout: Duration): Boolean =
       val deadline = java.lang.System.nanoTime() + timeout.toNanos
-      while !expected.subsetOf(answeredIds) && java.lang.System.nanoTime() < deadline &&
-        process.isAlive
-      do Thread.sleep(20)
+      Await.holds(s"replies to $expected, the deadline, or the server's exit", timeout.toMillis * 2) {
+        expected.subsetOf(answeredIds) || java.lang.System.nanoTime() >= deadline ||
+        !process.isAlive
+      }
       expected.subsetOf(answeredIds)
 
-    /** Hold stdin open a moment (as a real host would), then EOF and wait for exit. */
-    def close(): Int =
-      Thread.sleep(300)
+    private lazy val exited: Int =
       stdin.close()
-      if !process.waitFor(15, TimeUnit.SECONDS) then
+      if !process.waitFor(60, TimeUnit.SECONDS) then
         val _ = process.destroyForcibly().waitFor(5, TimeUnit.SECONDS)
       outThread.join(5000)
       errThread.join(5000)
       process.exitValue()
+
+    /** EOF on stdin, then wait for the process to exit and for both of its output streams to be
+      * read to their end. After this `stdoutLines` and `stderrLines` are everything the server
+      * ever wrote: a test grades them now, not after a pause it hopes was long enough. Idempotent.
+      */
+    def close(): Int = exited
 
   private def withServer[A](mainClass: String, ignoreStdout: String => Boolean = _ => false)(
       body: Server => A
@@ -161,8 +168,8 @@ class StdioStdoutHygieneTest extends AnyFunSuite with Matchers:
       assert(server.awaitIds(Set(1), 30.seconds), "no initialize reply within 30s")
       server.send(initializedFrame, callFrame(2))
       assert(server.awaitIds(Set(2), 30.seconds), "no tools/call reply within 30s")
-      // Give a late (mis-routed) log line the chance to show up before grading.
-      Thread.sleep(200)
+      // Grade the complete output: a late (mis-routed) log line is in it if there ever was one.
+      val _ = server.close()
       val stdout = server.stdoutLines.asScala.toList
       val stray = stdout.filter(_.trim.nonEmpty).filter(parseFrame(_).isEmpty)
       withClue(s"non-JSON-RPC lines on stdout (the wire):\n${describe(stray)}\n") {
@@ -189,7 +196,7 @@ class StdioStdoutHygieneTest extends AnyFunSuite with Matchers:
       assert(server.awaitIds(Set(1), 30.seconds), "no initialize reply within 30s")
       server.send(initializedFrame, callFrame(2))
       assert(server.awaitIds(Set(2), 30.seconds), "no tools/call reply within 30s")
-      Thread.sleep(200)
+      val _ = server.close()
       val stray = server.stdoutLines.asScala.toList.filter(_.trim.nonEmpty).filter(parseFrame(_).isEmpty)
       withClue(s"non-JSON-RPC lines on stdout:\n${describe(stray)}\n")(stray shouldBe empty)
       val adding = server.stderrLines.asScala.toList.filter(_.contains("message=\"adding\""))
@@ -219,7 +226,7 @@ class StdioStdoutHygieneTest extends AnyFunSuite with Matchers:
       // then 200 concurrent calls; stdin stays open until every reply is in (or the deadline).
       server.send((initFrame :: initializedFrame :: calls.map(callFrame))*)
       val complete = server.awaitIds(expected, 45.seconds)
-      Thread.sleep(200)
+      val _ = server.close()
       val missing = expected -- server.answeredIds
       val stdout = server.stdoutLines.asScala.toList
       // A split frame shows up as `{...}noise` (unparseable, so its id is missing) plus the empty
