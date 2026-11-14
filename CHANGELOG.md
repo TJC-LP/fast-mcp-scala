@@ -335,6 +335,9 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - An object that extends `McpServerApp` and already has a parameterless member named
     `completion` no longer compiles: rename the member. (A method that takes parameters, a tool
     for instance, is an overload and is unaffected.)
+  - A class of your own that extends `McpServerCore` and already declares
+    `completion(handler)` (a wrapper that forwards to an inner `McpServer`, for instance) no
+    longer compiles either: add `override` to it.
 - **Typed contracts: `Unit` input, enum and `List` / `Vector` results, Java enums** (GH #116,
   TJC-2362; C2.11, C2.12, C2.14). Type arguments that had no codec in 1.0.x now have one, on the
   JVM, Scala.js and Scala Native:
@@ -903,6 +906,9 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   `requests.tools.call` only, although `tasks/list` and `tasks/cancel` were always served on the
   same sessions, so a client that gates those calls on the server's capability never made them.
   The 2026-07-28 discovery result is unchanged: it declares the extension and no `tasks` field.
+  The stateless legacy adapter (`stateless = true`) refuses every legacy task method with
+  `-32601`, and its `initialize` result now declares no `tasks` capability at all. It used to
+  declare `requests.tools.call` there too.
 - **`subscriptions/listen` refuses task notifications from a client without the Tasks extension**
   (GH #115, TJC-2361). A 2026-07-28 `subscriptions/listen` request that names `taskIds` but does
   not declare `io.modelcontextprotocol/tasks` in its capabilities is answered `-32021`, as

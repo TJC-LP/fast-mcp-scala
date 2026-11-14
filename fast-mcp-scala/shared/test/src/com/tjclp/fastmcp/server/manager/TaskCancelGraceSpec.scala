@@ -71,6 +71,61 @@ class TaskCancelGraceSpec extends AsyncFunSuite:
       case Exit.Failure(cause) => cause.failureOption.exists(_.isInstanceOf[TaskCancelledError])
       case Exit.Success(_) => false
 
+  test("the status and the stored outcome agree when the body returns as the cancel gives up") {
+    // Two writers end one task: the cancel that stopped waiting, and the body returning. Each
+    // writes the status and then completes the result promise, as two steps. Here the cancel has
+    // written `Cancelled` and is held before its second step while the body returns and runs both
+    // of its own. The body lost the status, so it must not decide the outcome either.
+    run(
+      for
+        settled <- Ref.make(0)
+        held <- Promise.make[Nothing, Unit]
+        gate <- Promise.make[Nothing, Unit]
+        first <- Ref.make(true)
+        ids = new java.util.concurrent.atomic.AtomicLong
+        tm = TaskManager.makeUnsafe[Any](
+          TaskSettings(enabled = true, sweepIntervalMs = 250L, cancelGraceMs = 0L),
+          ZIO.succeed(s"task-${ids.incrementAndGet()}"),
+          {
+            case "recorded" =>
+              // Only the first writer to get here is held: that is the cancel.
+              first.getAndSet(false).flatMap(isFirst => (held.succeed(()) *> gate.await).when(isFirst).unit)
+            case "settled" => settled.update(_ + 1)
+            case _ => ZIO.unit
+          },
+          new ManualClock
+        )
+        started <- Promise.make[Nothing, Unit]
+        release <- Promise.make[Nothing, Unit]
+        created <- tm.createSized(
+          TaskScope.session("s1"),
+          None,
+          requestBytes = 16L,
+          synchronousBody(started, release, "late"),
+          _ => ZIO.unit
+        )
+        id = created.task.taskId
+        _ <- started.await
+        waiter <- tm.result(id, Session).exit.forkDaemon
+        cancel <- tm.cancel(id, Session).forkDaemon
+        _ <- held.await
+        // The body returns and its fiber runs to the end of its own record.
+        _ <- release.succeed(())
+        _ <- Eventually("the body's fiber settled")(settled.get)(_ >= 1)
+        shown <- tm.get(id, Session)
+        early <- waiter.poll
+        _ <- gate.succeed(())
+        outcome <- cancel.join
+        waited <- waiter.join
+        _ <- tm.shutdown
+      yield
+        assert(shown.map(_.status).contains(TaskStatus.Cancelled))
+        assert(early.isEmpty, s"the body that lost the status completed the result: $early")
+        assert(outcome.map(_.status) == Right(TaskStatus.Cancelled))
+        assert(cancelledError(waited), s"status cancelled, but tasks/result got $waited")
+    )
+  }
+
   test("a body that does not stop: the cancel is answered when the grace has passed, not before") {
     run(
       for

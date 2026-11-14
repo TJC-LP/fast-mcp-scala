@@ -201,15 +201,21 @@ final class Session private (
     * (tasks) does not outlive the session.
     */
   def terminate: UIO[Unit] =
-    finalizersRef.getAndSet(None).flatMap {
-      case None => ZIO.unit
-      case Some(fs) =>
-        inflight
-          .getAndSet(Map.empty)
-          .flatMap(fibers => ZIO.foreachDiscard(fibers.values)(_._2.interruptFork)) *>
-          ZIO.foreachDiscard(fs.values)(_.ignore) *>
-          outbound.shutdown
-    }
+    // Uninterruptible as a whole: the latch makes a second call a no-op, so a caller interrupted
+    // between the latch and the sweep would leave the in-flight requests running, the finalizers
+    // unrun and the outbound channel open, with nothing left to finish the job.
+    finalizersRef
+      .getAndSet(None)
+      .flatMap {
+        case None => ZIO.unit
+        case Some(fs) =>
+          inflight
+            .getAndSet(Map.empty)
+            .flatMap(fibers => ZIO.foreachDiscard(fibers.values)(_._2.interruptFork)) *>
+            ZIO.foreachDiscard(fs.values)(_.ignore) *>
+            outbound.shutdown
+      }
+      .uninterruptible
 
   /** Allocate the next id for a server-initiated request. Prefixed so server ids never collide with
     * client-issued ids on the same connection.

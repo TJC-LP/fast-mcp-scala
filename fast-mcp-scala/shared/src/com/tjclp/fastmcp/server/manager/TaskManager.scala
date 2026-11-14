@@ -339,8 +339,10 @@ class TaskManager[R] private[manager] (
     sweeperRef: Ref[Option[Fiber.Runtime[Nothing, Unit]]],
     /** Test hook invoked at `"forked"` (task fiber parked, nothing registered), `"registered"`
       * (entry admitted, gate still closed), `"result-waiting"` (a [[result]] call has found its
-      * task and waits for the outcome next) and `"settled"` (a task's fiber has ended and what it
-      * left has been recorded or dropped). `_ => ZIO.unit` in production.
+      * task and waits for the outcome next), `"recorded"` (a terminal status has been written to
+      * the store, or found already written; the result promise is completed next) and `"settled"`
+      * (a task's fiber has ended and what it left has been recorded or dropped). `_ => ZIO.unit` in
+      * production.
       */
     private[fastmcp] val checkpoint: String => UIO[Unit],
     /** The `FiberRef` values the sweeper fiber runs with: those of the fiber that built this
@@ -1054,12 +1056,16 @@ class TaskManager[R] private[manager] (
     for
       recorded <- storeRef.modify { s =>
         s.entries.get(taskId) match
-          case None => ((None, settled.outcome), s)
+          // Swept or released: no entry to update, but a `tasks/result` waiter still holds the
+          // promise.
+          case None => ((None, Some(settled.outcome)), s)
           // Already terminal: `cancel` stopped waiting for this task's body (`cancelGraceMs`) and
           // recorded `Cancelled`, and the body has only now returned (or the body ended just as
           // the cancel gave up on it). The first record stands. What arrives second is dropped:
-          // no status change, no second notification, and the promise is already completed.
-          case Some(entry) if entry.status.isTerminal => ((None, settled.outcome), s)
+          // no status change, no second notification, and no outcome. Only the writer whose
+          // status was recorded completes the promise, so the two can never disagree, whichever
+          // of them reaches its `done` first.
+          case Some(entry) if entry.status.isTerminal => ((None, None), s)
           case Some(entry) =>
             // The terminal entry drops the fiber handle (and with it everything the fiber
             // inherited from the request) and swaps the request's byte charge for the result's.
@@ -1082,16 +1088,17 @@ class TaskManager[R] private[manager] (
             // past the retention grace make room; inside the grace nobody is evicted and it is
             // this result that is discarded.
             fitBytes(kept, entry.ownerKey, entry.pool, cutoff, 0L, Some(taskId)) match
-              case Right(fitted) => ((fitted.entries.get(taskId), settled.outcome), fitted)
+              case Right(fitted) => ((fitted.entries.get(taskId), Some(settled.outcome)), fitted)
               case Left(budget) =>
                 val discarded = failed(
                   new TaskResultDiscarded(taskId, budget.setting, budget.limitBytes)
                 )
                 val next = terminal(discarded)
-                ((Some(next), discarded.outcome), s.markTerminal(entry, next))
+                ((Some(next), Some(discarded.outcome)), s.markTerminal(entry, next))
       }
       (updated, outcome) = recorded
-      _ <- promise.done(outcome)
+      _ <- checkpoint("recorded")
+      _ <- ZIO.foreachDiscard(outcome)(promise.done)
       _ <- ZIO.foreachDiscard(updated)(e => onStatusChange(e.toTask).ignore)
       _ <- checkpoint("settled")
     yield ()

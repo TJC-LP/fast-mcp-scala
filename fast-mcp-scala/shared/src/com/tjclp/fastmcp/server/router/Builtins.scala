@@ -131,7 +131,10 @@ final class Builtins[R](
       _ <- session.markInitialized
       result = InitializeResult(
         protocolVersion = negotiated,
-        capabilities = capabilities,
+        // The legacy task surface needs a session that outlives one request. A session without it
+        // (the stateless adapter) is refused every legacy task method, so it is not told of them.
+        capabilities =
+          if session.supportsTasks then capabilities else capabilities.copy(tasks = None),
         serverInfo = serverInfo,
         instructions = instructions
       )

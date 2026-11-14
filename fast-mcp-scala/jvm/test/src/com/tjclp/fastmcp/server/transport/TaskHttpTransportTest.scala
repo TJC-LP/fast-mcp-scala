@@ -406,6 +406,12 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
 
   test("legacy stateless: task augmentation and legacy task methods are refused with -32601") {
     val routes = buildRoutes(stateless = true)
+    // What is refused is not advertised: the stateless adapter's `initialize` declares no legacy
+    // `tasks` capability, while the rest of its capabilities stay.
+    val init = bodyOf(post(routes, initFrame, None))
+    init should include(""""capabilities":{""")
+    init should include(""""tools":{""")
+    init should not include """"tasks":{"""
     // All legacy stateless POSTs share the literal session id "stateless" — task ownership keyed
     // on it would let every client list, read, and cancel every other client's tasks.
     val create = bodyOf(post(routes, augmentedCall(30, "slow"), None))
