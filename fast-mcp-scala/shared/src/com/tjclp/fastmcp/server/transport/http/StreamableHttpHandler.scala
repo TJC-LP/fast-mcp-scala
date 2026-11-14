@@ -68,7 +68,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
     if !HttpRequestGuards.pathMatches(req.path, settings) then
       HttpRequestGuards.routeFor(req.path, settings) match
         case None => Some(HttpReply.Empty(404))
-        // A route of `httpRoutes`: refused on its head, or admitted to `handle` (a GET, no body).
+        // A route of `httpRoutes`: refused on its head, or admitted to `handle` (GET or HEAD).
         case Some(_) =>
           HttpRequestGuards
             .routeGate(req.method, req.gateHeader, settings)
@@ -111,8 +111,10 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
       case Some(rejection) => ZIO.succeed(rejectFor(req.method, rejection))
       case None =>
         HttpRequestGuards
-          .runRoute(route, req.path, req.gateHeader)
-          .map(r => HttpReply.Body(r.status, r.body, r.contentType, r.headers))
+          .runRoute(route, req.method, req.path, req.gateHeader)
+          .map(r =>
+            HttpReply.Body(r.status, r.body, r.contentType, r.headers, req.method == "HEAD")
+          )
 
   /** The verdict of `HttpRequestGuards.nonPostGate` on a request that is not a POST, rendered: 403
     * Host/Origin, then 405 for a method this endpoint does not serve in this mode (GET and DELETE

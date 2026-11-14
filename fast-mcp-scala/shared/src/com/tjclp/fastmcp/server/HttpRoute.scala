@@ -12,9 +12,10 @@ import zio.*
   * }}}
   *
   * What a route is, on every HTTP backend (zio-http, the socket backend, `Bun.serve`):
-  *   - '''`GET` only, on an exact path.''' The path is compared as the MCP endpoint is: exactly and
-  *     case-sensitively, the query string not being part of it. Another method on a route's path is
-  *     405 with `Allow: GET`.
+  *   - '''`GET` and `HEAD`, on an exact path.''' The path is compared as the MCP endpoint is:
+  *     exactly and case-sensitively, the query string not being part of it. A `HEAD` runs the same
+  *     handler and is answered with its status and headers, the `Content-Length` the `GET` would
+  *     have, and no body. Another method on a route's path is 405 with `Allow: GET, HEAD`.
   *   - '''Never the MCP endpoint.''' A route cannot be registered on `httpEndpoint`, so no route
   *     can answer, observe or change an MCP request. Everything the endpoint enforces stays as it
   *     is.
@@ -42,16 +43,22 @@ object HttpRoute:
   /** The one method a route answers. */
   private[fastmcp] val Method: String = "GET"
 
+  /** What a route's path serves, in `Allow` order: `GET`, and `HEAD` answered from it. */
+  private[fastmcp] val Methods: List[String] = List("GET", "HEAD")
+
   /** A `GET` route on `path`, which starts with `/` and is not the MCP endpoint (both are checked
     * when the HTTP transport starts, together with the rules `httpEndpoint` itself is held to).
     */
   def get(path: String)(handler: HttpRouteRequest => UIO[HttpRouteResponse]): HttpRoute =
     new HttpRoute(path, handler)
 
-/** What a route's handler sees of the request: its path and its headers. */
+/** What a route's handler sees of the request: its path, its headers, and whether it is a `HEAD`.
+  */
 final class HttpRouteRequest private[fastmcp] (
     val path: String,
-    lookup: String => Option[String]
+    lookup: String => Option[String],
+    /** `GET`, or `HEAD` when the client asked for the status and headers only. */
+    val method: String
 ):
 
   /** A request header by name, case-insensitively. A header sent more than once is seen as one
@@ -60,7 +67,7 @@ final class HttpRouteRequest private[fastmcp] (
   def header(name: String): Option[String] =
     if HttpRouteResponse.isToken(name) then lookup(name) else None
 
-  override def toString: String = s"HttpRouteRequest(GET $path)"
+  override def toString: String = s"HttpRouteRequest($method $path)"
 
 /** The reply of a route: a status, a text body and its content type, and any further headers. */
 final class HttpRouteResponse private (

@@ -737,7 +737,8 @@ private[fastmcp] object SocketHttpServer:
       buf.ascii("\r\ncontent-length: ")
       buf.ascii(Integer.toString(body.length))
       buf.ascii("\r\n\r\n")
-      buf.append(body)
+      // The reply to a HEAD ends with its head: the length above is the GET's.
+      if !reply.headOnly then buf.append(body)
       flush()
       !close
 

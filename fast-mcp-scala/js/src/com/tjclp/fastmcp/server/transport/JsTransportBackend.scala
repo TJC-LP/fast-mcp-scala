@@ -443,7 +443,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
     // `URL.pathname` carries no query string). Anything else is an empty 404, before any gate.
     else if !path.exists(HttpRequestGuards.pathMatches(_, settings)) then
       // ... unless `settings.httpRoutes` has a route for that path: the Host/Origin guard, 405 for
-      // any method but GET, then the author's handler (JVM twin: `StreamableHttpHandler.handle`).
+      // any method but GET and HEAD, then the author's handler (JVM twin: `StreamableHttpHandler.handle`).
       // The request body is never read, and neither the router nor the session store is touched.
       path.flatMap(p => HttpRequestGuards.routeFor(p, settings).map(p -> _)) match
         case None => ZIO.succeed(emptyResponse(404))
@@ -451,7 +451,9 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
           HttpRequestGuards.routeGate(method, headerOf(req), settings) match
             case Some(rejection) => ZIO.succeed(reject(rejection))
             case None =>
-              HttpRequestGuards.runRoute(route, routePath, headerOf(req)).map { r =>
+              // To a HEAD, Bun sends the head of this response — the body's Content-Length
+              // included — and drops the body itself.
+              HttpRequestGuards.runRoute(route, method, routePath, headerOf(req)).map { r =>
                 webResponse(r.status, r.body, r.headers.toMap + ("content-type" -> r.contentType))
               }
     else

@@ -388,10 +388,12 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   listener.
   - New, all in the root import: `HttpRoute.get(path)(handler)` with
     `handler: HttpRouteRequest => UIO[HttpRouteResponse]`; `HttpRouteRequest` (`path`,
-    `header(name)`); `HttpRouteResponse.text` / `.json` / `apply(status, body, contentType)` and
+    `method`, `header(name)`); `HttpRouteResponse.text` / `.json` / `apply(status, body, contentType)` and
     `.withHeader`.
-  - A route is a `GET` on an exact path (the query string is not part of it). Another method on
-    that path is 405 with `Allow: GET`.
+  - A route is a `GET` on an exact path (the query string is not part of it). A `HEAD` on it runs
+    the same handler and gets its status and headers, the `Content-Length` of the `GET`, and no
+    body, on every backend; `HttpRouteRequest.method` tells the two apart. Another method on that
+    path is 405 with `Allow: GET, HEAD`.
   - A route can never be the MCP endpoint: `runHttp()` fails at startup for a route on
     `httpEndpoint`, a path listed twice, one without a leading `/` and one no request can name.
     Nothing about the endpoint changes, and no request can select a handler that was not listed.

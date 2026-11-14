@@ -953,7 +953,7 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
     }
   }
 
-  test("httpRoutes on the wire: Host guard 403, then 405 with Allow: GET; a body sent to a route is never read") {
+  test("httpRoutes on the wire: Host guard 403, then 405 with Allow: GET, HEAD; HEAD has the GET's head and no body; a body sent to a route is never read") {
     val routes = List(HttpRoute.get("/health")(_ => ZIO.succeed(HttpRouteResponse.text("ok"))))
     withServer(baseSettings.copy(httpRoutes = routes)) { port =>
       request(port, "GET /health HTTP/1.1\r\nHost: evil.example\r\n\r\n").status shouldBe 403
@@ -966,16 +966,26 @@ class SocketHttpBackendTest extends AnyFunSuite with Matchers:
           request(port, s"$method /health HTTP/1.1\r\nHost: evil.example\r\n\r\n").status shouldBe 403
           val reply = request(port, s"$method /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
           reply.status shouldBe 405
-          reply.header("allow") shouldBe Some("GET")
+          reply.header("allow") shouldBe Some("GET, HEAD")
           reply.body should include(s"Method $method is not allowed on this route")
         }
       val client = new RawClient(port)
       try
-        // HEAD: status and headers only, and the connection is still in step.
+        // HEAD: the handler's status and headers and the GET's Content-Length, with no body
+        // bytes behind them — the next request on the connection is parsed from its first byte.
         client.send("HEAD /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
         val (status, headers) = client.readHead()
-        status shouldBe 405
-        headers.get("allow") shouldBe Some("GET")
+        status shouldBe 200
+        headers.get("content-type") shouldBe Some("text/plain; charset=utf-8")
+        headers.get("content-length") shouldBe Some("2")
+        headers.get("transfer-encoding") shouldBe None
+        headers.get("connection") shouldBe Some("keep-alive")
+        client.send("HEAD /health HTTP/1.1\r\nHost: evil.example\r\n\r\n")
+        client.readHead()._1 shouldBe 403
+        client.send("GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        val afterHead = client.readReply()
+        afterHead.status shouldBe 200
+        afterHead.body shouldBe "ok"
         // A GET that declares a body is answered, and the unread body closes the connection: its
         // bytes are never parsed as a request.
         client.send(

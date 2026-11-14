@@ -17,7 +17,7 @@ import com.tjclp.fastmcp.server.transport.{BunHttpHandle, startStatefulHttp, sta
   * and the global `fetch`. The JVM twin is `HttpRouteHandlerTest` (the shared handler, JVM and
   * Scala Native); both assert the same statuses, headers and bodies.
   *
-  * Ports 28946–28951: no other Scala.js suite uses them.
+  * Ports 28946–28952: no other Scala.js suite uses them.
   */
 class JsHttpRoutesTest extends AsyncFlatSpec with Matchers:
 
@@ -143,7 +143,23 @@ class JsHttpRoutesTest extends AsyncFlatSpec with Matchers:
     }
   }
 
-  it should "run the Host/Origin guard before the handler, then refuse every method but GET with 405" in {
+  it should "answer a HEAD from the same handler: status, headers, the GET's Content-Length, no body" in {
+    val port = 28952
+    withServer(port, _.copy(httpRoutes = routes)) {
+      for
+        head <- send(port, "HEAD", "/ready", Map("x-probe" -> "lb"))
+        refused <- send(port, "HEAD", "/health", Map("origin" -> "http://evil.example.com"))
+      yield
+        head.status shouldBe 503
+        head.header("content-type") shouldBe Some("application/json")
+        head.header("retry-after") shouldBe Some("5")
+        head.header("content-length") shouldBe Some("14")
+        head.body shouldBe ""
+        refused.status shouldBe 403
+    }
+  }
+
+  it should "run the Host/Origin guard before the handler, then refuse every method but GET and HEAD with 405" in {
     val port = 28949
     withServer(port, _.copy(httpRoutes = routes)) {
       calls = 0
@@ -159,11 +175,10 @@ class JsHttpRoutesTest extends AsyncFlatSpec with Matchers:
           yield withClue(s"$method: ") {
             guarded.status shouldBe 403
             reply.status shouldBe 405
-            reply.header("allow") shouldBe Some("GET")
+            reply.header("allow") shouldBe Some("GET, HEAD")
             reply.body should include(s"Method $method is not allowed on this route")
           }
         })
-        head <- send(port, "HEAD", "/health")
         afterMethods = calls
         ok <- send(port, "GET", "/health", Map("origin" -> s"http://127.0.0.1:$port"))
       yield
@@ -172,9 +187,6 @@ class JsHttpRoutesTest extends AsyncFlatSpec with Matchers:
         nullOrigin.status shouldBe 403
         afterRefusals shouldBe 0
         methods.size shouldBe 4
-        head.status shouldBe 405
-        head.header("allow") shouldBe Some("GET")
-        head.body shouldBe ""
         afterMethods shouldBe 0
         ok.status shouldBe 200
         calls shouldBe 1

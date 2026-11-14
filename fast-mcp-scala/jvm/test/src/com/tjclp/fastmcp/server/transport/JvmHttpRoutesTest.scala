@@ -75,17 +75,29 @@ class JvmHttpRoutesTest extends AnyFunSuite with Matchers:
     bodyOf(broken) should not include "secret"
   }
 
-  test("zio-http: Host guard 403 first, 405 with Allow: GET for other methods, 404 elsewhere") {
+  test("zio-http: a HEAD gets the handler's status and headers, the GET's Content-Length and no body") {
+    val app = buildRoutes(McpServerSettings(httpRoutes = routes))
+    val head = run(app, get("/ready", "X-Probe" -> "lb").copy(method = Method.HEAD))
+    head.status shouldBe Status.ServiceUnavailable
+    head.rawHeader("content-type") shouldBe Some("application/json")
+    head.rawHeader("retry-after") shouldBe Some("5")
+    head.rawHeader("content-length") shouldBe Some("""{"probe":"lb"}""".length.toString)
+    bodyOf(head) shouldBe ""
+    run(app, get("/health", "Host" -> "evil.example").copy(method = Method.HEAD)).status shouldBe
+      Status.Forbidden
+  }
+
+  test("zio-http: Host guard 403 first, 405 with Allow: GET, HEAD for other methods, 404 elsewhere") {
     val app = buildRoutes(McpServerSettings(httpRoutes = routes))
     run(app, get("/health", "Host" -> "evil.example")).status shouldBe Status.Forbidden
     run(app, get("/health", "Host" -> "localhost:8000", "Origin" -> "http://evil.example")).status shouldBe
       Status.Forbidden
     run(app, get("/health", "Host" -> "localhost:8000")).status shouldBe Status.Ok
-    for method <- List(Method.POST, Method.PUT, Method.DELETE, Method.OPTIONS, Method.HEAD) do
+    for method <- List(Method.POST, Method.PUT, Method.DELETE, Method.OPTIONS, Method.PATCH) do
       withClue(s"$method: ") {
         val refused = run(app, get("/health").copy(method = method))
         refused.status shouldBe Status.MethodNotAllowed
-        refused.rawHeader("allow") shouldBe Some("GET")
+        refused.rawHeader("allow") shouldBe Some("GET, HEAD")
         run(app, get("/health", "Host" -> "evil.example").copy(method = method)).status shouldBe
           Status.Forbidden
       }
@@ -185,6 +197,28 @@ class JvmHttpRoutesTest extends AnyFunSuite with Matchers:
                 readyStatus shouldBe 503
                 readyHeaders.get("retry-after") shouldBe Some("5")
                 readyBody shouldBe """{"probe":"lb"}"""
+
+                // HEAD through netty: the GET's head, and no body bytes before the next reply.
+                send(s"HEAD /ready HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nX-Probe: lb\r\n\r\n")
+                val headStatus = readLine(in).split(' ')(1).toInt
+                val headHeaders = Iterator
+                  .continually(readLine(in))
+                  .takeWhile(_.nonEmpty)
+                  .map { line =>
+                    val i = line.indexOf(':')
+                    line.substring(0, i).trim.toLowerCase -> line.substring(i + 1).trim
+                  }
+                  .toMap
+                headStatus shouldBe 503
+                headHeaders.get("content-type") shouldBe Some("application/json")
+                headHeaders.get("retry-after") shouldBe Some("5")
+                headHeaders.get("content-length") shouldBe Some("14")
+                headHeaders.get("transfer-encoding") shouldBe None
+
+                send(s"GET /health HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n\r\n")
+                val (afterStatus, _, afterBody) = readReply(in)
+                afterStatus shouldBe 200
+                afterBody shouldBe "ok"
 
                 send(s"GET /health HTTP/1.1\r\nHost: evil.example\r\n\r\n")
                 readReply(in)._1 shouldBe 403

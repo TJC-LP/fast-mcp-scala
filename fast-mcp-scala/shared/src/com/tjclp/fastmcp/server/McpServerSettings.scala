@@ -428,7 +428,8 @@ case class McpServerSettings(
     // for. Zero interrupts in-flight handlers at EOF without waiting. Must not be negative.
     stdioDrainTimeout: java.time.Duration = McpServerSettings.DefaultStdioDrainTimeout,
     // HTTP only: plain `GET` routes served next to the MCP endpoint on the same listener — a health
-    // or readiness probe (`HttpRoute.get("/health")(...)`). Empty by default: every path but the
+    // or readiness probe (`HttpRoute.get("/health")(...)`; a `HEAD` is answered from the same
+    // handler, without the body). Empty by default: every path but the
     // endpoint is then 404, as before. A route is matched on its exact path, can never be the MCP
     // endpoint, and sits behind the same Host/Origin guard; the endpoint's other gates (content
     // type, `Accept`, body and input limits, sessions) do not apply to it, and nothing

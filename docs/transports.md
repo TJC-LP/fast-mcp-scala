@@ -283,7 +283,7 @@ joined string.
 
 The admission gates run in a fixed order on every backend, on headers first and before any session
 state is touched: unknown path 404 (a path in `httpRoutes` takes its own, shorter way: Host/Origin
-guard 403 → 405 unless `GET` → its handler) → Host/Origin guard 403 → method 405 → `Content-Type` 415 →
+guard 403 → 405 unless `GET` or `HEAD` → its handler) → Host/Origin guard 403 → method 405 → `Content-Type` 415 →
 declared `Content-Length` over `maxRequestBodyBytes` 413 → `Accept` 406 → body read (platform byte
 cap, then a first-party post-read check → 413) → frame limits (`-32700`, HTTP 400) → dispatch. A
 legacy GET or DELETE continues after the method check with: a 2026-07-28 version header 405 → (GET
@@ -327,16 +327,18 @@ The API is three small types, all in the root import:
 
 | | |
 |---|---|
-| `HttpRoute.get(path)(handler)` | A `GET` route. `handler: HttpRouteRequest => UIO[HttpRouteResponse]` |
-| `HttpRouteRequest` | `path`, and `header(name): Option[String]` (case-insensitive; a header sent more than once is seen joined) |
+| `HttpRoute.get(path)(handler)` | A `GET` route, which also answers `HEAD`. `handler: HttpRouteRequest => UIO[HttpRouteResponse]` |
+| `HttpRouteRequest` | `path`, `method` (`GET` or `HEAD`), and `header(name): Option[String]` (case-insensitive; a header sent more than once is seen joined) |
 | `HttpRouteResponse.text(body, status = 200)` / `.json(body, status = 200)` / `HttpRouteResponse(status, body, contentType)` | The reply; `.withHeader(name, value)` adds a header |
 
 What a route is and is not:
 
-- **`GET` on an exact path.** The path is compared as the endpoint's is: exactly,
+- **`GET` and `HEAD` on an exact path.** The path is compared as the endpoint's is: exactly,
   case-sensitively, without the query string (`/health?x=1` is `/health`; `/health/` is 404).
-  Any other method on a route's path is **405** with `Allow: GET` (a `HEAD` gets the status and
-  headers only). There are no prefixes, wildcards or path parameters.
+  A `HEAD` runs the same handler (`request.method` tells the two apart) and is answered with its
+  status and headers, the `Content-Length` the `GET` would carry, and no body — on zio-http, the
+  socket backend and Bun alike. Any other method on a route's path is **405** with
+  `Allow: GET, HEAD`. There are no prefixes, wildcards or path parameters.
 - **Never the MCP endpoint.** `runHttp()` refuses at startup a route whose path is `httpEndpoint`,
   one listed twice, one that does not start with `/`, and one no request path can equal (the
   rules `httpEndpoint` is held to, on every backend). A route therefore cannot answer, observe or
@@ -365,7 +367,7 @@ What a route is and is not:
   bound its own checks. On Scala Native keep reply bodies under 8 KiB (see
   [The socket backend](#the-socket-backend)).
 
-Order on a route's path: Host/Origin guard 403 → method 405 → the handler. With no route listed
+Order on a route's path: Host/Origin guard 403 → method 405 (unless `GET` or `HEAD`) → the handler. With no route listed
 (the default) nothing changes: every path but the endpoint is the empty 404 it was. CORS on the
 MCP endpoint, TLS and authentication stay with the proxy in front. Routes are ignored on stdio.
 
@@ -581,7 +583,7 @@ no reply (it fails with its timeout). A JVM client whose GET stream falls more t
 | `resourcesSubscribe` | `false` | Enable legacy `resources/subscribe`; modern clients use `subscriptions/listen`. |
 | `exposeTemplatesEndpoint` | `false` | List registered resource templates through `resources/templates/list`. `resources/list` never lists templates; with the default the templates endpoint answers an empty page (clients derive templates from `{}` URIs) and `resources/read` on a matching URI works either way. Applies on every transport. |
 | `contextHeaders` | `Set.empty` | HTTP request headers a handler may read through `McpContext.header` / `McpContext.headers`; nothing is exposed unless listed. See "Request headers in handlers". |
-| `httpRoutes` | `Nil` | Plain `GET` routes served next to the MCP endpoint (since 1.1.0): `HttpRoute.get("/health")(...)`. Behind the Host/Origin guard; never the endpoint itself. See [Other routes on the listener](#other-routes-on-the-listener-httproutes). |
+| `httpRoutes` | `Nil` | Plain `GET` (and `HEAD`) routes served next to the MCP endpoint (since 1.1.0): `HttpRoute.get("/health")(...)`. Behind the Host/Origin guard; never the endpoint itself. See [Other routes on the listener](#other-routes-on-the-listener-httproutes). |
 | `tasks` | `TaskSettings()` | The Tasks extension, off by default (see [tasks.md](./tasks.md)). |
 | `limits` | `LimitSettings()` | Input bounds on every transport: `maxFrameChars` 4 MiB, `maxDepth` 64, `maxObjectFields` 1024, `maxArrayElements` 4096, `maxValues` 65536, `maxNumberDigits` 512, `maxNumberExponent` 512 (`-32700` / HTTP 400 before dispatch), `maxUriChars` 8192 and `maxSubscriptionsPerSession` 1024 (`-32602`); plus `maxOutboundMessages` 256, the per-session buffer for messages emitted outside a request. See [Input limits](#input-limits). |
 

@@ -64,6 +64,38 @@ class HttpRouteHandlerTest extends AnyFunSuite with Matchers:
       handle(handler, request(method, "/health")) shouldBe HttpReply.Empty(404)
   }
 
+  test("a HEAD runs the same handler: its status, type and headers, marked to be sent without a body") {
+    val calls = new AtomicInteger(0)
+    val seen = new java.util.concurrent.atomic.AtomicReference("")
+    val ready = HttpRoute.get("/ready") { req =>
+      ZIO.succeed {
+        val _ = calls.incrementAndGet()
+        seen.set(req.method)
+        HttpRouteResponse.json("""{"ready":false}""", status = 503).withHeader("Retry-After", "5")
+      }
+    }
+    val handler = makeHandler(McpServerSettings(httpRoutes = List(ready)))
+    // Admitted on its head like a GET.
+    handler.admit(request("HEAD", "/ready")) shouldBe None
+    val head = handle(handler, request("HEAD", "/ready"))
+    head shouldBe HttpReply.Body(
+      503,
+      """{"ready":false}""",
+      "application/json",
+      List("Retry-After" -> "5"),
+      headOnly = true
+    )
+    seen.get shouldBe "HEAD"
+    val get = handle(handler, request("GET", "/ready"))
+    get shouldBe head.asInstanceOf[HttpReply.Body].copy(headOnly = false)
+    seen.get shouldBe "GET"
+    calls.get shouldBe 2
+    // The guard comes first for a HEAD too, and a refusal to a HEAD has no body.
+    handle(handler, request("HEAD", "/ready", Map("host" -> "evil.example"))) shouldBe
+      HttpReply.Empty(403)
+    calls.get shouldBe 2
+  }
+
   test("a GET on a route's path runs its handler; the reply carries its status, body and type") {
     val handler = makeHandler(McpServerSettings(httpRoutes = List(health)))
     handle(handler, request("GET", "/health")) shouldBe
@@ -158,7 +190,7 @@ class HttpRouteHandlerTest extends AnyFunSuite with Matchers:
     handle(open, request("GET", "/health", Map("host" -> "10.0.0.7:8000"))).status shouldBe 200
   }
 
-  test("any method but GET on a route's path is 405 with Allow: GET, after the Host guard") {
+  test("any method but GET and HEAD on a route's path is 405 with Allow: GET, HEAD, after the Host guard") {
     val calls = new AtomicInteger(0)
     val counted = HttpRoute.get("/health") { _ =>
       ZIO.succeed { val _ = calls.incrementAndGet(); HttpRouteResponse.text("ok") }
@@ -168,17 +200,14 @@ class HttpRouteHandlerTest extends AnyFunSuite with Matchers:
       withClue(s"$method: ") {
         val reply = handle(handler, request(method, "/health", postHeaders, initFrame))
         reply.status shouldBe 405
-        headerOf(reply, "allow") shouldBe Some("GET")
+        headerOf(reply, "allow") shouldBe Some("GET, HEAD")
         reply match
           case HttpReply.Json(_, body, _) =>
-            body should include(s"Method $method is not allowed on this route")
+            body should include(s"Method $method is not allowed on this route (allowed: GET, HEAD)")
           case other => fail(s"expected a JSON-RPC refusal, got $other")
         handle(handler, request(method, "/health", Map("host" -> "evil.example"))).status shouldBe
           403
       }
-    // HEAD: the status and headers only.
-    handle(handler, request("HEAD", "/health")) shouldBe
-      HttpReply.Empty(405, List("allow" -> "GET"))
     calls.get shouldBe 0
   }
 

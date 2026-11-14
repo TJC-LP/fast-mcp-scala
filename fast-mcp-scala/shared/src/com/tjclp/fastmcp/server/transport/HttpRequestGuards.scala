@@ -11,7 +11,7 @@ import com.tjclp.fastmcp.server.router.RequestHeaders
   *
   * Request order on every backend:
   * {{{
-  * path 404 (pathMatches; a path in `httpRoutes` instead: hostGate 403 → 405 unless GET → its
+  * path 404 (pathMatches; a path in `httpRoutes` instead: hostGate 403 → 405 unless GET/HEAD → its
   *   handler, see routeGate) → hostGate 403 → method 405 (nonPostGate) →
   *   POST: Content-Type 415 → declared Content-Length 413 → Accept 406 →
   *     body read (platform byte cap → 413) → bodyTooLarge 413 → parseFrame → dispatch →
@@ -150,9 +150,9 @@ private[fastmcp] object HttpRequestGuards:
     if settings.httpRoutes.isEmpty then None else settings.httpRouteIndex.get(path)
 
   /** The gate of a request to a route, on headers only: 403 Host/Origin — the same guard as on the
-    * MCP endpoint — then 405 for any method but `GET` (`Allow: GET`). `None` runs the handler.
-    * Nothing else is checked: the content-type, `Accept`, body and session gates are the
-    * endpoint's.
+    * MCP endpoint — then 405 for any method but `GET` and `HEAD` (`Allow: GET, HEAD`). `None` runs
+    * the handler. Nothing else is checked: the content-type, `Accept`, body and session gates are
+    * the endpoint's.
     */
   def routeGate(
       method: String,
@@ -160,24 +160,27 @@ private[fastmcp] object HttpRequestGuards:
       settings: McpServerSettings
   ): Option[Rejection] =
     hostGate(header, settings).orElse {
-      if method == HttpRoute.Method then None
+      if HttpRoute.Methods.contains(method) then None
       else
         Some(
           Rejection(
             405,
-            s"Method $method is not allowed on this route (allowed: ${HttpRoute.Method})",
-            allow = List(HttpRoute.Method)
+            s"Method $method is not allowed on this route (allowed: ${HttpRoute.Methods.mkString(", ")})",
+            allow = HttpRoute.Methods
           )
         )
     }
 
-  /** Run a route's handler for an admitted request. `header` is the gates' joined lookup. */
+  /** Run a route's handler for an admitted request (`method` is `GET` or `HEAD`; a `HEAD` runs the
+    * same handler and the backend then sends no body). `header` is the gates' joined lookup.
+    */
   def runRoute(
       route: HttpRoute,
+      method: String,
       path: String,
       header: String => Option[String]
   ): zio.UIO[HttpRouteResponse] =
-    zio.ZIO.suspendSucceed(route.handler(new HttpRouteRequest(path, header)))
+    zio.ZIO.suspendSucceed(route.handler(new HttpRouteRequest(path, header, method)))
 
   /** The path requests are matched against: `httpEndpoint` with a leading slash (`/mcp` for both
     * `"/mcp"` and `"mcp"`).
