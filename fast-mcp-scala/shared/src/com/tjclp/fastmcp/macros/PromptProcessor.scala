@@ -86,15 +86,8 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
       .map(_.asType)
       .getOrElse(TypeRepr.of[Any].asType)
 
-    val rServerRepr = TypeRepr.of[R]
     val rMethodRepr = rMethodType match { case '[t] => TypeRepr.of[t] }
-    if !(rServerRepr <:< rMethodRepr) then
-      report.errorAndAbort(
-        s"@Prompt '$methodName' requires ZIO environment '${rMethodRepr.show}' but the server's " +
-          s"environment type is '${rServerRepr.show}', which does not provide it. " +
-          s"Construct the server as McpServer.typed[${rServerRepr.show} & ${rMethodRepr.show}] " +
-          s"(or wider), or remove the environment requirement from the method body."
-      )
+    requireEnvironment[R]("@Prompt", methodSym, rMethodRepr)
 
     val withContext: Expr[(Map[String, Any], Option[McpContext]) => Map[String, Any]] =
       ctxParamName match

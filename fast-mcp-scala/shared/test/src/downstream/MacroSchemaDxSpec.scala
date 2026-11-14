@@ -54,6 +54,11 @@ object DxResources:
   @Resource("dx://notes/{id}")
   def note(id: String): String = s"note $id"
 
+object DxMissing:
+
+  @Tool(name = Some("annotated"))
+  def annotated(p: String): String = p
+
 object DxContextual:
 
   @Tool(name = Some("who"))
@@ -311,5 +316,33 @@ class MacroSchemaDxSpec extends AsyncFunSuite:
     run(program).map { (declared, undeclared) =>
       assert(declared == (Some("application/json"), """{"id":"7"}"""))
       assert(undeclared == (None, "note 7"))
+    }
+  }
+
+  // ---- D1.13: one message for a missing argument on both registration paths ----
+
+  test("a missing required argument reads the same on both paths, with validation on and off") {
+    def messages(validate: Boolean): Task[(Either[String, String], Either[String, String])] =
+      val server = McpServer("missing", settings = McpServerSettings(validateToolInput = validate))
+      val _ = server.scanAnnotations[DxMissing.type]
+      for
+        _ <- server.tool(McpTool[DxPoint, String](name = "typed")(_.toString))
+        annotated <- call(server, "annotated", "{}")
+        typed <- call(server, "typed", """{"y":1}""")
+      yield (annotated, typed)
+    val program =
+      for
+        on <- messages(validate = true)
+        off <- messages(validate = false)
+      yield List(on._1, on._2, off._1, off._2)
+    run(program).map { results =>
+      assert(
+        results == List(
+          Left("Invalid arguments for tool 'annotated': missing required property 'p'"),
+          Left("Invalid arguments for tool 'typed': missing required property 'x'"),
+          Left("Missing required argument 'p'"),
+          Left("Missing required argument 'x'")
+        )
+      )
     }
   }

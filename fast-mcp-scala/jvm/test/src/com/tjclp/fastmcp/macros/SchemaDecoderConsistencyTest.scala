@@ -12,6 +12,15 @@ import zio.json.ast.Json
 import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.macros.RegistrationMacro.scanAnnotations
 
+/** References two Java enum constants out of declaration order, BEFORE the macros below expand in
+  * this file. The compiler lists a Java enum's constants in the order a run first touches them, so
+  * a derivation that read that list would advertise `["DAYS", "MILLISECONDS", ...]` here (and did,
+  * in one full build of this branch). The schema must be in declaration order regardless.
+  */
+object JavaEnumOrderProbe:
+  val touchedFirst: java.util.concurrent.TimeUnit = java.util.concurrent.TimeUnit.DAYS
+  val touchedSecond: java.util.concurrent.TimeUnit = java.util.concurrent.TimeUnit.MILLISECONDS
+
 /** Parameter shapes whose advertised `inputSchema` and generated decoder must agree. The `ctl_*`
   * tools are controls: if their properties fail, the schema-driven generator is wrong, not the
   * macro.

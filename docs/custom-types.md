@@ -66,6 +66,14 @@ constraint — the same in-band answer an undecodable argument gets. The handler
 holds for derived schemas, `@Param(schema = ...)` fragments, `McpSchema` / `McpInputCodec` schemas
 and `McpTool.withSchema`, on every transport, on the JVM, Scala.js and Scala Native.
 
+A missing required argument is such a case. Both registration paths answer it with the same
+`isError` result, `Invalid arguments for tool '<tool>': missing required property '<name>'`, and
+not with a JSON-RPC `-32602`: the MCP specification (2026-07-28, *Tools* § *Error Handling*) keeps
+protocol errors for unknown tools and malformed requests, and lists input validation errors under
+tool execution errors, which are "reported in tool results with `isError: true`" so that the model
+can correct the call. With enforcement off the decoder reports it instead, again with one message
+on both paths: `Missing required argument '<name>'`.
+
 The check is a built-in, dependency-free validator
 (`com.tjclp.fastmcp.core.JsonSchemaValidator`) for a subset of JSON Schema:
 

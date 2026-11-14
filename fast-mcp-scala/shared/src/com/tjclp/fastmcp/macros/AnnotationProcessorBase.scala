@@ -136,6 +136,33 @@ private[macros] trait AnnotationProcessorBase:
           methodPosition(methodSym)
         )
 
+  /** Abort unless the server's environment `R` provides what the annotated method's `ZIO` return
+    * type requires (`rMethod`; `Any` for a method that does not return a `ZIO`). Friendlier than
+    * the bound violation the generated registration would otherwise produce. The remedy names the
+    * type to construct the server with: the method's environment when the server has none
+    * (`McpServer.typed[Ref[Int]]`, not `McpServer.typed[Any & Ref[Int]]`), the intersection
+    * otherwise.
+    */
+  protected def requireEnvironment[R: Type](using Quotes)(
+      kind: String,
+      methodSym: quotes.reflect.Symbol,
+      rMethod: quotes.reflect.TypeRepr
+  ): Unit =
+    import quotes.reflect.*
+    val rServer = TypeRepr.of[R]
+    if !(rServer <:< rMethod) then
+      def short(tpe: TypeRepr): String = tpe.show(using Printer.TypeReprShortCode)
+      val wanted =
+        if rServer =:= TypeRepr.of[Any] then short(rMethod)
+        else s"${short(rServer)} & ${short(rMethod)}"
+      report.errorAndAbort(
+        s"$kind '${methodSym.name}' requires ZIO environment '${rMethod.show}' but the server's " +
+          s"environment type is '${rServer.show}', which does not provide it. " +
+          s"Construct the server as McpServer.typed[$wanted] (or wider), or remove the " +
+          "environment requirement from the method body.",
+        methodPosition(methodSym)
+      )
+
   /** Build a method reference expression that survives inlining and denotes EXACTLY `method` (the
     * annotated symbol), never a same-named sibling overload — see [[MacroUtils.getMethodRefExpr]].
     */

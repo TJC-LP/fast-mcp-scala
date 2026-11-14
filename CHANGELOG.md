@@ -532,6 +532,40 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   `McpTemplateResource`, `server.resourceTemplate(...)`) still fails then, and the error message
   now carries the reason: `Failed to register resource template '<pattern>': <reason>` (it was
   only in the cause).
+- **Typed tools: argument decode errors name the tool as a tool, and a missing argument reads as
+  on the annotation path** (GH #116, TJC-2362; C2.18, D1.13). Only the text of an `isError`
+  result changes, and only for calls that reach the decoder: with input validation on (the
+  default) a missing or mistyped argument is refused by the schema check first, with the message
+  both paths already share (`Invalid arguments for tool '<tool>': missing required property
+  '<name>'`).
+  - A missing top-level argument of a typed tool is `Missing required argument '<name>'`, the
+    message of an annotated tool. Before: `Failed to decode parameter '<tool>' from JSON:
+    .<name>(missing). Value: {}`.
+  - Any other decode failure is `Failed to decode the arguments of tool '<tool>': ...`; a number
+    outside the input limits is `Arguments of tool '<tool>' rejected: ...`. Before, both called
+    the tool a parameter (`... parameter '<tool>' ...`).
+  - A missing argument is still an `isError` tool result, not a JSON-RPC `-32602`, although the
+    1.0.0 notes had planned the latter. The 2026-07-28 specification (*Tools*, *Error Handling*)
+    keeps protocol errors for unknown tools and malformed requests and lists input validation
+    errors under tool execution errors, reported with `isError: true`.
+- **Clearer compile-time diagnostics on the annotation path** (GH #116, TJC-2362; C2.18). Texts
+  only; nothing that compiled stops compiling.
+  - Errors about one annotated method are reported at that method (when it is compiled in the
+    same run), not at the object that is scanned: the environment mismatch, `required = false`
+    without an `Option` or default, `@Tool(taskSupport)`, the `@Resource` parameter checks.
+  - Environment mismatch: on a server without an environment the remedy reads
+    `McpServer.typed[Ref[Int]]`, not `McpServer.typed[scala.Any & zio.Ref[scala.Int]]`.
+  - A parameter type no schema can be derived for (a recursive case class, an arbitrary class, a
+    map with non-string keys) is pointed at `McpInputCodec` only. `McpSchema` and
+    `McpTool.withSchema` were offered too, but neither helps an annotated parameter, which also
+    needs a decoder. Typed contracts keep all three remedies.
+  - `@Resource(uri = someVal)` says that the URI must be a string literal or a `final val`
+    constant (it said the annotation "must have a 'uri' parameter"). A `final val` is accepted.
+  - `@Tool(taskSupport = Some("..."))` with an unknown value names the method.
+  - `@Param(required = false)` on a repeated parameter (`parts: String*`) says that such a
+    parameter cannot be optional and what to write instead; the message used to print the
+    compiler's internal `@scala.annotation.internal.Repeated`. On a field of a typed tool's `In`
+    the message now ends with the same remedy as on a method parameter.
 - **`java.time.DayOfWeek` and `java.time.Month` advertise `enum`** (GH #116, TJC-2362; C2.14):
   `{"type":"string","enum":["MONDAY", ...]}` in place of `{"type":"string"}`. zio-json's decoders
   for the two also accept other letter cases (`"monday"`); with input validation on, only the

@@ -61,7 +61,9 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       case Some("required") => '{ Some(com.tjclp.fastmcp.core.TaskSupport.Required) }
       case Some(other) =>
         report.errorAndAbort(
-          s"@Tool taskSupport must be one of \"forbidden\" | \"optional\" | \"required\" — got \"$other\""
+          s"@Tool(taskSupport) on method '$methodName' must be one of \"forbidden\" | " +
+            s"\"optional\" | \"required\" — got \"$other\"",
+          methodPosition(methodSym)
         )
 
     val hasAnyAnnotation = List(
@@ -137,11 +139,28 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
               val hasDefault = paramsWithDefaults.contains(pSym.name)
 
               if !isOptionType && !hasDefault then
-                report.errorAndAbort(
-                  s"Parameter '${pSym.name}' in method '$methodName' is marked as required=false " +
-                    s"but is not an Option type and has no default value. " +
-                    s"Use Option[${pSym.termRef.widenTermRefByName.show}] or provide a default value."
-                )
+                val shownType = (tpe: TypeRepr) => tpe.show(using Printer.TypeReprShortCode)
+                repeatedElementType(pSym) match
+                  case Some(element) =>
+                    // A repeated parameter can be neither: there is no `Option[T*]` and it
+                    // cannot have a default. Its type used to be printed with the compiler's
+                    // internal `@Repeated` annotation.
+                    report.errorAndAbort(
+                      s"Parameter '${pSym.name}' in method '$methodName' is marked as " +
+                        s"required=false but is a repeated parameter (${shownType(element)}*), " +
+                        "which can be neither an Option nor have a default value. Remove " +
+                        s"required = false, or declare it as `${pSym.name}: " +
+                        s"List[${shownType(element)}] = Nil`.",
+                      methodPosition(methodSym)
+                    )
+                  case None =>
+                    report.errorAndAbort(
+                      s"Parameter '${pSym.name}' in method '$methodName' is marked as required=false " +
+                        s"but is not an Option type and has no default value. " +
+                        s"Use Option[${shownType(pSym.termRef.widenTermRefByName)}] or provide a " +
+                        "default value.",
+                      methodPosition(methodSym)
+                    )
 
             Some(pSym.name -> ParamMetadata(desc, examples, required, schema))
           case None if hasAppliedDefault && !isOptionType =>
@@ -181,15 +200,8 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
       .getOrElse(TypeRepr.of[Any].asType)
 
     // Pre-flight R-check with a friendlier error than Scala's bound-violation message.
-    val rServerRepr = TypeRepr.of[R]
     val rMethodRepr = rMethodType match { case '[t] => TypeRepr.of[t] }
-    if !(rServerRepr <:< rMethodRepr) then
-      report.errorAndAbort(
-        s"@Tool '$methodName' requires ZIO environment '${rMethodRepr.show}' but the server's " +
-          s"environment type is '${rServerRepr.show}', which does not provide it. " +
-          s"Construct the server as McpServer.typed[${rServerRepr.show} & ${rMethodRepr.show}] " +
-          s"(or wider), or remove the environment requirement from the method body."
-      )
+    requireEnvironment[R]("@Tool", methodSym, rMethodRepr)
 
     // Handler typed at the method's required environment. Scala's normal type-checker enforces
     // that the surrounding `server.tool[R1 >: R](handler: ContextualToolHandler[R1])` constraint
@@ -277,6 +289,17 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
         }
 
     runAndReturnServer[R](server)(registration)
+
+  /** `Some(T)` when `param` is a repeated parameter `T*`. */
+  private def repeatedElementType(using Quotes)(
+      param: quotes.reflect.Symbol
+  ): Option[quotes.reflect.TypeRepr] =
+    import quotes.reflect.*
+    param.termRef.widenTermRefByName match
+      case AnnotatedType(underlying, annotation)
+          if annotation.tpe.typeSymbol == defn.RepeatedAnnot =>
+        underlying.typeArgs.headOption
+      case _ => None
 
   private def optionStringExpr(using Quotes)(opt: Option[String]): Expr[Option[String]] =
     opt match

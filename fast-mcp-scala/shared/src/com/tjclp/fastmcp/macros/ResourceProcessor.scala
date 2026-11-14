@@ -92,10 +92,14 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
       if missing.nonEmpty || extra.nonEmpty then
         report.errorAndAbort(
           s"Resource template URI parameters {${placeholders.mkString(",")}} " +
-            s"do not match method parameters (${methodParamNames.mkString(",")}) for method '$methodName'"
+            s"do not match method parameters (${methodParamNames.mkString(",")}) for method '$methodName'",
+          methodPosition(methodSym)
         )
     else if methodParamNames.nonEmpty then
-      report.errorAndAbort(s"Static resource method '$methodName' must not have parameters.")
+      report.errorAndAbort(
+        s"Static resource method '$methodName' must not have parameters.",
+        methodPosition(methodSym)
+      )
 
     val argsExpr: Expr[Option[List[ResourceArgument]]] =
       if !isTemplate then '{ None }
@@ -138,15 +142,8 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
       .map(_.asType)
       .getOrElse(TypeRepr.of[Any].asType)
 
-    val rServerRepr = TypeRepr.of[R]
     val rMethodRepr = rMethodType match { case '[t] => TypeRepr.of[t] }
-    if !(rServerRepr <:< rMethodRepr) then
-      report.errorAndAbort(
-        s"@Resource '$methodName' requires ZIO environment '${rMethodRepr.show}' but the server's " +
-          s"environment type is '${rServerRepr.show}', which does not provide it. " +
-          s"Construct the server as McpServer.typed[${rServerRepr.show} & ${rMethodRepr.show}] " +
-          s"(or wider), or remove the environment requirement from the method body."
-      )
+    requireEnvironment[R]("@Resource", methodSym, rMethodRepr)
 
     val registration: Expr[ZIO[Any, Throwable, McpServerCore[R]]] = rMethodType match
       case '[rMethod] =>

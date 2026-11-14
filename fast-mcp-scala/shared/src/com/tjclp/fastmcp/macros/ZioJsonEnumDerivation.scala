@@ -68,8 +68,8 @@ object ZioJsonEnumDerivation:
   /** The constants of the Java enum `T`, by name, in declaration order. */
   private def javaEnumConstants[T: Type](using Quotes): List[(String, Expr[T])] =
     import quotes.reflect.*
-    TypeRepr.of[T].dealias.simplified.typeSymbol.children.map { constant =>
-      constant.name -> Ref(constant).asExprOf[T]
+    EnumTypeCollector.javaEnumConstants(TypeRepr.of[T].dealias.simplified.typeSymbol).map {
+      constant => constant.name -> Ref(constant).asExprOf[T]
     }
 
   /** A decoder for the Java enum `T` that reads exactly the constant names the schema macro

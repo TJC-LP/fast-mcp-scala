@@ -107,6 +107,22 @@ private[fastmcp] object EnumTypeCollector:
     val sym = tpe.dealias.simplified.typeSymbol
     sym.isClassDef && sym.flags.is(Flags.Enum) && sym.flags.is(Flags.JavaDefined)
 
+  /** The constants of the Java enum class `enumClass`, in DECLARATION order.
+    *
+    * Read from the declared static fields of the class, not from `Symbol.children`: the compiler
+    * registers a Java enum constant as a child when it first completes it, so `children` lists the
+    * constants in the order the current compilation run happened to reference them
+    * (`TimeUnit.MILLISECONDS` first, if another source file mentions it first). A schema whose
+    * `enum` order changed from build to build would be a moving wire shape. `children` remains the
+    * fallback should a compiler version stop listing the fields.
+    */
+  def javaEnumConstants(using q: Quotes)(enumClass: q.reflect.Symbol): List[q.reflect.Symbol] =
+    import q.reflect.*
+    val declared = enumClass.companionModule.declaredFields.filter { field =>
+      field.flags.is(Flags.Enum) && field.flags.is(Flags.JavaStatic)
+    }
+    if declared.nonEmpty then declared else enumClass.children
+
   /** `TupleN[...]` for N >= 1. */
   def isTuple(using q: Quotes)(tpe: q.reflect.TypeRepr): Boolean =
     import q.reflect.*

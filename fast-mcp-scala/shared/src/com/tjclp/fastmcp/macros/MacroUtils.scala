@@ -456,7 +456,9 @@ private[macros] object MacroUtils:
                 if !isOption && !hasDefault then
                   report.errorAndAbort(
                     s"Field '${fieldSym.name}' in typed request ${tpeSym.name} is marked as required=false " +
-                      s"but is not an Option type and has no default value."
+                      s"but is not an Option type and has no default value. " +
+                      s"Use Option[${fieldTpe.show(using Printer.TypeReprShortCode)}] or provide a " +
+                      "default value."
                   )
               ParamMetadata(desc, examples, required, schema)
             }
@@ -508,6 +510,21 @@ private[macros] object MacroUtils:
             Some('{ SchemaMetadataNode(properties = Map(${ Varargs(entries) }*)) })
           else None
 
+  /** The `uri` of a `@Resource`: a string literal or a `final val` constant. Anything else aborts
+    * with that cause; it used to fall through to "must have a 'uri' parameter", which the
+    * annotation plainly had.
+    */
+  private def parseUriLiteral(using quotes: Quotes)(argTerm: quotes.reflect.Term): String =
+    import quotes.reflect.*
+    constantOf(argTerm) { case StringConstant(s) => s }.getOrElse {
+      report.errorAndAbort(
+        s"@Resource(uri) must be a string literal (or a `final val` constant), but was " +
+          s"`${stripTerm(argTerm).show}`. Annotation arguments are read at compile time, and the " +
+          "URI decides whether the resource is static or a template.",
+        argTerm.pos
+      )
+    }
+
   // Helper to parse @Resource annotation arguments
   def parseResourceParams(using quotes: Quotes)(
       term: quotes.reflect.Term
@@ -524,7 +541,7 @@ private[macros] object MacroUtils:
     term match {
       case Apply(Select(New(_), _), argTerms) =>
         argTerms.zipWithIndex.foreach {
-          case (NamedArg("uri", Literal(StringConstant(s))), _) => uri = s
+          case (NamedArg("uri", valueTerm), _) => uri = parseUriLiteral(valueTerm)
           case (NamedArg("name", valueTerm), _) =>
             resourceName = parseOptionStringLiteral(valueTerm, "@Resource(name)")
           case (NamedArg("description", valueTerm), _) =>
@@ -532,7 +549,7 @@ private[macros] object MacroUtils:
           case (NamedArg("mimeType", valueTerm), _) =>
             mimeType = parseOptionStringLiteral(valueTerm, "@Resource(mimeType)")
           case (NamedArg(_, _), _) => ()
-          case (Literal(StringConstant(s)), 0) => uri = s
+          case (valueTerm, 0) => uri = parseUriLiteral(valueTerm)
           case (valueTerm, 1) =>
             resourceName = parseOptionStringLiteral(valueTerm, "@Resource(name)")
           case (valueTerm, 2) =>
