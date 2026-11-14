@@ -389,7 +389,9 @@ set TCP keepalive itself). The cap-time rules below bound the session store rega
 
 `McpServerSettings.sseRetryInterval` (since 1.1.0, unset by default) makes the adapter announce
 the SSE `retry` field: the time a client should wait before it reconnects after a stream ends.
-With it unset nothing is sent and the wire is what it always was. With it set, every
+With it unset nothing is sent and the wire is what it always was. A negative interval, or one
+above 2147483 seconds (about 24 days, the largest delay a browser's timer honours), is refused
+when the settings are built. With it set, every
 `text/event-stream` body the adapter writes **begins with the line `retry: <milliseconds>`**, on
 every backend:
 

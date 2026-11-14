@@ -105,6 +105,9 @@ jobs:
       # A separate invocation: the report tasks read the measurement files and do not depend on
       # the test run, so naming them next to it would not order them after it.
       - name: Coverage reports
+        # `shell: bash` adds `-o pipefail`: a report that fails must fail the step, not be
+        # hidden by `tee`.
+        shell: bash
         run: |
           ./mill fast-mcp-scala.jvm.scoverage.htmlReport
           ./mill fast-mcp-scala.jvm.scoverage.xmlReport

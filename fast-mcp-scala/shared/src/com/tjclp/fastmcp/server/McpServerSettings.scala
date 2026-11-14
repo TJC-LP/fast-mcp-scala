@@ -442,9 +442,14 @@ case class McpServerSettings(
     sseRetryInterval: Option[java.time.Duration] = None
 ):
   require(!stdioDrainTimeout.isNegative, "McpServerSettings.stdioDrainTimeout must be >= 0")
+  // The upper bound is what the field can carry: it is written as whole milliseconds, a larger
+  // `Duration` overflows `toMillis`, and a browser's timer treats a delay above `Int.MaxValue` ms
+  // as 1 ms. Compared in seconds, which cannot overflow.
   require(
-    sseRetryInterval.forall(interval => !interval.isNegative),
-    "McpServerSettings.sseRetryInterval must be >= 0"
+    sseRetryInterval.forall(interval =>
+      !interval.isNegative && interval.getSeconds <= Int.MaxValue / 1000L
+    ),
+    "McpServerSettings.sseRetryInterval must be between 0 and 2147483 seconds (about 24 days)"
   )
 
   /** The Host/Origin guard these settings resolve to (`transport.HostGuard`), computed once per

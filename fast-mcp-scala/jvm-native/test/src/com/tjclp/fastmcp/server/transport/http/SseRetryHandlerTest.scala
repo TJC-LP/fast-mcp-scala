@@ -265,12 +265,21 @@ class SseRetryHandlerTest extends AnyFunSuite with Matchers:
 
   // --- the setting --------------------------------------------------------------------------------
 
-  test("sseRetryInterval: unset by default, and a negative interval is refused at construction") {
+  test("sseRetryInterval: unset by default; a negative or unrepresentable interval is refused") {
     McpServerSettings().sseRetryInterval shouldBe None
-    val refused = intercept[IllegalArgumentException] {
+    val negative = intercept[IllegalArgumentException] {
       McpServerSettings(sseRetryInterval = Some(java.time.Duration.ofMillis(-1)))
     }
-    refused.getMessage should include("sseRetryInterval must be >= 0")
+    negative.getMessage should include("sseRetryInterval must be between 0 and")
+    // `toMillis` of this one overflows a Long: refused here, not when the first reply is built.
+    val forever = intercept[IllegalArgumentException] {
+      McpServerSettings(sseRetryInterval = Some(java.time.temporal.ChronoUnit.FOREVER.getDuration))
+    }
+    forever.getMessage should include("sseRetryInterval must be between 0 and")
+    an[IllegalArgumentException] should be thrownBy
+      McpServerSettings(sseRetryInterval = Some(java.time.Duration.ofSeconds(2147484L)))
+    val largest = java.time.Duration.ofSeconds(2147483L)
+    McpServerSettings(sseRetryInterval = Some(largest)).sseRetryInterval shouldBe Some(largest)
   }
 
 object SseRetryHandlerTest:
