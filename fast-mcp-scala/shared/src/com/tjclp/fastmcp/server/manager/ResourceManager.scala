@@ -146,9 +146,12 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
         templateResources.put(uriPattern, (pattern, templateDefinition, handler))
         ()
       }
+      // The reason is part of the message, not only the cause: a server that fails to start
+      // because of an invalid template (`x://{a}{b}`) should say why in the one line most
+      // launchers show.
       .mapError(e =>
         new ResourceRegistrationError(
-          s"Failed to register resource template '$uriPattern'",
+          s"Failed to register resource template '$uriPattern': ${e.getMessage}",
           Some(e)
         )
       )
@@ -248,9 +251,7 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
           case Some(result) => ZIO.succeed(result)
           case None =>
             findMatchingTemplate(uri) match
-              case Some((_, _, handler, params)) =>
-                // Templated reads carry no declared mime type on the wire (pre-existing behaviour:
-                // `getResourceDefinition` never matched a templated URI), kept unchanged here.
+              case Some((_, definition, handler, params)) =>
                 handler(params)
                   .mapBoth(
                     e =>
@@ -258,7 +259,8 @@ class ResourceManager[R] extends Manager[ResourceDefinition]:
                         s"Error accessing templated resource '$uri' with params $params",
                         Some(e)
                       ),
-                    body => (None, body)
+                    // The template's declared mime type, like a static resource's (D1.23).
+                    body => (definition.mimeType, body)
                   )
               case None =>
                 ZIO.fail(new ResourceNotFoundError(uri))

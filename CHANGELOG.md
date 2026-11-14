@@ -524,6 +524,14 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   Now it is the first paragraph as one line: the markers are removed, and the text stops at the
   first blank line, `@tag` or code block. A comment with no text gives no description. Inline
   markup (`[[links]]`, backticks) is left as written.
+- **An invalid `@Resource` URI template is a compile-time error** (GH #116, TJC-2362; D1.27).
+  Adjacent placeholders (`x://{a}{b}`), a repeated placeholder name, unbalanced or nested braces
+  and a `/` inside a placeholder are reported at the method: `@Resource method 'r' has an invalid
+  URI template: template 'x://{a}{b}' has adjacent placeholders before '{b}' ...`. Before, such a
+  template compiled and the server failed when it started. Registration at run time (a typed
+  `McpTemplateResource`, `server.resourceTemplate(...)`) still fails then, and the error message
+  now carries the reason: `Failed to register resource template '<pattern>': <reason>` (it was
+  only in the cause).
 - **`java.time.DayOfWeek` and `java.time.Month` advertise `enum`** (GH #116, TJC-2362; C2.14):
   `{"type":"string","enum":["MONDAY", ...]}` in place of `{"type":"string"}`. zio-json's decoders
   for the two also accept other letter cases (`"monday"`); with input validation on, only the
@@ -716,6 +724,24 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Fixed
 
+- **`resources/read` on a resource template returns the template's `mimeType`** (GH #116,
+  TJC-2362; D1.23). The declared mime type was sent for static resources only; a templated read
+  carried none (and a binary body always `application/octet-stream`). Now the content entry of a
+  templated read has the `mimeType` of its template: the one written on `@Resource(mimeType = ...)`
+  or passed to `McpTemplateResource`. What changes on the wire: a typed `McpTemplateResource`
+  that does not pass `mimeType` gets the contract's default, `text/plain`, on every read, as a
+  typed static resource always did; pass `mimeType = None` to send none. An annotated template
+  without `mimeType` is unchanged.
+- **The `@Resource` Scaladoc no longer claims a `text/plain` default** (GH #116, TJC-2362; D1.24).
+  An annotated resource that does not state `mimeType` advertises none on `resources/list` and
+  sends none with a text body; a binary body is served as `application/octet-stream`. That is
+  what 1.0.x did; only the documentation said otherwise. The behaviour is unchanged, because
+  adding `text/plain` to every annotated resource would label binary bodies wrongly.
+- **A server that cannot start because of an invalid resource template says so on stderr**
+  (GH #116, TJC-2362; D1.27): `McpServerApp[Stdio]` reports the registration failure on stderr and
+  writes nothing to stdout. A plain `ZIOAppDefault` that fails before `runStdio()` is reported by
+  ZIO itself, on stdout, unless it installs `StdioLogging.bootstrap`; `docs/transports.md`
+  ("stdout is the wire") now says so.
 - **One stdio lifecycle on the JVM, Bun and Scala Native** (GH #113, TJC-2359). The edges of a
   stdio session behaved differently per platform; they now behave the same, and
   `docs/transports.md` ("stdio") states the contract.

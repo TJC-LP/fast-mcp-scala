@@ -46,6 +46,14 @@ object DxFragment:
       ) sortBy: String
   ): String = sortBy
 
+object DxResources:
+
+  @Resource("dx://users/{id}", mimeType = Some("application/json"))
+  def user(id: String): String = s"""{"id":"$id"}"""
+
+  @Resource("dx://notes/{id}")
+  def note(id: String): String = s"note $id"
+
 object DxContextual:
 
   @Tool(name = Some("who"))
@@ -287,5 +295,21 @@ class MacroSchemaDxSpec extends AsyncFunSuite:
       )
       assert(ok == Right("date"))
       assert(bad.left.exists(_.contains("must be one of: relevance, date")), s"got $bad")
+    }
+  }
+
+  // ---- D1.23: the mime type of a templated read ----
+
+  test("a templated read carries the mimeType its template declares") {
+    val server = McpServer("template-mime")
+    val _ = server.scanAnnotations[DxResources.type]
+    val program =
+      for
+        declared <- server.resourceManager.readResourceWithMime("dx://users/7", None)
+        undeclared <- server.resourceManager.readResourceWithMime("dx://notes/7", None)
+      yield (declared, undeclared)
+    run(program).map { (declared, undeclared) =>
+      assert(declared == (Some("application/json"), """{"id":"7"}"""))
+      assert(undeclared == (None, "note 7"))
     }
   }

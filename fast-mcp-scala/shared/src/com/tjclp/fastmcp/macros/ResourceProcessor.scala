@@ -9,6 +9,7 @@ import com.tjclp.fastmcp.core.*
 import com.tjclp.fastmcp.server.McpServerCore
 import com.tjclp.fastmcp.server.manager.ResourceHandler
 import com.tjclp.fastmcp.server.manager.ResourceTemplateHandler
+import com.tjclp.fastmcp.server.manager.ResourceTemplatePattern
 
 /** Cross-platform `@Resource` annotation processor. Handles both static and templated (URI with
   * `{placeholders}`) resources. Emits registration against [[McpServerCore]].
@@ -76,6 +77,16 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
     val methodParamNames = paramSyms.map(_.name)
 
     if isTemplate then
+      // The same check registration runs (`ResourceTemplatePattern.parse`), at compile time: a
+      // template it refuses (adjacent placeholders such as `{a}{b}`, a repeated name, unbalanced
+      // or nested braces, a `/` inside a placeholder) would otherwise compile and fail only when
+      // the server starts (D1.27).
+      ResourceTemplatePattern.parse(uri).left.foreach { reason =>
+        report.errorAndAbort(
+          s"@Resource method '$methodName' has an invalid URI template: $reason.",
+          methodPosition(methodSym)
+        )
+      }
       val missing = placeholders.filterNot(methodParamNames.contains)
       val extra = methodParamNames.filterNot(placeholders.contains)
       if missing.nonEmpty || extra.nonEmpty then

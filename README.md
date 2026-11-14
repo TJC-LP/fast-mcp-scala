@@ -171,7 +171,7 @@ turns it on:
 override def settings = McpServerSettings(exposeTemplatesEndpoint = true)
 ```
 
-A placeholder matches a non-empty run of characters within one path segment (never `/`); literal text is matched verbatim (not as a regex); placeholders in the same segment must be separated by literal text (a template such as `x://{a}{b}` is rejected at registration, so the server fails to start). Client URIs longer than `limits.maxUriChars` (8192) are rejected with `-32602`.
+A placeholder matches a non-empty run of characters within one path segment (never `/`); literal text is matched verbatim (not as a regex); placeholders in the same segment must be separated by literal text. A template that breaks the rules (`x://{a}{b}`, a repeated placeholder name, unbalanced braces) is a compile-time error on `@Resource`; a typed `McpTemplateResource` with such a pattern fails when it is registered, with the reason in the error. `resources/read` on a template returns the `mimeType` the template declares. An annotated resource that does not state a `mimeType` advertises none (a binary body is served as `application/octet-stream`); the typed contracts default to `text/plain`. Client URIs longer than `limits.maxUriChars` (8192) are rejected with `-32602`.
 
 ## Skills (`io.modelcontextprotocol/skills`)
 

@@ -136,14 +136,20 @@ class Param(
   *   names: `users://{id}` and `users://{userId}` are the same pattern and may not both be
   *   registered from one object (compile-time error); a static URI may be registered once per
   *   object. Literal text is matched verbatim (not as a regex) and placeholders in one path segment
-  *   must be separated by literal text.
+  *   must be separated by literal text. A template that breaks these rules (`x://{a}{b}`, a
+  *   repeated placeholder name, unbalanced braces, a `/` inside a placeholder) is a compile-time
+  *   error.
   * @param name
   *   Optional name for the resource (defaults to method name). Literal values only.
   * @param description
   *   Optional description for the resource (defaults to the first paragraph of the Scaladoc).
   *   Literal values only.
   * @param mimeType
-  *   Optional MIME type for the resource (defaults to "text/plain"). Literal values only.
+  *   Optional MIME type for the resource. Literal values only. When omitted, no `mimeType` is
+  *   advertised on `resources/list` or sent with a text body on `resources/read`, and a binary
+  *   (`Array[Byte]`) body is served as `application/octet-stream`. (The typed contracts
+  *   `McpStaticResource` / `McpTemplateResource` differ: their `mimeType` parameter defaults to
+  *   `Some("text/plain")`.)
   */
 class Resource(
     val uri: String,
