@@ -401,7 +401,8 @@ the same placeholder shape (`users://{id}` vs `users://{userId}`) log a warning.
   preflight, a `/health` route — cannot reproduce that shape: `runHttp()` owns the listener,
   non-endpoint paths answer 404, and the library adds no CORS or preflight handling. The 1.0
   stance is to put those concerns on a reverse proxy in front of the server. A composable
-  fetch handler / route hook is tracked for 1.1.0.
+  fetch handler / route hook is tracked in
+  [#120](https://github.com/TJC-LP/fast-mcp-scala/issues/120); it is not in 1.1.0.
 - Large `sampling/createMessage` or elicitation results over HTTP meet `maxRequestBodyBytes`
   (1 MiB) before `limits.maxFrameChars`; raise both together (`maxRequestBodyBytes` must stay
   ≤ `maxFrameChars`; checked at startup). See [transports.md](transports.md).

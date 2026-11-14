@@ -150,7 +150,7 @@ trait FastMCPPublishingBase extends PublishModule {
     * running daemon never serves the version of an earlier invocation.
     */
   override def publishVersion: T[String] = Task.Input {
-    Task.env.getOrElse("PUBLISH_VERSION", "1.1.0-SNAPSHOT")
+    Task.env.getOrElse("PUBLISH_VERSION", "1.1.0")
   }
 
   override def pomSettings: T[PomSettings] = PomSettings(
