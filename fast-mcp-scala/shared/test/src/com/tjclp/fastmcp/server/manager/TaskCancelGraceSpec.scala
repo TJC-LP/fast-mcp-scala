@@ -417,6 +417,9 @@ class TaskCancelGraceSpec extends AsyncFunSuite:
         _ <- started.await
         cancel <- f.tm.cancel(id, Session).forkDaemon
         _ <- f.clock.awaitSleeping(Duration.fromMillis(GraceMs))
+        // The sweeper too must be parked on its interval before the clock moves: parking after
+        // the advance, it would wait 250 ms past the new reading and never see the expiry.
+        _ <- f.clock.awaitSleeping(250.millis)
         // Past the TTL (the sweeper removes the entry), then to the end of the grace.
         _ <- f.clock.advance(1.second)
         _ <- Eventually("the sweeper removed the expired task")(f.tm.stats)(_.total == 0)
