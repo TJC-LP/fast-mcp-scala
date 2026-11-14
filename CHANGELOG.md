@@ -550,9 +550,72 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 - New production dependency `org.virtuslab::scala-yaml:0.3.3` (JVM, Scala.js, Scala Native) for
   `SKILL.md` frontmatter, driven at the event level (see `DEPENDENCY_POLICY.md` rationale in
   `docs/skills-conformance.md`).
+- **Sealed-trait hierarchies as arguments** (GH #119, C2.24). A sealed trait or sealed abstract
+  class is derived as a tool argument on both registration paths and on all three platforms: as
+  a field of a typed tool's `In` (it used to stop with `No given instance of type
+  zio.json.JsonDecoder[Shape]`), as an `@Tool` parameter whose cases have enum or case-class
+  fields, and inside `Option`, a collection or a `Map[String, V]`. No `McpInputCodec` is needed.
+  - The wire shape is zio-json's, and the derived schema describes it:
+    `{"Circle": {"radius": 1.5}}`, a `oneOf` of single-key wrapper objects, with `{}` as the
+    payload of a case object. A hierarchy of case objects only is the case name as a string
+    (`"Fast"`), a string `enum` in the schema. A sealed trait nested in another contributes its
+    cases and no level of its own.
+  - `@jsonDiscriminator("type")` and `@jsonHintNames(SnakeCase)` on the hierarchy and
+    `@jsonHint("name")` on a case are read by the schema derivation as they are by the codec:
+    `{"type": "Circle", "radius": 1.5}` is then what is advertised and enforced. The names may
+    be string literals or `final val` constants. A `@jsonHintNames(CustomCase(f))` function
+    cannot be applied when the schema is derived and is a compile-time error that names
+    `@jsonHint` and `McpInputCodec`.
+  - A given `JsonCodecConfiguration` does not reach the derived input decoder (as for case
+    classes: it is derived with zio-json's defaults), and the input schema describes exactly
+    that. It does reach the derived result encoder, so `.withOutputSchema` on a result with a
+    sealed-hierarchy field is a compile-time error while a configuration other than zio-json's
+    default is in scope where the tool is declared, unless you define the `JsonEncoder` (and
+    `McpSchema`) of the hierarchy yourself: its settings are not known when the schema is
+    derived.
+  - A codec you define for the hierarchy wins, as for every other type, and the derivation does
+    not look inside a hierarchy or a case class that has one: a case with a field no codec can
+    be derived for is fine behind a hand-written `JsonDecoder[Shape]`. Give the type an
+    `McpSchema` or make the instance an `McpInputCodec` when its shape differs from the one
+    above.
+  - Fields of a result case class may be sealed hierarchies too (`McpTool[In, Out]`, with or
+    without `.withOutputSchema`); a bare sealed trait as `Out` still needs a `JsonEncoder`.
+  - Still not derived, with a compile-time error that names the remedy: a recursive hierarchy, a
+    generic one (`sealed trait Box[T]`), a Scala 3 enum with parameterized cases, and a sealed
+    trait as the `In` of a typed tool itself (MCP `arguments` is always an object). `@Param` on a
+    field of a case is not carried into the schema.
+
 
 ### Changed
 
+- **An annotated `@Tool` method's result is encoded through the encoder you defined for its
+  type** (GH #119, C2.9). In 1.0.x only a typed contract (`McpTool`) used `McpEncoder`; an
+  annotated method that returned anything but a `String`, a `Content`, a `List[Content]` or an
+  `Array[Byte]` sent the value's `toString`, whatever instances existed.
+  - A result type with a `given zio.json.JsonEncoder[T]` of yours (`derives JsonEncoder` and
+    `derives JsonCodec` included) is now sent as JSON text, as `McpTool[In, T]` sends it, also
+    inside `List`, `Vector`, `Seq`, `Set`, `Option` and `Map[String, T]`. A result type with a
+    `given McpEncoder[T]`, in scope where `scanAnnotations` is called or in the companion of
+    `T` (not a `private` or `protected` one), is the content that encoder builds. The same holds for `ZIO[R, E, T]`, `Try[T]` and
+    `Either[Throwable, T]`.
+  - **This changes what such a server sends.** A method that returns `Item(1, "x")`, where
+    `Item derives JsonCodec`, sent the text `Item(1,x)` in 1.0.x and sends `{"a":1,"b":"x"}`
+    in 1.1.0. Return `item.toString` to keep the old text.
+  - Every other result is sent exactly as before, including the types for which only the
+    library could derive an encoder: a case class without a `JsonEncoder` is still `Item(1,x)`,
+    `Option[String]` is `Some(1)`, `List[String]` is `List(1, b)`, `Unit` is `()`. Return a
+    `String` / `Content`, define a `JsonEncoder`, or use a typed `McpTool` for those. There is
+    still no `structuredContent` and no `outputSchema` on the annotation path.
+  - A result type that nothing can encode now gets a compile-time **warning** where the method
+    is registered: a plain class or a sealed trait without a `JsonEncoder`, or a container whose
+    element is one (`List[Handle]`, `Option[Handle]`, `Map[String, Handle]`). It says that the
+    value is sent as its `toString` text and names the remedies. A build with `-Werror` has to
+    act on it: define the encoder, return a `String`, or silence it with
+    `-Wconf:msg=has no McpEncoder:s`. Not warned about: a declared result type of `Any` or
+    `AnyRef`; every type the library could encode by itself (a case class, `Option[String]`,
+    `Unit`, an enum); and a container of those (`List[Item]`, `Option[Item]`,
+    `Map[String, Item]` for a case class `Item` without a `JsonEncoder`), which is sent as its
+    `toString` like the bare `Item` is.
 - **`tools/list` sends each tool with the fields of the client's protocol revision** (GH #120,
   D3.17). Every session used to get every field, so a 2024-11-05 client was sent `annotations`
   (a 2025-03-26 field), `title` and `outputSchema` (2025-06-18) and `execution` (2025-11-25). Now
@@ -901,6 +964,13 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
 
 ### Fixed
 
+- **The schema of a sealed hierarchy matches zio-json's codec** (GH #119, C2.24). Two shapes
+  were advertised that the derived decoder refuses, so with input validation on no call could
+  pass: a hierarchy of case objects only was a `oneOf` of `{"Fast": {}}` wrappers (the codec
+  reads `"Fast"`), and a sealed trait nested in another was a level of its own
+  (`{"Sub": {"Leaf": ...}}`; the codec reads `{"Leaf": ...}`). Both are now derived as the codec
+  reads them. A hierarchy with `@jsonDiscriminator`, `@jsonHintNames` or `@jsonHint` was
+  advertised with wrapper objects and class names; it now follows the annotations. `outputSchema` follows the same rules.
 - **A request that races the end of its session is interrupted** (#117). A request's handler is
   started before it is registered as in flight, so a `DELETE` (or an idle or session-cap eviction)
   that ended the session in between missed it: the handler kept running and its reply stream

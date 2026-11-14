@@ -35,8 +35,8 @@ trait McpDecodeContext:
   */
 @implicitNotFound(
   "No McpDecoder[${T}] found: MCP arguments are decoded into ${T} through an McpDecoder. " +
-    "Case classes (with primitive, java.time, Scala 3 enum, Option, collection and nested " +
-    "case-class fields) and Unit derive one automatically, and any given zio.json.JsonDecoder[${T}] " +
+    "Case classes (with primitive, java.time, Scala 3 enum, sealed-trait, Option, collection and " +
+    "nested case-class fields) and Unit derive one automatically, and any given zio.json.JsonDecoder[${T}] " +
     "is lifted. For another type, define a given zio.json.JsonDecoder[${T}], a given " +
     "McpInputCodec[${T}] (decoder + schema), or a given McpDecoder[${T}]. If the compiler adds an " +
     "\"I found: ...\" note below, it names the field type that has no JsonDecoder"

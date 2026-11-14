@@ -73,7 +73,7 @@ private[macros] object MacroUtils:
     val moduleSym = ownerSym.companionModule // module class -> its module value (the Ref target)
     Select(Ref(moduleSym), methodSym).etaExpand(Symbol.spliceOwner).asExprOf[Any]
 
-  private def stripTerm(using quotes: Quotes)(term: quotes.reflect.Term): quotes.reflect.Term =
+  def stripTerm(using quotes: Quotes)(term: quotes.reflect.Term): quotes.reflect.Term =
     import quotes.reflect.*
     term match {
       case Inlined(_, _, inner) => stripTerm(inner)
@@ -601,7 +601,7 @@ private[macros] object MacroUtils:
   /** A compile-time constant carried by `term`: a literal, or a `final val` whose type is the
     * constant itself (`ConstantType`). Anything else is not statically known.
     */
-  private def constantOf[C](using quotes: Quotes)(term: quotes.reflect.Term)(
+  def constantOf[C](using quotes: Quotes)(term: quotes.reflect.Term)(
       pf: PartialFunction[quotes.reflect.Constant, C]
   ): Option[C] =
     import quotes.reflect.*

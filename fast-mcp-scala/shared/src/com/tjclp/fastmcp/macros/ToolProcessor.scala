@@ -99,6 +99,24 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
 
     val effectShape = MacroUtils.detectEffectShape(methodSym)
 
+    // How the result reaches the wire: through a user-defined `McpEncoder` when the result type
+    // has one, otherwise by the run-time rendering (see `ResultEncoderResolution`).
+    val resultTpe = ResultEncoderResolution.resultType(methodSym, effectShape)
+    val resultEncoder = ResultEncoderResolution.resolve(resultTpe)
+    resultEncoder match
+      case ResultEncoderResolution.Resolution.NoEncoder =>
+        val shown = resultTpe.show(using Printer.TypeReprShortCode)
+        report.warning(
+          s"@Tool method '$methodName' returns $shown, which has no McpEncoder: unless the value " +
+            "is a String, a Content, a List[Content] or an Array[Byte] when the tool is called, " +
+            s"it is sent as its toString text, not as JSON. Define a given " +
+            s"zio.json.JsonEncoder[$shown] (the result is then sent as JSON text) or a given " +
+            s"McpEncoder[$shown] (you choose the content), return a String / Content, or use a " +
+            "typed McpTool.",
+          methodPosition(methodSym)
+        )
+      case _ => ()
+
     val rawSchema: Expr[zio.json.ast.Json] = '{
       JsonSchemaMacro.schemaForFunctionArgs(
         $methodRefExpr,
@@ -268,6 +286,24 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
               }
             }
 
+        // A result type with a user-defined encoder is encoded while its type is still known, as
+        // a typed contract does; every other result is rendered when the tool is called.
+        val encodedHandler: Expr[ContextualToolHandler[rMethod]] = resultEncoder match
+          case ResultEncoderResolution.Resolution.Encode(encoderTerm) =>
+            resultTpe.asType match
+              case '[a] =>
+                val encoderExpr = encoderTerm.asExprOf[McpEncoder[a]]
+                '{
+                  val encoder: McpEncoder[a] = $encoderExpr
+                  val run: ContextualToolHandler[rMethod] = $handler
+                  (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
+                    run(args, ctxOpt).map { value =>
+                      val typed = value.asInstanceOf[a]
+                      StructuredToolResult(encoder.encode(typed), encoder.encodeStructured(typed))
+                    }
+                }
+          case _ => handler
+
         // Cast the handler to `ContextualToolHandler[R]`. The macro has already verified
         // `R <:< rMethod` above, so the cast is sound at runtime: providing `R` to an effect
         // that may require `rMethod` works because the server's environment is at least as wide
@@ -282,8 +318,8 @@ private[macros] object ToolProcessor extends AnnotationProcessorBase:
               annotations = $annotationsExpr,
               taskSupport = $taskSupportExpr
             ),
-            handler =
-              $handler.asInstanceOf[com.tjclp.fastmcp.server.manager.ContextualToolHandler[R]],
+            handler = $encodedHandler
+              .asInstanceOf[com.tjclp.fastmcp.server.manager.ContextualToolHandler[R]],
             options = com.tjclp.fastmcp.server.manager.ToolRegistrationOptions()
           )
         }

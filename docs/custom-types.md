@@ -21,9 +21,10 @@ typed contracts.
 - A hand-written `given JsonDecoder` / `JsonEncoder` for a type always wins over the derived one,
   custom naming and all. Derivation is macro-side and summon-first; the library never exports
   givens that could shadow yours.
-- Result (`Out`) case classes need no hand-written `JsonEncoder`: `McpEncoder` falls back to
-  `JsonEncoder[A]`, and case classes without any `JsonEncoder` in scope derive one automatically
-  (Mirror-based, `NotGiven`-guarded).
+- Result (`Out`) case classes of a typed contract need no hand-written `JsonEncoder`: `McpEncoder`
+  falls back to `JsonEncoder[A]`, and case classes without any `JsonEncoder` in scope derive one
+  automatically (Mirror-based, `NotGiven`-guarded). The result of an annotated method follows
+  [its own rule](#results-of-annotated-methods).
 - Enums with parameterized cases keep zio-json's wrapper-object encoding. Provide an
   `McpInputCodec` for a custom shape.
 - Union types (`A | B`), literal types (`"asc" | "desc"`) and opaque types are **not** derived: the
@@ -33,8 +34,9 @@ typed contracts.
   schema of the constant names and a codec that reads and writes exactly those names.
   `java.time.DayOfWeek` and `java.time.Month` advertise their names too (zio-json's decoders for
   the two also accept other letter cases, but input validation requires the listed spelling).
-- Sealed-trait hierarchies as a field type are not derived: provide a `given McpInputCodec[T]` for
-  them.
+- Sealed-trait hierarchies (a `sealed trait` or `sealed abstract class` and its cases) derive as
+  arguments since 1.1.0, as a parameter, as a field, and inside `Option`, a collection or a map:
+  see [Sealed-trait hierarchies](#sealed-trait-hierarchies).
 - A tuple on the input side is the object `{"_1": ..., "_2": ...}` its schema describes, wherever it
   appears: as a parameter, inside `Option`, a collection or a map, and as a field of a case class
   whose decoder is derived by the library. A `JsonDecoder` you define yourself for the tuple, or
@@ -56,6 +58,113 @@ typed contracts.
 - Derived schemas use the `format` keywords `date-time`, `date`, `time`, `duration`, `uuid` and
   `uri` for the matching `java.time` / `UUID` / `URI` types; validators running in strict mode
   (`ajv --strict`) need their formats plugin (`ajv-formats`) to accept them.
+
+## Sealed-trait hierarchies
+
+A sealed hierarchy is read and written in zio-json's shape, and the derived schema describes that
+shape:
+
+```scala 3 raw
+sealed trait Shape
+case class Circle(radius: Double) extends Shape
+case class Rect(w: Double, h: Double = 1.0) extends Shape
+case object Origin extends Shape
+
+sealed trait Mode
+case object Fast extends Mode
+case object Slow extends Mode
+
+case class DrawArgs(shape: Shape, mode: Mode)
+// {"shape": {"Circle": {"radius": 1.5}}, "mode": "Fast"}
+```
+
+| Hierarchy | On the wire | Schema |
+|---|---|---|
+| Cases with fields, or mixed | `{"Circle": {"radius": 1.5}}`, `{"Origin": {}}` | `oneOf` of single-key wrapper objects |
+| Case objects only | `"Fast"` | `{"type": "string", "enum": ["Fast", "Slow"]}` |
+| `@jsonDiscriminator("type")` on the trait | `{"type": "Circle", "radius": 1.5}`, `{"type": "Origin"}` | `oneOf` of the cases' objects, the case name as a `const` |
+
+- A case is called by its `@jsonHint("name")`, or else by its class name, passed through the
+  hierarchy's `@jsonHintNames(SnakeCase)` format when it has one (`CamelCase`, `PascalCase`,
+  `KebabCase` likewise; a `CustomCase(f)` function cannot be applied at compile time and is an
+  error). The names in `@jsonDiscriminator` and `@jsonHint` may be literals or `final val`
+  constants.
+- A sealed trait nested in another one (`sealed trait Polygon extends Shape`) contributes its
+  cases; there is no `"Polygon"` level on the wire.
+- A case's fields derive like any case class: enums, nested case classes, defaults (a defaulted
+  field is not `required`), other hierarchies.
+- The decoder is derived where the hierarchy is used, unless you define one: a
+  `given JsonDecoder[Shape]` of yours wins, and the derivation then does not look inside the
+  hierarchy (a case may have a field no codec can be derived for). The same holds for a case class
+  with a codec of its own. If the shape of your codec is not the one in the table, give the type
+  an `McpSchema`, or make the instance an `McpInputCodec`, so that the advertised (and enforced)
+  schema describes what it reads.
+- A given `JsonCodecConfiguration` (`sumTypeHandling`, `sumTypeMapping`, `enumValuesAsStrings`):
+  - does not reach a decoder the library derives, which always uses zio-json's defaults, as for
+    case classes. Arguments have the shape in the table whatever configuration is in scope, and
+    the input schema says so. Use the annotations to change the shape.
+  - does reach an encoder the library derives for a result. Its settings are run-time values the
+    schema derivation cannot read, so `.withOutputSchema` on a result with a sealed-hierarchy
+    field is a compile-time error while such a configuration is in scope where the tool is
+    declared. Use the annotations instead, or define the `JsonEncoder` and an `McpSchema` for the
+    hierarchy.
+  - a codec you derive yourself (`derives JsonDecoder`) under such a configuration has a shape the
+    schema derivation does not see: give the type an `McpSchema` / `McpInputCodec`.
+- On the result side, a field of an `Out` case class may be a sealed hierarchy, with the same
+  shape and the same `outputSchema`. A bare sealed trait as `Out` needs a `JsonEncoder` of yours.
+- Not derived, each with a compile-time error that names the remedy: a recursive hierarchy
+  (`case class Node(children: List[Tree]) extends Tree`), a generic one (`sealed trait Box[T]`), a
+  Scala 3 enum with parameterized cases, and a sealed trait as the `In` of a typed tool itself. Use
+  an `McpInputCodec`.
+- `@Param` on a field of a case is not carried into the schema (as for the values of a `Map` and
+  the sides of an `Either`).
+
+## Results of annotated methods
+
+What an annotated `@Tool` method returns reaches the client in one of three ways, decided from the
+method's result type when the server is compiled (`A` for `ZIO[R, E, A]`, `Try[A]` and
+`Either[Throwable, A]`):
+
+1. **A `String`, a `Content`, a `List[Content]` or an `Array[Byte]`** is sent as it is: text, the
+   content, or a base64 image block.
+2. **A type with an encoder you defined** is encoded through it, exactly as `McpTool[In, T]`
+   encodes its `Out` (since 1.1.0):
+   - a `given zio.json.JsonEncoder[T]`, `derives JsonEncoder` or `derives JsonCodec`: the JSON
+     text of the value, also for `List[T]`, `Vector[T]`, `Seq[T]`, `Set[T]`, `Option[T]` and
+     `Map[String, T]`;
+   - a `given McpEncoder[T]`, in the companion of `T` (a `private` or `protected` one does not
+     count) or in scope where `scanAnnotations` is called: the content it builds.
+3. **Anything else** is sent as `TextContent(value.toString)`.
+
+```scala 3 raw
+case class Item(name: String, qty: Int) derives JsonEncoder
+case class Raw(name: String, qty: Int)
+
+@Tool() def item(): Item = Item("x", 1)             // {"name":"x","qty":1}
+@Tool() def items(): List[Item] = List(Item("x", 1)) // [{"name":"x","qty":1}]
+@Tool() def raw(): Raw = Raw("x", 1)                 // Raw(x,1)
+@Tool() def maybe(): Option[String] = Some("x")      // Some(x)
+```
+
+The third rule includes the types for which the library could derive an encoder by itself: a case
+class without a `JsonEncoder`, `Option[String]`, `List[Int]`, `Unit` (sent as `()`), a Scala 3 enum
+(its case name, which is also its `toString`). They are sent as 1.0 sent them, so that upgrading
+does not change what an existing server puts on the wire. Add `derives JsonEncoder` to a case class
+to opt in, return a `String` / `Content`, or use a typed `McpTool`.
+
+A result type that nothing can encode is a compile-time warning at the method, because its
+`toString` is rarely what a client should read: a plain class or a sealed trait without a
+`JsonEncoder`, or a container whose element is one (`List[Handle]`, `Option[Handle]`). It names the
+remedies; `-Wconf:msg=has no McpEncoder:s` silences it. Not warned about: a declared result type of
+`Any` or `AnyRef`, the types of the paragraph above, and a container of those (`List[Raw]`,
+`Option[Raw]`, `Map[String, Raw]`), which is sent as its `toString` like `Raw` itself.
+
+The annotation path has no `outputSchema` and never sends `structuredContent`: that is
+`McpTool[...].withOutputSchema`.
+
+A user instance is recognised by where it is declared: an instance in a package of this library,
+of zio-json or of the standard library is not one. That is why `List[String]` (zio-json's encoder)
+keeps the third rule.
 
 ## What the server enforces
 
