@@ -6,8 +6,9 @@ import scala.quoted.*
 import zio.*
 
 import com.tjclp.fastmcp.core.*
+import com.tjclp.fastmcp.server.McpContext
 import com.tjclp.fastmcp.server.McpServerCore
-import com.tjclp.fastmcp.server.manager.PromptHandler
+import com.tjclp.fastmcp.server.manager.ContextualPromptHandler
 
 /** Cross-platform `@Prompt` annotation processor. Emits registration against [[McpServerCore]]. */
 private[macros] object PromptProcessor extends AnnotationProcessorBase:
@@ -40,18 +41,27 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
     // The parameters whose Scala default the generated handler applies when the client omits them.
     val appliedDefaults: Set[String] = MacroUtils.appliedDefaultGetters(methodSym).keySet
 
+    // The parameter that receives the request's McpContext, recognised by type (any name). It is
+    // not a prompt argument: it is left out of `arguments` and filled in by the handler below.
+    val ctxParamName: Option[String] = contextParameter("@Prompt", methodSym)
+
     val argExprs: List[Expr[PromptArgument]] =
-      methodSym.paramSymss.headOption.getOrElse(Nil).map { pSym =>
-        // An `Option` argument and an argument with an applied Scala default are optional unless
-        // `@Param(required = true)` says otherwise: the generated handler supplies `None` or the
-        // default when the client omits them.
-        val isOptionType = pSym.termRef.widenTermRefByName <:< TypeRepr.of[Option[?]]
-        val (descOpt, required) = MacroUtils.parsePromptParamArgs(
-          MacroUtils.extractParamAnnotation(pSym),
-          isOptionType || appliedDefaults.contains(pSym.name)
-        )
-        '{ PromptArgument(${ Expr(pSym.name) }, ${ Expr(descOpt) }, ${ Expr(required) }) }
-      }
+      methodSym.paramSymss.headOption
+        .getOrElse(Nil)
+        .filterNot { pSym =>
+          ctxParamName.contains(pSym.name)
+        }
+        .map { pSym =>
+          // An `Option` argument and an argument with an applied Scala default are optional unless
+          // `@Param(required = true)` says otherwise: the generated handler supplies `None` or the
+          // default when the client omits them.
+          val isOptionType = pSym.termRef.widenTermRefByName <:< TypeRepr.of[Option[?]]
+          val (descOpt, required) = MacroUtils.parsePromptParamArgs(
+            MacroUtils.extractParamAnnotation(pSym),
+            isOptionType || appliedDefaults.contains(pSym.name)
+          )
+          '{ PromptArgument(${ Expr(pSym.name) }, ${ Expr(descOpt) }, ${ Expr(required) }) }
+        }
 
     val maybeArgs: Expr[Option[List[PromptArgument]]] =
       if argExprs.isEmpty then '{ None }
@@ -86,25 +96,33 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
           s"(or wider), or remove the environment requirement from the method body."
       )
 
+    val withContext: Expr[(Map[String, Any], Option[McpContext]) => Map[String, Any]] =
+      ctxParamName match
+        case Some(name) =>
+          '{ (args: Map[String, Any], ctxOpt: Option[McpContext]) =>
+            args + (${ Expr(name) } -> ctxOpt.getOrElse(McpContext.empty))
+          }
+        case None => '{ (args: Map[String, Any], _: Option[McpContext]) => args }
+
     val registration: Expr[ZIO[Any, Throwable, McpServerCore[R]]] = rMethodType match
       case '[rMethod] =>
-        val handler: Expr[PromptHandler[rMethod]] = effectShape match
+        val handler: Expr[ContextualPromptHandler[rMethod]] = effectShape match
           case MacroUtils.EffectShape.Pure =>
-            '{ (args: Map[String, Any]) =>
+            '{ (wireArgs: Map[String, Any], ctxOpt: Option[McpContext]) =>
               ZIO.attempt {
                 val result = MapToFunctionMacro
                   .callByMap($methodRefExpr)
-                  .asInstanceOf[Map[String, Any] => Any](args)
+                  .asInstanceOf[Map[String, Any] => Any]($withContext(wireArgs, ctxOpt))
                 $coerceMessages(result)
               }
             }
           case MacroUtils.EffectShape.Zio =>
-            '{ (args: Map[String, Any]) =>
+            '{ (wireArgs: Map[String, Any], ctxOpt: Option[McpContext]) =>
               ZIO
                 .suspend {
                   MapToFunctionMacro
                     .callByMap($methodRefExpr)
-                    .asInstanceOf[Map[String, Any] => Any](args)
+                    .asInstanceOf[Map[String, Any] => Any]($withContext(wireArgs, ctxOpt))
                     .asInstanceOf[ZIO[rMethod, Any, Any]]
                     .mapError {
                       case t: Throwable => t
@@ -114,36 +132,51 @@ private[macros] object PromptProcessor extends AnnotationProcessorBase:
                 .map($coerceMessages)
             }
           case MacroUtils.EffectShape.TryEffect =>
-            '{ (args: Map[String, Any]) =>
+            '{ (wireArgs: Map[String, Any], ctxOpt: Option[McpContext]) =>
               ZIO
                 .suspend {
                   val result = MapToFunctionMacro
                     .callByMap($methodRefExpr)
-                    .asInstanceOf[Map[String, Any] => Any](args)
+                    .asInstanceOf[Map[String, Any] => Any]($withContext(wireArgs, ctxOpt))
                     .asInstanceOf[scala.util.Try[Any]]
                   ZIO.fromTry(result)
                 }
                 .map($coerceMessages)
             }
           case MacroUtils.EffectShape.EitherThrowable =>
-            '{ (args: Map[String, Any]) =>
+            '{ (wireArgs: Map[String, Any], ctxOpt: Option[McpContext]) =>
               ZIO
                 .suspend {
                   val result = MapToFunctionMacro
                     .callByMap($methodRefExpr)
-                    .asInstanceOf[Map[String, Any] => Any](args)
+                    .asInstanceOf[Map[String, Any] => Any]($withContext(wireArgs, ctxOpt))
                     .asInstanceOf[Either[Throwable, Any]]
                   ZIO.fromEither(result)
                 }
                 .map($coerceMessages)
             }
 
-        // See ToolProcessor for an explanation of the cast.
-        '{
-          $server.prompt(
-            definition = PromptDefinition(${ Expr(finalName) }, ${ Expr(finalDesc) }, $maybeArgs),
-            handler = $handler.asInstanceOf[com.tjclp.fastmcp.server.manager.PromptHandler[R]]
-          )
-        }
+        // See ToolProcessor for an explanation of the cast. A method without a context parameter
+        // registers through `prompt`, as it always has; `promptContextual` is used only when the
+        // context is asked for.
+        val definition: Expr[PromptDefinition] =
+          '{ PromptDefinition(${ Expr(finalName) }, ${ Expr(finalDesc) }, $maybeArgs) }
+        if ctxParamName.isDefined then
+          '{
+            $server.promptContextual(
+              definition = $definition,
+              handler = $handler
+                .asInstanceOf[com.tjclp.fastmcp.server.manager.ContextualPromptHandler[R]]
+            )
+          }
+        else
+          '{
+            val contextual =
+              $handler.asInstanceOf[com.tjclp.fastmcp.server.manager.ContextualPromptHandler[R]]
+            $server.prompt(
+              definition = $definition,
+              handler = (args: Map[String, Any]) => contextual(args, None)
+            )
+          }
 
     runAndReturnServer[R](server)(registration)

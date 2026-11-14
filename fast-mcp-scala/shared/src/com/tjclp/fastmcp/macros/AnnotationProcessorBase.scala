@@ -71,9 +71,7 @@ private[macros] trait AnnotationProcessorBase:
   ): Unit =
     import quotes.reflect.*
     val name = methodSym.name
-    val pos =
-      if methodSym.isDefinedInCurrentRun then methodSym.pos.getOrElse(Position.ofMacroExpansion)
-      else Position.ofMacroExpansion
+    val pos = methodPosition(methodSym)
     def abort(problem: String, remedy: String): Nothing =
       report.errorAndAbort(s"$kind method '$name' $problem. $remedy", pos)
 
@@ -102,6 +100,41 @@ private[macros] trait AnnotationProcessorBase:
         s"has $arity parameters; at most $MaxParameters are supported",
         "Group parameters into a case class, or split the tool."
       )
+
+  /** Where a diagnostic about `methodSym` is reported: at the method when it is compiled in this
+    * run, otherwise at the `scanAnnotations` call (a position in another compilation unit's source
+    * cannot be reported against).
+    */
+  protected def methodPosition(using Quotes)(
+      methodSym: quotes.reflect.Symbol
+  ): quotes.reflect.Position =
+    import quotes.reflect.*
+    if methodSym.isDefinedInCurrentRun then methodSym.pos.getOrElse(Position.ofMacroExpansion)
+    else Position.ofMacroExpansion
+
+  /** The name of the parameter through which `methodSym` receives the request's `McpContext`, if it
+    * declares one. The parameter is recognised by its TYPE, whatever it is called; it is not an MCP
+    * argument (no schema entry, never read from the wire) and the generated handler fills it in.
+    * Two such parameters are a compile-time error: there is one context per request.
+    */
+  protected def contextParameter(using Quotes)(
+      kind: String,
+      methodSym: quotes.reflect.Symbol
+  ): Option[String] =
+    import quotes.reflect.*
+    val contextType = TypeRepr.of[com.tjclp.fastmcp.server.McpContext]
+    methodSym.paramSymss.filterNot(_.exists(_.isTypeParam)).headOption.getOrElse(Nil).filter { p =>
+      val tpe = p.termRef.widenTermRefByName
+      tpe <:< contextType && !(tpe =:= TypeRepr.of[Nothing])
+    } match
+      case Nil => None
+      case one :: Nil => Some(one.name)
+      case many =>
+        report.errorAndAbort(
+          s"$kind method '${methodSym.name}' declares ${many.size} McpContext parameters " +
+            s"(${many.map(_.name).mkString(", ")}). A request has one context: keep one of them.",
+          methodPosition(methodSym)
+        )
 
   /** Build a method reference expression that survives inlining and denotes EXACTLY `method` (the
     * annotated symbol), never a same-named sibling overload — see [[MacroUtils.getMethodRefExpr]].

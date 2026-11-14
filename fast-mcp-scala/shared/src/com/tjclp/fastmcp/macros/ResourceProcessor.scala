@@ -59,6 +59,16 @@ private[macros] object ResourceProcessor extends AnnotationProcessorBase:
     val finalName = nameOpt.orElse(Some(methodName))
     val finalDesc = descOpt.orElse(methodSym.docstring)
 
+    contextParameter("@Resource", methodSym).foreach { name =>
+      report.errorAndAbort(
+        s"@Resource method '$methodName' declares an McpContext parameter ('$name'), which a " +
+          "resource method cannot take: the request context is injected into @Tool and @Prompt " +
+          "methods only, and every parameter of a resource template must be a {placeholder} of " +
+          "its URI. Remove the parameter, or expose the operation as a @Tool.",
+        methodPosition(methodSym)
+      )
+    }
+
     val placeholders = placeholderRegex.findAllMatchIn(uri).map(_.group(1)).toList
     val isTemplate = placeholders.nonEmpty
 

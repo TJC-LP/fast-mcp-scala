@@ -348,6 +348,18 @@ The next release is **1.1.0** (the `1.0.2` patch line was not cut).
   - Not changed: `_ => None` for `Out = Option[T]` is still an ambiguous `Builder.apply` overload
     (write `Option.empty[T]`). The pure and the effectful overload both accept it, and no change
     that keeps their signatures removes the ambiguity.
+- **`McpContext` is injected by type, on `@Tool` and `@Prompt`** (GH #116, GH #119, TJC-2362;
+  D1.32, D1.33, C2.15). An annotated method receives the request context through the parameter
+  whose type is `McpContext`, whatever its name and position; `ctx: McpContext` keeps working.
+  - `@Tool`: in 1.0.x only a parameter named exactly `ctx` was recognised, and any other name
+    failed to compile with `Cannot derive an MCP JSON Schema for ...McpContext`.
+  - `@Prompt`: the context is now injected (the prompt is registered through
+    `promptContextual`). In 1.0.x a `ctx: McpContext` parameter compiled, was advertised as a
+    required prompt argument, and no `prompts/get` could satisfy it.
+  - `@Resource`: a `McpContext` parameter is a compile-time error that says the context is
+    available on `@Tool` and `@Prompt` only. Before, a template reported that its URI parameters
+    did not match and a static resource that it must not have parameters.
+  - Two `McpContext` parameters on one method are a compile-time error.
 - **`McpServerSettings.stdioDrainTimeout`** (GH #113, TJC-2359): how long a stdio server waits at
   end of stdin for the replies to frames it has already read, before it interrupts what is still
   running. Default five seconds; zero interrupts without waiting; a negative value is refused when

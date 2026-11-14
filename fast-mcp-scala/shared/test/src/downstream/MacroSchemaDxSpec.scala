@@ -35,6 +35,16 @@ object DxAnnotated:
   @Tool(name = Some("day"))
   def day(day: java.time.DayOfWeek, month: java.time.Month): String = s"$day/$month"
 
+object DxContextual:
+
+  @Tool(name = Some("who"))
+  def who(request: McpContext, n: Int): String =
+    s"${request.getClientInfo.map(_.name).getOrElse("nobody")}:$n"
+
+  @Prompt(name = Some("hello"))
+  def hello(@Param("Who to greet") name: String, context: McpContext): String =
+    s"Hello $name from ${context.getClientInfo.map(_.name).getOrElse("nobody")}"
+
 /** The macro and schema behaviour of TJC-2362 (GH #116) that depends on what each platform's
   * compiler and runtime see: codec derivation (`Unit` input, enum / `List` / `Vector` results,
   * tuples, Java enums) and the schemas that go with it. Compiled into the JVM, Scala.js and Scala
@@ -222,5 +232,28 @@ class MacroSchemaDxSpec extends AsyncFunSuite:
     run(program).map { (ok, bad) =>
       assert(ok == Right("FRIDAY/MAY"))
       assert(bad.left.exists(_.contains("must be one of: MONDAY")), s"got $bad")
+    }
+  }
+
+  // ---- D1.32 / D1.33: McpContext by type ----
+
+  test("a McpContext parameter of any name is injected into a @Tool and a @Prompt") {
+    val server = McpServer("context-by-type")
+    val _ = server.scanAnnotations[DxContextual.type]
+    // A user cannot build a context with client info (the constructor is the library's), so the
+    // injected one is told apart from a missing argument by the call succeeding at all.
+    val context = McpContext.empty
+    val promptArguments =
+      server.promptManager.getPromptDefinition("hello").flatMap(_.arguments).getOrElse(Nil).map(_.name)
+    val program =
+      for
+        tool <- server.toolManager.callTool("who", arguments("""{"n":3}"""), Some(context))
+        prompt <- server.promptManager.getPrompt("hello", Map("name" -> "Ada"), Some(context))
+      yield (tool, prompt)
+    run(program).map { (tool, prompt) =>
+      assert(at(inputSchema(server, "who"), "properties") == json("""{"n":{"type":"integer"}}"""))
+      assert(promptArguments == List("name"))
+      assert(tool == "nobody:3")
+      assert(prompt.map(_.content) == List(TextContent("Hello Ada from nobody")))
     }
   }

@@ -224,7 +224,7 @@ A prompt that returns a single `String` is automatically wrapped into a `User` m
 
 ## Context (`McpContext`)
 
-Add a parameter named exactly `ctx` of type `McpContext` to a `@Tool` method to read the client's declared info and capabilities, request metadata, and to send progress or logging (the parameter is recognised by its name and is not part of the tool's schema; `@Prompt` and `@Resource` methods do not take a context parameter):
+Add a parameter of type `McpContext` to a `@Tool` or `@Prompt` method to read the client's declared info and capabilities, request metadata, and to send progress or logging. The parameter is recognised by its type, so it may have any name and position; it is not part of the tool's schema or the prompt's arguments, and a method takes at most one. A `@Resource` method cannot take a context parameter (a compile-time error says so):
 
 ```scala 3 raw
 @Tool(name = Some("echo"), description = Some("Echo client and request context"))
