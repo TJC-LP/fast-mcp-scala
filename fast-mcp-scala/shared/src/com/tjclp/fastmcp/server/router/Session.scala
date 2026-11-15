@@ -445,6 +445,22 @@ object Session:
 
   private def nextTouchOrder(): Long = touchCounter.incrementAndGet()
 
+  /** `items` in ascending order of `order`, with `order` read ONCE for each item.
+    *
+    * The session stores sort their sessions by [[Session.touchOrder]], which other requests change
+    * while the sort runs. `sortBy` reads its key again at every comparison, so a session touched in
+    * the middle of a sort compared differently from one moment to the next, and the JDK's sort then
+    * fails with "Comparison method violates its general contract!": an `initialize` at the session
+    * cap was answered 500 (found by Antithesis, run 2231d6e2). Sorting a snapshot of the keys has
+    * no such moment.
+    */
+  private[fastmcp] def inOrderOf[A](items: Iterable[A])(order: A => Long): List[A] =
+    items.iterator.map(item => (order(item), item)).toList.sortBy(_._1).map(_._2)
+
+  /** Sessions least recently used first, by a snapshot of each one's [[Session.touchOrder]]. */
+  private[fastmcp] def leastRecentlyUsedFirst(sessions: Iterable[Session]): List[Session] =
+    inOrderOf(sessions)(_.touchOrder)
+
   /** How many cancellations of not-yet-registered request ids a session remembers. */
   private[fastmcp] val MaxEarlyCancels: Int = 64
 
