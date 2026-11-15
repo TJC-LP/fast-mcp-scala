@@ -561,7 +561,11 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     val taskId = extractTaskId(bodyOf(post(routes, augmentedCall(73, "blocky"), Some(sid))))
     val result = runUnsafe(
       for
-        waiter <- ZIO.attemptBlocking(bodyOf(post(routes, tasksResult(74, taskId), Some(sid)))).fork
+        // A daemon: the blocking call cannot be interrupted, and a fiber waits for its children as
+        // it ends, so a child here would turn the timeout below into a test that never returns.
+        waiter <- ZIO
+          .attemptBlocking(bodyOf(post(routes, tasksResult(74, taskId), Some(sid))))
+          .forkDaemon
         // The request has found its task and waits for an outcome only the cancel below can give
         // it (`blocky` never finishes).
         _ <- waiting.await
@@ -594,8 +598,13 @@ class TaskHttpTransportTest extends AnyFunSuite with Matchers:
     val taskId = extractTaskId(created)
     val result = runUnsafe(
       for
-        waiter <- ZIO.attemptBlocking(bodyOf(post(routes, tasksResult(77, taskId), Some(sid)))).fork
+        waiter <- ZIO
+          .attemptBlocking(bodyOf(post(routes, tasksResult(77, taskId), Some(sid))))
+          .forkDaemon
         _ <- waiting.await
+        // The sweeper is parked until the task's deadline: an advance that came before it reached
+        // its sleep would leave it sleeping from the new reading, and the task would never expire.
+        _ <- clock.awaitSleeping(300.millis)
         // The TTL passes on the server's clock, with the waiter in place.
         _ <- clock.advance(300.millis)
         body <- waiter.join.timeoutFail(
