@@ -665,7 +665,7 @@ object JsTransportBackend extends TransportBackend with HttpTransportBackend:
                 // Least recently used first: sessions that tie on `lastSeen` (one
                 // millisecond) are then told apart by the order they were used in.
                 val snapshot = Unsafe.unsafe { implicit u =>
-                  store.toList.sortBy(_._2.touchOrder).map { case (id, s) =>
+                  Session.inOrderOf(store.toList)(_._2.touchOrder).map { case (id, s) =>
                     val (seen, live) = s.idleStateUnsafe
                     HttpRequestGuards.StoredSession(id, seen, live, s.clientKey)
                   }

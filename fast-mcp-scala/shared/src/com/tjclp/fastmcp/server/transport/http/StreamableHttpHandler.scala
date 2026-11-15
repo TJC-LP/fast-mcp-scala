@@ -432,7 +432,7 @@ private[fastmcp] final class StreamableHttpHandler[R] private (
         ZIO
           // Least recently used first: sessions that tie on `lastSeen` (one millisecond) are
           // then told apart by the order they were used in, not by the map's iteration order.
-          .foreach(m.values.toList.sortBy(_.touchOrder)) { s =>
+          .foreach(Session.leastRecentlyUsedFirst(m.values)) { s =>
             (s.lastSeen zip s.hasActiveGet).map { (seen, live) =>
               HttpRequestGuards.StoredSession(s.sessionId, seen, live, s.clientKey)
             }
