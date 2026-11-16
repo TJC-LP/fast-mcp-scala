@@ -87,6 +87,9 @@ object BuildConfig {
     "-XX:+IgnoreUnrecognizedVMOptions"
   )
 
+  /** The oldest JDK the published JVM artifact runs on. */
+  val minimumJavaVersion = "17"
+
   /** Compiler flags every platform shares. WartRemover is NOT here: it is a JVM-only compiler
     * plugin, so the js and scalaNative modules take this list as-is while the JVM module appends
     * its wart traversers (see `FastMCPModuleBase.scalacOptions`).
@@ -140,7 +143,12 @@ trait FastMCPModuleBase extends ScalaModule with ScalafmtModule with ScoverageMo
     mvn"org.wartremover:::wartremover:3.6.1"
   )
 
-  override def scalacOptions = BuildConfig.crossScalacOptions ++ BuildConfig.wartRemoverOptions
+  // The library supports JDK 17 and newer, whichever JDK compiles it: class files stay at the
+  // Java 17 level and only the Java 17 API is visible, so a build on a newer JDK (the release runs
+  // on 25) cannot bind to a method that JDK 17 does not have.
+  override def scalacOptions =
+    BuildConfig.crossScalacOptions ++ BuildConfig.wartRemoverOptions ++
+      Seq("-java-output-version", BuildConfig.minimumJavaVersion)
 
   // Coverage settings
   override def scoverageVersion = Versions.scoverage
