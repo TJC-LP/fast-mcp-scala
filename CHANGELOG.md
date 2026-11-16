@@ -9,15 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **An `initialize` at the session cap could be answered 500 on the JVM and Scala Native** (a
-  regression in 1.1.0). When the legacy session store is full, the server picks a session to
+- **An `initialize` at the session cap could be answered 500 on the JVM** (a regression in
+  1.1.0). When the legacy session store is full, the server picks a session to
   evict by sorting the stored sessions, least recently used first. The sort read each session's
   position at every comparison, and a request that used one of those sessions while the sort ran
   moved it: the JDK's sort then failed with `Comparison method violates its general contract!`
   and the `initialize` got the generic 500. The stores now sort a snapshot of the positions.
   It needed a full store (`maxSessions`, 1000 by default, and at least 32 sessions for the JDK
   to check) and traffic on the stored sessions at that moment; a client that retried got its
-  session. Bun was not affected (one thread: nothing runs during the sort). Found by Antithesis.
+  session. Bun was not affected (one thread: nothing runs during the sort), and neither was Scala
+  Native, whose merge sort does not check the comparator: there the worst outcome was an eviction
+  that was not strictly the least recently used session. Found by Antithesis.
 
 ### Changed
 
