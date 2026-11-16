@@ -7,7 +7,10 @@ reference kept in sync with this file.
 
 ## Prerequisites
 
-- **JDK 17 or newer.** CI tests the LTS releases 17, 21, and 25.
+- **JDK 17 or newer; 25, the latest LTS, is the default.** CI tests the LTS releases 17, 21, and
+  25; every other job (the release build, conformance, MiMa, the Antithesis image) runs on 25.
+  The JVM modules compile with `-java-output-version 17`, so a build on a newer JDK still
+  produces Java 17 class files and cannot use an API that JDK 17 lacks.
 - **Mill** comes with the repo: the `./mill` wrapper reads `.mill-version` (1.1.8). Nothing to install.
 - **Bun.** The build provisions its own pinned Bun (1.4.1) through the mill-bun plugin, so the
   Scala.js tests need nothing extra. `scripts/conformance.sh` prefers that same Mill-managed Bun

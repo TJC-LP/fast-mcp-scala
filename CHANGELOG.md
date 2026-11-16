@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to check) and traffic on the stored sessions at that moment; a client that retried got its
   session. Bun was not affected (one thread: nothing runs during the sort). Found by Antithesis.
 
+### Changed
+
+- **The release is built on JDK 25** (it was JDK 21), and the JVM artifact is compiled with
+  `-java-output-version 17`. The library still runs on JDK 17 and newer: the class files were
+  already at the Java 17 level, and the compiler now also refuses any API that JDK 17 lacks,
+  which until now only the JDK 17 CI job caught.
+
 ## [1.1.0] - 2026-11-14
 
 The `1.0.2` patch line was not cut; 1.1.0 follows 1.0.1.

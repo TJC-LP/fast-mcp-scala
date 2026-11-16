@@ -10,7 +10,7 @@
 #   /opt/app/lib   third-party jars, on the classpath but not instrumented
 # The JVM is started with both directories on the classpath (never `java -jar`), because
 # Antithesis adds its own jars next to the application's.
-FROM --platform=linux/amd64 eclipse-temurin:21-jre-jammy
+FROM --platform=linux/amd64 eclipse-temurin:25-jre-jammy
 # curl and jq are the debug tools `snouty runs exec` can use in this container.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl jq \

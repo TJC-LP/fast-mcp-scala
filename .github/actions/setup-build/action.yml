@@ -12,7 +12,7 @@ inputs:
   java-version:
     description: Temurin JVM version for the Mill/scalac runner.
     required: false
-    default: "21"
+    default: "25"
   bun:
     description: Install Bun (needed by the Scala.js tests and the conformance harness).
     required: false
